@@ -59,6 +59,7 @@ Third-party PDFs are never committed; `corpus/manifest.toml` records each source
 | `info` | Effective version, page count, xref size, repaired, revisions, Info metadata; encryption later | exact | M0, extended in M1 |
 | `objects` | Every object in canonical JSON (names `#xx`-escaped, strings hex, reals at f32), plus raw stream lengths | exact (numbers per DECISIONS D13) | M1 |
 | `pages` | Page lookup for every index and inherited MediaBox, CropBox, Rotate and Resources; page count before and after lookups | exact | M1 |
+| `warnings` | Distinct `warning:` and `<kind> error:` lines on MuPDF's stderr against nupdf's diagnostic messages, while running `info` | set equality | M1 |
 | `streams` | BLAKE3 of each decoded stream | exact, except image filters | M2 |
 | `roundtrip` | MuPDF reading nupdf's output: same graph modulo renumbering, same text | exact | M3 |
 | `trace` | Device calls per page, against `mutool trace` | matrices within 1e-3 | M4 |

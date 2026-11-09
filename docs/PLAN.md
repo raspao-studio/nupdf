@@ -94,7 +94,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [ ] Revisions: enumerate incremental-update sections with their offsets (redaction needs this in M6)
 - [x] Page tree: MuPDF's page map (including its `/Count` rewrite and the empty-map fallback), the slow lookup that guesses node types from `/Kids` and `/MediaBox`, cycle limits, and inherited `Resources`, `MediaBox`, `CropBox` and `Rotate` with MuPDF's Parent repair on cycles; `nupdf pages` and the `pages` check (99.8% on the standard tier, the rest encrypted or Brotli)
 - [x] `Limits`: decoded stream size, xref size and object-stream size are configurable (`--max-decoded-bytes`, `--max-xref-entries`), default to MuPDF's own caps, and fail with `limit.*` codes and exit 5; structural depths stay fixed for stack safety
-- [ ] Diagnostics: the harness compares warning classes between MuPDF and nupdf
+- [x] Diagnostics: a `warnings` check compares the distinct warnings and reported errors on MuPDF's stderr with nupdf's diagnostics; caught errors carry MuPDF's kinds (`syntax error:`, `format error:`, `library error:`); 98.9% on the standard tier
 - [x] `nupdf info` v1 (rest): linearization, revisions as MuPDF counts them, and Info entries decoded with a port of MuPDF's text-string conversion; page boxes are reported per page by `nupdf pages`
 - [x] `nupdf show <ref>`: one object or the trailer, with stream lengths and optional decoded data; `objects` and `pages` now carry the shared report envelope (`schema`, `doc_id`, `diagnostics`)
 - [x] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object`, `filters` and `open_walk`; a first 60-second run per target found nothing, and CI runs each for 30 seconds
@@ -108,6 +108,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 |---|---|---|
 | `info` (version, pages, xref size, repaired, revisions, metadata) | 98.7% (5,054 / 5,123) | 68 encrypted files (M2; their Info strings are encrypted), 1 Brotli file (M2) |
 | `pages` (page lookup, inherited attributes) | 99.8% (5,114 / 5,123) | 8 encrypted, 1 Brotli |
+| `warnings` (distinct warnings and reported errors) | 98.9% (5,068 / 5,123) | 22 encrypted; the rest are errors MuPDF reports from code paths nupdf does not run yet (stream reads with recovery, decryption) |
 | `objects` (every object, raw stream lengths) | 98.6% (5,049 / 5,122) | 66 encrypted, 1 Brotli, and 4 others: `issue18986.pdf` and `poppler-90-0-fuzzed.pdf` (lazy repairs MuPDF triggers that nupdf does not), `fuzz-16214.pdf` and two veraPDF files (MuPDF stops reading a stream at a buffer boundary when /Length overshoots into `endstream`) |
 
 There are no crashes, and no files that MuPDF opens but nupdf cannot. On a 300-file sample run sequentially, `nupdf info` takes 529 ms in total against MuPDF's 1,308 ms (geometric-mean speedup 2.47x, process start included; the MuPDF side also pays for its JavaScript runtime).
