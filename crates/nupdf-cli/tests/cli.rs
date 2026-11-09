@@ -35,15 +35,66 @@ fn info(name: &str) -> Value {
 }
 
 #[test]
-fn info_reports_header_facts() {
+fn info_reports_document_facts() {
     let report = info("minimal.pdf");
     assert_eq!(report["schema"], "nupdf.info/v0");
     assert_eq!(report["kind"], "pdf");
     assert_eq!(report["pdf_version"], "1.7");
     assert_eq!(report["header_offset"], 0);
+    assert_eq!(report["page_count"], 1);
+    assert_eq!(report["object_count"], 6);
+    assert_eq!(report["revisions"], 1);
+    assert_eq!(report["repaired"], false);
+    assert_eq!(report["encrypted"], false);
     assert_eq!(report["diagnostics"], Value::Array(vec![]));
     let size = std::fs::metadata(smoke("minimal.pdf")).unwrap().len();
     assert_eq!(report["file_size"], size);
+}
+
+#[test]
+fn catalog_version_overrides_the_header() {
+    let report = info("catalog-version.pdf");
+    assert_eq!(report["pdf_version"], "1.7");
+    assert_eq!(report["header_version"], "1.4");
+}
+
+#[test]
+fn incremental_updates_count_as_revisions() {
+    let report = info("incremental-update.pdf");
+    assert_eq!(report["revisions"], 2);
+    assert_eq!(report["object_count"], 7);
+}
+
+#[test]
+fn object_streams_and_inherited_pages() {
+    assert_eq!(info("xref-stream.pdf")["page_count"], 1);
+    assert_eq!(info("multipage-inherit.pdf")["page_count"], 3);
+}
+
+#[test]
+fn broken_xrefs_are_repaired_and_reported() {
+    for name in ["broken-xref-offsets.pdf", "no-xref.pdf"] {
+        let report = info(name);
+        assert_eq!(report["repaired"], true, "{name}");
+        assert_eq!(report["page_count"], 1, "{name}");
+        let codes: Vec<&str> = report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["code"].as_str().unwrap())
+            .collect();
+        assert!(codes.contains(&"xref.repairing"), "{name}: {codes:?}");
+    }
+}
+
+#[test]
+fn unrepairable_files_fail_like_mupdf() {
+    let path = smoke("truncated.pdf");
+    let out = nupdf(&["info", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(3));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "input.unrepairable");
+    assert_eq!(err["error"]["message"], "invalid key in dict");
 }
 
 #[test]
@@ -61,16 +112,10 @@ fn junk_before_header_is_a_diagnostic_not_a_failure() {
     let report = info("garbage-prefix.pdf");
     assert_eq!(report["header_offset"], 64);
     assert_eq!(report["pdf_version"], "1.6");
+    assert_eq!(report["page_count"], 1);
+    assert_eq!(report["repaired"], false);
     assert_eq!(report["diagnostics"][0]["code"], "header.garbage_prefix");
     assert_eq!(report["diagnostics"][0]["severity"], "warning");
-}
-
-#[test]
-fn broken_files_still_report_their_header() {
-    for name in ["broken-xref-offsets.pdf", "no-xref.pdf", "truncated.pdf"] {
-        let report = info(name);
-        assert!(report["pdf_version"].is_string(), "{name}");
-    }
 }
 
 #[test]

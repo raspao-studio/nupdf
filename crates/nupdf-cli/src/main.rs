@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use nupdf::DocId;
 use nupdf::header::{self, Kind};
+use nupdf::{DocId, Document};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -52,10 +52,20 @@ struct InfoReport {
     doc_id: String,
     file_size: usize,
     kind: &'static str,
-    /// Version from the header. Until M1 parses the catalog, this ignores
-    /// /Root/Version overrides.
+    /// Effective version: the header's unless /Root/Version overrides it.
     pdf_version: String,
-    header_offset: usize,
+    /// Version in the header; 1.7 when there is no header.
+    header_version: String,
+    /// Bytes of junk before the header, or null when there is no header.
+    header_offset: Option<usize>,
+    page_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_count_error: Option<String>,
+    /// Slots in the cross-reference table.
+    object_count: usize,
+    revisions: usize,
+    repaired: bool,
+    encrypted: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -119,38 +129,56 @@ fn info(path: &Path) -> Result<InfoReport, Failure> {
         code: "input.unreadable",
         message: format!("cannot read {}: {e}", path.display()),
     })?;
-    let header = header::find(&data).map_err(|e| Failure {
+    let header = header::find(&data).ok();
+    let doc_id = DocId::of(&data).to_string();
+    let file_size = data.len();
+    let doc = Document::open(data).map_err(|e| Failure {
         exit: Exit::Input,
-        code: "input.not_pdf",
-        message: e.to_string(),
+        code: if header.is_none() {
+            "input.not_pdf"
+        } else {
+            e.code
+        },
+        message: e.message,
     })?;
 
-    let mut diagnostics = Vec::new();
-    if header.offset > 0 {
-        diagnostics.push(Diagnostic {
-            code: "header.garbage_prefix",
+    // Same order as oracle/js/info.js: a repair triggered by one call is
+    // visible to the next.
+    let pdf_version = doc.version().to_string();
+    let (page_count, page_count_error) = match doc.page_count() {
+        Ok(n) => (Some(n), None),
+        Err(e) => (None, Some(e.0)),
+    };
+    let object_count = doc.xref_len();
+
+    let diagnostics = doc
+        .diagnostics()
+        .snapshot()
+        .into_iter()
+        .map(|d| Diagnostic {
+            code: d.code,
             severity: "warning",
-            message: format!("{} bytes before the %PDF- marker", header.offset),
-        });
-    }
-    if !header.version.is_known() {
-        diagnostics.push(Diagnostic {
-            code: "header.unknown_version",
-            severity: "warning",
-            message: format!("unknown PDF version {}", header.version),
-        });
-    }
+            message: d.message,
+        })
+        .collect();
 
     Ok(InfoReport {
         schema: "nupdf.info/v0",
-        doc_id: DocId::of(&data).to_string(),
-        file_size: data.len(),
-        kind: match header.kind {
-            Kind::Pdf => "pdf",
-            Kind::Fdf => "fdf",
+        doc_id,
+        file_size,
+        kind: match header.map(|h| h.kind) {
+            Some(Kind::Fdf) => "fdf",
+            _ => "pdf",
         },
-        pdf_version: header.version.to_string(),
-        header_offset: header.offset,
+        pdf_version,
+        header_version: doc.header_version().to_string(),
+        header_offset: header.map(|h| h.offset),
+        page_count,
+        page_count_error,
+        object_count,
+        revisions: doc.revisions(),
+        repaired: doc.repaired(),
+        encrypted: doc.is_encrypted(),
         diagnostics,
     })
 }

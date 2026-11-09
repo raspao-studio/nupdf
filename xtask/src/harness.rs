@@ -33,10 +33,10 @@ pub struct Check {
 
 pub const CHECKS: &[Check] = &[Check {
     name: "info",
-    about: "document-level facts: PDF version",
+    about: "document-level facts: effective version, page count, xref size, repair",
     oracle_script: "oracle/js/info.js",
     nupdf_args: &["info"],
-    fields: &["/pdf_version"],
+    fields: &["/pdf_version", "/page_count", "/object_count", "/repaired"],
 }];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
