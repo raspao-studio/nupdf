@@ -128,8 +128,10 @@ fn main() -> ExitCode {
     let open = |file: &Path| open(file, limits);
     let result = match &cli.command {
         Command::Info { file } => open(file).and_then(info).and_then(to_json),
-        Command::Objects { file } => open(file)
-            .map(|(doc, facts)| report("nupdf.objects/v0", &facts, &doc, objects::dump(&doc))),
+        Command::Objects { file } => match open(file) {
+            Ok((doc, facts)) => return stream_objects(&doc, &facts, cli.pretty),
+            Err(failure) => Err(failure),
+        },
         Command::Pages { file } => open(file)
             .map(|(doc, facts)| report("nupdf.pages/v0", &facts, &doc, objects::pages(&doc))),
         Command::Show {
@@ -141,33 +143,67 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(report) => {
-            emit(&mut std::io::stdout(), &report, cli.pretty);
+            emit(&mut std::io::stdout().lock(), &report, cli.pretty);
             ExitCode::SUCCESS
         }
-        Err(failure) => {
-            let report = ErrorReport {
-                schema: "nupdf.error/v0",
-                error: ErrorBody {
-                    code: failure.code,
-                    message: failure.message,
-                },
-            };
-            emit(&mut std::io::stderr(), &report, cli.pretty);
-            ExitCode::from(failure.exit as u8)
-        }
+        Err(failure) => fail(failure, cli.pretty),
     }
 }
 
-fn emit(out: &mut impl Write, value: &impl Serialize, pretty: bool) {
-    let json = if pretty {
-        serde_json::to_string_pretty(value)
-    } else {
-        serde_json::to_string(value)
+fn fail(failure: Failure, pretty: bool) -> ExitCode {
+    let report = ErrorReport {
+        schema: "nupdf.error/v0",
+        error: ErrorBody {
+            code: failure.code,
+            message: failure.message,
+        },
     };
-    // Serializing these plain structs cannot fail; a closed pipe is not ours to report.
-    if let Ok(json) = json {
-        let _ = writeln!(out, "{json}");
+    emit(&mut std::io::stderr().lock(), &report, pretty);
+    ExitCode::from(failure.exit as u8)
+}
+
+/// Writes `value` as one line of JSON. Serializing can only fail on a write
+/// error, and a closed pipe is not ours to report.
+fn emit(out: &mut impl Write, value: &impl Serialize, pretty: bool) {
+    let mut out = std::io::BufWriter::new(out);
+    let written = if pretty {
+        serde_json::to_writer_pretty(&mut out, value)
+    } else {
+        serde_json::to_writer(&mut out, value)
+    };
+    if written.is_ok() {
+        let _ = writeln!(out);
     }
+    let _ = out.flush();
+}
+
+/// `objects` reports can be far larger than the file (one entry per declared
+/// slot), so they are written while objects load instead of built first.
+fn stream_objects(doc: &Document, facts: &FileFacts, pretty: bool) -> ExitCode {
+    struct Report<'a> {
+        facts: &'a FileFacts,
+        doc: &'a Document,
+    }
+    impl Serialize for Report<'_> {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let dump = objects::Dump::new(self.doc);
+            let mut map = s.serialize_map(Some(5))?;
+            map.serialize_entry("schema", "nupdf.objects/v0")?;
+            map.serialize_entry("doc_id", &self.facts.doc_id)?;
+            map.serialize_entry("object_count", &dump.count)?;
+            map.serialize_entry("objects", &dump)?;
+            // Last, so it includes what loading the objects reported.
+            map.serialize_entry("diagnostics", &diagnostics(self.doc))?;
+            map.end()
+        }
+    }
+    emit(
+        &mut std::io::stdout().lock(),
+        &Report { facts, doc },
+        pretty,
+    );
+    ExitCode::SUCCESS
 }
 
 fn to_json(report: InfoReport) -> Result<serde_json::Value, Failure> {

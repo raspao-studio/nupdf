@@ -5,25 +5,45 @@
 //! oracle/js/objects.js produces, so the two can be diffed object by object.
 
 use nupdf::{Document, Object};
+use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Map, Value, json};
 
-pub fn dump(doc: &Document) -> Value {
-    // The count is taken first and objects are loaded in ascending order,
-    // exactly like the oracle, so a lazy repair happens at the same point.
-    let count = doc.xref_len();
-    let mut objects = Map::new();
-    for num in 1..count {
-        let value = match doc.object(num as i32) {
-            Some(Object::Stream(s)) => {
-                let raw = doc.raw_stream_data(&s);
-                json!({ "stream": encode_dict(&s.dict), "raw_len": raw.len() })
-            }
-            Some(obj) => encode(&obj),
-            None => Value::Null,
-        };
-        objects.insert(num.to_string(), value);
+/// The `objects` report body, serialized as it is written: each object is
+/// loaded, encoded and written in turn, so memory does not grow with the
+/// size of the report.
+pub struct Dump<'a> {
+    pub doc: &'a Document,
+    pub count: usize,
+}
+
+impl<'a> Dump<'a> {
+    /// The count is taken here, before any object is loaded, as the oracle
+    /// does; objects are then loaded in ascending order, so a lazy repair
+    /// happens at the same point.
+    pub fn new(doc: &'a Document) -> Self {
+        Dump {
+            doc,
+            count: doc.xref_len(),
+        }
     }
-    json!({ "object_count": count, "objects": objects })
+}
+
+impl Serialize for Dump<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(self.count.saturating_sub(1)))?;
+        for num in 1..self.count {
+            let value = match self.doc.object(num as i32) {
+                Some(Object::Stream(s)) => {
+                    let raw = self.doc.raw_stream_data(&s);
+                    json!({ "stream": encode_dict(&s.dict), "raw_len": raw.len() })
+                }
+                Some(obj) => encode(&obj),
+                None => Value::Null,
+            };
+            map.serialize_entry(&num.to_string(), &value)?;
+        }
+        map.end()
+    }
 }
 
 /// Pages and their inherited attributes, in oracle/js/pages.js's format.
