@@ -161,6 +161,8 @@ pub struct Document {
     file_size: usize,
     header_version: Version,
     is_fdf: bool,
+    /// The first object is a linearization dictionary (`pdf_check_linear`).
+    linearized: bool,
     diag: Diagnostics,
     state: RwLock<Arc<State>>,
     /// MuPDF repairs at most once per document.
@@ -208,11 +210,22 @@ impl Document {
         } else {
             0
         };
+        // Checked before the xref loads, so an indirect /Linearized reads 0.
+        let linearized = broken.is_none() && !is_fdf && {
+            let mut lx = Lexer::new(&data, bias, &diag);
+            parse_indirect(&mut lx).is_ok_and(|ind| {
+                ind.obj
+                    .as_dict()
+                    .and_then(|d| d.get(b"Linearized"))
+                    .is_some_and(|v| v.to_int() == 1)
+            })
+        };
         let doc = Document {
             data,
             file_size,
             header_version: version,
             is_fdf,
+            linearized,
             diag,
             state: RwLock::new(Arc::new(State::empty())),
             repair_attempted: AtomicBool::new(false),
@@ -308,10 +321,30 @@ impl Document {
         self.current().repaired
     }
 
-    /// Number of xref sections (revisions) read; 1 after a repair.
+    /// Saved versions of the document, as `pdf_count_versions` counts
+    /// them: xref sections (one after a repair), less the extra section of
+    /// a linearized file.
     pub fn revisions(&self) -> usize {
         let s = self.current();
-        if s.repaired { 1 } else { s.revisions }
+        let sections = if s.repaired { 1 } else { s.revisions };
+        sections.saturating_sub(usize::from(self.linearized))
+    }
+
+    /// Whether the file starts with a linearization dictionary.
+    pub fn linearized(&self) -> bool {
+        self.linearized
+    }
+
+    /// An Info dictionary entry as text, like `fz_lookup_metadata` with an
+    /// `info:` key: `None` when missing, not a string, or empty.
+    pub fn metadata(&self, key: &str) -> Option<String> {
+        let info = self.trailer().get(b"Info").cloned()?;
+        let value = self.dict_get(&info, key.as_bytes());
+        let Object::String(s) = value else {
+            return None;
+        };
+        let text = crate::text_string::text_string(&s);
+        (!text.is_empty()).then_some(text)
     }
 
     pub fn is_encrypted(&self) -> bool {
