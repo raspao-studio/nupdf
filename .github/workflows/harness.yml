@@ -1,0 +1,34 @@
+name: harness
+
+# Differential runs against the pinned MuPDF oracle. Smoke tier only in CI;
+# standard and wild tiers run locally (docs/TESTING.md).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - id: oracle
+        run: echo "version=$(cat oracle/MUPDF_VERSION)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: target/oracle/mupdf-${{ steps.oracle.outputs.version }}/build/release/mutool
+          key: mupdf-${{ runner.os }}-${{ steps.oracle.outputs.version }}
+      - run: cargo xtask oracle build
+      - run: cargo test --workspace -- --ignored
+      - run: cargo xtask harness --tier smoke
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-smoke
+          path: target/harness/smoke
