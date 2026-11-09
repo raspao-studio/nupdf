@@ -3,10 +3,21 @@
 
 //! nupdf: a memory-safe, parallel PDF engine rewritten in Rust from MuPDF.
 //!
-//! Milestone M0 provides only header detection and document identity. The
-//! roadmap lives in `docs/PLAN.md`.
+//! The roadmap lives in `docs/PLAN.md`; the module-to-MuPDF map in
+//! `docs/ARCHITECTURE.md`.
 
+pub mod diag;
 mod doc_id;
+pub mod document;
+pub mod filter;
 pub mod header;
+pub mod lex;
+pub mod object;
+pub mod parse;
+pub mod repair;
+pub mod xref;
 
+pub use diag::{Diagnostic, Diagnostics};
 pub use doc_id::DocId;
+pub use document::{Document, OpenError, PageCountError};
+pub use object::{Dict, ObjRef, Object, Stream};
