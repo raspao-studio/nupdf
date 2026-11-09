@@ -17,6 +17,7 @@ pub mod page;
 pub mod parse;
 pub mod repair;
 pub mod strtof;
+pub mod text_string;
 pub mod xref;
 
 pub use diag::{Diagnostic, Diagnostics};
