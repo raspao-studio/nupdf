@@ -58,6 +58,9 @@ enum Cmd {
         pair: Option<String>,
         #[arg(long, default_value_t = 5)]
         runs: usize,
+        /// Bench an evenly spaced sample of this many files.
+        #[arg(long)]
+        sample: Option<usize>,
     },
     /// List or fetch public corpora.
     Corpus {
@@ -103,7 +106,12 @@ fn main() -> Result<()> {
             update_baseline,
             Duration::from_secs(timeout),
         ),
-        Cmd::Bench { tier, pair, runs } => bench::run(&root, &tier, pair.as_deref(), runs),
+        Cmd::Bench {
+            tier,
+            pair,
+            runs,
+            sample,
+        } => bench::run(&root, &tier, pair.as_deref(), runs, sample),
         Cmd::Corpus { action } => match action {
             CorpusCmd::List => corpus::list(&root),
             CorpusCmd::Fetch { name } => corpus::fetch(&root, &name),

@@ -27,7 +27,7 @@ pub struct Pair {
 
 pub const PAIRS: &[Pair] = &[Pair {
     name: "info",
-    about: "open and report document facts (M0: nupdf only reads the header, so this is not yet like for like)",
+    about: "open, read the effective version, count pages and xref slots (JS overhead included on the MuPDF side)",
     oracle: &["run", "oracle/js/info.js", "{file}"],
     nupdf: &["info", "{file}"],
 }];
@@ -42,10 +42,22 @@ struct Row {
     nupdf_rss_mb: f64,
 }
 
-pub fn run(root: &Path, tier: &str, only: Option<&str>, runs: usize) -> Result<()> {
+pub fn run(
+    root: &Path,
+    tier: &str,
+    only: Option<&str>,
+    runs: usize,
+    sample: Option<usize>,
+) -> Result<()> {
     let mutool = oracle::mutool(root)?;
     let nupdf = crate::build_nupdf(root)?;
-    let files = corpus::files(root, tier)?;
+    let mut files = corpus::files(root, tier)?;
+    if let Some(n) = sample.filter(|&n| n > 0 && n < files.len()) {
+        let step = files.len() as f64 / n as f64;
+        files = (0..n)
+            .map(|i| files[(i as f64 * step) as usize].clone())
+            .collect();
+    }
     let pairs: Vec<&Pair> = PAIRS
         .iter()
         .filter(|p| only.is_none_or(|name| p.name == name))
@@ -138,10 +150,14 @@ fn render(pair: &Pair, tier: &str, runs: usize, rows: &[Row]) -> String {
             r.file, r.oracle_ms, r.nupdf_ms, r.speedup, r.oracle_rss_mb, r.nupdf_rss_mb
         );
     }
+    let total = |f: fn(&Row) -> f64| rows.iter().map(f).sum::<f64>();
     let _ = writeln!(
         out,
-        "\nGeometric mean speedup: {:.2}x",
-        geomean(rows.iter().map(|r| r.speedup))
+        "\nFiles: {}. Geometric mean speedup: {:.2}x. Total time: MuPDF {:.0} ms, nupdf {:.0} ms.",
+        rows.len(),
+        geomean(rows.iter().map(|r| r.speedup)),
+        total(|r| r.oracle_ms),
+        total(|r| r.nupdf_ms),
     );
     out
 }
