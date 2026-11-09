@@ -9,7 +9,6 @@
 //! and end of input plays the role of `EOF` in MuPDF's stream reader.
 
 use crate::diag::Diagnostics;
-use crate::header::parse_float_prefix;
 
 /// Names longer than this are truncated (MuPDF's PDF_MAX_NAME_LENGTH).
 pub const MAX_NAME_LENGTH: usize = 4095;
@@ -520,15 +519,7 @@ fn acrobat_atof(text: &[u8]) -> f32 {
     }
 }
 
-/// MuPDF's `fz_atof`: strtof, with NaN mapped to 1 and infinities clamped.
-pub fn fz_atof(text: &[u8]) -> f32 {
-    let v = parse_float_prefix(text);
-    if v.is_nan() {
-        1.0
-    } else {
-        v.clamp(-f32::MAX, f32::MAX)
-    }
-}
+pub use crate::strtof::fz_atof;
 
 #[cfg(test)]
 mod tests {

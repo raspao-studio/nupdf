@@ -15,6 +15,7 @@ pub mod lex;
 pub mod object;
 pub mod parse;
 pub mod repair;
+pub mod strtof;
 pub mod xref;
 
 pub use diag::{Diagnostic, Diagnostics};

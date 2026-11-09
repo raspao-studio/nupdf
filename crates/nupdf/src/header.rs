@@ -36,15 +36,8 @@ impl Version {
     /// Reads a version number the way MuPDF does: as a float, rounded to
     /// tenths. Garbage reads as 0.0, matching C `atof`.
     pub fn parse_lenient(text: &[u8]) -> Version {
-        let value = parse_float_prefix(text);
-        // fz_atof returns 1.0 for NaN and clamps infinities.
-        let value = if value.is_nan() {
-            1.0
-        } else {
-            value.clamp(-f32::MAX, f32::MAX)
-        };
         // Same f32 arithmetic as MuPDF, then truncation toward zero.
-        Version((10.0f32 * (value + 0.05f32)) as i32)
+        Version((10.0f32 * (crate::strtof::fz_atof(text) + 0.05f32)) as i32)
     }
 }
 
@@ -108,61 +101,6 @@ pub fn find(data: &[u8]) -> Result<Header, HeaderError> {
         offset,
         version,
     })
-}
-
-/// The longest prefix of `text` that C `strtof` would consume, parsed as f32.
-pub(crate) fn parse_float_prefix(text: &[u8]) -> f32 {
-    let mut i = 0;
-    while text
-        .get(i)
-        .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c'))
-    {
-        i += 1;
-    }
-    let mut number = String::new();
-    // fz_strtof accepts '+' then '-', in that order.
-    if text.get(i) == Some(&b'+') {
-        i += 1;
-    }
-    if text.get(i) == Some(&b'-') {
-        number.push('-');
-        i += 1;
-    }
-    let mut digits = 0;
-    let mut take_digits = |i: &mut usize, number: &mut String| {
-        while let Some(&b) = text.get(*i).filter(|b| b.is_ascii_digit()) {
-            number.push(b as char);
-            *i += 1;
-            digits += 1;
-        }
-    };
-    take_digits(&mut i, &mut number);
-    if text.get(i) == Some(&b'.') {
-        number.push('.');
-        i += 1;
-        take_digits(&mut i, &mut number);
-    }
-    if digits == 0 {
-        return 0.0;
-    }
-    // Exponent only counts when at least one digit follows it.
-    if matches!(text.get(i), Some(b'e' | b'E')) {
-        let mut j = i + 1;
-        let mut exponent = String::from("e");
-        if let Some(&sign @ (b'+' | b'-')) = text.get(j) {
-            exponent.push(sign as char);
-            j += 1;
-        }
-        let start = exponent.len();
-        while let Some(&b) = text.get(j).filter(|b| b.is_ascii_digit()) {
-            exponent.push(b as char);
-            j += 1;
-        }
-        if exponent.len() > start {
-            number.push_str(&exponent);
-        }
-    }
-    number.parse().unwrap_or(0.0)
 }
 
 #[cfg(test)]
