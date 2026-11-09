@@ -37,12 +37,24 @@ enum Command {
     Objects { file: PathBuf },
     /// List pages with their inherited MediaBox, CropBox, Rotate and Resources.
     Pages { file: PathBuf },
+    /// Show one object (`12`, `12 0 R`) or the trailer (`trailer`).
+    Show {
+        file: PathBuf,
+        target: String,
+        /// Include the decoded stream data as text (lossy UTF-8).
+        #[arg(long)]
+        data: bool,
+        /// Cap on the bytes of stream data included with --data.
+        #[arg(long, default_value_t = 65536)]
+        max_bytes: usize,
+    },
 }
 
 /// Exit codes from docs/AGENT-INTERFACE.md. Usage errors (2) come from clap.
 #[derive(Debug, Clone, Copy)]
 enum Exit {
     Internal = 1,
+    Usage = 2,
     Input = 3,
 }
 
@@ -98,8 +110,16 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
         Command::Info { file } => info(file).and_then(to_json),
-        Command::Objects { file } => open(file).map(|(doc, _)| objects::dump(&doc)),
-        Command::Pages { file } => open(file).map(|(doc, _)| objects::pages(&doc)),
+        Command::Objects { file } => open(file)
+            .map(|(doc, facts)| report("nupdf.objects/v0", &facts, &doc, objects::dump(&doc))),
+        Command::Pages { file } => open(file)
+            .map(|(doc, facts)| report("nupdf.pages/v0", &facts, &doc, objects::pages(&doc))),
+        Command::Show {
+            file,
+            target,
+            data,
+            max_bytes,
+        } => show(file, target, *data, *max_bytes),
     };
     match result {
         Ok(report) => {
@@ -168,6 +188,96 @@ fn open(path: &Path) -> Result<(Document, FileFacts), Failure> {
         message: e.message,
     })?;
     Ok((doc, facts))
+}
+
+/// Wraps a command's fields in the report envelope every command shares:
+/// `schema` and `doc_id` first, `diagnostics` last.
+fn report(
+    schema: &str,
+    facts: &FileFacts,
+    doc: &Document,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    out.insert("schema".into(), schema.into());
+    out.insert("doc_id".into(), facts.doc_id.clone().into());
+    if let serde_json::Value::Object(fields) = body {
+        out.extend(fields);
+    }
+    out.insert("diagnostics".into(), diagnostics(doc));
+    serde_json::Value::Object(out)
+}
+
+fn diagnostics(doc: &Document) -> serde_json::Value {
+    doc.diagnostics()
+        .snapshot()
+        .into_iter()
+        .map(|d| serde_json::json!({ "code": d.code, "severity": "warning", "message": d.message }))
+        .collect()
+}
+
+fn show(
+    path: &Path,
+    target: &str,
+    data: bool,
+    max_bytes: usize,
+) -> Result<serde_json::Value, Failure> {
+    let (doc, facts) = open(path)?;
+    let mut body = serde_json::Map::new();
+    if target.trim() == "trailer" {
+        body.insert("object".into(), "trailer".into());
+        body.insert(
+            "value".into(),
+            objects::encode(&nupdf::Object::Dict(doc.trailer().into())),
+        );
+        return Ok(report("nupdf.show/v0", &facts, &doc, body.into()));
+    }
+    let num = target
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse::<i32>().ok())
+        .ok_or_else(|| Failure {
+            exit: Exit::Usage,
+            code: "usage.bad_target",
+            message: format!("expected an object number, `N G R` or `trailer`, got {target:?}"),
+        })?;
+    if num <= 0 || num as usize >= doc.xref_len() {
+        return Err(Failure {
+            exit: Exit::Input,
+            code: "input.no_such_object",
+            message: format!("object {num} is outside the xref (1..{})", doc.xref_len()),
+        });
+    }
+    body.insert("object".into(), format!("{num} 0 R").into());
+    let value = doc.object(num);
+    body.insert(
+        "value".into(),
+        value
+            .as_ref()
+            .map_or(serde_json::Value::Null, objects::encode),
+    );
+    if let Some(nupdf::Object::Stream(stream)) = &value {
+        let mut info = serde_json::Map::new();
+        info.insert("raw_len".into(), doc.raw_stream_data(stream).len().into());
+        match doc.stream_data(stream) {
+            Ok(decoded) => {
+                info.insert("decoded_len".into(), decoded.len().into());
+                if data {
+                    let shown = &decoded[..decoded.len().min(max_bytes)];
+                    info.insert(
+                        "data".into(),
+                        String::from_utf8_lossy(shown).into_owned().into(),
+                    );
+                    info.insert("truncated".into(), (decoded.len() > max_bytes).into());
+                }
+            }
+            Err(e) => {
+                info.insert("decode_error".into(), e.to_string().into());
+            }
+        }
+        body.insert("stream".into(), info.into());
+    }
+    Ok(report("nupdf.show/v0", &facts, &doc, body.into()))
 }
 
 fn info(path: &Path) -> Result<InfoReport, Failure> {
