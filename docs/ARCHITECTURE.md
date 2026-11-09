@@ -33,11 +33,17 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | nupdf module | MuPDF source | Milestone |
 |---|---|---|
 | `header` | `pdf/pdf-xref.c` (`pdf_load_version`) | M0 |
-| `syntax::lex`, `syntax::parse` | `pdf/pdf-lex.c`, `pdf/pdf-parse.c` | M1 |
+| `lex` | `pdf/pdf-lex.c` | M1 |
+| `strtof` | `fitz/strtof.c`, `fitz/string.c` (`fz_atof`) | M1 |
+| `parse` | `pdf/pdf-parse.c` | M1 |
 | `object` | `pdf/pdf-object.c` | M1 |
-| `xref`, `repair` | `pdf/pdf-xref.c`, `pdf/pdf-repair.c` | M1 |
+| `xref` | `pdf/pdf-xref.c` (loading), `fitz/filter-basic.c` (endstream filter) | M1 |
+| `repair` (scanner) | `pdf/pdf-repair.c` | M1 |
+| `document` (state, loading, object streams, repair rebuild, version, page count) | `pdf/pdf-xref.c`, `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1 |
+| `diag` | MuPDF's `fz_warn` calls, as data | M1 |
+| `filter` (Flate, predictors, ASCIIHex, ASCII85, RunLength) | `pdf/pdf-stream.c` (`build_filter`), `fitz/filter-flate.c`, `fitz/filter-predict.c`, `fitz/filter-basic.c` | M1 |
 | `page_tree` | `pdf/pdf-page.c` | M1 |
-| `filter::*` | `fitz/filter-*.c`, `fitz/load-jpx.c`, `fitz/load-jbig2.c` | M2 |
+| `filter` (LZW, Brotli, image decoders) | `fitz/filter-lzw.c`, `fitz/filter-brotli.c`, `fitz/filter-*.c`, `fitz/load-jpx.c`, `fitz/load-jbig2.c` | M2 |
 | `crypt` | `pdf/pdf-crypt.c`, `fitz/crypt-*.c` | M2 |
 | `write`, `edit`, `graft` | `pdf/pdf-write.c`, `pdf/pdf-graft.c`, `pdf/pdf-clean-file.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
@@ -53,7 +59,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `forms`, `annot`, `appearance` | `pdf/pdf-form.c`, `pdf-annot.c`, `pdf-appearance.c` | M9 |
 | `signature` | `pdf/pdf-signature.c` | M9 |
 
-## Core data model (M1 target)
+## Core data model
 
 ```rust
 pub struct Document {

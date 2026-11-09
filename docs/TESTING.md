@@ -13,6 +13,7 @@ cargo xtask harness                     # differential checks on the smoke tier
 cargo xtask harness --tier standard     # same on fetched public corpora
 cargo xtask harness --update-baseline   # accept improved results
 cargo xtask bench --runs 5              # paired timing and memory against mutool
+cargo xtask bench --tier standard --sample 300 --runs 3   # evenly spaced sample of a big tier
 cargo xtask corpus list                 # what is fetched, sizes, licenses
 cargo xtask corpus fetch qpdf           # sparse clone of one source
 ```
@@ -55,8 +56,8 @@ Third-party PDFs are never committed; `corpus/manifest.toml` records each source
 
 | Check | Compares | Tolerance | From |
 |---|---|---|---|
-| `info` | `pdf_version` now; page count, boxes, encryption in M1–M2 | exact | M0 |
-| `objects` | Canonical object graph; raw stream bytes hashed | exact | M1 |
+| `info` | Effective version, page count, xref size, repaired; boxes and encryption later | exact | M0, extended in M1 |
+| `objects` | Every object in canonical JSON (names `#xx`-escaped, strings hex, reals at f32), plus raw stream lengths | exact (numbers per DECISIONS D13) | M1 |
 | `streams` | BLAKE3 of each decoded stream | exact, except image filters | M2 |
 | `roundtrip` | MuPDF reading nupdf's output: same graph modulo renumbering, same text | exact | M3 |
 | `trace` | Device calls per page, against `mutool trace` | matrices within 1e-3 | M4 |

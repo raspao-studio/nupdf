@@ -9,7 +9,7 @@ Related docs: [ARCHITECTURE](ARCHITECTURE.md) · [AGENT-INTERFACE](AGENT-INTERFA
 | Milestone | Scope | MuPDF C in scope | State |
 |---|---|---|---|
 | M0 | Foundation: repo, oracle, harness, bench, CI | — | done |
-| M1 | Syntax, xref, repair, page tree | ~25k lines | next |
+| M1 | Syntax, xref, repair, page tree | ~25k lines | in progress |
 | M2 | Filters and encryption | ~15k | |
 | M3 | Writer and structural editing | ~10k | |
 | M4 | Content streams, resources, fonts | ~25k | |
@@ -79,23 +79,36 @@ Baseline at the end of M0: `info` matches MuPDF on 11 of 12 smoke files MuPDF op
 
 MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-repair.c`, `pdf-stream.c` (raw access), `pdf-page.c` (page tree).
 
-- [ ] Fetch the standard tier and record its first baseline with the existing `info` check
-- [ ] Lexer: whitespace and comments, all three EOL styles, MuPDF's number leniency (`pdf_lex_number`: `--5`, `1.2.3`, `.`), names with `#xx` escapes, nested literal strings with escapes, odd-length hex strings, keywords
-- [ ] Object parser: arrays, dictionaries (MuPDF's duplicate-key behavior), `n g R`, streams with `/Length` checked against `endstream` and MuPDF's search fallback, missing `endobj`
-- [ ] Object model: settle the numeric representation and dictionary layout (open questions 1 and 2), backed by benches
-- [ ] Xref: `startxref` search, classic tables including MuPDF's fixes for broken subsection headers, xref streams (`/W`, `/Index`), hybrid files (`/XRefStm`), object streams (`/N`, `/First`, `/Extends`), `/Prev` chains with loop detection
-- [ ] Lazy, concurrent object resolution: one `OnceLock` per xref slot; reference-cycle detection
-- [ ] Repair as in `pdf-repair.c`: scan for `obj`, `endobj`, `trailer` and `xref`; rebuild the trailer (`/Root`, `/Info`, `/Encrypt`, `/ID`), finding the catalog when the trailer is missing; objects inside object streams
-- [ ] Revisions: enumerate incremental-update sections (redaction needs this in M6)
-- [ ] Page tree: count, lookup by index, inherited `Resources`, `MediaBox`, `CropBox` and `Rotate`; loops, wrong `/Count`, missing `/Type`; MuPDF's fallback scan for page objects
-- [ ] Effective version from `/Root/Version` (fixes the smoke mismatch)
-- [ ] `Limits`: nesting depth, xref size, object-stream count, reference-chain length
-- [ ] Diagnostics: stable codes for each MuPDF warning we mirror; the harness compares warning classes
-- [ ] `nupdf info` v1: page count and box summary, revisions, repaired, object count, encryption detected, linearization detected, Info dictionary fields
-- [ ] `nupdf objects` and `nupdf show <ref>`: canonical JSON object dumps
-- [ ] Oracle scripts: extend `info.js` (page count, boxes); add `objects.js` (canonical dump through the `PDFDocument` API)
+- [x] Fetch the standard tier (5,142 files) and record its first baseline with the existing `info` check
+- [x] Lexer: whitespace and comments, all three EOL styles, MuPDF's number leniency (`pdf_lex_number`: `--5`, `1.2.3`, `.`, Google Docs' `0.0-5684342`), names with `#xx` escapes, nested literal strings with escapes, odd-length hex strings, keywords
+- [x] Object parser: arrays, dictionaries (MuPDF's duplicate-key behavior and its dropped-token quirk), `n g R`, stream starts, missing `endobj`, a nesting limit
+- [x] Object model: reals are `f32` and parsed by a port of MuPDF's `strtof`; dictionaries keep insertion order (DECISIONS D10, D11)
+- [x] Xref: `startxref` search, classic tables including 19-byte entries and broken subsection lines, xref streams (`/W`, `/Index`), hybrid files (`/XRefStm`), object streams (`/N`, `/First`, forward-only reads), `/Prev` chains with loop detection, MuPDF's conditions for falling back to repair
+- [x] Lazy, concurrent object resolution: one `OnceLock` per xref slot, an immutable xref snapshot swapped on repair, cycle detection
+- [x] Repair as in `pdf-repair.c`: scan for objects, streams and trailers; rebuild the trailer; correct stream lengths; reclaim object-stream members; find `/Root` and `/Info`; lazy repair on a bad object; MuPDF's "dead document" state when a lazy repair fails
+- [x] Effective version from `/Root/Version` (fixed the smoke mismatch)
+- [x] `nupdf info` v1 (part): effective and header version, page count, xref size, revisions, repaired, encryption detected
+- [x] `nupdf objects`: canonical JSON dump of every object, with raw stream lengths
+- [x] Oracle scripts: `info.js` extended (page count, xref size, repair); `objects.js` added
+- [x] Filters pulled forward from M2 because real xref and object streams use them: Flate (zlib-rs), PNG and TIFF predictors, ASCIIHex, ASCII85, RunLength
+- [ ] Revisions: enumerate incremental-update sections with their offsets (redaction needs this in M6)
+- [ ] Page tree: lookup by index, inherited `Resources`, `MediaBox`, `CropBox` and `Rotate`; loops, wrong `/Count`, missing `/Type`; MuPDF's fallback scan for page objects
+- [ ] `Limits`: xref size, object-stream count and reference-chain length as configurable limits (nesting depth is done)
+- [ ] Diagnostics: the harness compares warning classes between MuPDF and nupdf
+- [ ] `nupdf info` v1 (rest): page box summary, linearization, Info dictionary fields
+- [ ] `nupdf show <ref>`
 - [ ] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object` and `open_walk`, seeded from smoke and standard
 - [ ] Fixtures: one per lexer leniency and per xref repair path
+- [ ] Investigate the four non-encrypted `objects` mismatches listed below
+
+**Status after the first M1 pass** (standard tier, 5,142 files):
+
+| Check | Parity | Remaining mismatches |
+|---|---|---|
+| `info` (version, pages, xref size, repaired) | 98.9% (5,069 / 5,123) | 53 encrypted files (M2), 1 Brotli file (M2) |
+| `objects` (every object, raw stream lengths) | 98.6% (5,049 / 5,122) | 66 encrypted, 1 Brotli, and 4 others: `issue18986.pdf` and `poppler-90-0-fuzzed.pdf` (lazy repairs MuPDF triggers that nupdf does not), `fuzz-16214.pdf` and two veraPDF files (MuPDF stops reading a stream at a buffer boundary when /Length overshoots into `endstream`) |
+
+There are no crashes, and no files that MuPDF opens but nupdf cannot. On a 300-file sample run sequentially, `nupdf info` takes 529 ms in total against MuPDF's 1,308 ms (geometric-mean speedup 2.47x, process start included; the MuPDF side also pays for its JavaScript runtime).
 
 Checks: `info` (version, page count, boxes) and `objects` (the canonical graph, with raw stream bytes hashed).
 Exit: ≥99.5% `info` parity and ≥99% `objects` parity on the standard tier. Zero nupdf crashes. One CPU-hour per fuzz target, clean. Median open-and-walk time ≤ MuPDF's.
@@ -236,8 +249,8 @@ Exit: both nupdf arms beat every baseline on success rate and on median tokens p
 
 ## Open questions
 
-1. **Numbers.** MuPDF stores reals as `float`. Store f32 for exact parity, or f64 for accuracy? Decide in M1 by running the `objects` and later `trace` checks both ways.
-2. **Dictionaries and names.** Sorted small vectors as in MuPDF, or hash maps; interned names or not. Decide in M1 from benches.
+1. **Numbers.** Settled: f32, parsed by a port of MuPDF's `strtof` (DECISIONS D10).
+2. **Dictionaries and names.** Settled for now: ordered vectors with replace-in-place (DECISIONS D11). Name interning is still open; decide from profiles.
 3. **Crate split.** One `nupdf` crate until a boundary pays for itself (compile time, optional heavy dependencies). Revisit at M4 and M7.
 4. **Rasterizer.** Decide at the start of M7.
 5. **File access.** Read whole files into memory, or memory-map (memmap2 is `unsafe`, and the mapping breaks if the file changes)? Measure in M1. The default stays a safe read.
