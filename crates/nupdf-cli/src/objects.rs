@@ -26,6 +26,65 @@ pub fn dump(doc: &Document) -> Value {
     json!({ "object_count": count, "objects": objects })
 }
 
+/// Pages and their inherited attributes, in oracle/js/pages.js's format.
+pub fn pages(doc: &Document) -> Value {
+    let mut out = Map::new();
+    let count = doc.page_count();
+    out.insert(
+        "page_count".into(),
+        count.as_ref().map_or(Value::Null, |n| json!(n)),
+    );
+    if let Err(e) = &count {
+        out.insert("page_count_error".into(), json!(e.0));
+    }
+    let mut pages = Vec::new();
+    for index in 0..count.unwrap_or(0) {
+        let entry = doc.page(index).and_then(|page| {
+            // Same order as the oracle: the first failing lookup wins, and a
+            // parent repair triggered by one lookup applies to the next.
+            let attr = |key: &[u8]| -> Result<Value, nupdf::PageError> {
+                Ok(doc
+                    .inherited(&page, key)?
+                    .map_or(Value::Null, |v| encode(&v)))
+            };
+            let media = attr(b"MediaBox")?;
+            let crop = attr(b"CropBox")?;
+            let rotate = attr(b"Rotate")?;
+            let resources = summarize(doc.inherited(&page, b"Resources")?);
+            Ok(json!({
+                "object": match &page {
+                    Object::Ref(r) => format!("{} {} R", r.num, r.generation),
+                    _ => "direct".to_string(),
+                },
+                "MediaBox": media,
+                "CropBox": crop,
+                "Rotate": rotate,
+                "Resources": resources,
+            }))
+        });
+        pages.push(entry.unwrap_or_else(|e| json!({ "error": e.0 })));
+    }
+    out.insert("pages".into(), Value::Array(pages));
+    out.insert(
+        "page_count_after".into(),
+        doc.page_count().map_or(Value::Null, |n| json!(n)),
+    );
+    Value::Object(out)
+}
+
+/// A reference, the sorted keys of a dictionary, or the encoded value.
+fn summarize(value: Option<Object>) -> Value {
+    match value {
+        None | Some(Object::Null) => Value::Null,
+        Some(Object::Dict(d)) => {
+            let mut keys: Vec<String> = d.iter().map(|(k, _)| escape_name(k)).collect();
+            keys.sort();
+            json!({ "keys": keys })
+        }
+        Some(other) => encode(&other),
+    }
+}
+
 pub fn encode(obj: &Object) -> Value {
     match obj {
         Object::Null => Value::Null,

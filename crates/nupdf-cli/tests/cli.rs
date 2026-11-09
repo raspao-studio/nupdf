@@ -151,3 +151,39 @@ fn pretty_flag_indents_output() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.starts_with("{\n  \"schema\""));
 }
+
+fn run_json(args: &[&str]) -> Value {
+    let out = nupdf(args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn pages_report_inherited_attributes() {
+    let path = smoke("multipage-inherit.pdf");
+    let report = run_json(&["pages", path.to_str().unwrap()]);
+    assert_eq!(report["page_count"], 3);
+    let pages = report["pages"].as_array().unwrap();
+    assert_eq!(pages[0]["object"], "3 0 R");
+    assert_eq!(pages[0]["MediaBox"], serde_json::json!([0, 0, 595, 842]));
+    assert_eq!(pages[0]["Resources"]["keys"], serde_json::json!(["Font"]));
+    assert_eq!(pages[1]["Rotate"], 90);
+    assert_eq!(pages[2]["MediaBox"], serde_json::json!([0, 0, 300, 300]));
+    assert_eq!(report["page_count_after"], 3);
+}
+
+#[test]
+fn objects_dump_every_slot() {
+    let path = smoke("xref-stream.pdf");
+    let report = run_json(&["objects", path.to_str().unwrap()]);
+    assert_eq!(report["object_count"], 8);
+    let objects = report["objects"].as_object().unwrap();
+    assert_eq!(objects.len(), 7);
+    assert_eq!(objects["1"]["d"]["Type"]["n"], "Catalog");
+    assert_eq!(objects["6"]["stream"]["d"]["Type"]["n"], "ObjStm");
+    assert!(objects["6"]["raw_len"].as_u64().unwrap() > 0);
+}
