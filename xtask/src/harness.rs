@@ -48,7 +48,14 @@ pub const CHECKS: &[Check] = &[
         about: "document-level facts: effective version, page count, xref size, repair",
         oracle_script: "oracle/js/info.js",
         nupdf_args: &["info"],
-        compare: Compare::Fields(&["/pdf_version", "/page_count", "/object_count", "/repaired"]),
+        compare: Compare::Fields(&[
+            "/pdf_version",
+            "/page_count",
+            "/object_count",
+            "/repaired",
+            "/revisions",
+            "/metadata",
+        ]),
     },
     Check {
         name: "objects",
@@ -259,9 +266,11 @@ fn side(program: &Path, args: &[&std::ffi::OsStr], timeout: Duration) -> Side {
     match proc::run(program, args, timeout) {
         Ok(run) => Side {
             status: run.status,
+            // MuPDF's text conversion can emit bytes that are not UTF-8
+            // (an overlong NUL, lone surrogates); read both sides lossily.
             json: run
                 .succeeded()
-                .then(|| serde_json::from_slice(&run.stdout).ok())
+                .then(|| serde_json::from_str(&String::from_utf8_lossy(&run.stdout)).ok())
                 .flatten(),
             stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
             ms: run.wall.as_secs_f64() * 1000.0,
