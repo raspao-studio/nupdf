@@ -40,6 +40,9 @@ pub enum Compare {
         counts: &'static [&'static str],
         items: &'static str,
     },
+    /// The distinct warnings and reported errors on MuPDF's stderr must
+    /// equal the distinct `/diagnostics/*/message` values.
+    Warnings,
 }
 
 pub const CHECKS: &[Check] = &[
@@ -76,6 +79,13 @@ pub const CHECKS: &[Check] = &[
             counts: &["/page_count", "/page_count_after"],
             items: "pages",
         },
+    },
+    Check {
+        name: "warnings",
+        about: "distinct warnings and recovered errors while opening and inspecting a file",
+        oracle_script: "oracle/js/info.js",
+        nupdf_args: &["info"],
+        compare: Compare::Warnings,
     },
 ];
 
@@ -325,6 +335,7 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
                     Compare::Collection { counts, items } => {
                         compare_collection(counts, items, a, b)
                     }
+                    Compare::Warnings => compare_warnings(&oracle.stderr, b),
                 };
                 if result.diffs.is_empty() {
                     Outcome::Match
@@ -357,6 +368,60 @@ pub fn compare(fields: &[&str], oracle: &Value, ours: &Value) -> Vec<FieldDiff> 
             })
         })
         .collect()
+}
+
+/// MuPDF's stderr lines that are diagnostics: `warning: X` and caught
+/// errors reported as `<kind> error: X`. Its "... repeated N times" lines
+/// are a printing artifact, not diagnostics.
+pub fn mupdf_diagnostics(stderr: &str) -> std::collections::BTreeSet<String> {
+    const KINDS: [&str; 8] = [
+        "format",
+        "syntax",
+        "generic",
+        "library",
+        "limit",
+        "argument",
+        "system",
+        "unsupported",
+    ];
+    stderr
+        .lines()
+        .filter_map(|line| {
+            if let Some(w) = line.strip_prefix("warning: ") {
+                return (!w.starts_with("... repeated")).then(|| w.to_string());
+            }
+            KINDS
+                .iter()
+                .any(|k| line.starts_with(&format!("{k} error: ")))
+                .then(|| line.to_string())
+        })
+        .collect()
+}
+
+pub fn compare_warnings(oracle_stderr: &str, ours: &Value) -> Vec<FieldDiff> {
+    let theirs = mupdf_diagnostics(oracle_stderr);
+    let mine: std::collections::BTreeSet<String> = ours
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|d| d.get("message").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let only = |a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>| {
+        Value::from(a.difference(b).cloned().collect::<Vec<_>>())
+    };
+    if theirs == mine {
+        Vec::new()
+    } else {
+        vec![FieldDiff {
+            field: "/diagnostics".into(),
+            oracle: only(&theirs, &mine),
+            nupdf: only(&mine, &theirs),
+        }]
+    }
 }
 
 /// Item-by-item comparison of a collection; reports the first few
@@ -560,6 +625,21 @@ mod tests {
         );
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].nupdf, Value::Null);
+    }
+
+    #[test]
+    fn mupdf_stderr_becomes_a_diagnostic_set() {
+        let set = mupdf_diagnostics(
+            "format error: cannot find startxref\nwarning: trying to repair broken xref\n\
+             warning: ... repeated 3 times...\nwarning: trying to repair broken xref\nnoise\n",
+        );
+        assert_eq!(
+            set.into_iter().collect::<Vec<_>>(),
+            vec![
+                "format error: cannot find startxref",
+                "trying to repair broken xref"
+            ]
+        );
     }
 
     #[test]
