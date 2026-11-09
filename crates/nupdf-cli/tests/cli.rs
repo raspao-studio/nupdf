@@ -236,6 +236,7 @@ fn info_reports_metadata_and_revisions() {
     assert_eq!(report["metadata"]["Producer"], "nupdf fixtures");
     assert!(report["metadata"].get("Author").is_none());
     assert_eq!(report["revisions"], 2);
+    assert_eq!(report["revision_offsets"].as_array().unwrap().len(), 2);
     assert_eq!(report["linearized"], false);
 }
 

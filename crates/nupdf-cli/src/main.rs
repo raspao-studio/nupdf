@@ -90,6 +90,8 @@ struct InfoReport {
     /// Slots in the cross-reference table.
     object_count: usize,
     revisions: usize,
+    /// Absolute offsets of the xref sections, newest first (empty after repair).
+    revision_offsets: Vec<u64>,
     linearized: bool,
     repaired: bool,
     encrypted: bool,
@@ -356,6 +358,7 @@ fn info((doc, facts): (Document, FileFacts)) -> Result<InfoReport, Failure> {
         page_count_error,
         object_count,
         revisions,
+        revision_offsets: doc.revision_offsets(),
         linearized: doc.linearized(),
         repaired,
         encrypted: doc.is_encrypted(),
