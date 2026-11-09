@@ -90,6 +90,8 @@ pub struct Loaded {
     pub cached: HashMap<i32, Object>,
     pub trailer: Dict,
     pub revisions: usize,
+    /// Where each xref section starts, relative to the header, newest first.
+    pub section_offsets: Vec<i64>,
 }
 
 pub type XrefError = String;
@@ -203,6 +205,7 @@ pub fn load(
         cached,
         trailer,
         revisions: sections.len(),
+        section_offsets: seen,
     })
 }
 

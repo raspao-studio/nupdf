@@ -91,7 +91,8 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [x] `nupdf objects`: canonical JSON dump of every object, with raw stream lengths
 - [x] Oracle scripts: `info.js` extended (page count, xref size, repair); `objects.js` added
 - [x] Filters pulled forward from M2 because real xref and object streams use them: Flate (zlib-rs), PNG and TIFF predictors, ASCIIHex, ASCII85, RunLength
-- [ ] Revisions: enumerate incremental-update sections with their offsets (redaction needs this in M6)
+- [x] Revisions: `Document::revision_offsets` and `info.revision_offsets` list each xref section, newest first (redaction needs this in M6)
+- [ ] Bounded memory for huge declared xrefs: slots are allocated eagerly (as in MuPDF), so a small file declaring millions of objects costs hundreds of MB; switch the object cache to sparse storage
 - [x] Page tree: MuPDF's page map (including its `/Count` rewrite and the empty-map fallback), the slow lookup that guesses node types from `/Kids` and `/MediaBox`, cycle limits, and inherited `Resources`, `MediaBox`, `CropBox` and `Rotate` with MuPDF's Parent repair on cycles; `nupdf pages` and the `pages` check (99.8% on the standard tier, the rest encrypted or Brotli)
 - [x] `Limits`: decoded stream size, xref size and object-stream size are configurable (`--max-decoded-bytes`, `--max-xref-entries`), default to MuPDF's own caps, and fail with `limit.*` codes and exit 5; structural depths stay fixed for stack safety
 - [x] Diagnostics: a `warnings` check compares the distinct warnings and reported errors on MuPDF's stderr with nupdf's diagnostics; caught errors carry MuPDF's kinds (`syntax error:`, `format error:`, `library error:`); 98.9% on the standard tier

@@ -79,6 +79,9 @@ pub(crate) struct State {
     /// Parent links re-derived from /Kids after an inheritance cycle, as
     /// MuPDF's `pdf_repair_page_tree_parents` rewrites them.
     pub(crate) repaired_parents: OnceLock<HashMap<i32, Object>>,
+    /// Xref section offsets relative to the header, newest first; empty
+    /// after a repair.
+    section_offsets: Vec<i64>,
 }
 
 impl State {
@@ -102,6 +105,7 @@ impl State {
             page_map: OnceLock::new(),
             page_count_override: OnceLock::new(),
             repaired_parents: OnceLock::new(),
+            section_offsets: Vec::new(),
         }
     }
 
@@ -261,7 +265,8 @@ impl Document {
 
         match loaded {
             Some(l) => {
-                let state = State::new(bias, l.entries, l.trailer, l.revisions, false);
+                let mut state = State::new(bias, l.entries, l.trailer, l.revisions, false);
+                state.section_offsets = l.section_offsets;
                 for (num, obj) in l.cached {
                     state.precache(num, obj);
                 }
@@ -344,6 +349,19 @@ impl Document {
         let s = self.current();
         let sections = if s.repaired { 1 } else { s.revisions };
         sections.saturating_sub(usize::from(self.linearized))
+    }
+
+    /// Absolute file offsets of the xref sections, newest first: one per
+    /// saved revision, plus the first-page section of a linearized file.
+    /// Empty when the xref was rebuilt by repair, since revisions are then
+    /// unknown. Redaction uses these to drop every earlier revision.
+    pub fn revision_offsets(&self) -> Vec<u64> {
+        let state = self.current();
+        state
+            .section_offsets
+            .iter()
+            .filter_map(|&o| u64::try_from(o.saturating_add(state.bias as i64)).ok())
+            .collect()
     }
 
     /// Whether the file starts with a linearization dictionary.
@@ -1126,6 +1144,20 @@ mod tests {
         };
         let e = Document::open_with(SIMPLE.to_vec(), limits).unwrap_err();
         assert_eq!(e.code, "limit.xref_entries");
+    }
+
+    #[test]
+    fn revision_offsets_point_at_xref_sections() {
+        let head = "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n";
+        let at = head.len();
+        let data = format!(
+            "{head}xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+             trailer<</Root 1 0 R/Size 2>>\nstartxref\n{at}\n%%EOF\n"
+        );
+        let d = doc(data.as_bytes());
+        assert!(!d.repaired());
+        assert_eq!(d.revision_offsets(), vec![at as u64]);
+        assert!(doc(SIMPLE).revision_offsets().is_empty());
     }
 
     #[test]
