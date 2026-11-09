@@ -34,8 +34,12 @@ pub struct Check {
 pub enum Compare {
     /// These JSON pointers must be equal.
     Fields(&'static [&'static str]),
-    /// `object_count` must be equal, then every entry of `objects`.
-    Objects,
+    /// The `counts` must be equal, then every entry of the `items`
+    /// collection (an object or an array), reported item by item.
+    Collection {
+        counts: &'static [&'static str],
+        items: &'static str,
+    },
 }
 
 pub const CHECKS: &[Check] = &[
@@ -51,7 +55,20 @@ pub const CHECKS: &[Check] = &[
         about: "every object in the xref, canonically encoded, with raw stream lengths",
         oracle_script: "oracle/js/objects.js",
         nupdf_args: &["objects"],
-        compare: Compare::Objects,
+        compare: Compare::Collection {
+            counts: &["/object_count"],
+            items: "objects",
+        },
+    },
+    Check {
+        name: "pages",
+        about: "page tree lookup and inherited MediaBox, CropBox, Rotate, Resources",
+        oracle_script: "oracle/js/pages.js",
+        nupdf_args: &["pages"],
+        compare: Compare::Collection {
+            counts: &["/page_count", "/page_count_after"],
+            items: "pages",
+        },
     },
 ];
 
@@ -296,7 +313,9 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
             (Some(a), Some(b)) => {
                 result.diffs = match check.compare {
                     Compare::Fields(fields) => compare(fields, a, b),
-                    Compare::Objects => compare_objects(a, b),
+                    Compare::Collection { counts, items } => {
+                        compare_collection(counts, items, a, b)
+                    }
                 };
                 if result.diffs.is_empty() {
                     Outcome::Match
@@ -331,19 +350,28 @@ pub fn compare(fields: &[&str], oracle: &Value, ours: &Value) -> Vec<FieldDiff> 
         .collect()
 }
 
-/// Object-by-object comparison; reports the first few differences.
-pub fn compare_objects(oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
+/// Item-by-item comparison of a collection; reports the first few
+/// differences.
+pub fn compare_collection(
+    counts: &[&str],
+    items: &str,
+    oracle: &Value,
+    ours: &Value,
+) -> Vec<FieldDiff> {
     const MAX_REPORTED: usize = 5;
-    let mut diffs = compare(&["/object_count"], oracle, ours);
-    let empty = serde_json::Map::new();
-    let a = oracle
-        .get("objects")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    let b = ours
-        .get("objects")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
+    let mut diffs = compare(counts, oracle, ours);
+    let as_map = |v: &Value| -> serde_json::Map<String, Value> {
+        match v.get(items) {
+            Some(Value::Object(m)) => m.clone(),
+            Some(Value::Array(list)) => list
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i.to_string(), v.clone()))
+                .collect(),
+            _ => serde_json::Map::new(),
+        }
+    };
+    let (a, b) = (as_map(oracle), as_map(ours));
     let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
     keys.sort_by_key(|k| k.parse::<u64>().unwrap_or(u64::MAX));
     keys.dedup();
@@ -355,7 +383,7 @@ pub fn compare_objects(oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
             differing += 1;
             if diffs.len() < MAX_REPORTED {
                 diffs.push(FieldDiff {
-                    field: format!("/objects/{key}"),
+                    field: format!("/{items}/{key}"),
                     oracle: truncate(x),
                     nupdf: truncate(y),
                 });
@@ -364,9 +392,9 @@ pub fn compare_objects(oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
     }
     if differing > MAX_REPORTED {
         diffs.push(FieldDiff {
-            field: "/objects (more)".into(),
+            field: format!("/{items} (more)"),
             oracle: Value::Null,
-            nupdf: Value::from(format!("{differing} objects differ in total")),
+            nupdf: Value::from(format!("{differing} {items} differ in total")),
         });
     }
     diffs
@@ -544,7 +572,7 @@ mod tests {
     fn object_diffs_name_the_objects() {
         let a = json!({"object_count": 3, "objects": {"1": 5, "2": {"n": "A"}}});
         let b = json!({"object_count": 3, "objects": {"1": 5.0, "2": {"n": "B"}}});
-        let diffs = compare_objects(&a, &b);
+        let diffs = compare_collection(&["/object_count"], "objects", &a, &b);
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].field, "/objects/2");
     }

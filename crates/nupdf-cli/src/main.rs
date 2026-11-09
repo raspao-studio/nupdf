@@ -35,6 +35,8 @@ enum Command {
     Info { file: PathBuf },
     /// Dump every object in the cross-reference table as canonical JSON.
     Objects { file: PathBuf },
+    /// List pages with their inherited MediaBox, CropBox, Rotate and Resources.
+    Pages { file: PathBuf },
 }
 
 /// Exit codes from docs/AGENT-INTERFACE.md. Usage errors (2) come from clap.
@@ -97,6 +99,7 @@ fn main() -> ExitCode {
     let result = match &cli.command {
         Command::Info { file } => info(file).and_then(to_json),
         Command::Objects { file } => open(file).map(|(doc, _)| objects::dump(&doc)),
+        Command::Pages { file } => open(file).map(|(doc, _)| objects::pages(&doc)),
     };
     match result {
         Ok(report) => {
