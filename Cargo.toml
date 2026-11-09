@@ -8,7 +8,7 @@ version = "0.0.1"
 edition = "2024"
 rust-version = "1.88"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/humships/nupdf"
+repository = "https://github.com/raspao-studio/nupdf"
 authors = ["hum <hello@byhum.dev>"]
 
 [workspace.dependencies]
