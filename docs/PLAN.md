@@ -84,7 +84,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [x] Object parser: arrays, dictionaries (MuPDF's duplicate-key behavior and its dropped-token quirk), `n g R`, stream starts, missing `endobj`, a nesting limit
 - [x] Object model: reals are `f32` and parsed by a port of MuPDF's `strtof`; dictionaries keep insertion order (DECISIONS D10, D11)
 - [x] Xref: `startxref` search, classic tables including 19-byte entries and broken subsection lines, xref streams (`/W`, `/Index`), hybrid files (`/XRefStm`), object streams (`/N`, `/First`, forward-only reads), `/Prev` chains with loop detection, MuPDF's conditions for falling back to repair
-- [x] Lazy, concurrent object resolution: one `OnceLock` per xref slot, an immutable xref snapshot swapped on repair, cycle detection
+- [x] Lazy, concurrent object resolution: a sharded cache of loaded objects over an immutable xref snapshot that is swapped on repair, with cycle detection
 - [x] Repair as in `pdf-repair.c`: scan for objects, streams and trailers; rebuild the trailer; correct stream lengths; reclaim object-stream members; find `/Root` and `/Info`; lazy repair on a bad object; MuPDF's empty-xref state after a failed lazy repair
 - [x] Effective version from `/Root/Version` (fixed the smoke mismatch)
 - [x] `nupdf info` v1 (part): effective and header version, page count, xref size, revisions, repaired, encryption detected
@@ -92,14 +92,14 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [x] Oracle scripts: `info.js` extended (page count, xref size, repair); `objects.js` added
 - [x] Filters pulled forward from M2 because real xref and object streams use them: Flate (zlib-rs), PNG and TIFF predictors, ASCIIHex, ASCII85, RunLength
 - [x] Revisions: `Document::revision_offsets` and `info.revision_offsets` list each xref section, newest first (redaction needs this in M6)
-- [ ] Bounded memory for huge declared xrefs: slots are allocated eagerly (as in MuPDF), so a small file declaring millions of objects costs hundreds of MB; switch the object cache to sparse storage
+- [x] Bounded memory for huge declared xrefs: MuPDF allocates every declared slot in every section, so a 200-byte file declaring 8M objects costs it 357–677 MB, and a chain of ten such sections 3.2 GB. nupdf stores sections as runs and the effective table sparsely, does not cache free slots, and streams the `objects` report: 2–4 MB for all of these, with the same object counts, the same errors and MuPDF's checking order (DECISIONS D14)
 - [x] Page tree: MuPDF's page map (including its `/Count` rewrite and the empty-map fallback), the slow lookup that guesses node types from `/Kids` and `/MediaBox`, cycle limits, and inherited `Resources`, `MediaBox`, `CropBox` and `Rotate` with MuPDF's Parent repair on cycles; `nupdf pages` and the `pages` check (99.8% on the standard tier, the rest encrypted or Brotli)
 - [x] `Limits`: decoded stream size, xref size and object-stream size are configurable (`--max-decoded-bytes`, `--max-xref-entries`), default to MuPDF's own caps, and fail with `limit.*` codes and exit 5; structural depths stay fixed for stack safety
 - [x] Diagnostics: a `warnings` check compares the distinct warnings and reported errors on MuPDF's stderr with nupdf's diagnostics; caught errors carry MuPDF's kinds (`syntax error:`, `format error:`, `library error:`); 98.9% on the standard tier
 - [x] `nupdf info` v1 (rest): linearization, revisions as MuPDF counts them, and Info entries decoded with a port of MuPDF's text-string conversion; page boxes are reported per page by `nupdf pages`
 - [x] `nupdf show <ref>`: one object or the trailer, with stream lengths and optional decoded data; `objects` and `pages` now carry the shared report envelope (`schema`, `doc_id`, `diagnostics`)
 - [x] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object`, `filters` and `open_walk`; a first 60-second run per target found nothing, and CI runs each for 30 seconds
-- [ ] One CPU-hour per fuzz target with no findings (the M1 exit criterion)
+- [x] One CPU-hour per fuzz target with no findings (the M1 exit criterion): lex 48.7M runs, parse_object 48.6M, filters 120M, open_walk 2.3M, nothing found
 - [x] Fixtures: one per lexer leniency, xref repair path and page tree quirk (32 smoke fixtures, all matching MuPDF on `info`, `objects` and `pages`)
 - [ ] Investigate the four non-encrypted `objects` mismatches listed below
 
