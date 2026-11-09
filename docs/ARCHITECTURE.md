@@ -41,6 +41,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `repair` (scanner) | `pdf/pdf-repair.c` | M1 |
 | `document` (state, loading, object streams, repair rebuild, version, page count) | `pdf/pdf-xref.c`, `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1 |
 | `diag` | MuPDF's `fz_warn` calls, as data | M1 |
+| `text_string` | `pdf/pdf-parse.c` (`pdf_new_utf8_from_pdf_string`), `fitz/string.c` (`fz_runetochar`), `fitz/encodings.h` (PDFDocEncoding) | M1 |
 | `filter` (Flate, predictors, ASCIIHex, ASCII85, RunLength) | `pdf/pdf-stream.c` (`build_filter`), `fitz/filter-flate.c`, `fitz/filter-predict.c`, `fitz/filter-basic.c` | M1 |
 | `page` | `pdf/pdf-page.c` (page map and lookup), `pdf/pdf-repair.c` (`pdf_walk_parent`, parent repair), `pdf/pdf-object.c` (`pdf_cycle`) | M1 |
 | `filter` (LZW, Brotli, image decoders) | `fitz/filter-lzw.c`, `fitz/filter-brotli.c`, `fitz/filter-*.c`, `fitz/load-jpx.c`, `fitz/load-jbig2.c` | M2 |
