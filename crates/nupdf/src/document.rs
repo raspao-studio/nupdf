@@ -59,7 +59,7 @@ struct ObjStm {
 }
 
 #[derive(Debug)]
-struct State {
+pub(crate) struct State {
     bias: usize,
     entries: Vec<Entry>,
     cache: Vec<OnceLock<Loaded>>,
@@ -70,6 +70,14 @@ struct State {
     trailer: Dict,
     revisions: usize,
     repaired: bool,
+    /// MuPDF's page map, built on first lookup (see `page`).
+    pub(crate) page_map: OnceLock<Option<crate::page::PageMap>>,
+    /// Set when building the page map found fewer pages than /Count claims;
+    /// MuPDF rewrites /Count to match.
+    pub(crate) page_count_override: OnceLock<i32>,
+    /// Parent links re-derived from /Kids after an inheritance cycle, as
+    /// MuPDF's `pdf_repair_page_tree_parents` rewrites them.
+    pub(crate) repaired_parents: OnceLock<HashMap<i32, Object>>,
 }
 
 impl State {
@@ -90,6 +98,9 @@ impl State {
             trailer,
             revisions,
             repaired,
+            page_map: OnceLock::new(),
+            page_count_override: OnceLock::new(),
+            repaired_parents: OnceLock::new(),
         }
     }
 
@@ -254,7 +265,7 @@ impl Document {
         }
     }
 
-    fn current(&self) -> Arc<State> {
+    pub(crate) fn current(&self) -> Arc<State> {
         self.state
             .read()
             .map(|s| Arc::clone(&s))
@@ -372,9 +383,14 @@ impl Document {
         if self.is_fdf {
             return Ok(0);
         }
-        let root = self.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
-        let pages = self.dict_get(&root, b"Pages");
-        let count = self.dict_get(&pages, b"Count").to_int();
+        let count = match self.current().page_count_override.get() {
+            Some(&n) => n,
+            None => {
+                let root = self.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
+                let pages = self.dict_get(&root, b"Pages");
+                self.dict_get(&pages, b"Count").to_int()
+            }
+        };
         if count < 0 || i64::from(count) >= self.xref_len() as i64 {
             return Err(PageCountError("Invalid number of pages".into()));
         }
