@@ -64,6 +64,9 @@ struct State {
     entries: Vec<Entry>,
     cache: Vec<OnceLock<Loaded>>,
     objstms: Mutex<HashMap<i32, Arc<ObjStm>>>,
+    /// Object streams that failed to load. MuPDF marks their entry free, so
+    /// from then on the object still resolves but is no longer a stream.
+    demoted: Mutex<std::collections::HashSet<i32>>,
     trailer: Dict,
     revisions: usize,
     repaired: bool,
@@ -83,6 +86,7 @@ impl State {
             entries,
             cache,
             objstms: Mutex::new(HashMap::new()),
+            demoted: Mutex::new(std::collections::HashSet::new()),
             trailer,
             revisions,
             repaired,
@@ -141,6 +145,9 @@ impl Drop for LoadGuard {
 #[derive(Debug)]
 pub struct Document {
     data: Arc<[u8]>,
+    /// MuPDF's `doc->file_size`: only set when the xref loader ran, so it is
+    /// 0 for files without a header, and every stream /Length is ignored.
+    file_size: usize,
     header_version: Version,
     is_fdf: bool,
     diag: Diagnostics,
@@ -185,8 +192,14 @@ impl Document {
             Err(_) => broken = Some("cannot find version marker".into()),
         }
 
+        let file_size = if broken.is_none() && !is_fdf {
+            data.len()
+        } else {
+            0
+        };
         let doc = Document {
             data,
+            file_size,
             header_version: version,
             is_fdf,
             diag,
@@ -252,6 +265,20 @@ impl Document {
         &self.data
     }
 
+    /// The raw (still encoded) bytes of a stream, as MuPDF reads them.
+    pub fn raw_stream_data(&self, stream: &Stream) -> &[u8] {
+        let length = self
+            .resolve(stream.dict.get(b"Length").unwrap_or(&Object::Null))
+            .to_int64();
+        xref::raw_stream(
+            &self.data,
+            stream.data_start,
+            length,
+            self.file_size,
+            &self.diag,
+        )
+    }
+
     pub fn diagnostics(&self) -> &Diagnostics {
         &self.diag
     }
@@ -286,7 +313,7 @@ impl Document {
         loop {
             let state = self.current();
             match self.load_in(&state, num, true) {
-                Loaded::Obj(o) => return Some(o),
+                Loaded::Obj(o) => return Some(demote_if_failed(&state, num, o)),
                 Loaded::Missing => return None,
                 Loaded::Failed(_) => {
                     self.diag.warn(
@@ -387,7 +414,13 @@ impl Document {
         let length = self
             .resolve_in(st, stream.dict.get(b"Length").unwrap_or(&Object::Null))
             .to_int64();
-        let raw = xref::raw_stream(&self.data, stream.data_start, length, &self.diag);
+        let raw = xref::raw_stream(
+            &self.data,
+            stream.data_start,
+            length,
+            self.file_size,
+            &self.diag,
+        );
         filter::decode(&stream.dict, raw, &|o| self.resolve_in(st, o), &self.diag)
     }
 
@@ -473,6 +506,11 @@ impl Document {
             return found;
         }
         let computed = Arc::new(self.load_objstm(st, stm));
+        if computed.error.is_some()
+            && let Ok(mut demoted) = st.demoted.lock()
+        {
+            demoted.insert(stm);
+        }
         if let Ok(mut map) = st.objstms.lock() {
             return Arc::clone(map.entry(stm).or_insert(computed));
         }
@@ -623,6 +661,11 @@ impl Document {
                 stm_ofs: item.stm_ofs,
             };
             entries[item.num as usize] = entry;
+            // MuPDF reads stream data from the entry's offset, which tracks the
+            // latest definition, even when it keeps an older cached object.
+            if let Some(obj) = fixed.remove(&item.num) {
+                fixed.insert(item.num, with_data_start(obj, item.stm_ofs));
+            }
             // Correct stream lengths measured by the scan (unencrypted only).
             // MuPDF patches the object it has cached for this number, even if
             // that came from an earlier definition.
@@ -833,6 +876,15 @@ impl Document {
     }
 }
 
+fn demote_if_failed(st: &State, num: i32, obj: Object) -> Object {
+    match obj {
+        Object::Stream(s) if st.demoted.lock().is_ok_and(|d| d.contains(&num)) => {
+            Object::Dict(Arc::new(s.dict.clone()))
+        }
+        other => other,
+    }
+}
+
 /// Offset used to decide whether an object stream may claim a number.
 fn entry_offset(entries: &[Entry], num: i32) -> i64 {
     let Some(e) = usize::try_from(num).ok().and_then(|i| entries.get(i)) else {
@@ -855,6 +907,22 @@ fn into_object(ind: IndirectObject) -> Object {
             data_start,
         })),
         (_, obj) => obj,
+    }
+}
+
+/// Re-point a cached stream at new data, or demote it to a plain dictionary
+/// when the entry no longer has stream data.
+fn with_data_start(obj: Object, stm_ofs: i64) -> Object {
+    match obj {
+        Object::Stream(s) => match usize::try_from(stm_ofs) {
+            Ok(start) if start > 0 => {
+                let mut s = Arc::unwrap_or_clone(s);
+                s.data_start = start;
+                Object::Stream(Arc::new(s))
+            }
+            _ => Object::Dict(Arc::new(Arc::unwrap_or_clone(s).dict)),
+        },
+        other => other,
     }
 }
 

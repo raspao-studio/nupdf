@@ -592,7 +592,7 @@ fn read_new_xref(
         return Err(format!("xref stream has no data ({num} 0 R)"));
     };
     let length = trailer.get(b"Length").map_or(0, Object::to_int64);
-    let raw = raw_stream(lx.data(), data_start, length, diag);
+    let raw = raw_stream(lx.data(), data_start, length, lx.data().len(), diag);
     let direct_only = |o: &Object| match o {
         Object::Ref(_) => Object::Null,
         other => other.clone(),
@@ -676,9 +676,17 @@ fn read_new_xref(
 /// The raw bytes of a stream, as MuPDF's endstream filter delivers them:
 /// `/Length` bytes, then anything up to the next `endstream` (minus the EOL
 /// before it), because lengths in the wild are often wrong.
-pub fn raw_stream<'a>(data: &'a [u8], start: usize, length: i64, diag: &Diagnostics) -> &'a [u8] {
-    let file_size = data.len() as i64;
-    let length = if length < 0 || length > file_size {
+///
+/// `max_length` is MuPDF's notion of the file size, which stays 0 when the
+/// header was never found; lengths above it are ignored.
+pub fn raw_stream<'a>(
+    data: &'a [u8],
+    start: usize,
+    length: i64,
+    max_length: usize,
+    diag: &Diagnostics,
+) -> &'a [u8] {
+    let length = if length < 0 || length > max_length as i64 {
         0
     } else {
         length as usize
@@ -740,20 +748,23 @@ mod tests {
     fn raw_stream_trusts_length_then_scans() {
         let diag = Diagnostics::new();
         let data = b"stream\nABCDE\nendstream";
-        assert_eq!(raw_stream(data, 7, 5, &diag), b"ABCDE");
+        let all = data.len();
+        assert_eq!(raw_stream(data, 7, 5, all, &diag), b"ABCDE");
         assert!(diag.snapshot().is_empty());
         // Too short: the rest up to endstream is included, with a warning.
-        assert_eq!(raw_stream(data, 7, 3, &diag), b"ABCDE");
+        assert_eq!(raw_stream(data, 7, 3, all, &diag), b"ABCDE");
         assert!(diag.has("stream.length_incorrect"));
         // Missing or absurd lengths scan from the start.
-        assert_eq!(raw_stream(data, 7, -1, &Diagnostics::new()), b"ABCDE");
+        assert_eq!(raw_stream(data, 7, -1, all, &Diagnostics::new()), b"ABCDE");
         assert_eq!(
-            raw_stream(b"stream\r\nAB\r\nendstream", 8, 0, &Diagnostics::new()),
+            raw_stream(b"stream\r\nAB\r\nendstream", 8, 0, 100, &Diagnostics::new()),
             b"AB"
         );
+        // Lengths above MuPDF's file size (0 without a header) are ignored.
+        assert_eq!(raw_stream(data, 7, 6, 0, &Diagnostics::new()), b"ABCDE");
         // No endstream at all: everything to the end of the file.
         assert_eq!(
-            raw_stream(b"stream\nABC", 7, 1, &Diagnostics::new()),
+            raw_stream(b"stream\nABC", 7, 1, 100, &Diagnostics::new()),
             b"ABC"
         );
     }
