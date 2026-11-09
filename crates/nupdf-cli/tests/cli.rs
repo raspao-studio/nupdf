@@ -238,3 +238,28 @@ fn info_reports_metadata_and_revisions() {
     assert_eq!(report["revisions"], 2);
     assert_eq!(report["linearized"], false);
 }
+
+#[test]
+fn limit_errors_exit_5() {
+    let path = smoke("minimal.pdf");
+    let out = nupdf(&["--max-xref-entries", "3", "info", path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(5));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "limit.xref_entries");
+}
+
+#[test]
+fn decode_limits_surface_as_stream_errors() {
+    let path = smoke("flate-content.pdf");
+    let report = run_json(&[
+        "--max-decoded-bytes",
+        "4",
+        "show",
+        path.to_str().unwrap(),
+        "4",
+    ]);
+    assert_eq!(
+        report["stream"]["decode_error"],
+        "decoded stream exceeds the size limit"
+    );
+}

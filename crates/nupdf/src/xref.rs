@@ -16,6 +16,7 @@ use memchr::memmem;
 use crate::diag::Diagnostics;
 use crate::filter;
 use crate::lex::{Lexer, Token, is_white};
+use crate::limits::Limits;
 use crate::object::{Dict, MAX_OBJECT_NUMBER, Object, Stream};
 use crate::parse::{parse_dict, parse_indirect};
 
@@ -93,8 +94,16 @@ pub struct Loaded {
 
 pub type XrefError = String;
 
+/// Marks an `XrefError` that is a limit, not a broken file: no repair.
+pub const LIMIT_PREFIX: &str = "limit: ";
+
 /// `pdf_load_xref`.
-pub fn load(data: &[u8], bias: usize, diag: &Diagnostics) -> Result<Loaded, XrefError> {
+pub fn load(
+    data: &[u8],
+    bias: usize,
+    diag: &Diagnostics,
+    limits: &Limits,
+) -> Result<Loaded, XrefError> {
     let startxref = read_start_xref(data)?;
     let mut sections: Vec<Section> = Vec::new();
     let mut seen: Vec<i64> = Vec::new();
@@ -110,7 +119,7 @@ pub fn load(data: &[u8], bias: usize, diag: &Diagnostics) -> Result<Loaded, Xref
         seen.push(ofs);
         sections.push(Section::default());
         let section = sections.last_mut().ok_or("no section")?;
-        ofs = read_xref_section(data, bias, ofs, section, diag)?;
+        ofs = read_xref_section(data, bias, ofs, section, diag, limits)?;
     }
     let newest = sections.first_mut().ok_or("cannot find startxref")?;
     let mut trailer = newest.trailer.clone().unwrap_or_default();
@@ -130,6 +139,9 @@ pub fn load(data: &[u8], bias: usize, diag: &Diagnostics) -> Result<Loaded, Xref
     }
     if xref_len == 0 {
         return Err("found xref was empty".into());
+    }
+    if xref_len as usize > limits.max_xref_entries {
+        return Err(format!("{LIMIT_PREFIX}xref has {xref_len} entries"));
     }
 
     // Broken files where the first object is missing or not free.
@@ -227,8 +239,9 @@ fn read_xref_section(
     ofs: i64,
     section: &mut Section,
     diag: &Diagnostics,
+    limits: &Limits,
 ) -> Result<i64, XrefError> {
-    let trailer = read_xref(data, bias, ofs, section, diag)?;
+    let trailer = read_xref(data, bias, ofs, section, diag, limits)?;
     section.trailer = Some(trailer.clone());
 
     let xrefstm = trailer.get(b"XRefStm").map_or(0, Object::to_int64);
@@ -238,7 +251,7 @@ fn read_xref_section(
         }
         // Hybrid file: the stream fills gaps; its trailer is discarded and
         // its /Prev is not followed.
-        read_xref(data, bias, xrefstm, section, diag)?;
+        read_xref(data, bias, xrefstm, section, diag, limits)?;
     }
     match trailer.get(b"Prev") {
         Some(Object::Int(prev)) => {
@@ -257,6 +270,7 @@ fn read_xref(
     ofs: i64,
     section: &mut Section,
     diag: &Diagnostics,
+    limits: &Limits,
 ) -> Result<Dict, XrefError> {
     let start = usize::try_from(ofs)
         .unwrap_or(usize::MAX)
@@ -267,7 +281,7 @@ fn read_xref(
     }
     match lx.peek_byte() {
         Some(b'x') => read_old_xref(&mut lx, section, diag),
-        Some(b'0'..=b'9') => read_new_xref(&mut lx, bias, section, diag),
+        Some(b'0'..=b'9') => read_new_xref(&mut lx, bias, section, diag, limits),
         _ => Err("cannot recognize xref format".into()),
     }
 }
@@ -548,6 +562,7 @@ fn read_new_xref(
     bias: usize,
     section: &mut Section,
     diag: &Diagnostics,
+    limits: &Limits,
 ) -> Result<Dict, XrefError> {
     let at = lx.pos();
     let ind = parse_indirect(lx).map_err(|e| e.message)?;
@@ -597,7 +612,8 @@ fn read_new_xref(
         Object::Ref(_) => Object::Null,
         other => other.clone(),
     };
-    let decoded = filter::decode(&trailer, raw, &direct_only, diag).map_err(|e| e.to_string())?;
+    let decoded =
+        filter::decode(&trailer, raw, &direct_only, diag, limits).map_err(|e| e.to_string())?;
 
     // A present but non-array /Index reads nothing, as in MuPDF.
     let ranges: Vec<(i32, i32)> = match trailer.get(b"Index") {

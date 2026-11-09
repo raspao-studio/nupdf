@@ -104,7 +104,7 @@ MuPDF needs a cloned `fz_context` per thread and serializes access to a document
 - `unsafe_code = "forbid"` in every product crate. Dependencies may contain audited `unsafe` (zlib-rs, blake3), but nupdf's own code has none.
 - No panics on input. `unwrap`, `expect` and `panic!` are lint warnings (errors in CI) outside tests. Fuzzing catches the rest: out-of-bounds slicing, arithmetic overflow and stack overflow.
 - No unbounded recursion. Nested arrays and dictionaries, Form XObjects, reference chains and page trees all carry explicit depth limits, because a stack overflow aborts the process.
-- A `Limits` value travels with every operation: maximum decompressed bytes and ratio, nesting depth, object count, pixel count, and a cancellation token that is checked at loop boundaries. Defaults are safe for untrusted input, and agents can raise them per call.
+- A `Limits` value travels with every document (`Document::open_with`): today the decoded size of a stream, the xref size and the size of an object stream, defaulting to MuPDF's own caps. Pixel counts, time and a cancellation token join it as rendering and long operations arrive. Structural depths (object nesting 512, page tree and reference chains 256) are fixed constants, because their purpose is to keep the stack safe.
 - PDF JavaScript is never executed.
 
 ## Errors and diagnostics

@@ -22,6 +22,7 @@ use crate::diag::Diagnostics;
 use crate::filter::{self, DecodeError};
 use crate::header::{self, Kind as HeaderKind, Version};
 use crate::lex::{Lexer, Token, fz_atof};
+use crate::limits::Limits;
 use crate::object::{Dict, MAX_OBJECT_NUMBER, ObjRef, Object, Stream};
 use crate::parse::{IndirectError, IndirectObject, parse_indirect, parse_stm_obj};
 use crate::repair;
@@ -163,6 +164,7 @@ pub struct Document {
     is_fdf: bool,
     /// The first object is a linearization dictionary (`pdf_check_linear`).
     linearized: bool,
+    limits: Limits,
     diag: Diagnostics,
     state: RwLock<Arc<State>>,
     /// MuPDF repairs at most once per document.
@@ -178,6 +180,11 @@ pub struct PageCountError(pub String);
 impl Document {
     /// `pdf_init_document`: read the header and xref, repairing if needed.
     pub fn open(data: impl Into<Arc<[u8]>>) -> Result<Document, OpenError> {
+        Self::open_with(data, Limits::default())
+    }
+
+    /// `open` with explicit resource limits.
+    pub fn open_with(data: impl Into<Arc<[u8]>>, limits: Limits) -> Result<Document, OpenError> {
         let data: Arc<[u8]> = data.into();
         let diag = Diagnostics::new();
         let mut broken: Option<String> = None;
@@ -226,6 +233,7 @@ impl Document {
             header_version: version,
             is_fdf,
             linearized,
+            limits,
             diag,
             state: RwLock::new(Arc::new(State::empty())),
             repair_attempted: AtomicBool::new(false),
@@ -233,8 +241,9 @@ impl Document {
         };
 
         let loaded = if broken.is_none() && !is_fdf {
-            match xref::load(&doc.data, bias, &doc.diag) {
+            match xref::load(&doc.data, bias, &doc.diag, &doc.limits) {
                 Ok(loaded) => Some(loaded),
+                Err(e) if e.starts_with(xref::LIMIT_PREFIX) => return Err(limit_error(&e)),
                 Err(e) => {
                     broken = Some(e);
                     None
@@ -260,6 +269,7 @@ impl Document {
                 doc.repair_attempted.store(true, Ordering::SeqCst);
                 match doc.repair() {
                     Ok(state) => doc.install(state),
+                    Err(e) if e.starts_with(xref::LIMIT_PREFIX) => return Err(limit_error(&e)),
                     Err(e) => {
                         return Err(OpenError {
                             code: "input.unrepairable",
@@ -470,7 +480,13 @@ impl Document {
             self.file_size,
             &self.diag,
         );
-        filter::decode(&stream.dict, raw, &|o| self.resolve_in(st, o), &self.diag)
+        filter::decode(
+            &stream.dict,
+            raw,
+            &|o| self.resolve_in(st, o),
+            &self.diag,
+            &self.limits,
+        )
     }
 
     /// `pdf_cache_object` against one state.
@@ -595,6 +611,13 @@ impl Document {
         if !(0..=MAX_OBJECT_NUMBER).contains(&count) {
             return fail("number of objects in object stream out of range".into());
         }
+        if count as usize > self.limits.max_objstm_objects {
+            self.diag.warn(
+                "limit.objstm_objects",
+                format!("object stream {stm} declares {count} objects"),
+            );
+            return fail(format!("object stream {stm} exceeds the object limit"));
+        }
         let data = match self.stream_data_in(st, &stream) {
             Ok(d) => d,
             Err(e) => return fail(e.to_string()),
@@ -699,6 +722,12 @@ impl Document {
         let encrypted = scan.encrypt.is_some();
 
         let len = scan.maxnum as usize + 1;
+        if len > self.limits.max_xref_entries {
+            return Err(format!(
+                "{}repaired xref has {len} entries",
+                xref::LIMIT_PREFIX
+            ));
+        }
         let mut entries = vec![Entry::free(0); len];
         let mut fixed: HashMap<i32, Object> = HashMap::new();
         let probe = State::new(0, entries.clone(), Dict::new(), 1, true);
@@ -934,6 +963,16 @@ fn demote_if_failed(st: &State, num: i32, obj: Object) -> Object {
     }
 }
 
+fn limit_error(message: &str) -> OpenError {
+    OpenError {
+        code: "limit.xref_entries",
+        message: message
+            .strip_prefix(xref::LIMIT_PREFIX)
+            .unwrap_or(message)
+            .to_string(),
+    }
+}
+
 /// Offset used to decide whether an object stream may claim a number.
 fn entry_offset(entries: &[Entry], num: i32) -> i64 {
     let Some(e) = usize::try_from(num).ok().and_then(|i| entries.get(i)) else {
@@ -1054,6 +1093,16 @@ mod tests {
         for h in handles {
             assert_eq!(h.join().unwrap(), first);
         }
+    }
+
+    #[test]
+    fn xref_limit_refuses_large_tables() {
+        let limits = Limits {
+            max_xref_entries: 2,
+            ..Limits::default()
+        };
+        let e = Document::open_with(SIMPLE.to_vec(), limits).unwrap_err();
+        assert_eq!(e.code, "limit.xref_entries");
     }
 
     #[test]

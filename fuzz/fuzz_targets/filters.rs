@@ -11,7 +11,7 @@ fuzz_target!(|data: &[u8]| {
     };
     match selector % 5 {
         0 => {
-            let _ = filter::inflate(rest, &diag);
+            let _ = filter::inflate(rest, &diag, 1 << 26);
         }
         1 => {
             let Some((params, body)) = rest.split_at_checked(4.min(rest.len())) else {
@@ -35,7 +35,7 @@ fuzz_target!(|data: &[u8]| {
             let _ = filter::ascii85(rest, &diag);
         }
         _ => {
-            let _ = filter::run_length(rest);
+            let _ = filter::run_length(rest, 1 << 26);
         }
     }
 });

@@ -25,6 +25,12 @@ struct Cli {
     /// Pretty-print JSON output.
     #[arg(long, global = true)]
     pretty: bool,
+    /// Largest decoded size of a single stream, in bytes.
+    #[arg(long, global = true, default_value_t = nupdf::Limits::default().max_decoded_bytes)]
+    max_decoded_bytes: usize,
+    /// Largest cross-reference table a document may have, in object slots.
+    #[arg(long, global = true, default_value_t = nupdf::Limits::default().max_xref_entries)]
+    max_xref_entries: usize,
     #[command(subcommand)]
     command: Command,
 }
@@ -56,6 +62,7 @@ enum Exit {
     Internal = 1,
     Usage = 2,
     Input = 3,
+    Limit = 5,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,8 +118,14 @@ struct Failure {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let limits = nupdf::Limits {
+        max_decoded_bytes: cli.max_decoded_bytes,
+        max_xref_entries: cli.max_xref_entries,
+        ..nupdf::Limits::default()
+    };
+    let open = |file: &Path| open(file, limits);
     let result = match &cli.command {
-        Command::Info { file } => info(file).and_then(to_json),
+        Command::Info { file } => open(file).and_then(info).and_then(to_json),
         Command::Objects { file } => open(file)
             .map(|(doc, facts)| report("nupdf.objects/v0", &facts, &doc, objects::dump(&doc))),
         Command::Pages { file } => open(file)
@@ -122,7 +135,7 @@ fn main() -> ExitCode {
             target,
             data,
             max_bytes,
-        } => show(file, target, *data, *max_bytes),
+        } => open(file).and_then(|opened| show(opened, target, *data, *max_bytes)),
     };
     match result {
         Ok(report) => {
@@ -170,7 +183,7 @@ struct FileFacts {
     file_size: usize,
 }
 
-fn open(path: &Path) -> Result<(Document, FileFacts), Failure> {
+fn open(path: &Path, limits: nupdf::Limits) -> Result<(Document, FileFacts), Failure> {
     let data = std::fs::read(path).map_err(|e| Failure {
         exit: Exit::Input,
         code: "input.unreadable",
@@ -181,8 +194,12 @@ fn open(path: &Path) -> Result<(Document, FileFacts), Failure> {
         doc_id: DocId::of(&data).to_string(),
         file_size: data.len(),
     };
-    let doc = Document::open(data).map_err(|e| Failure {
-        exit: Exit::Input,
+    let doc = Document::open_with(data, limits).map_err(|e| Failure {
+        exit: if e.code.starts_with("limit.") {
+            Exit::Limit
+        } else {
+            Exit::Input
+        },
         code: if facts.header.is_none() {
             "input.not_pdf"
         } else {
@@ -220,12 +237,11 @@ fn diagnostics(doc: &Document) -> serde_json::Value {
 }
 
 fn show(
-    path: &Path,
+    (doc, facts): (Document, FileFacts),
     target: &str,
     data: bool,
     max_bytes: usize,
 ) -> Result<serde_json::Value, Failure> {
-    let (doc, facts) = open(path)?;
     let mut body = serde_json::Map::new();
     if target.trim() == "trailer" {
         body.insert("object".into(), "trailer".into());
@@ -283,8 +299,7 @@ fn show(
     Ok(report("nupdf.show/v0", &facts, &doc, body.into()))
 }
 
-fn info(path: &Path) -> Result<InfoReport, Failure> {
-    let (doc, facts) = open(path)?;
+fn info((doc, facts): (Document, FileFacts)) -> Result<InfoReport, Failure> {
     let FileFacts {
         header,
         doc_id,

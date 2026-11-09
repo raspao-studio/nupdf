@@ -13,8 +13,7 @@ use flate2::{Decompress, FlushDecompress, Status};
 use crate::diag::Diagnostics;
 use crate::object::{Dict, Object};
 
-/// Cap on decoded size, so a small file cannot expand into all of memory.
-pub const MAX_DECODED_BYTES: usize = 1 << 30;
+use crate::limits::Limits;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
@@ -42,6 +41,7 @@ pub fn decode(
     raw: &[u8],
     resolve: &dyn Fn(&Object) -> Object,
     diag: &Diagnostics,
+    limits: &Limits,
 ) -> Result<Vec<u8>, DecodeError> {
     // pdf_dict_geta: the abbreviation wins when both are present.
     let filters = resolve(
@@ -73,7 +73,14 @@ pub fn decode(
 
     let mut data = raw.to_vec();
     for (filter, params) in chain {
-        data = apply(&filter, &params, &data, resolve, diag)?;
+        data = apply(
+            &filter,
+            &params,
+            &data,
+            resolve,
+            diag,
+            limits.max_decoded_bytes,
+        )?;
     }
     Ok(data)
 }
@@ -84,6 +91,7 @@ fn apply(
     input: &[u8],
     resolve: &dyn Fn(&Object) -> Object,
     diag: &Diagnostics,
+    max: usize,
 ) -> Result<Vec<u8>, DecodeError> {
     let name = filter.as_name().unwrap_or_default();
     let int = |key: &[u8], default: i32| {
@@ -94,7 +102,7 @@ fn apply(
     };
     match name {
         b"FlateDecode" | b"Fl" => {
-            let data = inflate(input, diag)?;
+            let data = inflate(input, diag, max)?;
             let predictor = int(b"Predictor", 1);
             if predictor > 1 {
                 predict(
@@ -118,7 +126,7 @@ fn apply(
         }
         b"ASCIIHexDecode" | b"AHx" => ascii_hex(input),
         b"ASCII85Decode" | b"A85" => ascii85(input, diag),
-        b"RunLengthDecode" | b"RL" => run_length(input),
+        b"RunLengthDecode" | b"RL" => run_length(input, max),
         b"LZWDecode" | b"LZW" | b"BrotliDecode" | b"Br" => Err(DecodeError::Unsupported(
             String::from_utf8_lossy(name).into_owned(),
         )),
@@ -216,7 +224,7 @@ fn word_tail(word: u32, count: usize, diag: &Diagnostics) -> Vec<u8> {
 }
 
 /// MuPDF's `rld`: PackBits runs, 128 ends the data.
-pub fn run_length(input: &[u8]) -> Result<Vec<u8>, DecodeError> {
+pub fn run_length(input: &[u8], max: usize) -> Result<Vec<u8>, DecodeError> {
     let premature = || DecodeError::Failed("premature end of data in run length decode".into());
     let mut out = Vec::with_capacity(input.len());
     let mut i = 0;
@@ -236,7 +244,7 @@ pub fn run_length(input: &[u8]) -> Result<Vec<u8>, DecodeError> {
                 out.extend(std::iter::repeat_n(c, 257 - usize::from(run)));
             }
         }
-        if out.len() > MAX_DECODED_BYTES {
+        if out.len() > max {
             return Err(DecodeError::Limit);
         }
     }
@@ -245,15 +253,20 @@ pub fn run_length(input: &[u8]) -> Result<Vec<u8>, DecodeError> {
 
 /// zlib inflate with MuPDF's tolerance: truncated data and errors at the
 /// very end of the input keep what was decoded; other errors fail.
-pub fn inflate(input: &[u8], diag: &Diagnostics) -> Result<Vec<u8>, DecodeError> {
+pub fn inflate(input: &[u8], diag: &Diagnostics, max: usize) -> Result<Vec<u8>, DecodeError> {
     let mut z = Decompress::new(true);
-    let mut out: Vec<u8> = Vec::with_capacity(input.len().saturating_mul(4).clamp(64, 1 << 20));
+    // Never hold more than one byte past the limit, so exceeding it is
+    // detected without first allocating the whole expansion.
+    let cap = |n: usize| n.min(max.saturating_add(1));
+    let mut out: Vec<u8> =
+        Vec::with_capacity(cap(input.len().saturating_mul(4).clamp(64, 1 << 20)));
     loop {
+        if out.len() > max {
+            return Err(DecodeError::Limit);
+        }
         if out.len() == out.capacity() {
-            if out.len() >= MAX_DECODED_BYTES {
-                return Err(DecodeError::Limit);
-            }
-            out.reserve(out.len().clamp(64 * 1024, 16 << 20));
+            let grow = cap(out.len() + out.len().clamp(64 * 1024, 16 << 20)) - out.len();
+            out.reserve(grow.max(1));
         }
         let consumed = usize::try_from(z.total_in())
             .unwrap_or(input.len())
@@ -261,6 +274,7 @@ pub fn inflate(input: &[u8], diag: &Diagnostics) -> Result<Vec<u8>, DecodeError>
         let rest = &input[consumed..];
         let before = (z.total_in(), z.total_out());
         match z.decompress_vec(rest, &mut out, FlushDecompress::Sync) {
+            Ok(Status::StreamEnd) if out.len() > max => return Err(DecodeError::Limit),
             Ok(Status::StreamEnd) => return Ok(out),
             Ok(Status::BufError) => {
                 diag.warn(
@@ -503,11 +517,11 @@ mod tests {
         let diag = Diagnostics::new();
         let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
         let packed = zlib(&data);
-        assert_eq!(inflate(&packed, &diag).unwrap(), data);
+        assert_eq!(inflate(&packed, &diag, usize::MAX).unwrap(), data);
         assert!(diag.snapshot().is_empty());
 
         let cut = &packed[..packed.len() / 2];
-        let partial = inflate(cut, &diag).unwrap();
+        let partial = inflate(cut, &diag, usize::MAX).unwrap();
         assert!(!partial.is_empty() && data.starts_with(&partial));
         assert!(diag.has("filter.flate_truncated"));
     }
@@ -518,7 +532,10 @@ mod tests {
         let mut packed = zlib(b"hello hello hello");
         let n = packed.len();
         packed[n - 1] ^= 0xff;
-        assert_eq!(inflate(&packed, &diag).unwrap(), b"hello hello hello");
+        assert_eq!(
+            inflate(&packed, &diag, usize::MAX).unwrap(),
+            b"hello hello hello"
+        );
         assert!(diag.has("filter.flate_error"));
     }
 
@@ -526,7 +543,7 @@ mod tests {
     fn bad_header_fails_like_mupdf() {
         let diag = Diagnostics::new();
         assert!(matches!(
-            inflate(b"not zlib at all", &diag),
+            inflate(b"not zlib at all", &diag, usize::MAX),
             Err(DecodeError::Failed(_))
         ));
     }
@@ -589,6 +606,14 @@ mod tests {
     }
 
     #[test]
+    fn decode_limit_stops_expansion() {
+        let diag = Diagnostics::new();
+        let packed = zlib(&vec![0u8; 1 << 20]);
+        assert_eq!(inflate(&packed, &diag, 1000), Err(DecodeError::Limit));
+        assert_eq!(run_length(&[129, 7, 129, 7], 100), Err(DecodeError::Limit));
+    }
+
+    #[test]
     fn ascii_hex_decoding() {
         assert_eq!(ascii_hex(b"48 65\n6C6c6F>ignored").unwrap(), b"Hello");
         assert_eq!(ascii_hex(b"4>").unwrap(), vec![0x40]);
@@ -614,11 +639,11 @@ mod tests {
     #[test]
     fn run_length_decoding() {
         assert_eq!(
-            run_length(&[2, b'a', b'b', b'c', 254, b'z', 128, 9]).unwrap(),
+            run_length(&[2, b'a', b'b', b'c', 254, b'z', 128, 9], usize::MAX).unwrap(),
             b"abczzz"
         );
-        assert!(run_length(&[5, b'a']).is_err());
-        assert!(run_length(&[200]).is_err());
+        assert!(run_length(&[5, b'a'], usize::MAX).is_err());
+        assert!(run_length(&[200], usize::MAX).is_err());
     }
 
     #[test]
@@ -628,17 +653,26 @@ mod tests {
         let mut dict = Dict::new();
         dict.put(b"Filter", Object::name(b"FlateDecode"));
         let packed = zlib(b"abc");
-        assert_eq!(decode(&dict, &packed, &identity, &diag).unwrap(), b"abc");
+        assert_eq!(
+            decode(&dict, &packed, &identity, &diag, &Limits::default()).unwrap(),
+            b"abc"
+        );
 
         let mut dict = Dict::new();
         dict.put(b"Filter", Object::name(b"Bogus"));
-        assert_eq!(decode(&dict, b"raw", &identity, &diag).unwrap(), b"raw");
+        assert_eq!(
+            decode(&dict, b"raw", &identity, &diag, &Limits::default()).unwrap(),
+            b"raw"
+        );
         assert!(diag.has("filter.unknown"));
 
         // /F wins over /Filter; a non-name /F (a file spec) means no filter.
         let mut dict = Dict::new();
         dict.put(b"Filter", Object::name(b"FlateDecode"));
         dict.put(b"F", Object::String(std::sync::Arc::from(&b"file.bin"[..])));
-        assert_eq!(decode(&dict, b"raw", &identity, &diag).unwrap(), b"raw");
+        assert_eq!(
+            decode(&dict, b"raw", &identity, &diag, &Limits::default()).unwrap(),
+            b"raw"
+        );
     }
 }
