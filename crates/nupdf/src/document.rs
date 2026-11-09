@@ -15,6 +15,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -26,6 +27,7 @@ use crate::limits::Limits;
 use crate::object::{Dict, MAX_OBJECT_NUMBER, ObjRef, Object, Stream};
 use crate::parse::{IndirectError, IndirectObject, parse_indirect, parse_stm_obj};
 use crate::repair;
+use crate::slots::Slots;
 use crate::xref::{self, Entry, Kind};
 
 /// Why a document could not be opened at all.
@@ -59,11 +61,60 @@ struct ObjStm {
     error: Option<String>,
 }
 
+/// Loaded objects, keyed by number. Sharded so concurrent readers rarely
+/// contend, and sparse so memory follows what was actually loaded rather
+/// than how many slots the file declares.
+#[derive(Debug)]
+struct Cache {
+    shards: Vec<RwLock<HashMap<i32, Loaded>>>,
+}
+
+impl Cache {
+    const SHARDS: usize = 64;
+
+    fn new() -> Self {
+        Cache {
+            shards: (0..Self::SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect(),
+        }
+    }
+
+    fn shard(&self, num: i32) -> &RwLock<HashMap<i32, Loaded>> {
+        &self.shards[num.unsigned_abs() as usize % Self::SHARDS]
+    }
+
+    fn get(&self, num: i32) -> Option<Loaded> {
+        self.shard(num).read().ok()?.get(&num).cloned()
+    }
+
+    /// Stores `value` unless another thread got there first; returns the
+    /// value that is now cached.
+    fn insert_if_absent(&self, num: i32, value: Loaded) -> Loaded {
+        match self.shard(num).write() {
+            Ok(mut shard) => shard.entry(num).or_insert(value).clone(),
+            Err(_) => value,
+        }
+    }
+
+    fn all(&self) -> Vec<(i32, Loaded)> {
+        self.shards
+            .iter()
+            .filter_map(|s| {
+                s.read()
+                    .ok()
+                    .map(|m| m.iter().map(|(&n, v)| (n, v.clone())).collect::<Vec<_>>())
+            })
+            .flatten()
+            .collect()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct State {
     bias: usize,
-    entries: Vec<Entry>,
-    cache: Vec<OnceLock<Loaded>>,
+    entries: Slots,
+    cache: Cache,
     objstms: Mutex<HashMap<i32, Arc<ObjStm>>>,
     /// Object streams that failed to load. MuPDF marks their entry free, so
     /// from then on the object still resolves but is no longer a stream.
@@ -85,18 +136,11 @@ pub(crate) struct State {
 }
 
 impl State {
-    fn new(
-        bias: usize,
-        entries: Vec<Entry>,
-        trailer: Dict,
-        revisions: usize,
-        repaired: bool,
-    ) -> Self {
-        let cache = (0..entries.len()).map(|_| OnceLock::new()).collect();
+    fn new(bias: usize, entries: Slots, trailer: Dict, revisions: usize, repaired: bool) -> Self {
         State {
             bias,
             entries,
-            cache,
+            cache: Cache::new(),
             objstms: Mutex::new(HashMap::new()),
             demoted: Mutex::new(std::collections::HashSet::new()),
             trailer,
@@ -110,12 +154,12 @@ impl State {
     }
 
     fn empty() -> Self {
-        State::new(0, Vec::new(), Dict::new(), 0, true)
+        State::new(0, Slots::filled(0, Entry::NONE), Dict::new(), 0, true)
     }
 
     fn precache(&self, num: i32, obj: Object) {
-        if let Some(cell) = usize::try_from(num).ok().and_then(|i| self.cache.get(i)) {
-            let _ = cell.set(Loaded::Obj(obj));
+        if num > 0 && (num as usize) < self.xref_len() {
+            self.cache.insert_if_absent(num, Loaded::Obj(obj));
         }
     }
 
@@ -525,15 +569,16 @@ impl Document {
 
     /// `pdf_cache_object` against one state.
     fn load_in(&self, st: &State, num: i32, allow_repair: bool) -> Loaded {
-        let Some(cell) = usize::try_from(num)
-            .ok()
-            .filter(|&i| i > 0)
-            .and_then(|i| st.cache.get(i))
-        else {
+        if num <= 0 || num as usize >= st.xref_len() {
             return Loaded::Missing;
-        };
-        if let Some(v) = cell.get() {
-            return v.clone();
+        }
+        // Free and unset slots depend only on the entry; caching them would
+        // cost memory per declared slot, which a hostile file sets freely.
+        if matches!(st.entries.get(num).kind, Kind::Free | Kind::None) {
+            return self.load_slot(st, num, allow_repair);
+        }
+        if let Some(v) = st.cache.get(num) {
+            return v;
         }
         let Some(_guard) = LoadGuard::enter(st, num) else {
             return Loaded::Failed(report::format(&format!(
@@ -541,8 +586,7 @@ impl Document {
             )));
         };
         let loaded = self.load_slot(st, num, allow_repair);
-        let _ = cell.set(loaded);
-        cell.get().cloned().unwrap_or(Loaded::Missing)
+        st.cache.insert_if_absent(num, loaded)
     }
 
     fn parse_at(&self, st: &State, ofs: i64) -> Result<IndirectObject, IndirectError> {
@@ -554,7 +598,7 @@ impl Document {
     }
 
     fn load_slot(&self, st: &State, num: i32, allow_repair: bool) -> Loaded {
-        let entry = st.entries[num as usize];
+        let entry = st.entries.get(num);
         let can_repair = allow_repair && !self.attempted();
         match entry.kind {
             Kind::Free => Loaded::Obj(Object::Null),
@@ -635,7 +679,7 @@ impl Document {
         if stm <= 0 || i64::from(stm) >= xref_len {
             return fail(format!("corrupt object stream {stm}"));
         }
-        if st.entries[stm as usize].kind == Kind::Free {
+        if st.entries.get(stm).kind == Kind::Free {
             return fail(format!("corrupt object stream {stm}"));
         }
         let stream = match self.load_in(st, stm, true) {
@@ -769,17 +813,22 @@ impl Document {
                 xref::LIMIT_PREFIX
             ));
         }
-        let mut entries = vec![Entry::free(0); len];
+        // Every slot below maxnum starts free; found objects then fill theirs.
+        let mut entries = Slots::filled(len, Entry::free(0));
         let mut fixed: HashMap<i32, Object> = HashMap::new();
-        let probe = State::new(0, entries.clone(), Dict::new(), 1, true);
+        // The scan's last stream offset per number picks object streams.
+        let mut stream_at: HashMap<i32, i64> = HashMap::new();
+        let parse_state = State::empty();
         for item in &scan.list {
-            let entry = Entry {
-                kind: Kind::InFile,
-                ofs: item.ofs,
-                generation: item.generation,
-                stm_ofs: item.stm_ofs,
-            };
-            entries[item.num as usize] = entry;
+            entries.set(
+                item.num,
+                Entry {
+                    kind: Kind::InFile,
+                    ofs: item.ofs,
+                    generation: item.generation,
+                },
+            );
+            stream_at.insert(item.num, item.stm_ofs);
             // MuPDF reads stream data from the entry's offset, which tracks the
             // latest definition, even when it keeps an older cached object.
             if let Some(obj) = fixed.remove(&item.num) {
@@ -791,7 +840,7 @@ impl Document {
             if !encrypted && item.stm_len >= 0 {
                 let obj = match fixed.remove(&item.num) {
                     Some(o) => o,
-                    None => match self.parse_at(&probe, item.ofs) {
+                    None => match self.parse_at(&parse_state, item.ofs) {
                         Ok(ind) if ind.num == item.num => into_object(ind),
                         Ok(_) => return Err(format!("not a dict ({} 0 R)", item.num)),
                         Err(_) => return Err(format!("cannot parse object ({} 0 R)", item.num)),
@@ -801,7 +850,7 @@ impl Document {
                 fixed.insert(item.num, obj);
             }
         }
-        entries[0] = Entry::free(65535);
+        entries.set(0, Entry::free(65535));
 
         let mut trailer = Dict::new();
         trailer.put(b"Size", Object::Int(i64::from(scan.maxnum) + 1));
@@ -821,13 +870,20 @@ impl Document {
         for (&num, obj) in &fixed {
             first.precache(num, obj.clone());
         }
-        let initial_len = entries.len();
-        let mut changed: Vec<bool> = vec![false; initial_len];
-        for i in 0..initial_len {
-            if entries[i].stm_ofs == 0 {
+        let initial_len = entries.len() as i32;
+        let mut candidates: Vec<i32> = stream_at
+            .iter()
+            .filter(|&(_, &ofs)| ofs != 0)
+            .map(|(&n, _)| n)
+            .collect();
+        candidates.sort_unstable();
+        let mut changed: HashSet<i32> = HashSet::new();
+        for i in candidates {
+            // An object stream processed earlier may have claimed this one.
+            if entries.get(i).kind != Kind::InFile {
                 continue;
             }
-            let obj = match self.load_in(&first, i as i32, false) {
+            let obj = match self.load_in(&first, i, false) {
                 Loaded::Obj(o) => o,
                 Loaded::Missing => continue,
                 Loaded::Failed(e) | Loaded::NeedsRepair(e) => return Err(e),
@@ -838,7 +894,7 @@ impl Document {
                 .is_some_and(|t| self.resolve_in(&first, t).is_name(b"ObjStm"));
             if is_objstm
                 && self
-                    .repair_objstm(&first, i as i32, &obj, &mut entries, &mut changed)
+                    .repair_objstm(&first, i, &obj, &mut entries, &mut changed)
                     .is_err()
             {
                 self.diag.warn(
@@ -847,30 +903,35 @@ impl Document {
                 );
             }
         }
-        for i in 0..initial_len {
-            if entries[i].kind == Kind::InStream
-                && entries
-                    .get(entries[i].ofs as usize)
-                    .is_none_or(|e| e.kind != Kind::InFile)
+        let mut explicit = entries.explicit();
+        explicit.sort_unstable_by_key(|&(n, _)| n);
+        for (i, e) in explicit {
+            if i < initial_len
+                && e.kind == Kind::InStream
+                && entries.get(e.ofs as i32).kind != Kind::InFile
             {
                 self.diag.warn(
                     "repair.bad_objstm_ref",
                     format!(
                         "invalid reference to non-object-stream: {}, assuming {i} 0 R is a freed object",
-                        entries[i].ofs as i32
+                        e.ofs as i32
                     ),
                 );
-                entries[i].kind = Kind::Free;
-                changed[i] = true;
+                entries.set(
+                    i,
+                    Entry {
+                        kind: Kind::Free,
+                        ..e
+                    },
+                );
+                changed.insert(i);
             }
         }
 
         let mut second = State::new(0, entries, trailer, 1, true);
-        for (i, cell) in first.cache.iter().enumerate() {
-            if !changed.get(i).copied().unwrap_or(true)
-                && let Some(v) = cell.get()
-            {
-                let _ = second.cache[i].set(v.clone());
+        for (num, value) in first.cache.all() {
+            if !changed.contains(&num) && (num as usize) < second.xref_len() {
+                second.cache.insert_if_absent(num, value);
             }
         }
 
@@ -896,35 +957,33 @@ impl Document {
         // dictionary, newest objects first.
         let mut has_root = trailer.get(b"Root").is_some();
         let mut has_info = trailer.get(b"Info").is_some();
-        let mut i = second.xref_len() as i32 - 1;
-        while i > 0 && (!has_root || !has_info) {
-            let kind = second.entries[i as usize].kind;
-            if kind != Kind::None && kind != Kind::Free {
-                match self.load_in(&second, i, false) {
-                    Loaded::Obj(obj) => {
-                        if let Some(d) = obj.as_dict() {
-                            if !has_root && d.get(b"Type").is_some_and(|t| t.is_name(b"Catalog")) {
-                                trailer.put(b"Root", Object::Ref(ObjRef::new(i, 0)));
-                                has_root = true;
-                            }
-                            if !has_info
-                                && (d.get(b"Creator").is_some() || d.get(b"Producer").is_some())
-                            {
-                                trailer.put(b"Info", Object::Ref(ObjRef::new(i, 0)));
-                                has_info = true;
-                            }
+        for i in second.entries.in_use_descending() {
+            if i <= 0 || (has_root && has_info) {
+                break;
+            }
+            match self.load_in(&second, i, false) {
+                Loaded::Obj(obj) => {
+                    if let Some(d) = obj.as_dict() {
+                        if !has_root && d.get(b"Type").is_some_and(|t| t.is_name(b"Catalog")) {
+                            trailer.put(b"Root", Object::Ref(ObjRef::new(i, 0)));
+                            has_root = true;
+                        }
+                        if !has_info
+                            && (d.get(b"Creator").is_some() || d.get(b"Producer").is_some())
+                        {
+                            trailer.put(b"Info", Object::Ref(ObjRef::new(i, 0)));
+                            has_info = true;
                         }
                     }
-                    Loaded::Missing => {}
-                    Loaded::Failed(_) | Loaded::NeedsRepair(_) => {
-                        self.diag.warn(
-                            "repair.broken_object",
-                            format!("ignoring broken object ({i} 0 R)"),
-                        );
-                    }
+                }
+                Loaded::Missing => {}
+                Loaded::Failed(_) | Loaded::NeedsRepair(_) => {
+                    self.diag.warn(
+                        "repair.broken_object",
+                        format!("ignoring broken object ({i} 0 R)"),
+                    );
                 }
             }
-            i -= 1;
         }
 
         second.trailer = trailer;
@@ -937,8 +996,8 @@ impl Document {
         st: &State,
         stm: i32,
         obj: &Object,
-        entries: &mut Vec<Entry>,
-        changed: &mut [bool],
+        entries: &mut Slots,
+        changed: &mut HashSet<i32>,
     ) -> Result<(), String> {
         let Object::Stream(stream) = obj else {
             return Err("object is not a stream".into());
@@ -964,11 +1023,8 @@ impl Document {
                 i += 1;
                 continue;
             }
-            if n as usize >= entries.len() {
-                entries.resize(n as usize + 1, Entry::NONE);
-            }
             let mut replace = true;
-            let existing = entries[n as usize];
+            let existing = entries.get(n);
             if existing.kind != Kind::None && existing.kind != Kind::Free {
                 let here = entry_offset(entries, n);
                 if here >= 0 && here > entry_offset(entries, stm) {
@@ -976,15 +1032,15 @@ impl Document {
                 }
             }
             if replace {
-                entries[n as usize] = Entry {
-                    kind: Kind::InStream,
-                    ofs: i64::from(stm),
-                    generation: i,
-                    stm_ofs: 0,
-                };
-                if let Some(c) = changed.get_mut(n as usize) {
-                    *c = true;
-                }
+                entries.set(
+                    n,
+                    Entry {
+                        kind: Kind::InStream,
+                        ofs: i64::from(stm),
+                        generation: i,
+                    },
+                );
+                changed.insert(n);
             }
             let Token::Int(_) = lx.next_token() else {
                 return Err(format!("corrupt object stream ({stm} 0 R)"));
@@ -1015,15 +1071,13 @@ fn limit_error(message: &str) -> OpenError {
 }
 
 /// Offset used to decide whether an object stream may claim a number.
-fn entry_offset(entries: &[Entry], num: i32) -> i64 {
-    let Some(e) = usize::try_from(num).ok().and_then(|i| entries.get(i)) else {
-        return 0;
-    };
+fn entry_offset(entries: &Slots, num: i32) -> i64 {
+    let e = entries.get(num);
     match e.kind {
         Kind::None | Kind::Free => 0,
         Kind::InFile => e.ofs,
-        Kind::InStream => match usize::try_from(e.ofs).ok().and_then(|i| entries.get(i)) {
-            Some(s) if s.kind == Kind::InFile => s.ofs,
+        Kind::InStream => match i32::try_from(e.ofs).map(|o| entries.get(o)) {
+            Ok(s) if s.kind == Kind::InFile => s.ofs,
             _ => -1,
         },
     }

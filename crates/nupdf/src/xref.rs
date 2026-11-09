@@ -8,7 +8,7 @@
 //! hybrid files and `/Prev` chains. Any error here sends the document to
 //! repair, exactly as in MuPDF.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use memchr::memmem;
@@ -19,8 +19,10 @@ use crate::lex::{Lexer, Token, is_white};
 use crate::limits::Limits;
 use crate::object::{Dict, MAX_OBJECT_NUMBER, Object, Stream};
 use crate::parse::{parse_dict, parse_indirect};
+use crate::slots::{DENSE_LIMIT, Slots};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Kind {
     /// Listed nowhere (MuPDF's type 0).
     None,
@@ -31,36 +33,181 @@ pub enum Kind {
     InStream,
 }
 
+/// One xref entry: 16 bytes, so even a full table stays small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry {
     pub kind: Kind,
-    pub ofs: i64,
     pub generation: i32,
-    /// Stream data offset found while repairing (selects object streams).
-    pub stm_ofs: i64,
+    pub ofs: i64,
 }
 
 impl Entry {
     pub const NONE: Entry = Entry {
         kind: Kind::None,
-        ofs: 0,
         generation: 0,
-        stm_ofs: 0,
+        ofs: 0,
     };
 
     pub fn free(generation: i32) -> Entry {
         Entry {
             kind: Kind::Free,
             generation,
-            ..Entry::NONE
+            ofs: 0,
         }
     }
 }
 
-/// One xref section (one revision), newest first in the list.
+/// Consecutive entries of one subsection. Long stretches of identical
+/// entries (an xref stream with zero-width fields can declare millions)
+/// are stored once.
+#[derive(Debug)]
+enum RunEntries {
+    Each(Vec<Entry>),
+    Same { count: i32, entry: Entry },
+}
+
+#[derive(Debug)]
+struct Run {
+    start: i32,
+    entries: RunEntries,
+}
+
+impl Run {
+    fn get(&self, num: i32) -> Entry {
+        match &self.entries {
+            RunEntries::Each(v) => v[(num - self.start) as usize],
+            RunEntries::Same { entry, .. } => *entry,
+        }
+    }
+}
+
+/// Runs of identical entries longer than this become one `Same` run.
+const SAME_RUN: usize = 64;
+
+/// A set of numbers as disjoint, non-adjacent ranges. Numbers added in
+/// ascending order are collected in `open` without touching the map.
+#[derive(Debug, Default)]
+struct Intervals {
+    map: BTreeMap<i32, i32>,
+    open: Option<(i32, i32)>,
+}
+
+impl Intervals {
+    fn contains(&self, n: i32) -> bool {
+        self.open.is_some_and(|(s, e)| n >= s && n < e)
+            || self
+                .map
+                .range(..=n)
+                .next_back()
+                .is_some_and(|(_, &e)| n < e)
+    }
+
+    /// Whether any number in `start..end` is in the set.
+    fn any_in(&self, start: i32, end: i32) -> bool {
+        self.open.is_some_and(|(s, e)| s < end && start < e)
+            || self.contains(start)
+            || self.map.range(start..end).next().is_some()
+    }
+
+    fn add(&mut self, n: i32) {
+        match &mut self.open {
+            Some((_, e)) if *e == n => *e += 1,
+            _ => {
+                self.flush();
+                self.open = Some((n, n + 1));
+            }
+        }
+    }
+
+    /// Moves `open` into the map, so `gaps` sees every number.
+    fn flush(&mut self) {
+        if let Some((s, e)) = self.open.take() {
+            self.insert(s, e);
+        }
+    }
+
+    fn insert(&mut self, start: i32, end: i32) {
+        if start >= end {
+            return;
+        }
+        let (mut s, mut e) = (start, end);
+        if let Some((&ps, &pe)) = self.map.range(..=s).next_back()
+            && pe >= s
+        {
+            s = ps;
+            e = e.max(pe);
+        }
+        let joined: Vec<i32> = self.map.range(s..=e).map(|(&k, _)| k).collect();
+        for k in joined {
+            if let Some(v) = self.map.remove(&k) {
+                e = e.max(v);
+            }
+        }
+        self.map.insert(s, e);
+    }
+
+    /// The parts of `start..end` not in the set, in order. `open` must
+    /// have been flushed.
+    fn gaps(&self, start: i32, end: i32) -> Vec<(i32, i32)> {
+        let mut out = Vec::new();
+        let mut cursor = start;
+        let covering = self
+            .map
+            .range(..=start)
+            .next_back()
+            .map(|(&s, &e)| (s, e))
+            .into_iter()
+            .chain(self.map.range(start + 1..end).map(|(&s, &e)| (s, e)));
+        for (s, e) in covering {
+            if s > cursor {
+                out.push((cursor, s.min(end)));
+            }
+            cursor = cursor.max(e);
+            if cursor >= end {
+                break;
+            }
+        }
+        if cursor < end {
+            out.push((cursor, end));
+        }
+        out
+    }
+}
+
+/// Where a resolved entry comes from: the xref stream's own entry, or a
+/// run (read with `Run::get`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Src {
+    Own,
+    Run(usize),
+}
+
+/// Numbers `start..end` of one section, all defined by `src`.
+#[derive(Debug, Clone, Copy)]
+struct Piece {
+    start: i32,
+    end: i32,
+    src: Src,
+}
+
+/// One xref section (one revision), newest first in the list. As in
+/// MuPDF, an entry is kept from the first subsection that defines it,
+/// except the xref stream's own entry, which always wins.
 #[derive(Debug, Default)]
 pub struct Section {
-    pub entries: HashMap<i32, Entry>,
+    runs: Vec<Run>,
+    /// Numbers this section has defined so far.
+    defined: Intervals,
+    /// MuPDF's list of subsections for this section, after its merging
+    /// rules: start to (length, rank). The highest rank comes first in
+    /// MuPDF's list, which decides the order entries are checked in.
+    layout: BTreeMap<i32, (i32, u32)>,
+    rank: u32,
+    /// Whether the current subsection overlaps numbers already defined.
+    overlaps: bool,
+    next: i32,
+    fresh: bool,
+    own: Option<(i32, Entry)>,
     pub num_objects: i32,
     pub trailer: Option<Dict>,
     /// Objects MuPDF caches while loading (the xref streams themselves).
@@ -68,17 +215,272 @@ pub struct Section {
 }
 
 impl Section {
-    fn cover(&mut self, start: i32, len: i32) {
-        if len > 0 {
-            self.num_objects = self.num_objects.max(start + len);
+    /// Starts a subsection (`pdf_xref_find_subsection`).
+    fn begin_subsection(&mut self, start: i32, len: i32) {
+        self.next = start;
+        self.fresh = true;
+        self.overlaps = false;
+        if len <= 0 {
+            return;
+        }
+        let end = start + len;
+        self.overlaps = self.defined.any_in(start, end);
+        self.place(start, end);
+        self.num_objects = self.num_objects.max(end);
+    }
+
+    /// MuPDF's four cases: inside a subsection (nothing to do), extending
+    /// the one that holds or ends at `start`, overlapping several (the
+    /// section becomes one solid subsection), or new (first in the list).
+    fn place(&mut self, start: i32, end: i32) {
+        let below = self
+            .layout
+            .range(..=start)
+            .next_back()
+            .map(|(&s, &(l, _))| (s, s + l));
+        if below.is_some_and(|(s, e)| s <= start && end <= e) {
+            return;
+        }
+        let mut touching: Vec<i32> = Vec::new();
+        if let Some((s, e)) = below
+            && e >= start
+        {
+            touching.push(s);
+            if s == start
+                && let Some((&ps, &(pl, _))) = self.layout.range(..start).next_back()
+                && ps + pl == start
+            {
+                touching.push(ps);
+            }
+        }
+        let covers = self.layout.range(start + 1..end).next().is_some();
+        if covers || touching.len() > 1 {
+            self.solidify(end.max(self.num_objects));
+        } else if let Some(&s) = touching.first() {
+            if let Some(sub) = self.layout.get_mut(&s) {
+                sub.0 = end - s;
+            }
+        } else {
+            self.rank += 1;
+            self.layout.insert(start, (end - start, self.rank));
         }
     }
 
-    /// Fill an entry only if this section has not defined it yet.
-    fn fill(&mut self, num: i32, entry: Entry) {
-        if entry.kind != Kind::None {
-            self.entries.entry(num).or_insert(entry);
+    /// `ensure_solid_xref`: one subsection covering `0..num`.
+    fn solidify(&mut self, num: i32) {
+        let num = num.max(self.num_objects);
+        let solid = self.layout.len() == 1 && self.layout.get(&0).is_some_and(|&(l, _)| l >= num);
+        if !solid {
+            self.rank += 1;
+            self.layout.clear();
+            self.layout.insert(0, (num, self.rank));
         }
+        self.num_objects = num;
+    }
+
+    fn in_layout(&self, num: i32) -> Option<u32> {
+        self.layout
+            .range(..=num)
+            .next_back()
+            .filter(|&(&s, &(l, _))| num < s + l)
+            .map(|(_, &(_, rank))| rank)
+    }
+
+    /// Whether `num` was defined before the current subsection, in which
+    /// case MuPDF neither parses nor stores its entry.
+    fn defines(&self, num: i32) -> bool {
+        self.overlaps && self.defined.contains(num)
+    }
+
+    /// Appends the next entry of the current subsection.
+    fn push(&mut self, e: Entry) {
+        let num = self.next;
+        self.next = self.next.saturating_add(1);
+        let e = if self.defines(num) { Entry::NONE } else { e };
+        if e.kind != Kind::None {
+            self.defined.add(num);
+        }
+        if !self.fresh
+            && let Some(run) = self.runs.last_mut()
+        {
+            match &mut run.entries {
+                RunEntries::Same { count, entry } if *entry == e => {
+                    *count += 1;
+                    return;
+                }
+                RunEntries::Each(v) => {
+                    v.push(e);
+                    let n = v.len();
+                    if n >= SAME_RUN && v[n - SAME_RUN..].iter().all(|x| *x == e) {
+                        v.truncate(n - SAME_RUN);
+                        let same = Run {
+                            start: run.start + (n - SAME_RUN) as i32,
+                            entries: RunEntries::Same {
+                                count: SAME_RUN as i32,
+                                entry: e,
+                            },
+                        };
+                        if n == SAME_RUN {
+                            *run = same;
+                        } else {
+                            self.runs.push(same);
+                        }
+                    }
+                    return;
+                }
+                RunEntries::Same { .. } => {}
+            }
+        }
+        self.fresh = false;
+        self.runs.push(Run {
+            start: num,
+            entries: RunEntries::Each(vec![e]),
+        });
+    }
+
+    /// Appends `count` copies of `e` to the current subsection, as `push`
+    /// would one by one, in time that does not depend on `count`.
+    fn push_many(&mut self, e: Entry, count: i32) {
+        let start = self.next;
+        let end = start.saturating_add(count);
+        self.next = end;
+        self.defined.flush();
+        let gaps = if self.overlaps {
+            self.defined.gaps(start, end)
+        } else {
+            vec![(start, end)]
+        };
+        let mut cursor = start;
+        for (a, b) in gaps {
+            if a > cursor {
+                self.push_range(cursor, a, Entry::NONE);
+            }
+            self.push_range(a, b, e);
+            if e.kind != Kind::None {
+                self.defined.insert(a, b);
+            }
+            cursor = b;
+        }
+        if cursor < end {
+            self.push_range(cursor, end, Entry::NONE);
+        }
+    }
+
+    fn push_range(&mut self, start: i32, end: i32, entry: Entry) {
+        self.fresh = false;
+        self.runs.push(Run {
+            start,
+            entries: RunEntries::Same {
+                count: end - start,
+                entry,
+            },
+        });
+    }
+
+    /// The xref stream's own entry (`pdf_get_populating_xref_entry`): it
+    /// replaces whatever the stream listed for its number, and a number
+    /// outside every subsection makes the section solid.
+    fn set_own(&mut self, num: i32, e: Entry) {
+        if let Some((n, prev)) = self.own.take() {
+            self.runs.push(Run {
+                start: n,
+                entries: RunEntries::Each(vec![prev]),
+            });
+        }
+        if self.in_layout(num).is_none() {
+            self.solidify(num.saturating_add(1));
+        }
+        self.own = Some((num, e));
+        self.defined.add(num);
+        self.fresh = true;
+    }
+
+    fn entry(&self, piece: &Piece, num: i32) -> Entry {
+        match piece.src {
+            Src::Own => self.own.map_or(Entry::NONE, |(_, e)| e),
+            Src::Run(ri) => self.runs[ri].get(num),
+        }
+    }
+
+    /// The section's defined entries as disjoint pieces, in number order.
+    fn resolve(&self) -> Vec<Piece> {
+        let mut pieces = Vec::new();
+        for (ri, run) in self.runs.iter().enumerate() {
+            match &run.entries {
+                RunEntries::Same { count, entry } => {
+                    if entry.kind != Kind::None {
+                        pieces.push(Piece {
+                            start: run.start,
+                            end: run.start + count,
+                            src: Src::Run(ri),
+                        });
+                    }
+                }
+                RunEntries::Each(v) => {
+                    let mut k = 0;
+                    while k < v.len() {
+                        if v[k].kind == Kind::None {
+                            k += 1;
+                            continue;
+                        }
+                        let from = k;
+                        while k < v.len() && v[k].kind != Kind::None {
+                            k += 1;
+                        }
+                        pieces.push(Piece {
+                            start: run.start + from as i32,
+                            end: run.start + k as i32,
+                            src: Src::Run(ri),
+                        });
+                    }
+                }
+            }
+        }
+        if let Some((n, e)) = self.own {
+            let mut split = Vec::new();
+            pieces.retain(|p| {
+                if n < p.start || n >= p.end {
+                    return true;
+                }
+                for (start, end) in [(p.start, n), (n + 1, p.end)] {
+                    if start < end {
+                        split.push(Piece { start, end, ..*p });
+                    }
+                }
+                false
+            });
+            pieces.extend(split);
+            if e.kind != Kind::None {
+                pieces.push(Piece {
+                    start: n,
+                    end: n + 1,
+                    src: Src::Own,
+                });
+            }
+        }
+        pieces.sort_unstable_by_key(|p| p.start);
+        pieces
+    }
+}
+
+/// A section with its resolved pieces, for lookups.
+struct Resolved<'a> {
+    section: &'a Section,
+    pieces: Vec<Piece>,
+}
+
+impl Resolved<'_> {
+    fn lookup(&self, num: i32) -> Option<Entry> {
+        let i = self.pieces.partition_point(|p| p.start <= num);
+        let piece = self.pieces.get(i.checked_sub(1)?)?;
+        (num < piece.end).then(|| self.section.entry(piece, num))
+    }
+
+    /// Pieces inside one subsection of the layout.
+    fn within(&self, start: i32, end: i32) -> &[Piece] {
+        let from = self.pieces.partition_point(|p| p.start < start);
+        let to = self.pieces.partition_point(|p| p.start < end);
+        &self.pieces[from..to]
     }
 }
 
@@ -86,7 +488,7 @@ impl Section {
 pub struct Loaded {
     /// Effective entries for 0..xref_len: for each number, the newest
     /// section that defines it.
-    pub entries: Vec<Entry>,
+    pub entries: Slots,
     pub cached: HashMap<i32, Object>,
     pub trailer: Dict,
     pub revisions: usize,
@@ -146,58 +548,61 @@ pub fn load(
         return Err(format!("{LIMIT_PREFIX}xref has {xref_len} entries"));
     }
 
-    // Broken files where the first object is missing or not free.
-    let first = sections.iter().find_map(|s| s.entries.get(&0).copied());
-    if first.is_some_and(|e| e.kind != Kind::Free) {
-        diag.warn("xref.first_not_free", "first object in xref is not free");
-    }
-
-    // "0000000000 * n" means free; other out-of-range offsets fail.
-    let file_size = data.len() as i64;
-    for section in &mut sections {
-        for (&num, entry) in section.entries.iter_mut() {
-            if entry.kind == Kind::InFile {
-                if entry.ofs == 0 {
-                    entry.kind = Kind::Free;
-                } else if entry.ofs <= 0 || entry.ofs >= file_size {
-                    return Err(format!(
-                        "object offset out of range: {} ({num} 0 R)",
-                        entry.ofs as i32
-                    ));
-                }
-            }
-        }
-    }
-
-    let mut entries = vec![Entry::NONE; xref_len as usize];
-    let mut cached = HashMap::new();
-    for (num, slot) in entries.iter_mut().enumerate() {
-        let num = num as i32;
-        if let Some((section, entry)) = sections
+    // Broken files where the first object is missing or not free. A
+    // missing one is looked up in the newest section, which MuPDF makes
+    // solid when no subsection holds it.
+    let first = {
+        let resolved: Vec<Resolved> = sections
             .iter()
-            .find_map(|s| s.entries.get(&num).map(|e| (s, *e)))
-        {
-            *slot = entry;
-            if let Some(obj) = section.cached.get(&num) {
-                cached.insert(num, obj.clone());
+            .map(|section| Resolved {
+                section,
+                pieces: section.resolve(),
+            })
+            .collect();
+        resolved.iter().find_map(|r| r.lookup(0))
+    };
+    match first {
+        Some(e) if e.kind != Kind::Free => {
+            diag.warn("xref.first_not_free", "first object in xref is not free");
+        }
+        Some(_) => {}
+        None => {
+            if sections.last().is_some_and(|s| s.num_objects == 0) {
+                return Err(
+                    "argument error: cannot find object in xref (0 0 R), but not allowed to return NULL"
+                        .into(),
+                );
+            }
+            if let Some(newest) = sections.first_mut()
+                && newest.in_layout(0).is_none()
+            {
+                newest.solidify(1);
             }
         }
     }
-    if entries[0].kind == Kind::None {
-        entries[0] = Entry::free(65535);
-    }
-    for section in &sections {
-        for (&num, entry) in &section.entries {
-            if entry.kind == Kind::InStream {
-                let target = usize::try_from(entry.ofs).ok().and_then(|i| entries.get(i));
-                if entry.ofs <= 0 || target.is_none_or(|t| t.kind != Kind::InFile) {
-                    return Err(format!(
-                        "invalid reference to an objstm that does not exist: {} ({num} 0 R)",
-                        entry.ofs as i32
-                    ));
-                }
+
+    check_entries(&sections, xref_len, data.len() as i64)?;
+    // "0000000000 * n" means free (some producers, Quartz among them).
+    for section in &mut sections {
+        let free = |e: &mut Entry| {
+            if e.kind == Kind::InFile && e.ofs == 0 {
+                e.kind = Kind::Free;
+            }
+        };
+        if let Some((_, e)) = &mut section.own {
+            free(e);
+        }
+        for run in &mut section.runs {
+            match &mut run.entries {
+                RunEntries::Each(v) => v.iter_mut().for_each(free),
+                RunEntries::Same { entry, .. } => free(entry),
             }
         }
+    }
+
+    let (mut entries, cached) = merge(&sections, xref_len);
+    if entries.get(0).kind == Kind::None {
+        entries.set(0, Entry::free(65535));
     }
 
     Ok(Loaded {
@@ -207,6 +612,142 @@ pub fn load(
         revisions: sections.len(),
         section_offsets: seen,
     })
+}
+
+/// `check_xref_entry_offsets` over every entry, in MuPDF's order
+/// (`pdf_xref_entry_map`): sections newest first, each section's
+/// subsections in list order, numbers ascending. The order decides which
+/// error is reported. In-file entries must be inside the file; entries in
+/// object streams must name one stored in the file, which an earlier
+/// "0000000000 * n" entry no longer is: MuPDF turns those into free
+/// entries as it goes.
+fn check_entries(sections: &[Section], xref_len: i32, file_size: i64) -> Result<(), XrefError> {
+    let resolved: Vec<Resolved> = sections
+        .iter()
+        .map(|section| Resolved {
+            section,
+            pieces: section.resolve(),
+        })
+        .collect();
+    for (si, current) in resolved.iter().enumerate() {
+        let section = current.section;
+        let mut layout: Vec<(i32, i32, u32)> = section
+            .layout
+            .iter()
+            .map(|(&s, &(l, r))| (s, s + l, r))
+            .collect();
+        layout.sort_unstable_by_key(|l| std::cmp::Reverse(l.2));
+        for &(start, end, rank) in &layout {
+            for piece in current.within(start, end) {
+                let uniform = match piece.src {
+                    Src::Own => true,
+                    Src::Run(ri) => matches!(section.runs[ri].entries, RunEntries::Same { .. }),
+                };
+                let last = if uniform { piece.start + 1 } else { piece.end };
+                for num in piece.start..last {
+                    let e = section.entry(piece, num);
+                    match e.kind {
+                        Kind::InFile if e.ofs != 0 && (e.ofs < 0 || e.ofs >= file_size) => {
+                            return Err(format!(
+                                "object offset out of range: {} ({num} 0 R)",
+                                e.ofs as i32
+                            ));
+                        }
+                        Kind::InStream => {
+                            let visited = |k: usize, t: i32| {
+                                k < si
+                                    || (k == si
+                                        && section
+                                            .in_layout(t)
+                                            .is_some_and(|r| r > rank || (r == rank && t < num)))
+                            };
+                            let target = i32::try_from(e.ofs)
+                                .ok()
+                                .filter(|&t| t > 0 && t < xref_len)
+                                .and_then(|t| {
+                                    resolved[si..]
+                                        .iter()
+                                        .enumerate()
+                                        .find_map(|(k, r)| r.lookup(t).map(|te| (si + k, t, te)))
+                                });
+                            let stored = target.is_some_and(|(k, t, te)| {
+                                te.kind == Kind::InFile && !(te.ofs == 0 && visited(k, t))
+                            });
+                            if !stored {
+                                return Err(format!(
+                                    "invalid reference to an objstm that does not exist: {} ({num} 0 R)",
+                                    e.ofs as i32
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The effective table: for each number, the newest section that defines
+/// it. Each section's pieces only fill numbers no newer section defined,
+/// so the work is bounded by the table and the file, not by how many
+/// sections repeat a range. Huge tables that are mostly uniform ranges are
+/// stored sparsely.
+fn merge(sections: &[Section], xref_len: i32) -> (Slots, HashMap<i32, Object>) {
+    let resolved: Vec<Resolved> = sections
+        .iter()
+        .map(|section| Resolved {
+            section,
+            pieces: section.resolve(),
+        })
+        .collect();
+    let len = usize::try_from(xref_len).unwrap_or(0);
+    let listed: usize = resolved
+        .iter()
+        .flat_map(|r| r.pieces.iter().map(move |p| (r, p)))
+        .filter(|(r, p)| match p.src {
+            Src::Own => true,
+            Src::Run(ri) => matches!(r.section.runs[ri].entries, RunEntries::Each(_)),
+        })
+        .map(|(_, p)| (p.end - p.start) as usize)
+        .sum();
+    // An array costs 16 bytes a slot, a map entry about 24 per listed one.
+    let mut slots = if len <= DENSE_LIMIT || listed.saturating_mul(4) >= len {
+        Slots::from_vec(vec![Entry::NONE; len])
+    } else {
+        Slots::sparse(len)
+    };
+    let mut cached = HashMap::new();
+    let mut taken = Intervals::default();
+    for r in &resolved {
+        for piece in &r.pieces {
+            let end = piece.end.min(xref_len);
+            if piece.start >= end {
+                continue;
+            }
+            for (a, b) in taken.gaps(piece.start, end) {
+                match piece.src {
+                    Src::Own => {
+                        slots.set(a, r.section.entry(piece, a));
+                        if let Some(obj) = r.section.cached.get(&a) {
+                            cached.insert(a, obj.clone());
+                        }
+                    }
+                    Src::Run(ri) => match &r.section.runs[ri].entries {
+                        RunEntries::Same { entry, .. } => slots.fill_range(a, b, *entry),
+                        RunEntries::Each(_) => {
+                            for num in a..b {
+                                slots.set(num, r.section.entry(piece, num));
+                            }
+                        }
+                    },
+                }
+            }
+            taken.insert(piece.start, end);
+        }
+    }
+    (slots, cached)
 }
 
 /// Finds the last `startxref` in the final kilobyte.
@@ -470,7 +1011,7 @@ fn read_old_xref(
                 "broken xref subsection, proceeding anyway.",
             );
         }
-        section.cover(start, len);
+        section.begin_subsection(start, len);
 
         // Entries should be 20 bytes; 19-byte ones (PCLm drivers) are
         // handled by carrying the extra byte into the next entry.
@@ -486,13 +1027,14 @@ fn read_old_xref(
             buf[carried..20].copy_from_slice(&lx.data()[at..at + want]);
             lx.seek(at + want);
             let num = start + i;
-            if section.entries.contains_key(&num) {
+            // An entry this section already defined is neither parsed nor
+            // allowed to change the 19-byte carry, as in MuPDF.
+            if section.defines(num) {
+                section.push(Entry::NONE);
                 continue;
             }
             let entry = parse_old_entry(&buf[..20], num)?;
-            if let Some(entry) = entry {
-                section.fill(num, entry);
-            }
+            section.push(entry.unwrap_or(Entry::NONE));
             carried = usize::from(buf[19] > 32);
             if carried == 1 {
                 buf[0] = buf[19];
@@ -555,7 +1097,6 @@ fn parse_old_entry(buf: &[u8], num: i32) -> Result<Option<Entry>, XrefError> {
         kind,
         ofs,
         generation,
-        stm_ofs: 0,
     }))
 }
 
@@ -636,8 +1177,24 @@ fn read_new_xref(
     let mut cursor = 0usize;
     for (first, count) in ranges {
         validate_range(first, count)?;
-        section.cover(first, count);
-        for num in first..first + count {
+        section.begin_subsection(first, count);
+        // With every width zero, no bytes are read and all entries are the
+        // same in-file entry at offset 0: store them as one range.
+        if w0 == 0 && w1 == 0 && w2 == 0 && count > 0 {
+            if cursor >= decoded.len() {
+                return Err("truncated xref stream".into());
+            }
+            section.push_many(
+                Entry {
+                    kind: Kind::InFile,
+                    ofs: 0,
+                    generation: 0,
+                },
+                count,
+            );
+            continue;
+        }
+        for _ in first..first + count {
             if cursor >= decoded.len() {
                 return Err("truncated xref stream".into());
             }
@@ -659,29 +1216,23 @@ fn read_new_xref(
                 2 => Kind::InStream,
                 _ => Kind::None,
             };
-            section.fill(
-                num,
-                Entry {
-                    kind,
-                    ofs: if w1 > 0 { b } else { 0 },
-                    generation: if w2 > 0 { c as i32 } else { 0 },
-                    stm_ofs: 0,
-                },
-            );
+            section.push(Entry {
+                kind,
+                ofs: if w1 > 0 { b } else { 0 },
+                generation: if w2 > 0 { c as i32 } else { 0 },
+            });
         }
     }
 
     // The stream's own entry always points at what we just parsed.
-    section.entries.insert(
+    section.set_own(
         num,
         Entry {
             kind: Kind::InFile,
             ofs: (at.saturating_sub(bias)) as i64,
             generation: ind.generation,
-            stm_ofs: data_start as i64,
         },
     );
-    section.cover(num, 1);
     section.cached.insert(
         num,
         Object::Stream(Arc::new(Stream {
@@ -796,10 +1347,250 @@ mod tests {
                 kind: Kind::InFile,
                 ofs: 17,
                 generation: 0,
-                stm_ofs: 0
             })
         );
         assert!(parse_old_entry(b"0000000017 00000 x \n", 1).is_err());
         assert!(parse_old_entry(b"          00000 n \n ", 1).is_err());
+    }
+
+    const HEAD: &[u8] = b"%PDF-1.5\n";
+    const CATALOG: &[u8] = b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n";
+    const PAGES: &[u8] = b"2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n";
+    /// Offsets of objects 1 and 2, and one past the end of every test file.
+    const OBJ1: i64 = HEAD.len() as i64;
+    const OBJ2: i64 = OBJ1 + CATALOG.len() as i64;
+    const BAD: i64 = 999_999;
+
+    /// An xref stream object; `rows` are (type, field 2, field 3).
+    fn xref_stream(
+        num: i32,
+        size: i32,
+        w: [usize; 3],
+        index: &[i32],
+        rows: &[(i64, i64, i64)],
+        prev: Option<usize>,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        for &(a, b, c) in rows {
+            for (v, width) in [(a, w[0]), (b, w[1]), (c, w[2])] {
+                data.extend_from_slice(&v.to_be_bytes()[8 - width..]);
+            }
+        }
+        if w == [0, 0, 0] {
+            data.push(0); // never read; keeps the stream from looking truncated
+        }
+        let index: Vec<String> = index.iter().map(i32::to_string).collect();
+        let prev = prev.map_or(String::new(), |p| format!("/Prev {p}"));
+        let mut out = format!(
+            "{num} 0 obj<</Type/XRef/Size {size}/W[{} {} {}]/Index[{}]/Root 1 0 R{prev}/Length {}>>stream\n",
+            w[0],
+            w[1],
+            w[2],
+            index.join(" "),
+            data.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(&data);
+        out.extend_from_slice(b"\nendstream endobj\n");
+        out
+    }
+
+    /// A file whose only xref is one stream, object `own`.
+    fn with_stream(index: &[i32], rows: &[(i64, i64, i64)], own: i32, size: i32) -> Vec<u8> {
+        let mut body = [HEAD, CATALOG, PAGES].concat();
+        let at = body.len();
+        body.extend(xref_stream(own, size, [1, 4, 2], index, rows, None));
+        body.extend(format!("startxref\n{at}\n%%EOF\n").into_bytes());
+        body
+    }
+
+    /// `count` sections, each declaring `size` zero-width entries.
+    fn chain(count: i32, size: i32) -> Vec<u8> {
+        let mut body = [HEAD, CATALOG, PAGES].concat();
+        let mut prev = None;
+        for k in 0..count {
+            let at = body.len();
+            body.extend(xref_stream(3 + k, size, [0, 0, 0], &[0, size], &[], prev));
+            prev = Some(at);
+        }
+        body.extend(format!("startxref\n{}\n%%EOF\n", prev.unwrap_or(0)).into_bytes());
+        body
+    }
+
+    fn load_err(data: &[u8]) -> Option<String> {
+        load(data, 0, &Diagnostics::new(), &Limits::default()).err()
+    }
+
+    // Expected messages come from MuPDF 1.28.6 on the same files.
+    #[test]
+    fn entries_are_checked_in_mupdf_order() {
+        // [5,7) was added last, so MuPDF's list visits it first.
+        let list = with_stream(
+            &[0, 2, 5, 2],
+            &[(0, 0, 65535), (2, 4, 0), (1, BAD, 0), (1, 0, 0)],
+            6,
+            7,
+        );
+        assert_eq!(
+            load_err(&list).as_deref(),
+            Some("object offset out of range: 999999 (5 0 R)")
+        );
+        // [2,4) extends [0,2) in place, behind [6,8).
+        let extend = with_stream(
+            &[0, 2, 6, 2, 2, 2],
+            &[
+                (0, 0, 65535),
+                (1, OBJ1, 0),
+                (1, BAD, 0),
+                (1, 0, 0),
+                (2, 4, 0),
+                (1, OBJ2, 0),
+            ],
+            7,
+            8,
+        );
+        assert_eq!(
+            load_err(&extend).as_deref(),
+            Some("object offset out of range: 999999 (6 0 R)")
+        );
+        // The stream's own number is outside /Index: the section becomes
+        // one ascending subsection.
+        let solid = with_stream(&[1, 1, 5, 1], &[(2, 4, 0), (1, BAD, 0)], 9, 10);
+        assert_eq!(
+            load_err(&solid).as_deref(),
+            Some("invalid reference to an objstm that does not exist: 4 (1 0 R)")
+        );
+        // Object 0 is listed nowhere: the newest section becomes solid.
+        let zero = with_stream(&[1, 1, 5, 2], &[(2, 4, 0), (1, BAD, 0), (1, 0, 0)], 6, 7);
+        assert_eq!(
+            load_err(&zero).as_deref(),
+            Some("invalid reference to an objstm that does not exist: 4 (1 0 R)")
+        );
+    }
+
+    #[test]
+    fn the_first_definition_in_a_section_wins() {
+        let dup = with_stream(
+            &[0, 3, 1, 1],
+            &[(0, 0, 65535), (1, OBJ1, 0), (1, OBJ2, 0), (1, BAD, 0)],
+            3,
+            4,
+        );
+        let loaded = load(&dup, 0, &Diagnostics::new(), &Limits::default());
+        assert_eq!(loaded.map(|l| l.entries.get(1).ofs), Ok(OBJ1));
+    }
+
+    #[test]
+    fn zero_offsets_become_free_as_they_are_checked() {
+        // 1 is "0 n", already free when 2 is checked against it.
+        let before = with_stream(
+            &[0, 4],
+            &[(0, 0, 65535), (1, 0, 0), (2, 1, 0), (1, OBJ1, 0)],
+            4,
+            5,
+        );
+        assert_eq!(
+            load_err(&before).as_deref(),
+            Some("invalid reference to an objstm that does not exist: 1 (2 0 R)")
+        );
+        // 1 is checked against 2 before 2 is: accepted, then 2 is free.
+        let after = with_stream(
+            &[0, 4],
+            &[(0, 0, 65535), (2, 2, 0), (1, 0, 0), (1, OBJ1, 0)],
+            4,
+            5,
+        );
+        let loaded = load(&after, 0, &Diagnostics::new(), &Limits::default());
+        assert_eq!(loaded.map(|l| l.entries.get(2).kind), Ok(Kind::Free));
+    }
+
+    #[test]
+    fn huge_declared_tables_cost_what_the_file_contains() {
+        for (count, size) in [(1, 8_388_607), (300, 8_388_607), (1000, 1003)] {
+            let file = chain(count, size);
+            let diag = Diagnostics::new();
+            let loaded = load(&file, 0, &diag, &Limits::default());
+            let entries = loaded.map(|l| l.entries);
+            assert_eq!(entries.as_ref().map(Slots::len), Ok(size as usize));
+            let bytes = entries.as_ref().map_or(usize::MAX, Slots::heap_bytes);
+            assert!(
+                bytes < (size as usize).min(1 << 16) * 16 + 4096,
+                "{count} sections: {bytes} bytes"
+            );
+            assert!(diag.has("xref.first_not_free"));
+        }
+    }
+
+    #[test]
+    fn many_subsections_load() {
+        let n = 20_000;
+        let mut index = vec![0, 3];
+        for i in 0..n {
+            index.extend([3 + 2 * i, 1]);
+        }
+        let rows = vec![(0, 0, 0); 3 + n as usize];
+        let mut body = [HEAD, CATALOG, PAGES].concat();
+        let at = body.len();
+        body.extend(xref_stream(
+            3 + 2 * n,
+            4 + 2 * n,
+            [1, 0, 0],
+            &index,
+            &rows,
+            None,
+        ));
+        body.extend(format!("startxref\n{at}\n%%EOF\n").into_bytes());
+        let loaded = load(&body, 0, &Diagnostics::new(), &Limits::default());
+        assert_eq!(loaded.map(|l| l.entries.len()), Ok(4 + 2 * n as usize));
+    }
+
+    #[test]
+    fn subsections_merge_like_mupdf() {
+        let layout = |ranges: &[(i32, i32)], own: Option<i32>| {
+            let mut s = Section::default();
+            for &(start, len) in ranges {
+                s.begin_subsection(start, len);
+            }
+            if let Some(n) = own {
+                s.set_own(n, Entry::NONE);
+            }
+            let mut out: Vec<(i32, i32, u32)> =
+                s.layout.iter().map(|(&st, &(l, r))| (st, l, r)).collect();
+            out.sort_by_key(|l| std::cmp::Reverse(l.2));
+            out.into_iter()
+                .map(|(st, l, _)| (st, l))
+                .collect::<Vec<_>>()
+        };
+        // New subsections go first in the list; contained ones change nothing.
+        assert_eq!(layout(&[(0, 2), (6, 2), (6, 1)], None), [(6, 2), (0, 2)]);
+        // One that starts inside or right after another extends it in place.
+        assert_eq!(layout(&[(0, 2), (6, 2), (2, 2)], None), [(6, 2), (0, 4)]);
+        assert_eq!(layout(&[(0, 2), (6, 2), (1, 3)], None), [(6, 2), (0, 4)]);
+        // Touching or covering two makes the section solid.
+        assert_eq!(layout(&[(0, 2), (4, 2), (1, 4)], None), [(0, 6)]);
+        assert_eq!(layout(&[(2, 2), (0, 2), (2, 3)], None), [(0, 5)]);
+        // Right after one subsection extends it, rather than adding one.
+        assert_eq!(layout(&[(0, 2), (2, 2)], None), [(0, 4)]);
+        assert_eq!(layout(&[(4, 2), (2, 4)], None), [(0, 6)]);
+        // An own entry outside every subsection does too.
+        assert_eq!(layout(&[(0, 2), (6, 2)], Some(7)), [(6, 2), (0, 2)]);
+        assert_eq!(layout(&[(0, 2), (6, 2)], Some(9)), [(0, 10)]);
+    }
+
+    #[test]
+    fn intervals_merge_and_report_gaps() {
+        let mut set = Intervals::default();
+        for n in [1, 2, 3, 7] {
+            set.add(n);
+        }
+        set.insert(10, 20);
+        set.flush();
+        assert!(set.contains(3) && set.contains(7) && set.contains(19));
+        assert!(!set.contains(4) && !set.contains(20) && !set.contains(0));
+        assert!(set.any_in(4, 8) && !set.any_in(4, 7));
+        assert_eq!(set.gaps(0, 25), [(0, 1), (4, 7), (8, 10), (20, 25)]);
+        assert_eq!(set.gaps(11, 15), []);
+        set.insert(3, 12);
+        assert_eq!(set.gaps(0, 25), [(0, 1), (20, 25)]);
     }
 }
