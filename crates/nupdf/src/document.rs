@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use crate::diag::Diagnostics;
+use crate::diag::{Diagnostics, report};
 use crate::filter::{self, DecodeError};
 use crate::header::{self, Kind as HeaderKind, Version};
 use crate::lex::{Lexer, Token, fz_atof};
@@ -218,14 +218,20 @@ impl Document {
             0
         };
         // Checked before the xref loads, so an indirect /Linearized reads 0.
+        // MuPDF reports, then swallows, a parse error here.
         let linearized = broken.is_none() && !is_fdf && {
             let mut lx = Lexer::new(&data, bias, &diag);
-            parse_indirect(&mut lx).is_ok_and(|ind| {
-                ind.obj
+            match parse_indirect(&mut lx) {
+                Ok(ind) => ind
+                    .obj
                     .as_dict()
                     .and_then(|d| d.get(b"Linearized"))
-                    .is_some_and(|v| v.to_int() == 1)
-            })
+                    .is_some_and(|v| v.to_int() == 1),
+                Err(e) => {
+                    diag.warn("error.reported", report::syntax(&e.message));
+                    false
+                }
+            }
         };
         let doc = Document {
             data,
@@ -263,7 +269,7 @@ impl Document {
             }
             None => {
                 if let Some(e) = &broken {
-                    doc.diag.warn("xref.broken", format!("format error: {e}"));
+                    doc.diag.warn("xref.broken", report::line(e));
                     doc.diag.warn("xref.repair", "trying to repair broken xref");
                 }
                 doc.repair_attempted.store(true, Ordering::SeqCst);
@@ -273,7 +279,7 @@ impl Document {
                     Err(e) => {
                         return Err(OpenError {
                             code: "input.unrepairable",
-                            message: e,
+                            message: report::strip(&e).to_string(),
                         });
                     }
                 }
@@ -369,14 +375,16 @@ impl Document {
             match self.load_in(&state, num, true) {
                 Loaded::Obj(o) => return Some(demote_if_failed(&state, num, o)),
                 Loaded::Missing => return None,
-                Loaded::Failed(_) => {
+                Loaded::Failed(cause) => {
+                    self.report(&cause);
                     self.diag.warn(
                         "object.unloadable",
                         format!("cannot load object ({num} 0 R) into cache"),
                     );
                     return None;
                 }
-                Loaded::NeedsRepair(_) => {
+                Loaded::NeedsRepair(cause) => {
+                    self.report(&cause);
                     if !self.repair_on_demand(&state) {
                         self.diag.warn(
                             "object.unloadable",
@@ -459,13 +467,21 @@ impl Document {
         match self.load_in(st, r.num, false) {
             Loaded::Obj(o) => o,
             Loaded::Missing => Object::Null,
-            Loaded::Failed(_) | Loaded::NeedsRepair(_) => {
+            Loaded::Failed(cause) | Loaded::NeedsRepair(cause) => {
+                self.report(&cause);
                 self.diag.warn(
                     "object.unloadable",
                     format!("cannot load object ({} 0 R) into cache", r.num),
                 );
                 Object::Null
             }
+        }
+    }
+
+    /// Records the error lines MuPDF prints when it catches a failure.
+    fn report(&self, cause: &str) {
+        for line in cause.lines().filter(|l| !l.is_empty()) {
+            self.diag.warn("error.reported", line);
         }
     }
 
@@ -502,7 +518,9 @@ impl Document {
             return v.clone();
         }
         let Some(_guard) = LoadGuard::enter(st, num) else {
-            return Loaded::Failed(format!("recursive object lookup ({num} 0 R)"));
+            return Loaded::Failed(report::format(&format!(
+                "recursive object lookup ({num} 0 R)"
+            )));
         };
         let loaded = self.load_slot(st, num, allow_repair);
         let _ = cell.set(loaded);
@@ -522,27 +540,34 @@ impl Document {
         let can_repair = allow_repair && !self.attempted();
         match entry.kind {
             Kind::Free => Loaded::Obj(Object::Null),
-            Kind::None => Loaded::Failed(format!("cannot find object in xref ({num} 0 R)")),
+            Kind::None => Loaded::Failed(report::format(&format!(
+                "cannot find object in xref ({num} 0 R)"
+            ))),
             Kind::InFile => match self.parse_at(st, entry.ofs) {
                 Ok(ind) if ind.num == num => Loaded::Obj(into_object(ind)),
-                Ok(ind) => {
+                Ok(_) => {
                     if can_repair {
-                        Loaded::NeedsRepair(format!(
-                            "found object ({} 0 R) instead of ({num} 0 R)",
-                            ind.num
-                        ))
+                        // MuPDF repairs silently when the number is wrong.
+                        Loaded::NeedsRepair(String::new())
                     } else {
                         Loaded::Missing
                     }
                 }
                 Err(e) if e.try_repair => {
                     if can_repair {
-                        Loaded::NeedsRepair(e.message)
+                        Loaded::NeedsRepair(report::syntax(&e.message))
                     } else {
-                        Loaded::Failed(format!("cannot parse object ({num} 0 R)"))
+                        Loaded::Failed(
+                            [
+                                report::syntax(&e.message),
+                                report::format("Repair failed already - not trying again"),
+                                report::format(&format!("cannot parse object ({num} 0 R)")),
+                            ]
+                            .join("\n"),
+                        )
                     }
                 }
-                Err(e) => Loaded::Failed(e.message),
+                Err(e) => Loaded::Failed(report::syntax(&e.message)),
             },
             Kind::InStream => {
                 let objstm = self.objstm(st, entry.ofs as i32);
@@ -553,13 +578,11 @@ impl Document {
                     return Loaded::Failed(e.clone());
                 }
                 if can_repair {
-                    Loaded::NeedsRepair(format!(
-                        "object ({num} 0 R) was not found in its object stream"
-                    ))
+                    Loaded::NeedsRepair(String::new())
                 } else {
-                    Loaded::Failed(format!(
+                    Loaded::Failed(report::format(&format!(
                         "object ({num} 0 R) was not found in its object stream"
-                    ))
+                    )))
                 }
             }
         }
@@ -585,7 +608,7 @@ impl Document {
     fn load_objstm(&self, st: &State, stm: i32) -> ObjStm {
         let fail = |e: String| ObjStm {
             objects: Vec::new(),
-            error: Some(e),
+            error: Some(report::line(&e)),
         };
         let Some(_guard) = LoadGuard::enter(st, -1 - stm) else {
             return fail("recursive object stream lookup".into());
@@ -620,7 +643,7 @@ impl Document {
         }
         let data = match self.stream_data_in(st, &stream) {
             Ok(d) => d,
-            Err(e) => return fail(e.to_string()),
+            Err(e) => return fail(e.report()),
         };
 
         let mut lx = Lexer::new(&data, 0, &self.diag);
@@ -674,7 +697,7 @@ impl Document {
                 Err(e) => {
                     return ObjStm {
                         objects,
-                        error: Some(e.0),
+                        error: Some(report::syntax(&e.0)),
                     };
                 }
             }
