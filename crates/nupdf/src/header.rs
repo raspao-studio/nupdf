@@ -111,7 +111,7 @@ pub fn find(data: &[u8]) -> Result<Header, HeaderError> {
 }
 
 /// The longest prefix of `text` that C `strtof` would consume, parsed as f32.
-fn parse_float_prefix(text: &[u8]) -> f32 {
+pub(crate) fn parse_float_prefix(text: &[u8]) -> f32 {
     let mut i = 0;
     while text
         .get(i)
