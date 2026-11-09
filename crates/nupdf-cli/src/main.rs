@@ -4,6 +4,8 @@
 //! `nupdf`: JSON reports on stdout, JSON errors on stderr, meaningful exit
 //! codes. The contract is specified in docs/AGENT-INTERFACE.md.
 
+mod objects;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -31,11 +33,14 @@ struct Cli {
 enum Command {
     /// Identify a file and report what nupdf can tell about it.
     Info { file: PathBuf },
+    /// Dump every object in the cross-reference table as canonical JSON.
+    Objects { file: PathBuf },
 }
 
 /// Exit codes from docs/AGENT-INTERFACE.md. Usage errors (2) come from clap.
 #[derive(Debug, Clone, Copy)]
 enum Exit {
+    Internal = 1,
     Input = 3,
 }
 
@@ -90,7 +95,8 @@ struct Failure {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::Info { file } => info(file),
+        Command::Info { file } => info(file).and_then(to_json),
+        Command::Objects { file } => open(file).map(|(doc, _)| objects::dump(&doc)),
     };
     match result {
         Ok(report) => {
@@ -123,24 +129,51 @@ fn emit(out: &mut impl Write, value: &impl Serialize, pretty: bool) {
     }
 }
 
-fn info(path: &Path) -> Result<InfoReport, Failure> {
+fn to_json(report: InfoReport) -> Result<serde_json::Value, Failure> {
+    serde_json::to_value(report).map_err(|e| Failure {
+        exit: Exit::Internal,
+        code: "internal.serialize",
+        message: e.to_string(),
+    })
+}
+
+/// What `open` learned about the file before parsing it.
+struct FileFacts {
+    header: Option<header::Header>,
+    doc_id: String,
+    file_size: usize,
+}
+
+fn open(path: &Path) -> Result<(Document, FileFacts), Failure> {
     let data = std::fs::read(path).map_err(|e| Failure {
         exit: Exit::Input,
         code: "input.unreadable",
         message: format!("cannot read {}: {e}", path.display()),
     })?;
-    let header = header::find(&data).ok();
-    let doc_id = DocId::of(&data).to_string();
-    let file_size = data.len();
+    let facts = FileFacts {
+        header: header::find(&data).ok(),
+        doc_id: DocId::of(&data).to_string(),
+        file_size: data.len(),
+    };
     let doc = Document::open(data).map_err(|e| Failure {
         exit: Exit::Input,
-        code: if header.is_none() {
+        code: if facts.header.is_none() {
             "input.not_pdf"
         } else {
             e.code
         },
         message: e.message,
     })?;
+    Ok((doc, facts))
+}
+
+fn info(path: &Path) -> Result<InfoReport, Failure> {
+    let (doc, facts) = open(path)?;
+    let FileFacts {
+        header,
+        doc_id,
+        file_size,
+    } = facts;
 
     // Same order as oracle/js/info.js: a repair triggered by one call is
     // visible to the next.

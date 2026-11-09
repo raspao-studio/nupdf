@@ -27,17 +27,33 @@ pub struct Check {
     pub oracle_script: &'static str,
     /// `nupdf` arguments; the file path is appended.
     pub nupdf_args: &'static [&'static str],
-    /// JSON pointers that must be equal in both outputs.
-    pub fields: &'static [&'static str],
+    pub compare: Compare,
 }
 
-pub const CHECKS: &[Check] = &[Check {
-    name: "info",
-    about: "document-level facts: effective version, page count, xref size, repair",
-    oracle_script: "oracle/js/info.js",
-    nupdf_args: &["info"],
-    fields: &["/pdf_version", "/page_count", "/object_count", "/repaired"],
-}];
+#[derive(Debug, Clone, Copy)]
+pub enum Compare {
+    /// These JSON pointers must be equal.
+    Fields(&'static [&'static str]),
+    /// `object_count` must be equal, then every entry of `objects`.
+    Objects,
+}
+
+pub const CHECKS: &[Check] = &[
+    Check {
+        name: "info",
+        about: "document-level facts: effective version, page count, xref size, repair",
+        oracle_script: "oracle/js/info.js",
+        nupdf_args: &["info"],
+        compare: Compare::Fields(&["/pdf_version", "/page_count", "/object_count", "/repaired"]),
+    },
+    Check {
+        name: "objects",
+        about: "every object in the xref, canonically encoded, with raw stream lengths",
+        oracle_script: "oracle/js/objects.js",
+        nupdf_args: &["objects"],
+        compare: Compare::Objects,
+    },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -278,7 +294,10 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
             (None, Some(_)) => Outcome::OracleFailed,
             (Some(_), None) => Outcome::NupdfFailed,
             (Some(a), Some(b)) => {
-                result.diffs = compare(check.fields, a, b);
+                result.diffs = match check.compare {
+                    Compare::Fields(fields) => compare(fields, a, b),
+                    Compare::Objects => compare_objects(a, b),
+                };
                 if result.diffs.is_empty() {
                     Outcome::Match
                 } else {
@@ -303,13 +322,93 @@ pub fn compare(fields: &[&str], oracle: &Value, ours: &Value) -> Vec<FieldDiff> 
         .filter_map(|&field| {
             let a = oracle.pointer(field).cloned().unwrap_or(Value::Null);
             let b = ours.pointer(field).cloned().unwrap_or(Value::Null);
-            (a != b).then(|| FieldDiff {
+            (!json_eq(&a, &b)).then(|| FieldDiff {
                 field: field.to_string(),
                 oracle: a,
                 nupdf: b,
             })
         })
         .collect()
+}
+
+/// Object-by-object comparison; reports the first few differences.
+pub fn compare_objects(oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
+    const MAX_REPORTED: usize = 5;
+    let mut diffs = compare(&["/object_count"], oracle, ours);
+    let empty = serde_json::Map::new();
+    let a = oracle
+        .get("objects")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let b = ours
+        .get("objects")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+    keys.sort_by_key(|k| k.parse::<u64>().unwrap_or(u64::MAX));
+    keys.dedup();
+    let mut differing = 0;
+    for key in keys {
+        let x = a.get(key).unwrap_or(&Value::Null);
+        let y = b.get(key).unwrap_or(&Value::Null);
+        if !json_eq(x, y) {
+            differing += 1;
+            if diffs.len() < MAX_REPORTED {
+                diffs.push(FieldDiff {
+                    field: format!("/objects/{key}"),
+                    oracle: truncate(x),
+                    nupdf: truncate(y),
+                });
+            }
+        }
+    }
+    if differing > MAX_REPORTED {
+        diffs.push(FieldDiff {
+            field: "/objects (more)".into(),
+            oracle: Value::Null,
+            nupdf: Value::from(format!("{differing} objects differ in total")),
+        });
+    }
+    diffs
+}
+
+fn truncate(v: &Value) -> Value {
+    let text = v.to_string();
+    if text.len() <= 400 {
+        return v.clone();
+    }
+    let mut cut = 400;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Value::from(format!("{}...", &text[..cut]))
+}
+
+/// JSON equality where numbers compare by value, so 1 and 1.0 are equal.
+/// Non-integers compare at f32 precision: MuPDF stores reals as floats and
+/// mujs prints only 16 significant digits of them.
+pub fn json_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            let (Some(p), Some(q)) = (x.as_f64(), y.as_f64()) else {
+                return false;
+            };
+            // Integers beyond 2^53 come from JS with only 16 digits.
+            let big = p.abs() > 9.007_199_254_740_992e15;
+            p == q
+                || ((x.is_f64() || y.is_f64()) && p as f32 == q as f32)
+                || (big && (p - q).abs() <= p.abs() * 1e-15)
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| json_eq(p, q))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| json_eq(v, w)))
+        }
+        _ => a == b,
+    }
 }
 
 fn summary_row(name: &str, results: &[FileResult]) -> String {
@@ -424,6 +523,30 @@ mod tests {
         );
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].nupdf, Value::Null);
+    }
+
+    #[test]
+    fn numbers_compare_by_value() {
+        assert!(json_eq(&json!({"r": 1}), &json!({"r": 1.0})));
+        assert!(json_eq(
+            &json!(1.200000047683716),
+            &json!(1.2000000476837158)
+        ));
+        assert!(!json_eq(&json!(16777217), &json!(16777216)));
+        assert!(json_eq(
+            &json!(-8546744073709553000i64),
+            &json!(-8546744073709551616i64)
+        ));
+        assert!(!json_eq(&json!([1, 2]), &json!([1, 3])));
+    }
+
+    #[test]
+    fn object_diffs_name_the_objects() {
+        let a = json!({"object_count": 3, "objects": {"1": 5, "2": {"n": "A"}}});
+        let b = json!({"object_count": 3, "objects": {"1": 5.0, "2": {"n": "B"}}});
+        let diffs = compare_objects(&a, &b);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].field, "/objects/2");
     }
 
     #[test]

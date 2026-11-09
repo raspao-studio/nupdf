@@ -15,6 +15,21 @@
       "smoke/truncated.pdf": "both_failed",
       "smoke/version-2.0.pdf": "match",
       "smoke/xref-stream.pdf": "match"
+    },
+    "objects": {
+      "smoke/broken-xref-offsets.pdf": "match",
+      "smoke/catalog-version.pdf": "match",
+      "smoke/cr-line-endings.pdf": "match",
+      "smoke/crlf-line-endings.pdf": "match",
+      "smoke/flate-content.pdf": "match",
+      "smoke/garbage-prefix.pdf": "match",
+      "smoke/incremental-update.pdf": "match",
+      "smoke/minimal.pdf": "match",
+      "smoke/multipage-inherit.pdf": "match",
+      "smoke/no-xref.pdf": "match",
+      "smoke/truncated.pdf": "both_failed",
+      "smoke/version-2.0.pdf": "match",
+      "smoke/xref-stream.pdf": "match"
     }
   }
 }
