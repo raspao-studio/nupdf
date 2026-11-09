@@ -1,0 +1,243 @@
+# nupdf plan
+
+nupdf is a rewrite of MuPDF's PDF engine in Rust. It keeps MuPDF's behavior as the reference, adds memory safety and real parallelism, and wraps everything in an interface designed for AI agents. This file is the roadmap. Work items are checkboxes; tick them in the same commit that lands the work.
+
+Related docs: [ARCHITECTURE](ARCHITECTURE.md) · [AGENT-INTERFACE](AGENT-INTERFACE.md) · [TESTING](TESTING.md) · [DECISIONS](DECISIONS.md) · [PRIOR-ART](PRIOR-ART.md)
+
+## Status
+
+| Milestone | Scope | MuPDF C in scope | State |
+|---|---|---|---|
+| M0 | Foundation: repo, oracle, harness, bench, CI | — | done |
+| M1 | Syntax, xref, repair, page tree | ~25k lines | next |
+| M2 | Filters and encryption | ~15k | |
+| M3 | Writer and structural editing | ~10k | |
+| M4 | Content streams, resources, fonts | ~25k | |
+| M5 | Text extraction and search | ~15k | |
+| M6 | Redaction and verification | ~5k plus verifier | |
+| M7 | Rendering | ~30k | |
+| M8 | Agent surface: MCP, batch, eval | new | |
+| M9 | Forms, annotations, OCR, tables, signatures | ~15k | |
+| M10 | Hardening and public release | — | |
+
+Line counts are rough sizes of the matching hand-written C in MuPDF 1.28.6. The data tables (CJK CMaps, glyph lists, ICC profiles) are another ~165k lines; they are converted mechanically, not rewritten.
+
+Dependency order: M1 → M2 → M3, and M2 → M4 → M5 → M6. M7 needs M4. M8 grows from M1 onward (every command ships with its JSON contract) and is finished after M7. M9 needs M5 and M7.
+
+## What "better than MuPDF" has to mean
+
+These are the claims nupdf must prove with numbers before it goes public. Each maps to an exit criterion below.
+
+1. **Parity.** On the standard corpus, nupdf produces the same objects, text and pixels as MuPDF on at least 99% of the files MuPDF opens, check by check.
+2. **Safety.** No `unsafe` in nupdf's crates. No crash, hang or unbounded allocation on any input: fuzzed continuously, and run over a wild corpus of 100k+ real files.
+3. **Speed.** Single-threaded throughput within 10% of MuPDF. Page-parallel operations scale to the machine's cores, which MuPDF's one-thread-per-document model cannot do without the caller restructuring work.
+4. **Agents.** On a fixed task suite, agents using nupdf succeed more often, with fewer tokens and tool calls, than agents using the Python stack, pymupdf4llm-mcp or pdf_oxide.
+5. **Redaction.** Zero leaks on adversarial suites, with a machine-checkable verification report, and verification never passes a leaky file.
+
+## Principles
+
+1. **MuPDF is the reference, and parity is measured.** Every subsystem ships with a differential check against a pinned MuPDF build. Default behavior matches MuPDF; improvements (better reading order, stricter parsing) are opt-in modes measured separately.
+2. **Hostile input is the default.** No `unsafe`, no panics, explicit limits on memory, depth and time. Every new parser surface gets a fuzz target in the same milestone.
+3. **Parallel by construction.** A parsed document is `Send + Sync`. Pages are processed concurrently without per-thread contexts or locks around the document.
+4. **Agents are the primary user.** Versioned JSON everywhere, stable addresses for content, diagnostics as data, mutations that verify themselves. Spec: [AGENT-INTERFACE](AGENT-INTERFACE.md).
+5. **Ratchet, never regress.** Parity and performance baselines are committed. CI fails when parity drops; benches flag slowdowns.
+6. **Credit the source.** Modules written by following MuPDF name the files they follow and carry Artifex's copyright line. See [NOTICE](../NOTICE.md).
+
+## Non-goals for 1.0
+
+- Formats other than PDF. MuPDF also reads XPS, EPUB, CBZ, FB2, HTML and SVG; nupdf does not.
+- Running PDF JavaScript. nupdf detects and strips it.
+- XFA forms beyond detection and removal.
+- A GUI viewer, or compatibility with MuPDF's C API.
+- MuPDF's HTML/CSS story engine for creating PDFs.
+
+## How a work item flows
+
+1. Pick the next unchecked item in the current milestone.
+2. Read the MuPDF files listed for it (`target/oracle/mupdf-<version>/source/...`, present after `cargo xtask oracle build`).
+3. Write the tests first: unit tests, a smoke fixture in `xtask/src/fixtures.rs` when the behavior is about file syntax, and an oracle script or check when the behavior is observable through MuPDF.
+4. Implement. Add the attribution header if you followed a MuPDF file.
+5. Run `cargo test --workspace`, `cargo xtask harness` (smoke tier, plus the standard tier for milestone work), and the relevant bench.
+6. Update the baseline only when results improved (`--update-baseline`), tick the box, commit.
+
+## M0: Foundation (done)
+
+- [x] Repository, AGPL-3.0-or-later license, NOTICE with MuPDF attribution, plan documents
+- [x] Cargo workspace: `nupdf` (library), `nupdf-cli` (binary `nupdf`), `xtask` (tooling); `unsafe_code = "forbid"` and no-panic lints for product crates
+- [x] Oracle: MuPDF 1.28.6 built from source with `cargo xtask oracle build`, version-checked on every use
+- [x] Smoke corpus: 13 deterministic generated fixtures (`cargo xtask fixtures`), with their repair expectations checked against MuPDF
+- [x] Differential harness: checks pair an oracle script with a `nupdf` command, run in parallel, classify outcomes, write JSON and Markdown reports, and ratchet against `harness/baselines/<tier>.json`
+- [x] Bench runner: paired commands, warmup, median wall time, peak RSS via `wait4`
+- [x] CLI: `nupdf info` (header version, doc id, size, diagnostics) with JSON errors and exit codes
+- [x] CI: fmt, clippy, tests, fixture freshness, cargo-deny; harness workflow on the smoke tier
+- [x] Corpus manifest for public suites, with sparse git fetch (`cargo xtask corpus fetch <name>`)
+- [x] Prior-art survey ([PRIOR-ART](PRIOR-ART.md))
+
+Baseline at the end of M0: `info` matches MuPDF on 11 of 12 smoke files MuPDF opens. The mismatch is `catalog-version.pdf`, because the effective version needs `/Root/Version` (M1). MuPDF cannot open `truncated.pdf` at all, and nupdf's header-only `info` still answers.
+
+## M1: Syntax, xref, repair, page tree
+
+MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-repair.c`, `pdf-stream.c` (raw access), `pdf-page.c` (page tree).
+
+- [ ] Fetch the standard tier and record its first baseline with the existing `info` check
+- [ ] Lexer: whitespace and comments, all three EOL styles, MuPDF's number leniency (`pdf_lex_number`: `--5`, `1.2.3`, `.`), names with `#xx` escapes, nested literal strings with escapes, odd-length hex strings, keywords
+- [ ] Object parser: arrays, dictionaries (MuPDF's duplicate-key behavior), `n g R`, streams with `/Length` checked against `endstream` and MuPDF's search fallback, missing `endobj`
+- [ ] Object model: settle the numeric representation and dictionary layout (open questions 1 and 2), backed by benches
+- [ ] Xref: `startxref` search, classic tables including MuPDF's fixes for broken subsection headers, xref streams (`/W`, `/Index`), hybrid files (`/XRefStm`), object streams (`/N`, `/First`, `/Extends`), `/Prev` chains with loop detection
+- [ ] Lazy, concurrent object resolution: one `OnceLock` per xref slot; reference-cycle detection
+- [ ] Repair as in `pdf-repair.c`: scan for `obj`, `endobj`, `trailer` and `xref`; rebuild the trailer (`/Root`, `/Info`, `/Encrypt`, `/ID`), finding the catalog when the trailer is missing; objects inside object streams
+- [ ] Revisions: enumerate incremental-update sections (redaction needs this in M6)
+- [ ] Page tree: count, lookup by index, inherited `Resources`, `MediaBox`, `CropBox` and `Rotate`; loops, wrong `/Count`, missing `/Type`; MuPDF's fallback scan for page objects
+- [ ] Effective version from `/Root/Version` (fixes the smoke mismatch)
+- [ ] `Limits`: nesting depth, xref size, object-stream count, reference-chain length
+- [ ] Diagnostics: stable codes for each MuPDF warning we mirror; the harness compares warning classes
+- [ ] `nupdf info` v1: page count and box summary, revisions, repaired, object count, encryption detected, linearization detected, Info dictionary fields
+- [ ] `nupdf objects` and `nupdf show <ref>`: canonical JSON object dumps
+- [ ] Oracle scripts: extend `info.js` (page count, boxes); add `objects.js` (canonical dump through the `PDFDocument` API)
+- [ ] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object` and `open_walk`, seeded from smoke and standard
+- [ ] Fixtures: one per lexer leniency and per xref repair path
+
+Checks: `info` (version, page count, boxes) and `objects` (the canonical graph, with raw stream bytes hashed).
+Exit: ≥99.5% `info` parity and ≥99% `objects` parity on the standard tier. Zero nupdf crashes. One CPU-hour per fuzz target, clean. Median open-and-walk time ≤ MuPDF's.
+
+## M2: Filters and encryption
+
+MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filter-predict.c`, `filter-fax.c`, `filter-dct.c`, `filter-jbig2.c`, `filter-sgi.c`, `filter-thunder.c`, `load-jpx.c`, `crypt-*.c`; `pdf/pdf-stream.c`, `pdf-crypt.c`.
+
+- [ ] Filter pipeline: streaming decode, decompressed-size and ratio limits
+- [ ] ASCIIHex, ASCII85, RunLength, LZW with EarlyChange (weezl or our own), Flate (zlib-rs) with MuPDF's tolerance for corrupt data (partial output plus a warning), PNG and TIFF predictors
+- [ ] CCITTFax (`fax` or hayro-ccitt), DCT (zune-jpeg, with raw passthrough), JPX (hayro-jpeg2000), JBIG2 with globals (hayro-jbig2)
+- [ ] Crypt filter and Identity
+- [ ] Standard security handler R2–R6: RC4 and AES-128/256 (RustCrypto), user and owner passwords, permissions, `EncryptMetadata`, separate string and stream crypt filters, embedded-file filter
+- [ ] `nupdf streams` (list streams, decode one), encryption fields in `info`, a global `--password`
+- [ ] Oracle: `streams.js` (BLAKE3 of each decoded stream), and MuPDF's encryption description string
+- [ ] Fixtures: every filter, and encrypted variants of the smoke files for each handler revision
+- [ ] Fuzz targets per decoder
+
+Exit: ≥99.9% decoded-stream parity for non-image filters. Image decoders within one level on 99% of pixels. Every encryption fixture opens with the right password and fails cleanly with the wrong one.
+
+## M3: Writer and structural editing
+
+MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` (insert and delete), `pdf-crypt.c`, `pdf-outline.c`.
+
+- [ ] Edit overlay: copy-on-write over the parsed document; new and deleted objects; grafting between documents with a dedup map
+- [ ] Serializer: canonical output; full rewrite; garbage collection levels matching `mutool clean -g` through `-gggg`; stream compression; object streams and xref streams; incremental append
+- [ ] Encryption on write
+- [ ] Deterministic output: `/ID` derived from content, no timestamps unless asked; atomic file replacement
+- [ ] Commands: `merge`, `split`, `pages` (select, reorder, delete, rotate), `meta` (get, set, strip), `clean`, `encrypt`, `decrypt`
+- [ ] Output validation: `qpdf --check`, selected Arlington PDF Model rules, and MuPDF reopening the output with identical content
+
+Exit: ≥99.5% round-trip parity on the standard tier: MuPDF reads our output with the same object graph (modulo renumbering) and the same text. `merge`, `split` and `clean` are at least as fast as mutool.
+
+## M4: Content streams, resources, fonts
+
+MuPDF reference: `pdf-interpret.c`, `pdf-op-run.c`, `pdf-op-buffer.c`, `pdf-run.c`, `pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c`, `pdf-shade.c`, `pdf-function.c`, `pdf-colorspace.c`, `pdf-image.c`, `pdf-layer.c`, `pdf-font.c`, `pdf-type3.c`, `pdf-cmap*.c`, `pdf-unicode.c`, `pdf-metrics.c`; `fitz/font.c`, `fitz/device.c`.
+
+- [ ] Content lexer and parser, including inline images with MuPDF's `EI` detection
+- [ ] Interpreter: graphics and text state, CTM, `q`/`Q`, `BT`/`ET`, marked content, Form XObjects with recursion limits, shadings, patterns, inline images, optional-content visibility, Type3 glyph procedures
+- [ ] `Device` trait mirroring `fz_device`, plus a trace device whose output lines up with `mutool trace`
+- [ ] Functions (types 0, 2, 3 and 4) and color-space definitions (conversion arrives in M7)
+- [ ] Fonts: simple and composite; embedded Type1 (own parser, or hayro-font), CFF, OpenType and TrueType (skrifa/read-fonts); standard-14 metrics and MuPDF's substitute fonts; encodings, `/Differences`, the Adobe Glyph List, ToUnicode, predefined CMaps (generated from MuPDF's tables), `/W` widths, vertical writing
+- [ ] Commands: `trace`, `fonts`, `images` (list and extract)
+- [ ] Fuzz targets: content parser, font parsers
+
+Exit: ≥99% page-trace parity on the standard tier: same operations, matrices within 1e-3, same glyph ids and Unicode.
+
+## M5: Text extraction and search
+
+MuPDF reference: `fitz/stext-device.c`, `stext-output.c`, `stext-search.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-table.c`, `stext-boxer.c`, `stext-raft.c`.
+
+- [ ] Structured text model (pages, blocks, lines, chars) with MuPDF's options: preserve ligatures, preserve whitespace, preserve spans, dehyphenate, clip to mediabox
+- [ ] Output: JSON with stable ids, plain text, Markdown, JSONL per page, with output budgets
+- [ ] Search: literal and regex, case- and diacritic-insensitive, across hyphenation and line breaks; hits carry quads and span ids
+- [ ] Paragraph, column and table segmentation (`stext-para`, `stext-boxer`, `stext-table`), at parity first
+- [ ] Page-parallel extraction with output identical at every thread count
+- [ ] Opt-in improved reading order, scored against hand-labeled ground truth rather than MuPDF
+- [ ] Bench pairs: against `mutool draw -F stext.json`, plus, for context, PyMuPDF, pypdf, pdfplumber, pdfminer.six, pdftotext and pdf_oxide
+
+Exit: ≥99% of pages have the same character sequence as MuPDF's stext, and ≥98% of characters have bbox IoU ≥0.98. Single-threaded time ≤1.1× MuPDF's. ≥6× speedup on 8 cores for documents of 50+ pages.
+
+## M6: Redaction and verification
+
+MuPDF reference: `pdf-clean.c` (`pdf_redact_page` and helpers), `pdf-op-filter.c`, `pdf-image-rewriter.c`, `pdf-annot.c` (Redact annotations), `pdf-form.c`, `pdf-outline.c`, `pdf-nametree.c`.
+
+- [ ] Targets: text, regex, presets (email, phone, card-like, SSN-like, IBAN), bboxes, span ids, search-hit files; resolved to quads per page
+- [ ] Content filtering with MuPDF's policies: text removed; images left, removed or pixel-blanked; line art left, removed when covered, or removed when touched. Split `TJ` arrays so surrounding text keeps its position; give pages their own copies of shared Form XObjects; handle Type3 glyphs and clipping paths
+- [ ] Image pixel redaction: decode, blank, re-encode with the original filter where possible
+- [ ] Annotations, widgets and links inside redacted regions; optional overlay boxes
+- [ ] Document scrub: Info, XMP, outline titles, named destinations, embedded files, form values, JavaScript, ActualText, Alt and structure tree, hidden optional content, thumbnails, unused objects, incremental history (always a full rewrite)
+- [ ] `verify`: an independent pass over the output that checks every leak class in [AGENT-INTERFACE](AGENT-INTERFACE.md#redaction-contract)
+- [ ] Adversarial fixture generator, one fixture per leak class; the `redaction` corpus tier (pdf-redaction-benchmarks)
+- [ ] `--dry-run`: the redaction plan as quads now, with rendered previews after M7
+
+Exit: zero leaks on the adversarial suite and the redaction tier, as judged by `nupdf verify`, MuPDF extraction and `pdftotext`. Remaining-text parity with MuPDF's redaction ≥99%. Tests seeded with deliberately leaky outputs prove `verify` fails them.
+
+## M7: Rendering
+
+MuPDF reference: `fitz/draw-*.c`, `colorspace.c`, `color-lcms.c`, `separation.c`, `pdf-shade.c`, glyph caching in `fitz/font.c`.
+
+- [ ] Rasterizer decision: vello_cpu, tiny-skia, or a port of `draw-edge`/`draw-paint`, chosen by measured pixel parity and speed
+- [ ] Paths and strokes (joins, caps, dashes), clipping, glyphs (outlines and Type3), images (every color space, decode arrays, stencil and soft masks, interpolation), shadings 1–7, patterns, transparency groups, soft masks, blend modes, knockout, overprint simulation, ICC through moxcms
+- [ ] Band-parallel rendering within a page, and page-parallel across pages
+- [ ] `render`: PNG output for a page or region, set DPI, and `--max-pixels` to fit vision-model budgets
+- [ ] Redaction previews for `--dry-run`
+- [ ] hayro as a second reference renderer, for triaging MuPDF disagreements
+
+Exit: ≥98% of standard-tier pages within the pixel threshold of `mutool draw` at 72 and 150 dpi. Single-threaded time ≤1.2× MuPDF's, and faster than MuPDF on multiple cores.
+
+## M8: Agent surface
+
+- [ ] MCP server over stdio: tools mirror the commands, a document-handle cache avoids reparsing, limits and cancellation apply per call
+- [ ] `batch`: globs, parallel execution, JSONL output, resumable runs
+- [ ] `diff`: compare two PDFs by text, structure and pixels
+- [ ] `guide` (compact usage text for models), `schema <command>` (JSON Schema), and a `SKILL.md` for Claude Code
+- [ ] Freeze schemas at v1, with a changelog
+- [ ] Agent eval: about 30 graded tasks (extract invoice fields, redact PII across a bundle, split by bookmarks, fill a form, find a clause, triage scanned pages). Arms: nupdf CLI, nupdf MCP, the default Python PDF skill, pymupdf4llm-mcp and pdf_oxide. Measure success, wall time, tool calls and tokens
+
+Exit: both nupdf arms beat every baseline on success rate and on median tokens per solved task.
+
+## M9: Coverage
+
+- [ ] Forms: list, fill and flatten AcroForm fields; generate appearances (`pdf-form.c`, `pdf-appearance.c`); detect and strip XFA
+- [ ] Annotations: list, add, delete, flatten
+- [ ] OCR: rasterize, run Tesseract as a subprocess (or ocrs), add an invisible text layer; `info` routes scanned pages here
+- [ ] Tables: structured rows from `stext-table` parity
+- [ ] Signatures: list them, check byte-range integrity, preserve them with incremental saves
+- [ ] Attachments, outlines, page labels, links; `sanitize` (JavaScript, actions, launch and URI policy)
+- [ ] Optional: Python bindings (PyO3) for agents that run Python
+
+## M10: Hardening and public release
+
+- [ ] Wild tier: a sample of 100k+ files runs crash-free; publish the parity report
+- [ ] Continuous fuzzing (apply to OSS-Fuzz), SECURITY.md, a threat model
+- [ ] The public case: parity, safety, performance and agent-eval results against MuPDF and the alternatives
+- [ ] Publish to crates.io, make the repository public, ship a docs site
+
+## Cross-cutting, every milestone
+
+- `info` learns what the new subsystem can detect (triage is the agent's first call).
+- New warnings get stable diagnostic codes, documented next to the code that emits them.
+- Benchmarks run for each new command; slowdowns over 5% on the local bench machine need a reason in the commit.
+- Line coverage of the `nupdf` crate stays at or above 90% (`cargo llvm-cov`, starting in M1).
+- Each parser surface has a fuzz target before its milestone closes.
+
+## Risks
+
+| Risk | Mitigation |
+|---|---|
+| The long tail of malformed files | MuPDF's leniency is the spec, the harness measures it file by file, and the wild tier is sampled. |
+| Pixel-exact rendering parity is hard | Use thresholds rather than exact matches; triage disagreements with a second renderer (hayro). |
+| Font breadth (Type1 quirks, CFF, CJK) | Reuse fontations; port MuPDF's fallbacks and substitute fonts. |
+| Drift from upstream MuPDF | Oracle bumps are explicit commits. On each bump, diff the upstream files listed in ARCHITECTURE's module map and file follow-up items. |
+| Performance traps (allocation-heavy object model, f64 math) | Benches from M1 on, decisions backed by profiles, open questions settled with measurements. |
+| Scope creep | The non-goals above. |
+| Competitors moving fast (pdf_oxide, PDFluent) | Our edge is measured parity, verified redaction and the agent eval. Publish those numbers. |
+| License provenance | AGPL throughout, attribution headers on derived files, no code from projects with incompatible licenses. |
+
+## Open questions
+
+1. **Numbers.** MuPDF stores reals as `float`. Store f32 for exact parity, or f64 for accuracy? Decide in M1 by running the `objects` and later `trace` checks both ways.
+2. **Dictionaries and names.** Sorted small vectors as in MuPDF, or hash maps; interned names or not. Decide in M1 from benches.
+3. **Crate split.** One `nupdf` crate until a boundary pays for itself (compile time, optional heavy dependencies). Revisit at M4 and M7.
+4. **Rasterizer.** Decide at the start of M7.
+5. **File access.** Read whole files into memory, or memory-map (memmap2 is `unsafe`, and the mapping breaks if the file changes)? Measure in M1. The default stays a safe read.
