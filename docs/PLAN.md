@@ -92,7 +92,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [x] Oracle scripts: `info.js` extended (page count, xref size, repair); `objects.js` added
 - [x] Filters pulled forward from M2 because real xref and object streams use them: Flate (zlib-rs), PNG and TIFF predictors, ASCIIHex, ASCII85, RunLength
 - [ ] Revisions: enumerate incremental-update sections with their offsets (redaction needs this in M6)
-- [ ] Page tree: lookup by index, inherited `Resources`, `MediaBox`, `CropBox` and `Rotate`; loops, wrong `/Count`, missing `/Type`; MuPDF's fallback scan for page objects
+- [x] Page tree: MuPDF's page map (including its `/Count` rewrite and the empty-map fallback), the slow lookup that guesses node types from `/Kids` and `/MediaBox`, cycle limits, and inherited `Resources`, `MediaBox`, `CropBox` and `Rotate` with MuPDF's Parent repair on cycles; `nupdf pages` and the `pages` check (99.8% on the standard tier, the rest encrypted or Brotli)
 - [ ] `Limits`: xref size, object-stream count and reference-chain length as configurable limits (nesting depth is done)
 - [ ] Diagnostics: the harness compares warning classes between MuPDF and nupdf
 - [ ] `nupdf info` v1 (rest): page box summary, linearization, Info dictionary fields
@@ -107,6 +107,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 | Check | Parity | Remaining mismatches |
 |---|---|---|
 | `info` (version, pages, xref size, repaired) | 98.9% (5,069 / 5,123) | 53 encrypted files (M2), 1 Brotli file (M2) |
+| `pages` (page lookup, inherited attributes) | 99.8% (5,114 / 5,123) | 8 encrypted, 1 Brotli |
 | `objects` (every object, raw stream lengths) | 98.6% (5,049 / 5,122) | 66 encrypted, 1 Brotli, and 4 others: `issue18986.pdf` and `poppler-90-0-fuzzed.pdf` (lazy repairs MuPDF triggers that nupdf does not), `fuzz-16214.pdf` and two veraPDF files (MuPDF stops reading a stream at a buffer boundary when /Length overshoots into `endstream`) |
 
 There are no crashes, and no files that MuPDF opens but nupdf cannot. On a 300-file sample run sequentially, `nupdf info` takes 529 ms in total against MuPDF's 1,308 ms (geometric-mean speedup 2.47x, process start included; the MuPDF side also pays for its JavaScript runtime).
