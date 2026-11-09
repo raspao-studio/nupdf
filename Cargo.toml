@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/nupdf", "crates/nupdf-cli", "xtask"]
+default-members = ["crates/nupdf", "crates/nupdf-cli"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/humships/nupdf"
+authors = ["hum <hello@byhum.dev>"]
+
+[workspace.dependencies]
+nupdf = { path = "crates/nupdf" }
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Product crates opt in with `[lints] workspace = true`. xtask does not: it is
+# dev tooling and needs a little unsafe for wait4().
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# Untrusted input must never panic. Tests are exempt via clippy.toml.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

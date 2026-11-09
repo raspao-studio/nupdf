@@ -1,0 +1,99 @@
+# Public corpora for the differential harness.
+#
+# Files are fetched into $NUPDF_CORPUS_DIR (default ~/.cache/nupdf/corpus) with
+# `cargo xtask corpus fetch <name>` and are never committed. Tiers:
+#   standard   public regression suites, ~5k files, run before merging milestone work
+#   redaction  leak-scoring suites used from M6
+#   wild       large crawls, sampled; contain malformed and malicious files
+#
+# `kind = "git"` sources are sparse, shallow clones of `paths` (gitignore-style
+# patterns). `kind = "manual"` sources are downloaded by hand into the
+# source's directory until fetching is automated (PLAN.md, M1).
+
+[[source]]
+name = "pdfjs"
+tier = "standard"
+kind = "git"
+url = "https://github.com/mozilla/pdf.js.git"
+paths = ["/test/pdfs/"]
+license = "Apache-2.0 repository; files come from bug reports and keep their own terms"
+about = "pdf.js regression PDFs: broken files, odd fonts, encryption (~1.1k files, plus .link files we skip)"
+
+[[source]]
+name = "qpdf"
+tier = "standard"
+kind = "git"
+url = "https://github.com/qpdf/qpdf.git"
+paths = ["*.pdf"]
+license = "Apache-2.0"
+about = "qpdf test suite: xref, object streams, encryption, linearization (~700 files)"
+
+[[source]]
+name = "pdfium"
+tier = "standard"
+kind = "git"
+url = "https://pdfium.googlesource.com/pdfium"
+paths = ["/testing/resources/"]
+license = "BSD-3-Clause"
+about = "PDFium test resources"
+
+[[source]]
+name = "verapdf"
+tier = "standard"
+kind = "git"
+url = "https://github.com/veraPDF/veraPDF-corpus.git"
+paths = ["*.pdf"]
+license = "CC-BY-4.0"
+about = "veraPDF corpus including Isartor and PDF/A TWG files (~2.7k files)"
+
+[[source]]
+name = "sample-files"
+tier = "standard"
+kind = "git"
+url = "https://github.com/py-pdf/sample-files.git"
+paths = ["*.pdf"]
+license = "CC-BY-SA-4.0"
+about = "py-pdf sample files"
+
+[[source]]
+name = "pdf-differences"
+tier = "standard"
+kind = "git"
+url = "https://github.com/pdf-association/pdf-differences.git"
+paths = ["*.pdf"]
+license = "Apache-2.0"
+about = "PDF Association files that render differently across viewers"
+
+[[source]]
+name = "pdf20examples"
+tier = "standard"
+kind = "git"
+url = "https://github.com/pdf-association/pdf20examples.git"
+paths = ["*.pdf"]
+license = "See repository"
+about = "PDF Association PDF 2.0 examples"
+
+[[source]]
+name = "redaction-benchmarks"
+tier = "redaction"
+kind = "git"
+url = "https://github.com/RedactionTools/pdf-redaction-benchmarks.git"
+paths = ["/"]
+license = "AGPL-3.0"
+about = "Redaction leak benchmarks: content streams, annotations, layers, revisions, metadata, images"
+
+[[source]]
+name = "govdocs1"
+tier = "wild"
+kind = "manual"
+url = "https://downloads.digitalcorpora.org/corpora/files/govdocs1/"
+license = "Digital Corpora terms; believed freely redistributable; contains malware"
+about = "GovDocs1: ~231k PDFs among ~986k files; sample a few zips"
+
+[[source]]
+name = "cc-main-2021-31"
+tier = "wild"
+kind = "manual"
+url = "https://digitalcorpora.org/cc-main-2021-31-pdf-untruncated/"
+license = "Common Crawl and Digital Corpora terms; not sanitized, contains malware"
+about = "SafeDocs CC-MAIN-2021-31-PDF-UNTRUNCATED: ~8M PDFs; sample subsets"

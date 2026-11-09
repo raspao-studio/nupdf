@@ -1,0 +1,20 @@
+{
+  "oracle": "1.28.6",
+  "checks": {
+    "info": {
+      "smoke/broken-xref-offsets.pdf": "match",
+      "smoke/catalog-version.pdf": "mismatch",
+      "smoke/cr-line-endings.pdf": "match",
+      "smoke/crlf-line-endings.pdf": "match",
+      "smoke/flate-content.pdf": "match",
+      "smoke/garbage-prefix.pdf": "match",
+      "smoke/incremental-update.pdf": "match",
+      "smoke/minimal.pdf": "match",
+      "smoke/multipage-inherit.pdf": "match",
+      "smoke/no-xref.pdf": "match",
+      "smoke/truncated.pdf": "oracle_failed",
+      "smoke/version-2.0.pdf": "match",
+      "smoke/xref-stream.pdf": "match"
+    }
+  }
+}
