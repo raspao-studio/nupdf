@@ -56,7 +56,7 @@ Third-party PDFs are never committed; `corpus/manifest.toml` records each source
 
 | Check | Compares | Tolerance | From |
 |---|---|---|---|
-| `info` | Effective version, page count, xref size, repaired; boxes and encryption later | exact | M0, extended in M1 |
+| `info` | Effective version, page count, xref size, repaired, revisions, Info metadata; encryption later | exact | M0, extended in M1 |
 | `objects` | Every object in canonical JSON (names `#xx`-escaped, strings hex, reals at f32), plus raw stream lengths | exact (numbers per DECISIONS D13) | M1 |
 | `pages` | Page lookup for every index and inherited MediaBox, CropBox, Rotate and Resources; page count before and after lookups | exact | M1 |
 | `streams` | BLAKE3 of each decoded stream | exact, except image filters | M2 |

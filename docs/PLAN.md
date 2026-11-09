@@ -95,7 +95,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [x] Page tree: MuPDF's page map (including its `/Count` rewrite and the empty-map fallback), the slow lookup that guesses node types from `/Kids` and `/MediaBox`, cycle limits, and inherited `Resources`, `MediaBox`, `CropBox` and `Rotate` with MuPDF's Parent repair on cycles; `nupdf pages` and the `pages` check (99.8% on the standard tier, the rest encrypted or Brotli)
 - [ ] `Limits`: xref size, object-stream count and reference-chain length as configurable limits (nesting depth is done)
 - [ ] Diagnostics: the harness compares warning classes between MuPDF and nupdf
-- [ ] `nupdf info` v1 (rest): page box summary, linearization, Info dictionary fields
+- [x] `nupdf info` v1 (rest): linearization, revisions as MuPDF counts them, and Info entries decoded with a port of MuPDF's text-string conversion; page boxes are reported per page by `nupdf pages`
 - [x] `nupdf show <ref>`: one object or the trailer, with stream lengths and optional decoded data; `objects` and `pages` now carry the shared report envelope (`schema`, `doc_id`, `diagnostics`)
 - [x] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object`, `filters` and `open_walk`; a first 60-second run per target found nothing, and CI runs each for 30 seconds
 - [ ] One CPU-hour per fuzz target with no findings (the M1 exit criterion)
@@ -106,7 +106,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 
 | Check | Parity | Remaining mismatches |
 |---|---|---|
-| `info` (version, pages, xref size, repaired) | 98.9% (5,069 / 5,123) | 53 encrypted files (M2), 1 Brotli file (M2) |
+| `info` (version, pages, xref size, repaired, revisions, metadata) | 98.7% (5,054 / 5,123) | 68 encrypted files (M2; their Info strings are encrypted), 1 Brotli file (M2) |
 | `pages` (page lookup, inherited attributes) | 99.8% (5,114 / 5,123) | 8 encrypted, 1 Brotli |
 | `objects` (every object, raw stream lengths) | 98.6% (5,049 / 5,122) | 66 encrypted, 1 Brotli, and 4 others: `issue18986.pdf` and `poppler-90-0-fuzzed.pdf` (lazy repairs MuPDF triggers that nupdf does not), `fuzz-16214.pdf` and two veraPDF files (MuPDF stops reading a stream at a buffer boundary when /Length overshoots into `endstream`) |
 
