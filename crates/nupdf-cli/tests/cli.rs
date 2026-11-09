@@ -263,3 +263,19 @@ fn decode_limits_surface_as_stream_errors() {
         "decoded stream exceeds the size limit"
     );
 }
+
+#[test]
+fn lazy_repairs_report_the_error_that_caused_them() {
+    let report = info("broken-xref-offsets.pdf");
+    let messages: Vec<&str> = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    assert!(
+        messages.contains(&"syntax error: expected object number"),
+        "{messages:?}"
+    );
+    assert!(messages.contains(&"repairing PDF document"), "{messages:?}");
+}
