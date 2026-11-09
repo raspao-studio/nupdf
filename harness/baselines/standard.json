@@ -17625,7 +17625,7 @@
       "qpdf/qpdf/qtest/qpdf/various-updates-updated.pdf": "match",
       "qpdf/qpdf/qtest/qpdf/warn-replace.pdf": "match",
       "qpdf/qpdf/qtest/qpdf/weird-tokens.pdf": "match",
-      "qpdf/qpdf/qtest/qpdf/xref-compressed-in-compressed.pdf": "mismatch",
+      "qpdf/qpdf/qtest/qpdf/xref-compressed-in-compressed.pdf": "match",
       "qpdf/qpdf/qtest/qpdf/xref-errors.pdf": "match",
       "qpdf/qpdf/qtest/qpdf/xref-range.pdf": "match",
       "qpdf/qpdf/qtest/qpdf/xref-with-short-size.pdf": "match",

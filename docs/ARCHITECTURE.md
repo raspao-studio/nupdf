@@ -38,6 +38,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `parse` | `pdf/pdf-parse.c` | M1 |
 | `object` | `pdf/pdf-object.c` | M1 |
 | `xref` | `pdf/pdf-xref.c` (loading), `fitz/filter-basic.c` (endstream filter) | M1 |
+| `slots` (sparse xref storage) | new; MuPDF allocates every declared slot | M1 |
 | `repair` (scanner) | `pdf/pdf-repair.c` | M1 |
 | `document` (state, loading, object streams, repair rebuild, version, page count) | `pdf/pdf-xref.c`, `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1 |
 | `diag` | MuPDF's `fz_warn` calls, as data | M1 |
@@ -66,15 +67,15 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 pub struct Document {
     source: Source,                 // Arc<[u8]>; the file bytes, shared, never mutated
     header: Header,                 // offset ("bias") and version
-    xref: Xref,                     // one slot per object number
+    state: RwLock<Arc<State>>,      // xref entries and the object cache; replaced whole on repair
     trailer: Dict,
     revisions: Vec<Revision>,       // incremental-update sections, newest first
     diagnostics: Diagnostics,       // what was repaired or tolerated while opening
 }
 
-struct Slot {
-    entry: XrefEntry,               // Free | InFile { offset, gen } | InStream { stream, index }
-    value: OnceLock<Result<Object, ObjectError>>, // parsed on first use, from any thread
+struct State {
+    entries: Slots,                 // 16-byte entries; an array, or uniform ranges plus a map for huge tables
+    cache: Cache,                   // loaded objects, in 64 shards behind RwLocks
 }
 
 pub enum Object {
@@ -93,7 +94,7 @@ Open questions in PLAN.md decide `Real` (f32 or f64), the `Dict` layout and `Nam
 
 MuPDF needs a cloned `fz_context` per thread and serializes access to a document. Its documented pattern for parallelism is to build display lists on one thread and rasterize them on others. nupdf instead makes the document itself shareable:
 
-- `Document: Send + Sync`. Object resolution is lazy and lock-free (`OnceLock` per slot). Two threads that race to parse the same object do the same work, and one result wins.
+- `Document: Send + Sync`. Object resolution is lazy. Loaded objects go into a cache split into 64 shards, each behind an `RwLock`, so readers rarely contend. Two threads that race to load the same object may both parse it, and the first result stored wins. A repair builds a new `State` and swaps it in; readers holding the old one finish against it.
 - Shared caches (fonts, decoded images, glyphs) are concurrent maps with size bounds and are keyed by `ObjRef`.
 - Page-level operations (extract, search, render, redaction planning) fan out over pages with rayon. Results are collected by page index, so output is identical at every thread count, and a test enforces that.
 - `batch` adds file-level parallelism on top. The MCP server keeps open documents in a handle cache, so repeated calls do not reparse.
