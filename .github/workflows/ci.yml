@@ -28,3 +28,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # Not a required check: keeps the fuzz targets compiling and gives each a
+  # short run on every change. Long runs happen locally (docs/TESTING.md).
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Seed the document corpus with the smoke fixtures
+        run: mkdir -p fuzz/corpus/open_walk && cp corpus/smoke/*.pdf fuzz/corpus/open_walk/
+      - name: Run each target for 30 seconds
+        run: |
+          for target in lex parse_object filters open_walk; do
+            cargo fuzz run -O "$target" -- -max_total_time=30 -rss_limit_mb=2048 -timeout=10
+          done

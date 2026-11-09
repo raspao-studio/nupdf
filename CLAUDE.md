@@ -9,7 +9,9 @@ A Rust rewrite of MuPDF's PDF engine, built for agents. Read `docs/PLAN.md` firs
 - `cargo xtask oracle build`: pinned MuPDF in `target/oracle/mupdf-<version>/`. Its `source/` tree is the reference to read when porting.
 - `cargo xtask fixtures`: regenerate `corpus/smoke`. Never edit those files by hand.
 - `cargo xtask harness [--tier standard] [--check NAME] [--update-baseline]`
-- `cargo xtask bench [--pair NAME] [--runs N]`
+- `cargo xtask bench [--pair NAME] [--runs N] [--sample N]`
+- `cargo +nightly fuzz run -O <lex|parse_object|filters|open_walk>`
+- Changes reach `main` through pull requests; `main` is protected.
 
 ## Rules
 

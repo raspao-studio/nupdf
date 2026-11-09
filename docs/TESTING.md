@@ -95,6 +95,13 @@ The M0 `info` pair is not like for like (nupdf only reads the header). It exists
 
 ## Fuzzing (from M1)
 
+```bash
+cargo +nightly fuzz run -O open_walk -- -max_total_time=3600   # one CPU-hour
+cargo +nightly fuzz run -O lex                                  # until stopped
+```
+
+Targets live in `fuzz/fuzz_targets`: `lex`, `parse_object`, `filters` and `open_walk` (open a document, compute its version and page count, load every object and decode every stream). Seed `fuzz/corpus/open_walk/` with the smoke fixtures and small standard-tier files; corpora and crash artifacts are not committed.
+
 - cargo-fuzz targets per parser surface: `lex`, `parse_object`, `open_walk`, one per decoder, the content parser and the font parsers.
 - Seeds come from the smoke and standard tiers.
 - Every crash becomes a smoke fixture or a unit test before it is fixed.

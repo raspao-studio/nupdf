@@ -85,7 +85,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [x] Object model: reals are `f32` and parsed by a port of MuPDF's `strtof`; dictionaries keep insertion order (DECISIONS D10, D11)
 - [x] Xref: `startxref` search, classic tables including 19-byte entries and broken subsection lines, xref streams (`/W`, `/Index`), hybrid files (`/XRefStm`), object streams (`/N`, `/First`, forward-only reads), `/Prev` chains with loop detection, MuPDF's conditions for falling back to repair
 - [x] Lazy, concurrent object resolution: one `OnceLock` per xref slot, an immutable xref snapshot swapped on repair, cycle detection
-- [x] Repair as in `pdf-repair.c`: scan for objects, streams and trailers; rebuild the trailer; correct stream lengths; reclaim object-stream members; find `/Root` and `/Info`; lazy repair on a bad object; MuPDF's "dead document" state when a lazy repair fails
+- [x] Repair as in `pdf-repair.c`: scan for objects, streams and trailers; rebuild the trailer; correct stream lengths; reclaim object-stream members; find `/Root` and `/Info`; lazy repair on a bad object; MuPDF's empty-xref state after a failed lazy repair
 - [x] Effective version from `/Root/Version` (fixed the smoke mismatch)
 - [x] `nupdf info` v1 (part): effective and header version, page count, xref size, revisions, repaired, encryption detected
 - [x] `nupdf objects`: canonical JSON dump of every object, with raw stream lengths
@@ -97,7 +97,8 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [ ] Diagnostics: the harness compares warning classes between MuPDF and nupdf
 - [ ] `nupdf info` v1 (rest): page box summary, linearization, Info dictionary fields
 - [ ] `nupdf show <ref>`
-- [ ] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object` and `open_walk`, seeded from smoke and standard
+- [x] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object`, `filters` and `open_walk`; a first 60-second run per target found nothing, and CI runs each for 30 seconds
+- [ ] One CPU-hour per fuzz target with no findings (the M1 exit criterion)
 - [ ] Fixtures: one per lexer leniency and per xref repair path
 - [ ] Investigate the four non-encrypted `objects` mismatches listed below
 
