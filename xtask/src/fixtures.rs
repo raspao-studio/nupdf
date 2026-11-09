@@ -102,6 +102,9 @@ pub fn all() -> Vec<Fixture> {
             bytes: truncated(),
         },
     ]
+    .into_iter()
+    .chain(edge_cases())
+    .collect()
 }
 
 pub fn run(root: &Path, check: bool) -> Result<()> {
@@ -198,6 +201,27 @@ impl Pdf {
         self.line("endobj");
     }
 
+    /// An object whose body is arbitrary bytes (for lexer edge cases).
+    fn obj_bytes(&mut self, num: u32, body: &[u8]) {
+        self.offsets.insert(num, self.out.len());
+        self.line(&format!("{num} 0 obj"));
+        self.out.extend_from_slice(body);
+        self.out.extend_from_slice(self.eol.as_bytes());
+        self.line("endobj");
+    }
+
+    /// A stream whose dictionary is written as given, /Length included.
+    fn stream_as_is(&mut self, num: u32, dict: &str, data: &[u8]) {
+        self.offsets.insert(num, self.out.len());
+        self.line(&format!("{num} 0 obj"));
+        self.line(dict);
+        self.line("stream");
+        self.out.extend_from_slice(data);
+        self.out.extend_from_slice(self.eol.as_bytes());
+        self.line("endstream");
+        self.line("endobj");
+    }
+
     fn stream(&mut self, num: u32, dict: &str, data: &[u8]) {
         self.offsets.insert(num, self.out.len());
         self.line(&format!("{num} 0 obj"));
@@ -251,6 +275,18 @@ impl Pdf {
 
     fn size(&self) -> u32 {
         self.offsets.keys().max().map_or(1, |n| n + 1)
+    }
+
+    /// Like `finish_with_xref`, but with a deliberately wrong /Size.
+    fn finish_with_size(mut self, size: u32) -> Vec<u8> {
+        let nums: Vec<u32> = (1..self.size()).collect();
+        let start = self.xref(&nums, true);
+        self.line("trailer");
+        self.line(&format!("<</Root 1 0 R/Size {size}>>"));
+        self.line("startxref");
+        self.line(&start.to_string());
+        self.line("%%EOF");
+        self.out
     }
 
     fn finish_with_xref(mut self, extra_trailer: &str) -> Vec<u8> {
@@ -411,6 +447,302 @@ fn truncated() -> Vec<u8> {
     let pdf = hello(Pdf::new("1.7"), "Truncated", false);
     let cut = pdf.offsets[&3] + 20;
     pdf.out[..cut].to_vec()
+}
+
+/// One fixture per lexer leniency, xref repair path and page tree quirk.
+fn edge_cases() -> Vec<Fixture> {
+    let fx = |name, about, needs_repair, bytes| Fixture {
+        name,
+        about,
+        needs_repair,
+        bytes,
+    };
+    vec![
+        fx(
+            "lexer-numbers.pdf",
+            "Number leniency: --5, 0.0-5684342, 1.2.3, .5, 4., long integer parts, overflow",
+            false,
+            with_object(
+                "<</A --5 /B 0.000000000000-5684342 /C 1.2.3 /D .5 /E 4. /F 12345678901.5 \
+                 /G 18446744073709551617 /H 1e5 /I -.25 /J 3.40282347e38 /K 0.1 /L 2.000000001>>",
+            ),
+        ),
+        fx(
+            "lexer-names.pdf",
+            "Name escapes: #20, #2f, #00, malformed escapes, non-ASCII bytes, an over-long name",
+            false,
+            with_object_bytes(&names_body()),
+        ),
+        fx(
+            "lexer-strings.pdf",
+            "Literal and hex strings: escapes, octal, line continuations, raw EOLs, odd and invalid hex",
+            false,
+            with_object_bytes(
+                b"[(a\\(b\\)c) (\\n\\r\\t\\b\\f\\(\\)\\\\) (\\101\\7\\0123) (x\\\nY\\\r\nZ) \
+                  (cr\rcrlf\r\nlf\n) (nest(ed)) <48656c6c6f> <4> <4z1> <>]",
+            ),
+        ),
+        fx(
+            "dict-quirks.pdf",
+            "Duplicate keys, a broken reference that swallows a token, references in arrays",
+            false,
+            with_object("<</A 1 /A 2 /B 3 4 (x) /C [1 2 0 R 3] /D null /E <</F 5 0 R>>>>"),
+        ),
+        fx(
+            "xref-19-byte-entries.pdf",
+            "Classic xref whose entries are 19 bytes (no space before the EOL)",
+            false,
+            nineteen_byte_xref(),
+        ),
+        fx(
+            "xref-subsection-same-line.pdf",
+            "The first xref entry sits on the subsection header line",
+            false,
+            subsection_same_line(),
+        ),
+        fx(
+            "xref-size-off-by-one.pdf",
+            "Trailer /Size one smaller than the table",
+            false,
+            hello(Pdf::new("1.4"), "Size", false).finish_with_size(5),
+        ),
+        fx(
+            "xref-size-too-small.pdf",
+            "Trailer /Size far smaller than the table, which sends MuPDF to repair",
+            true,
+            hello(Pdf::new("1.4"), "Size", false).finish_with_size(2),
+        ),
+        fx(
+            "xref-prev-loop.pdf",
+            "A trailer whose /Prev points at its own xref section",
+            false,
+            prev_loop(),
+        ),
+        fx(
+            "stream-length-short.pdf",
+            "Stream /Length shorter than the data",
+            false,
+            with_stream("<</Length 5>>", b"0 0 m 100 100 l S"),
+        ),
+        fx(
+            "stream-length-long.pdf",
+            "Stream /Length running past endstream",
+            false,
+            with_stream("<</Length 60>>", b"0 0 m 100 100 l S"),
+        ),
+        fx(
+            "stream-length-indirect.pdf",
+            "Stream /Length given as an indirect reference",
+            false,
+            indirect_length(),
+        ),
+        fx(
+            "missing-endobj.pdf",
+            "An object without endobj, with a correct xref",
+            false,
+            missing_endobj(),
+        ),
+        fx(
+            "no-header.pdf",
+            "No %PDF- header: MuPDF repairs and ignores every stream /Length",
+            true,
+            no_header(),
+        ),
+        fx(
+            "objstm-first-too-small.pdf",
+            "Object stream whose /First points inside its header",
+            false,
+            objstm_first_too_small(),
+        ),
+        fx(
+            "wrong-object-at-offset.pdf",
+            "An xref offset that points at a different object, repaired on first use",
+            true,
+            wrong_object_at_offset(),
+        ),
+        fx(
+            "pages-count-too-high.pdf",
+            "/Count claims three pages, the tree has one; MuPDF rewrites /Count",
+            false,
+            page_tree(
+                "<</Type/Pages/Kids[3 0 R]/Count 3/MediaBox[0 0 200 200]>>",
+                &[],
+                "",
+            ),
+        ),
+        fx(
+            "pages-untyped-node.pdf",
+            "An intermediate page tree node without /Type, found by the slow lookup",
+            false,
+            page_tree(
+                "<</Type/Pages/Kids[4 0 R]/Count 1>>",
+                &[(4, "<</Kids[3 0 R]/Count 1/Parent 2 0 R>>")],
+                "/Parent 4 0 R",
+            ),
+        ),
+        fx(
+            "pages-parent-cycle.pdf",
+            "The page tree root lists itself as its /Parent",
+            false,
+            page_tree(
+                "<</Type/Pages/Kids[3 0 R]/Count 1/Parent 2 0 R/MediaBox[0 0 200 200]>>",
+                &[],
+                "",
+            ),
+        ),
+    ]
+}
+
+/// A minimal one-page file with object 6 set to `body`.
+fn with_object(body: &str) -> Vec<u8> {
+    with_object_bytes(body.as_bytes())
+}
+
+fn with_object_bytes(body: &[u8]) -> Vec<u8> {
+    let mut pdf = hello(Pdf::new("1.4"), "Edge case", false);
+    pdf.obj_bytes(6, body);
+    pdf.finish_with_xref("")
+}
+
+fn names_body() -> Vec<u8> {
+    let mut body = b"[/A#20B /#2f /a#00b /a#zz /a#4g /caf\xe9 /Tab#09 /".to_vec();
+    body.extend(std::iter::repeat_n(b'x', 4100));
+    body.extend_from_slice(b"]");
+    body
+}
+
+/// Objects 1-5 plus object 6, a stream with the given dictionary.
+fn with_stream(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut pdf = hello(Pdf::new("1.4"), "Stream", false);
+    pdf.stream_as_is(6, dict, data);
+    pdf.finish_with_xref("")
+}
+
+fn indirect_length() -> Vec<u8> {
+    let data = b"0 0 m 100 100 l S";
+    let mut pdf = hello(Pdf::new("1.4"), "Stream", false);
+    pdf.stream_as_is(6, "<</Length 7 0 R>>", data);
+    pdf.obj(7, &data.len().to_string());
+    pdf.finish_with_xref("")
+}
+
+fn nineteen_byte_xref() -> Vec<u8> {
+    let mut pdf = hello(Pdf::new("1.4"), "19-byte entries", false);
+    let start = pdf.out.len();
+    pdf.line("xref");
+    pdf.line("0 6");
+    pdf.out.extend_from_slice(b"0000000000 65535 f\n");
+    for num in 1..6u32 {
+        let entry = format!("{:010} 00000 n\n", pdf.offsets[&num]);
+        pdf.out.extend_from_slice(entry.as_bytes());
+    }
+    pdf.trailer("/Root 1 0 R", start);
+    pdf.out
+}
+
+fn subsection_same_line() -> Vec<u8> {
+    let mut pdf = hello(Pdf::new("1.4"), "Same line", false);
+    let start = pdf.out.len();
+    pdf.line("xref");
+    pdf.out.extend_from_slice(b"0 6 0000000000 65535 f\r\n");
+    for num in 1..6u32 {
+        let entry = format!("{:010} 00000 n\r\n", pdf.offsets[&num]);
+        pdf.out.extend_from_slice(entry.as_bytes());
+    }
+    pdf.trailer("/Root 1 0 R", start);
+    pdf.out
+}
+
+fn prev_loop() -> Vec<u8> {
+    let mut pdf = hello(Pdf::new("1.4"), "Loop", false);
+    let nums: Vec<u32> = (1..pdf.size()).collect();
+    let start = pdf.xref(&nums, true);
+    pdf.trailer(&format!("/Root 1 0 R/Prev {start}"), start);
+    pdf.out
+}
+
+fn missing_endobj() -> Vec<u8> {
+    let mut pdf = hello(Pdf::new("1.4"), "No endobj", false);
+    pdf.offsets.insert(6, pdf.out.len());
+    pdf.line("6 0 obj");
+    pdf.line("<</Note(no endobj follows)>>");
+    pdf.obj(7, "<</Next true>>");
+    pdf.finish_with_xref("")
+}
+
+fn no_header() -> Vec<u8> {
+    let body = with_stream("<</Length 5>>", b"0 0 m 100 100 l S");
+    let at = body.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1);
+    body[at..].to_vec()
+}
+
+fn objstm_first_too_small() -> Vec<u8> {
+    let mut pdf = Pdf::new("1.5");
+    pdf.stream(4, "", &text_content("Object stream"));
+    pdf.obj(5, FONT);
+    let objects = [
+        (1, "<</Type/Catalog/Pages 2 0 R>>"),
+        (2, "<</Type/Pages/Kids[3 0 R]/Count 1>>"),
+        (
+            3,
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
+        ),
+    ];
+    let mut index = String::new();
+    let mut body = String::new();
+    for (num, text) in objects {
+        let _ = write!(index, "{num} {} ", body.len());
+        body.push_str(text);
+        body.push('\n');
+    }
+    let data = format!("{index}{body}");
+    pdf.stream(6, "/Type/ObjStm/N 3/First 4", data.as_bytes());
+    let xref_offset = pdf.out.len();
+    let mut rows = Vec::new();
+    let mut row = |kind: u8, field2: u32, field3: u16| {
+        rows.push(kind);
+        rows.extend_from_slice(&field2.to_be_bytes());
+        rows.extend_from_slice(&field3.to_be_bytes());
+    };
+    row(0, 0, 65535);
+    for i in 0..3u16 {
+        row(2, 6, i);
+    }
+    for num in [4, 5, 6] {
+        row(1, u32::try_from(pdf.offsets[&num]).unwrap_or(0), 0);
+    }
+    row(1, u32::try_from(xref_offset).unwrap_or(0), 0);
+    pdf.stream(7, "/Type/XRef/Size 8/W[1 4 2]/Root 1 0 R", &rows);
+    pdf.line("startxref");
+    pdf.line(&xref_offset.to_string());
+    pdf.line("%%EOF");
+    pdf.out
+}
+
+fn wrong_object_at_offset() -> Vec<u8> {
+    let mut pdf = hello(Pdf::new("1.4"), "Swapped", false);
+    // Point object 5's entry at object 4.
+    let four = pdf.offsets[&4];
+    pdf.offsets.insert(5, four);
+    pdf.finish_with_xref("")
+}
+
+/// Catalog 1, page tree root 2 (`root`), page 3 (with `page_extra`), plus
+/// `extra` objects.
+fn page_tree(root: &str, extra: &[(u32, &str)], page_extra: &str) -> Vec<u8> {
+    let mut pdf = Pdf::new("1.4");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    pdf.obj(2, root);
+    let parent = if page_extra.is_empty() {
+        "/Parent 2 0 R"
+    } else {
+        page_extra
+    };
+    pdf.obj(3, &format!("<</Type/Page{parent}>>"));
+    for (num, body) in extra {
+        pdf.obj(*num, body);
+    }
+    pdf.finish_with_xref("")
 }
 
 #[cfg(test)]

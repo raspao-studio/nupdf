@@ -45,7 +45,7 @@ cargo xtask corpus fetch qpdf           # sparse clone of one source
 
 | Tier | Contents | Where |
 |---|---|---|
-| `smoke` | 13 generated fixtures, growing with each milestone | committed in `corpus/smoke` |
+| `smoke` | 32 generated fixtures, one per syntax feature, leniency or repair path; growing with each milestone | committed in `corpus/smoke` |
 | `standard` | pdf.js, qpdf, PDFium, veraPDF, py-pdf sample files, pdf-differences, pdf20examples: about 5k files | fetched into `$NUPDF_CORPUS_DIR` |
 | `redaction` | pdf-redaction-benchmarks, plus nupdf's generated leak fixtures | fetched, from M6 |
 | `wild` | Samples of GovDocs1 and SafeDocs CC-MAIN-2021-31 | downloaded by hand, from M1 |
