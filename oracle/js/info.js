@@ -23,5 +23,12 @@ if (!report.needs_password) {
 if (doc.isPDF()) {
   report.object_count = doc.countObjects();
   report.repaired = doc.wasRepaired();
+  report.revisions = doc.countVersions();
+}
+var keys = ["Title", "Author", "Subject", "Keywords", "Creator", "Producer", "CreationDate", "ModDate"];
+report.metadata = {};
+for (var i = 0; i < keys.length; i++) {
+  var value = doc.getMetaData("info:" + keys[i]);
+  if (value) report.metadata[keys[i]] = value;
 }
 print(JSON.stringify(report));

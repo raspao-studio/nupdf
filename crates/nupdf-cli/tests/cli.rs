@@ -228,3 +228,13 @@ fn show_prints_one_object_and_its_stream() {
     let bad = nupdf(&["show", path.to_str().unwrap(), "xyz"]);
     assert_eq!(bad.status.code(), Some(2));
 }
+
+#[test]
+fn info_reports_metadata_and_revisions() {
+    let report = info("incremental-update.pdf");
+    assert_eq!(report["metadata"]["Title"], "Revision 2");
+    assert_eq!(report["metadata"]["Producer"], "nupdf fixtures");
+    assert!(report["metadata"].get("Author").is_none());
+    assert_eq!(report["revisions"], 2);
+    assert_eq!(report["linearized"], false);
+}

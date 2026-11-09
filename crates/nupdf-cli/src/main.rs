@@ -83,8 +83,11 @@ struct InfoReport {
     /// Slots in the cross-reference table.
     object_count: usize,
     revisions: usize,
+    linearized: bool,
     repaired: bool,
     encrypted: bool,
+    /// Info dictionary entries that are non-empty text strings.
+    metadata: serde_json::Map<String, serde_json::Value>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -296,6 +299,21 @@ fn info(path: &Path) -> Result<InfoReport, Failure> {
         Err(e) => (None, Some(e.0)),
     };
     let object_count = doc.xref_len();
+    let repaired = doc.repaired();
+    let revisions = doc.revisions();
+    let metadata = [
+        "Title",
+        "Author",
+        "Subject",
+        "Keywords",
+        "Creator",
+        "Producer",
+        "CreationDate",
+        "ModDate",
+    ]
+    .into_iter()
+    .filter_map(|key| doc.metadata(key).map(|v| (key.to_string(), v.into())))
+    .collect();
 
     let diagnostics = doc
         .diagnostics()
@@ -322,9 +340,11 @@ fn info(path: &Path) -> Result<InfoReport, Failure> {
         page_count,
         page_count_error,
         object_count,
-        revisions: doc.revisions(),
-        repaired: doc.repaired(),
+        revisions,
+        linearized: doc.linearized(),
+        repaired,
         encrypted: doc.is_encrypted(),
+        metadata,
         diagnostics,
     })
 }
