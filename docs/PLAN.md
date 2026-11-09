@@ -96,7 +96,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [ ] `Limits`: xref size, object-stream count and reference-chain length as configurable limits (nesting depth is done)
 - [ ] Diagnostics: the harness compares warning classes between MuPDF and nupdf
 - [ ] `nupdf info` v1 (rest): page box summary, linearization, Info dictionary fields
-- [ ] `nupdf show <ref>`
+- [x] `nupdf show <ref>`: one object or the trailer, with stream lengths and optional decoded data; `objects` and `pages` now carry the shared report envelope (`schema`, `doc_id`, `diagnostics`)
 - [x] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object`, `filters` and `open_walk`; a first 60-second run per target found nothing, and CI runs each for 30 seconds
 - [ ] One CPU-hour per fuzz target with no findings (the M1 exit criterion)
 - [ ] Fixtures: one per lexer leniency and per xref repair path

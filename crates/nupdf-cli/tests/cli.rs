@@ -187,3 +187,44 @@ fn objects_dump_every_slot() {
     assert_eq!(objects["6"]["stream"]["d"]["Type"]["n"], "ObjStm");
     assert!(objects["6"]["raw_len"].as_u64().unwrap() > 0);
 }
+
+#[test]
+fn every_report_carries_the_envelope() {
+    let path = smoke("minimal.pdf");
+    for command in ["info", "objects", "pages"] {
+        let report = run_json(&[command, path.to_str().unwrap()]);
+        assert!(
+            report["schema"].as_str().unwrap().starts_with("nupdf."),
+            "{command}"
+        );
+        assert!(
+            report["doc_id"].as_str().unwrap().starts_with("b3:"),
+            "{command}"
+        );
+        assert!(report["diagnostics"].is_array(), "{command}");
+    }
+}
+
+#[test]
+fn show_prints_one_object_and_its_stream() {
+    let path = smoke("flate-content.pdf");
+    let report = run_json(&["show", path.to_str().unwrap(), "4 0 R", "--data"]);
+    assert_eq!(report["schema"], "nupdf.show/v0");
+    assert_eq!(report["object"], "4 0 R");
+    assert_eq!(report["value"]["d"]["Filter"]["n"], "FlateDecode");
+    assert!(
+        report["stream"]["data"]
+            .as_str()
+            .unwrap()
+            .contains("(Compressed) Tj")
+    );
+    assert_eq!(report["stream"]["truncated"], false);
+
+    let trailer = run_json(&["show", path.to_str().unwrap(), "trailer"]);
+    assert_eq!(trailer["value"]["d"]["Root"]["ref"], "1 0 R");
+
+    let missing = nupdf(&["show", path.to_str().unwrap(), "99"]);
+    assert_eq!(missing.status.code(), Some(3));
+    let bad = nupdf(&["show", path.to_str().unwrap(), "xyz"]);
+    assert_eq!(bad.status.code(), Some(2));
+}
