@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use memchr::memmem;
 
-use crate::diag::Diagnostics;
+use crate::diag::{Diagnostics, report};
 use crate::filter;
 use crate::lex::{Lexer, Token, is_white};
 use crate::limits::Limits;
@@ -409,7 +409,7 @@ fn size_from_old_trailer(lx: &mut Lexer) -> Result<i32, XrefError> {
     if lx.next_token() != Token::OpenDict {
         return Err("expected trailer dictionary".into());
     }
-    let trailer = parse_dict(lx, 1).map_err(|e| e.0)?;
+    let trailer = parse_dict(lx, 1).map_err(|e| report::syntax(&e.0))?;
     let size = trailer.get(b"Size");
     if matches!(size, Some(Object::Ref(_))) {
         return Err("trailer Size entry is indirect".into());
@@ -506,7 +506,7 @@ fn read_old_xref(
     if lx.next_token() != Token::OpenDict {
         return Err("expected trailer dictionary".into());
     }
-    parse_dict(lx, 1).map_err(|e| e.0)
+    parse_dict(lx, 1).map_err(|e| report::syntax(&e.0))
 }
 
 fn parse_old_entry(buf: &[u8], num: i32) -> Result<Option<Entry>, XrefError> {
@@ -565,7 +565,7 @@ fn read_new_xref(
     limits: &Limits,
 ) -> Result<Dict, XrefError> {
     let at = lx.pos();
-    let ind = parse_indirect(lx).map_err(|e| e.message)?;
+    let ind = parse_indirect(lx).map_err(|e| report::syntax(&e.message))?;
     if ind.num == 0 {
         return Err("Trailer object number cannot be 0\n".into());
     }
@@ -613,7 +613,7 @@ fn read_new_xref(
         other => other.clone(),
     };
     let decoded =
-        filter::decode(&trailer, raw, &direct_only, diag, limits).map_err(|e| e.to_string())?;
+        filter::decode(&trailer, raw, &direct_only, diag, limits).map_err(|e| e.report())?;
 
     // A present but non-array /Index reads nothing, as in MuPDF.
     let ranges: Vec<(i32, i32)> = match trailer.get(b"Index") {

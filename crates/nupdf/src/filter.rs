@@ -24,6 +24,17 @@ pub enum DecodeError {
     Limit,
 }
 
+impl DecodeError {
+    /// The line MuPDF prints when this error is caught.
+    pub fn report(&self) -> String {
+        match self {
+            DecodeError::Failed(m) if m.starts_with("zlib error") => format!("library error: {m}"),
+            DecodeError::Limit => format!("limit error: {self}"),
+            other => format!("format error: {other}"),
+        }
+    }
+}
+
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

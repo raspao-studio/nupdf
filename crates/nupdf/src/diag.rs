@@ -59,3 +59,78 @@ impl Diagnostics {
         self.dropped.lock().map(|d| *d).unwrap_or(0)
     }
 }
+
+/// How MuPDF prints a caught exception: `<kind> error: <message>`. nupdf
+/// keeps the same lines so diagnostics can be compared with MuPDF's.
+pub mod report {
+    const KINDS: [&str; 8] = [
+        "format",
+        "syntax",
+        "generic",
+        "library",
+        "limit",
+        "argument",
+        "system",
+        "unsupported",
+    ];
+
+    pub fn syntax(message: &str) -> String {
+        format!("syntax error: {message}")
+    }
+
+    pub fn format(message: &str) -> String {
+        format!("format error: {message}")
+    }
+
+    /// `message` as a report line, defaulting to a format error.
+    pub fn line(message: &str) -> String {
+        if has_kind(message) {
+            message.to_string()
+        } else {
+            format(message)
+        }
+    }
+
+    pub fn has_kind(message: &str) -> bool {
+        KINDS.iter().any(|k| {
+            message
+                .strip_prefix(k)
+                .is_some_and(|rest| rest.starts_with(" error: "))
+        })
+    }
+
+    /// The message without its `<kind> error: ` prefix.
+    pub fn strip(message: &str) -> &str {
+        if has_kind(message) {
+            message.split_once(" error: ").map_or(message, |(_, m)| m)
+        } else {
+            message
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::report;
+
+    #[test]
+    fn report_lines_carry_mupdf_error_kinds() {
+        assert_eq!(
+            report::syntax("invalid key in dict"),
+            "syntax error: invalid key in dict"
+        );
+        assert_eq!(
+            report::line("cannot find startxref"),
+            "format error: cannot find startxref"
+        );
+        assert_eq!(
+            report::line("library error: zlib error: x"),
+            "library error: zlib error: x"
+        );
+        assert_eq!(
+            report::strip("syntax error: invalid key in dict"),
+            "invalid key in dict"
+        );
+        assert_eq!(report::strip("plain message"), "plain message");
+    }
+}
