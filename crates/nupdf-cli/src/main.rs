@@ -658,6 +658,7 @@ fn clean_options(f: &CleanFlags) -> Result<nupdf::write::WriteOptions, Failure> 
             code: "usage.bad_value",
             message: "unknown encryption method".into(),
         })?,
+        incremental: false,
     })
 }
 

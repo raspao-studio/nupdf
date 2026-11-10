@@ -53,7 +53,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `jbig2` (JBIG2Decode around hayro-jbig2) | `fitz/filter-jbig2.c`, `pdf/pdf-stream.c` (`pdf_load_jbig2_globals`); jbig2dec's refusals from `jbig2.c` and `jbig2_segment.c` | M2 |
 | `names` (the names MuPDF interns, which take their own dictionary lookup path) | `include/mupdf/pdf/name-table.h` | M3 |
 | `print` (object syntax as MuPDF writes it) | `pdf/pdf-object.c` (`pdf_print_obj`), `fitz/printf.c` (`fmtfloat`), `fitz/ftoa.c` (`fz_grisu`) | M3 |
-| `write` (full save, and the read-back check) | `pdf/pdf-write.c` | M3 |
+| `write` (full and incremental saves, and the read-back check) | `pdf/pdf-write.c` | M3 |
 | `rearrange` (keeping some pages in a given order) | `pdf/pdf-clean-file.c` (`pdf_rearrange_pages`), `pdf/pdf-nametree.c` (`pdf_load_name_tree`), `pdf/pdf-page.c` (`pdf_flatten_inheritable_page_items`), `pdf/pdf-repair.c` (`pdf_parent_root`) | M3 |
 | `edit` (document information, removing metadata, page rotation) | `pdf/pdf-xref.c` (`pdf_set_metadata`), `pdf/pdf-parse.c` (`pdf_new_text_string`) | M3 |
 | `garbage` (garbage collection on save: marking, merging duplicates, renumbering) | `pdf/pdf-write.c`, `pdf/pdf-object.c` (`pdf_objcmp`, `pdf_hash_obj`) | M3 |

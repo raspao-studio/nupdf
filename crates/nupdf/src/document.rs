@@ -148,6 +148,10 @@ pub(crate) struct State {
     /// The oldest xref section's size (`Loaded::oldest_size`); 0 when
     /// there is one section, as after a repair.
     oldest_size: i32,
+    /// `doc->last_xref_was_old_style`.
+    last_xref_was_old_style: bool,
+    /// The xref stream whose dictionary the trailer is (`Loaded::trailer_owner`).
+    trailer_owner: Option<i32>,
 }
 
 impl State {
@@ -166,6 +170,8 @@ impl State {
             repaired_parents: OnceLock::new(),
             section_offsets: Vec::new(),
             oldest_size: 0,
+            last_xref_was_old_style: false,
+            trailer_owner: None,
         }
     }
 
@@ -245,6 +251,8 @@ pub struct Document {
     edits: RwLock<Edits>,
     /// Whether `edits` holds anything, checked before every load.
     edited: AtomicBool,
+    /// Made by `create`, not read from a file.
+    created: bool,
 }
 
 /// The copy-on-write layer over the parsed document.
@@ -295,7 +303,9 @@ impl Document {
         out.extend_from_slice(
             format!("trailer\n<</Size 3/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
         );
-        Self::open(out)
+        let mut doc = Self::open(out)?;
+        doc.created = true;
+        Ok(doc)
     }
 
     /// `pdf_init_document`: read the header and xref, repairing if needed.
@@ -368,6 +378,7 @@ impl Document {
             needs_password: AtomicBool::new(false),
             edits: RwLock::new(Edits::default()),
             edited: AtomicBool::new(false),
+            created: false,
         };
 
         let loaded = if broken.is_none() && !is_fdf {
@@ -387,6 +398,8 @@ impl Document {
             Some(l) => {
                 let mut state = State::new(bias, l.entries, l.trailer, l.revisions, false);
                 state.section_offsets = l.section_offsets;
+                state.last_xref_was_old_style = l.last_xref_was_old_style;
+                state.trailer_owner = l.trailer_owner;
                 if l.revisions > 1 {
                     state.oldest_size = l.oldest_size;
                 }
@@ -922,6 +935,58 @@ impl Document {
             .iter()
             .filter_map(|&o| u64::try_from(o.saturating_add(state.bias as i64)).ok())
             .collect()
+    }
+
+    /// MuPDF's `doc->startxref`: where the newest xref section starts, as
+    /// the file's `startxref` gives it; 0 after a repair.
+    pub(crate) fn startxref(&self) -> i64 {
+        self.current().section_offsets.first().copied().unwrap_or(0)
+    }
+
+    /// The object a first edit to the trailer moves into MuPDF's
+    /// incremental section: the xref stream whose dictionary the trailer
+    /// is, until edits begin (MuPDF's trailer is a copy from then on).
+    pub(crate) fn trailer_owner(&self) -> Option<i32> {
+        if self.is_edited() {
+            return None;
+        }
+        self.current().trailer_owner
+    }
+
+    /// `doc->last_xref_was_old_style`.
+    pub(crate) fn last_xref_was_table(&self) -> bool {
+        self.current().last_xref_was_old_style
+    }
+
+    /// Bytes before the header, which offsets in the file do not count.
+    pub(crate) fn bias(&self) -> usize {
+        self.current().bias
+    }
+
+    /// MuPDF's `doc->file_size`: the bytes an incremental save copies.
+    pub(crate) fn file_size(&self) -> usize {
+        self.file_size
+    }
+
+    /// Whether `create` made it, so there is no file to add to.
+    pub(crate) fn is_new(&self) -> bool {
+        self.created
+    }
+
+    /// The entries of MuPDF's incremental section, in number order: each
+    /// object number, whether it holds an object (or is free), and its
+    /// generation.
+    pub(crate) fn incremental_entries(&self) -> Vec<(i32, bool, i32)> {
+        let mut out: Vec<(i32, bool, i32)> = self
+            .with_edits(|e| {
+                e.gens
+                    .iter()
+                    .map(|(&num, &g)| (num, e.objects.contains_key(&num), g))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_unstable();
+        out
     }
 
     /// Whether the file starts with a linearization dictionary.
