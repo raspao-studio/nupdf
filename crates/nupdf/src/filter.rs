@@ -111,12 +111,17 @@ const IMAGE_FILTERS: [&[u8]; 6] = [
     b"JPXDecode",
 ];
 
+/// `pdf_load_stream` for an object a filter's parameters refer to
+/// (/JBIG2Globals): its decoded data, or `None` when it is not a stream.
+pub type LoadStream<'r> = &'r dyn Fn(&Object) -> Option<Result<Vec<u8>, DecodeError>>;
+
 /// `pdf_open_filter`: `raw` through the stream's filter chain. With
 /// `might_be_image` false, image filters yield nothing, as in MuPDF.
 pub fn open_filters<'a>(
     raw: Stream<'a>,
     dict: &Dict,
     resolve: &dyn Fn(&Object) -> Object,
+    load: Option<LoadStream<'_>>,
     crypt: Option<CryptContext<'_>>,
     might_be_image: bool,
 ) -> Result<Stream<'a>, DecodeError> {
@@ -129,7 +134,7 @@ pub fn open_filters<'a>(
     match &filters {
         Object::Name(_) => {
             let p = params.map_or(Object::Null, resolve);
-            build_filter(raw, &filters, &p, resolve, crypt, might_be_image)
+            build_filter(raw, &filters, &p, resolve, load, crypt, might_be_image)
         }
         Object::Array(items) if !items.is_empty() => {
             let params = params.map_or(Object::Null, resolve);
@@ -139,7 +144,7 @@ pub fn open_filters<'a>(
                     .as_array()
                     .and_then(|ps| ps.get(i))
                     .map_or(Object::Null, resolve);
-                chain = build_filter(chain, &resolve(f), &p, resolve, crypt, might_be_image)?;
+                chain = build_filter(chain, &resolve(f), &p, resolve, load, crypt, might_be_image)?;
             }
             Ok(chain)
         }
@@ -154,6 +159,7 @@ fn build_filter<'a>(
     filter: &Object,
     params: &Object,
     resolve: &dyn Fn(&Object) -> Object,
+    load: Option<LoadStream<'_>>,
     crypt: Option<CryptContext<'_>>,
     might_be_image: bool,
 ) -> Result<Stream<'a>, DecodeError> {
@@ -208,9 +214,23 @@ fn build_filter<'a>(
             crate::fax::open(chain, p).map_err(DecodeError::Failed)
         }
         b"DCTDecode" | b"DCT" => Ok(crate::dct::open(chain, int(b"ColorTransform", -1))),
-        b"JBIG2Decode" => Err(DecodeError::Unsupported(
-            String::from_utf8_lossy(name).into_owned(),
-        )),
+        b"JBIG2Decode" => {
+            let mut globals = None;
+            let g = params.as_dict().and_then(|d| d.get(b"JBIG2Globals"));
+            if let Some(g) = g.filter(|g| !matches!(g, Object::Null)) {
+                match load.and_then(|load| load(g)) {
+                    Some(data) => {
+                        globals = crate::jbig2::load_globals(&data?, diag)
+                            .map_err(DecodeError::Failed)?;
+                    }
+                    None => diag.warn(
+                        "filter.jbig2_globals_not_stream",
+                        "jbig2 globals is not a stream, skipping globals",
+                    ),
+                }
+            }
+            Ok(crate::jbig2::open(chain, globals))
+        }
         b"RunLengthDecode" | b"RL" => Ok(open_rld(chain)),
         b"FlateDecode" | b"Fl" => predictor(Stream::new(
             Flate {
@@ -399,7 +419,7 @@ pub fn decode(
     diag: &Diagnostics,
     limits: &Limits,
 ) -> Result<Vec<u8>, DecodeError> {
-    let mut s = open_filters(Stream::memory(raw, diag), dict, resolve, None, true)?;
+    let mut s = open_filters(Stream::memory(raw, diag), dict, resolve, None, None, true)?;
     Ok(s.read_best(0, 0, limits.max_decoded_bytes)?)
 }
 

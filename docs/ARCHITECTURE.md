@@ -50,7 +50,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `fax` (CCITTFax) | `fitz/filter-fax.c` | M2 |
 | `dct` (DCTDecode around the JPEG decoder) | `fitz/filter-dct.c` | M2 |
 | `jpeg` (JPEG decoder) | libjpeg 10 as bundled with MuPDF: `jdapimin.c`, `jdapistd.c`, `jdmaster.c`, `jdinput.c`, `jdmarker.c`, `jdhuff.c`, `jdarith.c`, `jaricom.c`, `jdcoefct.c`, `jddctmgr.c`, `jidctint.c`, `jdmainct.c`, `jdsample.c`, `jdcolor.c`, `jutils.c` (NOTICE) | M2 |
-| `filter` (image decoders: JBIG2, JPX) | `fitz/filter-jbig2.c`, `fitz/load-jpx.c`, `fitz/load-jbig2.c` | M2 |
+| `jbig2` (JBIG2Decode around hayro-jbig2) | `fitz/filter-jbig2.c`, `pdf/pdf-stream.c` (`pdf_load_jbig2_globals`); jbig2dec's refusals from `jbig2.c` and `jbig2_segment.c` | M2 |
 | `write`, `edit`, `graft` | `pdf/pdf-write.c`, `pdf/pdf-graft.c`, `pdf/pdf-clean-file.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |
@@ -126,9 +126,12 @@ Pure Rust, widely used, permissive licenses compatible with AGPL (cargo-deny enf
 | Need | Crate |
 |---|---|
 | Deflate | zlib-rs |
-| LZW | weezl |
-| JPEG | zune-jpeg |
-| JPEG 2000, JBIG2, CCITT | hayro-jpeg2000, hayro-jbig2, fax / hayro-ccitt |
+| LZW | own port of MuPDF's decoder (DECISIONS D16) |
+| Brotli | brotli-decompressor |
+| JPEG | own port of libjpeg (DECISIONS D17) |
+| JBIG2 | hayro-jbig2 |
+| CCITT | own port of MuPDF's decoder |
+| JPEG 2000 | hayro-jpeg2000 (M4) |
 | Fonts | skrifa / read-fonts (fontations), subsetter; Type1 from hayro-font or our own parser |
 | Color management | moxcms |
 | Rasterizer | vello_cpu or tiny-skia (decided in M7) |

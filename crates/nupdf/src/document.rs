@@ -447,10 +447,24 @@ impl Document {
             .raw_stream_in(st, stream, length)
             .map_err(DecodeError::Failed)?;
         let crypt = self.crypt();
+        // pdf_load_jbig2_globals: the globals stream, decoded; a stream that
+        // needs itself is a cycle.
+        let load = |o: &Object| -> Option<Result<Vec<u8>, DecodeError>> {
+            let Object::Stream(s) = self.resolve_in(st, o) else {
+                return None;
+            };
+            let Some(_guard) = LoadGuard::enter(st, -1 - s.num) else {
+                return Some(Err(DecodeError::Failed(report::format(
+                    "cyclic reference when loading JBIG2 globals",
+                ))));
+            };
+            Some(self.stream_data_in(st, &s, true))
+        };
         filter::open_filters(
             raw,
             &stream.dict,
             &|o| self.resolve_in(st, o),
+            Some(&load),
             crypt.as_deref().map(|crypt| filter::CryptContext {
                 crypt,
                 num: stream.num,

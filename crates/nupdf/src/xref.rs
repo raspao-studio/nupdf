@@ -1163,7 +1163,7 @@ fn read_new_xref(
     };
     // MuPDF reads the entries a byte at a time from the decoded stream.
     let raw = stream::Stream::new(Endstream::new(lx.data(), length, data_start), diag);
-    let decoded = filter::open_filters(raw, &trailer, &direct_only, None, true)
+    let decoded = filter::open_filters(raw, &trailer, &direct_only, None, None, true)
         .and_then(|mut s| Ok(s.read_bytewise(limits.max_decoded_bytes)?))
         .map_err(|e| e.report())?;
 

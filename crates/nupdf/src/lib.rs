@@ -14,6 +14,7 @@ pub mod document;
 pub mod fax;
 pub mod filter;
 pub mod header;
+pub mod jbig2;
 pub mod jpeg;
 pub mod lex;
 pub mod limits;

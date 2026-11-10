@@ -51,7 +51,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = filter::decode(&dict, body, &|o| o.clone(), &diag, &limits);
     let raw = nupdf::stream::Stream::memory(body, &diag);
-    if let Ok(mut s) = filter::open_filters(raw, &dict, &|o| o.clone(), None, true) {
+    if let Ok(mut s) = filter::open_filters(raw, &dict, &|o| o.clone(), None, None, true) {
         let _ = s.read_bytewise(1 << 26);
     }
 });
