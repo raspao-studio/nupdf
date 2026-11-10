@@ -10,6 +10,7 @@ pub mod crypt;
 pub mod diag;
 mod doc_id;
 pub mod document;
+pub mod fax;
 pub mod filter;
 pub mod header;
 pub mod lex;
