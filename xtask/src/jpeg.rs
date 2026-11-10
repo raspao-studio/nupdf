@@ -5,8 +5,8 @@
 //! (spectral selection and DC successive approximation), Huffman coded with
 //! the standard tables, any sampling factors, an optional Adobe marker and
 //! restart interval. Image quality is not a goal; reaching decoder paths is.
-
-use std::f64::consts::PI;
+//! The forward DCT is integer arithmetic over a fixed cosine table, so the
+//! fixtures come out the same on every platform (libm's `cos` does not).
 
 /// One component: its ID and sampling factors.
 #[derive(Clone, Copy)]
@@ -171,6 +171,31 @@ struct Plane {
     height_in_blocks: usize,
 }
 
+/// 2^13, the scale of the cosine table.
+const ONE: i64 = 8192;
+/// cos(k * pi / 16) * 2^13, rounded, for k = 0..8.
+const COS: [i64; 8] = [8192, 8035, 7568, 6811, 5793, 4551, 3135, 1598];
+
+/// cos(a * pi / 16) * 2^13.
+fn cos16(a: usize) -> i64 {
+    let a = a % 32;
+    let a = if a > 16 { 32 - a } else { a };
+    match a {
+        0..8 => COS[a],
+        8 => 0,
+        _ => -COS[16 - a],
+    }
+}
+
+/// `n / d` rounded half away from zero, as `f64::round` does.
+fn div_round(n: i128, d: i128) -> i128 {
+    if n >= 0 {
+        (n + d / 2) / d
+    } else {
+        -((-n + d / 2) / d)
+    }
+}
+
 fn quant_table(c: usize) -> [u16; 64] {
     let base = if c == 0 { QUANT_LUM } else { QUANT_CHROM };
     // Quality 75.
@@ -185,11 +210,11 @@ fn plane(spec: &Spec, c: usize, max_h: usize, max_v: usize) -> Plane {
     let mcus_y = spec.height.div_ceil(8 * max_v);
     let (bw, bh) = (mcus_x * comp.h, mcus_y * comp.v);
     let q = quant_table(c);
-    let sample = |x: usize, y: usize| -> f64 {
+    let sample = |x: usize, y: usize| -> i64 {
         let (x, y) = (x.min(cw - 1), y.min(ch - 1));
         let sx = (x * max_h / comp.h).min(spec.width - 1);
         let sy = (y * max_v / comp.v).min(spec.height - 1);
-        f64::from((spec.sample)(c, sx, sy)) - 128.0
+        i64::from((spec.sample)(c, sx, sy)) - 128
     };
     let mut blocks = Vec::with_capacity(bw * bh);
     for by in 0..bh {
@@ -197,18 +222,20 @@ fn plane(spec: &Spec, c: usize, max_h: usize, max_v: usize) -> Plane {
             let mut block = [0i32; 64];
             for v in 0..8 {
                 for u in 0..8 {
-                    let mut sum = 0.0;
+                    let mut sum: i64 = 0;
                     for y in 0..8 {
                         for x in 0..8 {
                             sum += sample(bx * 8 + x, by * 8 + y)
-                                * ((2 * x + 1) as f64 * u as f64 * PI / 16.0).cos()
-                                * ((2 * y + 1) as f64 * v as f64 * PI / 16.0).cos();
+                                * cos16((2 * x + 1) * u)
+                                * cos16((2 * y + 1) * v);
                         }
                     }
-                    let cu = if u == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
-                    let cv = if v == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
-                    let f = sum * cu * cv / 4.0;
-                    block[v * 8 + u] = (f / f64::from(q[v * 8 + u])).round() as i32;
+                    // F(u,v) = C(u) C(v) / 4 * sum, then quantized; C(0) is
+                    // 1/sqrt(2). Everything is scaled by 2^13 per factor.
+                    let c = |k: usize| if k == 0 { COS[4] } else { ONE };
+                    let num = i128::from(sum) * i128::from(c(u)) * i128::from(c(v));
+                    let den = 4 * i128::from(ONE).pow(4) * i128::from(q[v * 8 + u]);
+                    block[v * 8 + u] = div_round(num, den) as i32;
                 }
             }
             blocks.push(block);
