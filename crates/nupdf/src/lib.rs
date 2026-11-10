@@ -18,6 +18,7 @@ pub mod jbig2;
 pub mod jpeg;
 pub mod lex;
 pub mod limits;
+mod names;
 pub mod object;
 pub mod page;
 pub mod parse;
