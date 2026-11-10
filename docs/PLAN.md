@@ -177,7 +177,7 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 | `clean` (output bytes) | 99.4% (5,052 / 5,085) | AES files only (D18): random initialization vectors in MuPDF's output. Besides those, MuPDF fails to save `issue20453.pdf` after its repair; nupdf writes it |
 | `roundtrip` (MuPDF reads each output back) | 99.7% (5,070 / 5,084) | Random IVs again, where MuPDF's own output does not read back exactly: AES documents opened without their password, and streams under an Identity crypt filter. One more file times out on both sides |
 
-`clean` reads its output back by default and refuses 27 standard files, all cases where MuPDF's output loses something (D18).
+`clean` reads its output back by default and refuses 27 standard files, all cases where MuPDF's output loses something (D18). On a 300-file sample, `nupdf clean` takes 614 ms in total against `mutool clean`'s 900 ms (geometric-mean speedup 1.50x), with that check included. It is slower on files of a megabyte or more, where hashing the input and the output for their `doc_id` costs more than MuPDF's whole save.
 
 Exit: ≥99.5% round-trip parity on the standard tier: MuPDF reads our output with the same object graph (modulo renumbering) and the same text. `merge`, `split` and `clean` are at least as fast as mutool.
 
