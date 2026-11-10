@@ -51,6 +51,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `dct` (DCTDecode around the JPEG decoder) | `fitz/filter-dct.c` | M2 |
 | `jpeg` (JPEG decoder) | libjpeg 10 as bundled with MuPDF: `jdapimin.c`, `jdapistd.c`, `jdmaster.c`, `jdinput.c`, `jdmarker.c`, `jdhuff.c`, `jdarith.c`, `jaricom.c`, `jdcoefct.c`, `jddctmgr.c`, `jidctint.c`, `jdmainct.c`, `jdsample.c`, `jdcolor.c`, `jutils.c` (NOTICE) | M2 |
 | `jbig2` (JBIG2Decode around hayro-jbig2) | `fitz/filter-jbig2.c`, `pdf/pdf-stream.c` (`pdf_load_jbig2_globals`); jbig2dec's refusals from `jbig2.c` and `jbig2_segment.c` | M2 |
+| `names` (the names MuPDF interns, which take their own dictionary lookup path) | `include/mupdf/pdf/name-table.h` | M3 |
 | `write`, `edit`, `graft` | `pdf/pdf-write.c`, `pdf/pdf-graft.c`, `pdf/pdf-clean-file.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |

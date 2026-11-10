@@ -120,11 +120,26 @@ impl Object {
     }
 }
 
-/// A dictionary that keeps insertion order. Re-inserting a key replaces its
-/// value in place, as `pdf_dict_put` does, so the last duplicate wins.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// A dictionary in MuPDF's order: insertion order, until a put into one of
+/// more than 100 entries sorts it by key (`pdf_dict_get_put`), after which
+/// new keys go into their sorted place. Re-inserting a key replaces its value
+/// in place, so the last duplicate wins. The order is what gets written.
+///
+/// Lookups follow MuPDF's two search paths. A name MuPDF interns as a
+/// constant goes through `pdf_dict_find`, which in a sorted dictionary
+/// reports its last key as absent when that key is the one sought; `get`
+/// then misses it and `insert` appends a duplicate. Other names, and
+/// `remove`, go through `pdf_dict_finds`, which has no such case.
+#[derive(Debug, Clone, Default)]
 pub struct Dict {
     entries: Vec<(Arc<[u8]>, Object)>,
+    sorted: bool,
+}
+
+impl PartialEq for Dict {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
 }
 
 impl Dict {
@@ -132,17 +147,80 @@ impl Dict {
         Self::default()
     }
 
+    /// `pdf_dict_find` for interned names, else `pdf_dict_finds`.
+    fn find(&self, key: &[u8]) -> Result<usize, usize> {
+        let len = self.entries.len();
+        if self.sorted
+            && self.entries.last().is_some_and(|(k, _)| k.as_ref() == key)
+            && crate::names::is_known(key)
+        {
+            return Err(len);
+        }
+        self.finds(key)
+    }
+
+    /// `pdf_dict_finds`: the key's index, or where it would go.
+    fn finds(&self, key: &[u8]) -> Result<usize, usize> {
+        let Some((last, _)) = self.entries.last() else {
+            return Err(0);
+        };
+        if !self.sorted {
+            return self
+                .entries
+                .iter()
+                .position(|(k, _)| k.as_ref() == key)
+                .ok_or(self.entries.len());
+        }
+        if last.as_ref() < key {
+            return Err(self.entries.len());
+        }
+        // MuPDF's own bisection, so that duplicates resolve as it does.
+        let (mut l, mut r) = (0, self.entries.len());
+        while l < r {
+            let m = (l + r - 1) / 2;
+            match key.cmp(&self.entries[m].0) {
+                std::cmp::Ordering::Less => r = m,
+                std::cmp::Ordering::Greater => l = m + 1,
+                std::cmp::Ordering::Equal => return Ok(m),
+            }
+        }
+        Err(l)
+    }
+
     pub fn get(&self, key: &[u8]) -> Option<&Object> {
-        self.entries
-            .iter()
-            .find(|(k, _)| k.as_ref() == key)
-            .map(|(_, v)| v)
+        self.find(key).ok().map(|i| &self.entries[i].1)
     }
 
     pub fn insert(&mut self, key: Arc<[u8]>, value: Object) {
-        match self.entries.iter_mut().find(|(k, _)| *k == key) {
-            Some(slot) => slot.1 = value,
-            None => self.entries.push((key, value)),
+        if self.entries.len() > 100 && !self.sorted {
+            self.entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            self.sorted = true;
+        }
+        match self.find(&key) {
+            Ok(i) => self.entries[i].1 = value,
+            Err(i) => self.entries.insert(i, (key, value)),
+        }
+    }
+
+    /// `pdf_dict_dels`: the last entry takes the removed one's place.
+    pub fn remove(&mut self, key: &[u8]) {
+        if let Ok(i) = self.finds(key) {
+            self.entries.swap_remove(i);
+            self.sorted = false;
+        }
+    }
+
+    /// A copy without `key`, the other entries in their order. Unlike
+    /// `remove`, this is not a MuPDF operation; it is for comparisons.
+    pub fn without(&self, key: &[u8]) -> Dict {
+        Dict {
+            entries: self
+                .entries
+                .iter()
+                .filter(|(k, _)| k.as_ref() != key)
+                .cloned()
+                .collect(),
+            sorted: self.sorted,
         }
     }
 
@@ -196,6 +274,76 @@ mod tests {
         assert_eq!(d.get(b"A"), Some(&Object::Int(3)));
         let keys: Vec<&[u8]> = d.iter().map(|(k, _)| k).collect();
         assert_eq!(keys, vec![b"A".as_slice(), b"B".as_slice()]);
+    }
+
+    fn keys(d: &Dict) -> Vec<String> {
+        d.iter()
+            .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+            .collect()
+    }
+
+    /// 102 entries put in reverse, so the last put sorts the dictionary.
+    fn big(extra: &[&[u8]]) -> Dict {
+        let mut d = Dict::new();
+        for key in extra {
+            d.put(key, Object::Bool(true));
+        }
+        for i in (0..102 - extra.len()).rev() {
+            d.put(format!("K{i:03}").as_bytes(), Object::Int(i as i64));
+        }
+        d
+    }
+
+    #[test]
+    fn dict_sorts_once_it_outgrows_100_entries() {
+        let mut d = Dict::new();
+        for i in (0..101).rev() {
+            d.put(format!("K{i:03}").as_bytes(), Object::Int(i));
+        }
+        assert_eq!(keys(&d)[0], "K100", "101 entries stay in insertion order");
+        d.put(b"A", Object::Null);
+        let k = keys(&d);
+        assert_eq!(&k[..3], ["A", "K000", "K001"]);
+        assert_eq!(k.last().map(String::as_str), Some("K100"));
+        assert_eq!(d.get(b"K050"), Some(&Object::Int(50)));
+        d.put(b"K050", Object::Int(-1));
+        assert_eq!(d.len(), 102);
+        assert_eq!(d.get(b"K050"), Some(&Object::Int(-1)));
+    }
+
+    #[test]
+    fn dict_remove_moves_the_last_entry_and_unsorts() {
+        let mut d = big(&[]);
+        d.remove(b"K000");
+        let k = keys(&d);
+        assert_eq!(k[0], "K101");
+        assert_eq!(d.len(), 101);
+        d.put(b"K000", Object::Int(0));
+        assert_eq!(keys(&d)[0], "K000", "the next put sorts it again");
+    }
+
+    #[test]
+    fn sorted_dict_hides_an_interned_last_key() {
+        // pdf_dict_find returns "not found" when the last key of a sorted
+        // dictionary is the interned name sought.
+        let mut d = big(&[b"Type", b"Subtype"]);
+        assert_eq!(keys(&d)[100..], ["Subtype", "Type"]);
+        assert_eq!(d.get(b"Type"), None);
+        assert_eq!(d.get(b"Subtype"), Some(&Object::Bool(true)));
+        d.put(b"Type", Object::Int(1));
+        assert_eq!(keys(&d)[100..], ["Subtype", "Type", "Type"]);
+        d.remove(b"Type");
+        assert_eq!(d.len(), 102, "pdf_dict_dels finds it by string");
+        assert!(d.get(b"Type").is_some(), "unsorted again, so found");
+    }
+
+    #[test]
+    fn sorted_dict_finds_an_uninterned_last_key() {
+        let mut d = big(&[b"Zz"]);
+        assert_eq!(keys(&d).last().map(String::as_str), Some("Zz"));
+        assert_eq!(d.get(b"Zz"), Some(&Object::Bool(true)));
+        d.put(b"Zz", Object::Int(1));
+        assert_eq!(d.len(), 102);
     }
 
     #[test]
