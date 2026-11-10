@@ -194,6 +194,38 @@ pub const CHECKS: &[Check] = &[
         &["clean", "-gggg", "--dry-run", "--no-verify"],
         &["garbage=4"],
     ),
+    // mutool clean turns pretty printing on for -a and -d without -z; the
+    // write options MuPDF's script interface takes do not.
+    clean_streams(
+        "clean-d",
+        &["clean", "-d", "--dry-run", "--no-verify"],
+        &["decompress,pretty"],
+    ),
+    clean_streams(
+        "clean-z",
+        &["clean", "-z", "--dry-run", "--no-verify"],
+        &["compress"],
+    ),
+    clean_streams(
+        "clean-ze",
+        &["clean", "-z", "-e", "100", "--dry-run", "--no-verify"],
+        &["compress,compression-effort=100"],
+    ),
+    clean_streams(
+        "clean-a",
+        &["clean", "-a", "--dry-run", "--no-verify"],
+        &["ascii,pretty"],
+    ),
+    clean_streams(
+        "clean-dfi",
+        &["clean", "-dfi", "--dry-run", "--no-verify"],
+        &["decompress,compress-fonts,compress-images,pretty"],
+    ),
+    clean_streams(
+        "clean-dzgg",
+        &["clean", "-dzgg", "--dry-run", "--no-verify"],
+        &["decompress,compress,garbage=2"],
+    ),
     Check {
         name: "roundtrip-gggg",
         about: "the `clean -gggg` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
@@ -209,6 +241,18 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["garbage=4"],
     },
 ];
+
+/// `clean` with stream options, compared as `clean` is.
+const fn clean_streams(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        about: "the document rewritten as `mutool clean` writes it with stream options (decompress, compress, effort, ascii): BLAKE3 of the output",
+        ..clean_gc(name, nupdf_args, oracle_args)
+    }
+}
 
 /// `clean` with garbage collection at one level, compared as `clean` is.
 const fn clean_gc(
