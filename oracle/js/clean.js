@@ -43,6 +43,9 @@ function parsePages(spec, n) {
 
 var doc = Document.openDocument(scriptArgs[0]);
 var pdf = doc.asPDF ? doc.asPDF() : doc;
+// pdf_clean_file: without -p, only the empty password is tried.
+if (pdf.needsPassword() && !pdf.authenticatePassword(""))
+  throw new Error("cannot authenticate password: " + scriptArgs[0]);
 var options = "reproducible,regenerate-id=no";
 if (scriptArgs[2]) {
   var rest = [];
