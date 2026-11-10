@@ -274,6 +274,30 @@ const CRYPT_PREFIX: &str = "crypt: ";
 pub struct PageCountError(pub String);
 
 impl Document {
+    /// `pdf_create_document`: a new document whose page tree has no pages.
+    /// As in MuPDF, its /Info is in the catalog, naming the producer.
+    pub fn create() -> Result<Document, OpenError> {
+        let objects = [
+            "<</Type/Catalog/Pages 2 0 R/Info<</Producer(nupdf)>>>>",
+            "<</Type/Pages/Count 0/Kids[]>>",
+        ];
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(b"xref\n0 3\n0000000000 65535 f \n");
+        for ofs in offsets {
+            out.extend_from_slice(format!("{ofs:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer\n<</Size 3/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        Self::open(out)
+    }
+
     /// `pdf_init_document`: read the header and xref, repairing if needed.
     pub fn open(data: impl Into<Arc<[u8]>>) -> Result<Document, OpenError> {
         Self::open_with(data, Limits::default())
@@ -722,6 +746,73 @@ impl Document {
         .unwrap_or(0)
     }
 
+    /// `pdf_create_object`: a new object number, its entry free until
+    /// `update_object` fills it.
+    pub fn create_object(&self) -> i32 {
+        self.edit_mut(|e| {
+            let num = e.len as i32;
+            e.gens.insert(num, 0);
+            e.len += 1;
+            num
+        })
+        .unwrap_or(0)
+    }
+
+    /// `pdf_delete_object`: object `num` is free from now on. Its entry in
+    /// MuPDF's incremental section is free with the next generation when
+    /// the file had the object; when the file had it free, or never had
+    /// it, the entry is unset again, so the file's own entry shows.
+    pub fn delete_object(&self, num: i32) {
+        if num <= 0 || num as usize >= self.xref_len() {
+            self.diag.warn(
+                "object.out_of_range",
+                format!(
+                    "object out of range ({num} 0 R); xref size {}",
+                    self.xref_len()
+                ),
+            );
+            return;
+        }
+        let st = self.current();
+        let in_file = (num as usize) < st.xref_len()
+            && !matches!(st.entries.get(num).kind, Kind::None | Kind::Free);
+        self.edit_mut(|e| {
+            e.objects.remove(&num);
+            e.data.remove(&num);
+            if in_file {
+                let generation = e.gens.get(&num).copied().unwrap_or(0);
+                e.gens.insert(num, generation + 1);
+            } else {
+                e.gens.remove(&num);
+            }
+        });
+    }
+
+    /// `pdf_update_stream` with data already encoded: object `num`, a
+    /// dictionary or a stream, becomes a stream with `data` and a /Length
+    /// to match. Its filters stay as they are.
+    pub fn update_stream(&self, num: i32, data: Vec<u8>) {
+        let Some(obj) = self.edited_object(num).or_else(|| self.object(num)) else {
+            return;
+        };
+        let mut dict = match obj {
+            Object::Dict(d) => (*d).clone(),
+            Object::Stream(s) => s.dict.clone(),
+            _ => return,
+        };
+        dict.put(b"Length", Object::Int(data.len() as i64));
+        self.edit_mut(|e| {
+            let stream = Stream {
+                dict,
+                data_start: 0,
+                num,
+            };
+            e.objects.insert(num, Object::Stream(Arc::new(stream)));
+            e.gens.entry(num).or_insert(0);
+            e.data.insert(num, data);
+        });
+    }
+
     /// Replaces the trailer.
     pub fn set_trailer(&self, trailer: Dict) {
         self.edit_mut(|e| e.trailer = Some(trailer));
@@ -905,10 +996,14 @@ impl Document {
 
     /// Entry `num` of the current xref.
     pub(crate) fn xref_entry(&self, num: i32) -> xref::Entry {
-        // An edited object's entry is in MuPDF's incremental section.
-        if let Some(generation) = self.with_edits(|e| e.gens.get(&num).copied()).flatten() {
+        // An edited object's entry is in MuPDF's incremental section; one
+        // created but not filled yet is free there.
+        let edited = self
+            .with_edits(|e| e.gens.get(&num).map(|g| (*g, e.objects.contains_key(&num))))
+            .flatten();
+        if let Some((generation, filled)) = edited {
             return xref::Entry {
-                kind: Kind::InFile,
+                kind: if filled { Kind::InFile } else { Kind::Free },
                 generation,
                 ofs: 0,
             };
@@ -1052,10 +1147,17 @@ impl Document {
 
     /// `pdf_cache_object` against one state.
     fn load_in(&self, st: &State, num: i32, allow_repair: bool) -> Loaded {
-        if num > 0
-            && let Some(obj) = self.edited_object(num)
-        {
-            return Loaded::Obj(obj);
+        if num > 0 {
+            // An entry the edits made free (created and not filled yet, or
+            // deleted) loads as a free entry does.
+            let edited = self
+                .with_edits(|e| (e.objects.get(&num).cloned(), e.gens.contains_key(&num)))
+                .unwrap_or((None, false));
+            match edited {
+                (Some(obj), _) => return Loaded::Obj(obj),
+                (None, true) => return Loaded::Obj(Object::Null),
+                (None, false) => {}
+            }
         }
         if num <= 0 || num as usize >= st.xref_len() {
             return Loaded::Missing;
@@ -1900,5 +2002,34 @@ trailer\n<</Size 3/Root 1 3 R>>\nstartxref\n104\n%%EOF\n";
         // Once moved, an entry keeps what it got.
         doc.update_object(2, Object::Int(1));
         assert_eq!(doc.xref_entry(2).generation, 5);
+    }
+
+    #[test]
+    fn created_objects_are_free_until_filled_and_deleting_frees_them() {
+        let doc = Document::create().unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(doc.page_count(), Ok(0));
+        assert_eq!(doc.xref_len(), 3);
+        let num = doc.create_object();
+        assert_eq!(num, 3);
+        assert_eq!(doc.xref_entry(3).kind, Kind::Free);
+        doc.update_object(3, Object::Dict(Arc::new(Dict::new())));
+        assert_eq!(doc.xref_entry(3).kind, Kind::InFile);
+        doc.update_stream(3, b"abc".to_vec());
+        match doc.object(3) {
+            Some(Object::Stream(s)) => {
+                assert_eq!(s.dict.get(b"Length"), Some(&Object::Int(3)));
+                assert_eq!(doc.raw_stream_data(&s).ok().as_deref(), Some(&b"abc"[..]));
+            }
+            other => panic!("{other:?}"),
+        }
+        // An object the file never had goes back to nothing.
+        doc.delete_object(3);
+        assert_eq!(doc.xref_entry(3).kind, Kind::None);
+        assert_eq!(doc.object(3), None);
+        // One it had is free, of the next generation in the new section.
+        doc.delete_object(2);
+        let e = doc.xref_entry(2);
+        assert_eq!((e.kind, e.generation), (Kind::Free, 1));
+        assert_eq!(doc.object(2), Some(Object::Null));
     }
 }
