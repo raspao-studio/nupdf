@@ -45,7 +45,7 @@ Every command takes `--password`, tried as both the user and the owner password.
 | `info` | Triage: version, pages, encryption, repairs, revisions, text-layer presence per page, scanned-page detection, fonts at risk (no ToUnicode), forms, JavaScript, attachments, signatures, plus suggested next commands | M0 (header), extended every milestone |
 | `objects`, `show <ref>` | Canonical JSON dump of objects | M1 |
 | `pages` | Page objects with inherited MediaBox, CropBox, Rotate and Resources | M1 |
-| `streams` | List streams, decode one | M2 |
+| `streams` | Every stream's decoded length and BLAKE3 hash (image filters listed, not decoded); `show <ref> --data` decodes one | M2 |
 | `decrypt`, `encrypt` | Remove or add encryption | M2, M3 |
 | `merge`, `split`, `pages`, `meta`, `clean` | Structural editing | M3 |
 | `trace`, `fonts`, `images` | Device-call trace, font inventory, image list and extraction | M4 |

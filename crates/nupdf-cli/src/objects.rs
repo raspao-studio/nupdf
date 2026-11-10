@@ -69,6 +69,54 @@ fn touch_references(doc: &Document, obj: &Object) {
     }
 }
 
+/// Every stream decoded for non-image use, in oracle/js/streams.js's
+/// format: the decoded length and BLAKE3 hash, or the error. Every object is
+/// loaded in ascending order, as the oracle's `isStream` lookups do.
+pub fn streams(doc: &Document) -> Value {
+    let count = doc.xref_len();
+    let mut out = Map::new();
+    for num in 1..count {
+        let Some(Object::Stream(s)) = doc.object(num as i32) else {
+            continue;
+        };
+        if has_image_filter(doc, &s.dict) {
+            out.insert(num.to_string(), json!({ "image": true }));
+            continue;
+        }
+        let entry = match doc.stream_data(&s) {
+            Ok(data) => json!({
+                "len": data.len(),
+                "blake3": blake3::hash(&data).to_hex().to_string(),
+            }),
+            Err(e) => json!({ "error": e.to_string() }),
+        };
+        out.insert(num.to_string(), entry);
+    }
+    json!({ "object_count": count, "streams": out })
+}
+
+/// Whether the filter chain (/F, else /Filter) names an image filter.
+fn has_image_filter(doc: &Document, dict: &nupdf::Dict) -> bool {
+    const IMAGE: [&[u8]; 6] = [
+        b"CCITTFaxDecode",
+        b"CCF",
+        b"DCTDecode",
+        b"DCT",
+        b"JBIG2Decode",
+        b"JPXDecode",
+    ];
+    let is_image = |o: &Object| o.as_name().is_some_and(|n| IMAGE.contains(&n));
+    match dict
+        .get(b"F")
+        .or_else(|| dict.get(b"Filter"))
+        .map(|f| doc.resolve(f))
+    {
+        Some(Object::Array(items)) => items.iter().any(|f| is_image(&doc.resolve(f))),
+        Some(f) => is_image(&f),
+        None => false,
+    }
+}
+
 /// Pages and their inherited attributes, in oracle/js/pages.js's format.
 pub fn pages(doc: &Document) -> Value {
     let mut out = Map::new();

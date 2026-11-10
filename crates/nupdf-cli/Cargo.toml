@@ -14,11 +14,13 @@ path = "src/main.rs"
 
 [dependencies]
 nupdf.workspace = true
+blake3.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 serde_json.workspace = true
 
 [lints]

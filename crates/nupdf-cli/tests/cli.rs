@@ -359,3 +359,14 @@ fn objects_report_decrypted_strings() {
     // The /Encrypt dictionary itself is never decrypted.
     assert!(report["objects"]["7"]["d"]["O"]["s"].is_string());
 }
+
+#[test]
+fn streams_report_decoded_lengths_and_hashes() {
+    let path = smoke("flate-content.pdf");
+    let report = run_json(&["streams", path.to_str().unwrap()]);
+    assert_eq!(report["schema"], "nupdf.streams/v0");
+    let content = &report["streams"]["4"];
+    let data = b"BT /F1 24 Tf 72 720 Td (Compressed) Tj ET";
+    assert_eq!(content["len"], data.len());
+    assert_eq!(content["blake3"], blake3::hash(data).to_hex().to_string());
+}
