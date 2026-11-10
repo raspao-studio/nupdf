@@ -192,10 +192,13 @@ impl Document {
     }
 
     /// `pdf_dict_get`: resolve the container, return the value as stored.
+    /// `pdf_dict_get`: a null value is no value, MuPDF's null object being
+    /// the null pointer.
     fn lookup(&self, container: &Object, key: &[u8]) -> Option<Object> {
         self.resolve(container)
             .as_dict()
             .and_then(|d| d.get(key))
+            .filter(|v| !matches!(v, Object::Null))
             .cloned()
     }
 
@@ -407,6 +410,21 @@ mod tests {
         assert_eq!(attr(1, b"Rotate"), Some(Object::Int(0)));
         assert_eq!(attr(2, b"Rotate"), Some(Object::Int(90)));
         assert_eq!(attr(0, b"CropBox"), None);
+    }
+
+    #[test]
+    fn a_null_value_is_inherited_past() {
+        // MuPDF's null object is the null pointer: pdf_dict_get finds no
+        // value, so the parent's counts.
+        let d = open(
+            b"%PDF-1.4\n\
+            1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1/Rotate 90>>endobj\n\
+            3 0 obj<</Type/Page/Parent 2 0 R/Rotate null>>endobj\n\
+            trailer<</Root 1 0 R/Size 4>>\n",
+        );
+        let page = d.page(0).unwrap();
+        assert_eq!(d.inherited(&page, b"Rotate"), Ok(Some(Object::Int(90))));
     }
 
     #[test]
