@@ -70,6 +70,12 @@ impl Document {
         self.lookup_page_slow(index).ok().map(|(_, path)| path)
     }
 
+    /// `pdf_lookup_page_loc`: the path the slow descent takes to page
+    /// `index`, whatever the page map says.
+    pub(crate) fn page_location(&self, index: i32) -> Result<Vec<usize>, PageError> {
+        self.lookup_page_slow(index).map(|(_, path)| path)
+    }
+
     /// `walk_tree`'s order, stopping at page `target`.
     fn find_path(
         &self,

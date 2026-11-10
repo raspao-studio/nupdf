@@ -207,6 +207,178 @@ fn edit_at(
     })
 }
 
+/// One step down into a container: a dictionary key or an array index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Step {
+    Key(&'static [u8]),
+    Index(usize),
+}
+
+/// Where a stored value is: the object holding it (`None` for the
+/// trailer) and the steps from there through direct containers. Two
+/// locations are equal when they name the same stored value, as MuPDF's
+/// pointers are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Loc {
+    holder: Option<i32>,
+    steps: Vec<Step>,
+}
+
+/// References followed before giving up, as `pdf_resolve_indirect_chain`.
+const MAX_CHAIN: usize = 10;
+
+/// `pdf_dict_get` and `pdf_array_get`: a null value is no value.
+fn step_into(value: &Object, step: &Step) -> Option<Object> {
+    let found = match (value, step) {
+        (Object::Dict(d), Step::Key(k)) => d.get(k),
+        (Object::Stream(s), Step::Key(k)) => s.dict.get(k),
+        (Object::Array(a), Step::Index(i)) => a.get(*i),
+        _ => None,
+    };
+    found.filter(|v| !matches!(v, Object::Null)).cloned()
+}
+
+fn step_into_mut<'a>(value: &'a mut Object, step: &Step) -> Option<&'a mut Object> {
+    match (value, step) {
+        (Object::Dict(d), Step::Key(k)) => Arc::make_mut(d).get_mut(k),
+        (Object::Stream(s), Step::Key(k)) => Arc::make_mut(s).dict.get_mut(k),
+        (Object::Array(a), Step::Index(i)) => Arc::make_mut(a).get_mut(*i),
+        _ => None,
+    }
+}
+
+/// The object number a reference chain ends at, and that object.
+fn follow(doc: &Document, value: &Object) -> Option<(i32, Object)> {
+    let mut v = value.clone();
+    let mut num = None;
+    for _ in 0..MAX_CHAIN {
+        match v {
+            Object::Ref(r) => {
+                num = Some(r.num);
+                v = doc.object(r.num).unwrap_or(Object::Null);
+            }
+            other => return num.map(|n| (n, other)),
+        }
+    }
+    None
+}
+
+/// MuPDF's name for an object's kind, as its errors give it.
+pub(crate) fn kind(value: &Object) -> &'static str {
+    match value {
+        Object::Null => "null",
+        Object::Bool(_) => "boolean",
+        Object::Int(_) => "integer",
+        Object::Real(_) => "real",
+        Object::String(_) => "string",
+        Object::Name(_) => "name",
+        Object::Array(_) => "array",
+        Object::Dict(_) | Object::Stream(_) => "dictionary",
+        Object::Ref(_) => "reference",
+    }
+}
+
+impl Loc {
+    pub(crate) fn trailer() -> Loc {
+        Loc {
+            holder: None,
+            steps: Vec::new(),
+        }
+    }
+
+    /// The stored value, unresolved; `None` when nothing is stored there.
+    pub(crate) fn value(&self, doc: &Document) -> Option<Object> {
+        let mut v = match self.holder {
+            None => Object::Dict(Arc::new(doc.trailer())),
+            Some(num) => doc.object(num)?,
+        };
+        for step in &self.steps {
+            v = step_into(&v, step)?;
+        }
+        Some(v)
+    }
+
+    /// The value one step down from what this one designates, through any
+    /// reference it holds (`pdf_dict_get` and `pdf_array_get` resolve
+    /// their container).
+    pub(crate) fn child(&self, doc: &Document, step: Step) -> Option<Loc> {
+        let value = self.value(doc)?;
+        let loc = match follow(doc, &value) {
+            Some((num, obj)) => {
+                step_into(&obj, &step)?;
+                Loc {
+                    holder: Some(num),
+                    steps: vec![step],
+                }
+            }
+            None => {
+                step_into(&value, &step)?;
+                let mut steps = self.steps.clone();
+                steps.push(step);
+                Loc {
+                    holder: self.holder,
+                    steps,
+                }
+            }
+        };
+        Some(loc)
+    }
+
+    /// The object this value designates, resolved.
+    pub(crate) fn resolved(&self, doc: &Document) -> Option<Object> {
+        let value = self.value(doc)?;
+        Some(follow(doc, &value).map_or(value, |(_, obj)| obj))
+    }
+
+    /// Changes the object this value designates, where it is: a
+    /// referenced object in the edits, a direct one inside its holder.
+    pub(crate) fn edit<R>(
+        &self,
+        doc: &Document,
+        f: impl FnOnce(&mut Object) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let value = self.value(doc).ok_or("cannot find object to change")?;
+        if let Some((num, mut obj)) = follow(doc, &value) {
+            let out = f(&mut obj)?;
+            doc.alter_object(num, obj);
+            return Ok(out);
+        }
+        let mut top = match self.holder {
+            None => Object::Dict(Arc::new(doc.trailer())),
+            Some(num) => doc.object(num).ok_or("cannot find object to change")?,
+        };
+        let mut target = &mut top;
+        for step in &self.steps {
+            target = step_into_mut(target, step).ok_or("cannot find object to change")?;
+        }
+        let out = f(target)?;
+        match (self.holder, top) {
+            (None, Object::Dict(t)) => doc.set_trailer((*t).clone()),
+            (Some(num), top) => doc.alter_object(num, top),
+            _ => {}
+        }
+        Ok(out)
+    }
+}
+
+/// `pdf_dict_put` on whatever `obj` is: the error it throws on anything
+/// but a dictionary.
+pub(crate) fn dict_mut(obj: &mut Object) -> Result<&mut Dict, String> {
+    match obj {
+        Object::Dict(d) => Ok(Arc::make_mut(d)),
+        Object::Stream(s) => Ok(&mut Arc::make_mut(s).dict),
+        other => Err(format!("not a dict ({})", kind(other))),
+    }
+}
+
+/// The same for `pdf_array_put` and its kin.
+pub(crate) fn array_mut(obj: &mut Object) -> Result<&mut Vec<Object>, String> {
+    match obj {
+        Object::Array(a) => Ok(Arc::make_mut(a)),
+        other => Err(format!("not an array ({})", kind(other))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
