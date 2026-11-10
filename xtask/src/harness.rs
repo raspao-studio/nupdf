@@ -269,6 +269,21 @@ pub const CHECKS: &[Check] = &[
         &["clean", "-E", "aes-256", "-O", "owner", "--no-verify"],
         &["encrypt=aes-256,owner-password=owner"],
     ),
+    clean_pages(
+        "clean-pages-reverse",
+        &["clean", "--pages", "N-1", "--dry-run", "--no-verify"],
+        &["pages=N-1"],
+    ),
+    clean_pages(
+        "clean-pages-first",
+        &["clean", "--pages", "1", "--dry-run", "--no-verify"],
+        &["pages=1"],
+    ),
+    clean_pages(
+        "clean-pages-rest",
+        &["clean", "--pages", "2-N", "--dry-run", "--no-verify"],
+        &["pages=2-N"],
+    ),
     Check {
         name: "roundtrip-gggg",
         about: "the `clean -gggg` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
@@ -284,6 +299,18 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["garbage=4"],
     },
 ];
+
+/// `clean` keeping some pages, compared as `clean` is.
+const fn clean_pages(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        about: "the document with only some pages kept, in a given order, as `mutool clean` writes it given page ranges (pdf_rearrange_pages): BLAKE3 of the output",
+        ..clean_gc(name, nupdf_args, oracle_args)
+    }
+}
 
 /// `clean -E` with an owner password only, so the output opens without
 /// one, as MuPDF reads each side's output back. The bytes cannot be
