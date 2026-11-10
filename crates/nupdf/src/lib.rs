@@ -26,6 +26,7 @@ pub mod object;
 pub mod page;
 pub mod parse;
 pub mod print;
+pub mod rearrange;
 pub mod repair;
 pub mod slots;
 pub mod stream;

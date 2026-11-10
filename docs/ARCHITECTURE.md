@@ -54,10 +54,11 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `names` (the names MuPDF interns, which take their own dictionary lookup path) | `include/mupdf/pdf/name-table.h` | M3 |
 | `print` (object syntax as MuPDF writes it) | `pdf/pdf-object.c` (`pdf_print_obj`), `fitz/printf.c` (`fmtfloat`), `fitz/ftoa.c` (`fz_grisu`) | M3 |
 | `write` (full save, and the read-back check) | `pdf/pdf-write.c` | M3 |
+| `rearrange` (keeping some pages in a given order) | `pdf/pdf-clean-file.c` (`pdf_rearrange_pages`), `pdf/pdf-nametree.c` (`pdf_load_name_tree`), `pdf/pdf-page.c` (`pdf_flatten_inheritable_page_items`), `pdf/pdf-repair.c` (`pdf_parent_root`) | M3 |
 | `garbage` (garbage collection on save: marking, merging duplicates, renumbering) | `pdf/pdf-write.c`, `pdf/pdf-object.c` (`pdf_objcmp`, `pdf_hash_obj`) | M3 |
 | `deflate` (zlib's `compress2`, for the streams `clean -z` writes) | zlib 1.3.2 as bundled with MuPDF: `compress.c`, `deflate.c`, `trees.c`, `adler32.c` (NOTICE) | M3 |
 | `fax_encode` (CCITT G4 encoder, for 1-bit images `clean -z` writes) | `fitz/encode-fax.c`, `fitz/buffer.c` (`fz_append_bits`) | M3 |
-| `edit`, `graft` | `pdf/pdf-graft.c`, `pdf/pdf-clean-file.c` | M3 |
+| `graft` | `pdf/pdf-graft.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |
 | `resources`, `xobject`, `pattern`, `shade`, `function`, `colorspace`, `image` | `pdf/pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c`, `pdf-shade.c`, `pdf-function.c`, `pdf-colorspace.c`, `pdf-image.c` | M4 |

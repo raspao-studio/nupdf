@@ -57,4 +57,19 @@ fuzz_target!(|data: &[u8]| {
         let again = save(&doc, &options).ok();
         assert_eq!(again.as_deref(), Some(out.as_slice()), "writing is deterministic");
     }
+    // Keep some pages, as `clean --pages` does, on a fresh copy, and write
+    // that: the fourth byte from the end picks which.
+    if doc.xref_len() <= 4096
+        && let Ok(edited) = Document::open(data.to_vec())
+        && let Ok(count) = edited.page_count()
+    {
+        nupdf::write::check_document(&edited);
+        let spec = ["N-1", "1", "2-N", "1,1", "N"][usize::from(pick(4) % 5)];
+        let pages = nupdf::rearrange::parse_page_ranges(spec, count, &edited);
+        if nupdf::rearrange::rearrange_pages(&edited, &pages).is_ok()
+            && let Ok(out) = save(&edited, &options)
+        {
+            let _ = verify(&edited, &out, None, &options);
+        }
+    }
 });

@@ -622,6 +622,25 @@ fn clean_changes_the_security_handler() {
 }
 
 #[test]
+fn clean_keeps_the_pages_given() {
+    let input = smoke("pages-rearrange.pdf");
+    let path = input.to_str().unwrap();
+    let report = run_json(&["clean", "--pages", "4-3,1", "--dry-run", path]);
+    assert_eq!(report["pages"], serde_json::json!([4, 3, 1]));
+    assert_eq!(report["verification"]["verified"], true);
+    let output = scratch("clean-pages.pdf");
+    run_json(&[
+        "clean",
+        "--pages",
+        "N",
+        path,
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(info_at(&output)["page_count"], 1);
+}
+
+#[test]
 fn clean_refuses_brotli() {
     let input = smoke("streams-raw.pdf");
     let out = nupdf(&["clean", "-zz", "--dry-run", input.to_str().unwrap()]);
