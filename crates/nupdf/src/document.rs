@@ -31,6 +31,7 @@ use crate::object::{Dict, MAX_OBJECT_NUMBER, ObjRef, Object, Stream};
 use crate::parse::{IndirectError, IndirectObject, parse_indirect, parse_stm_obj};
 use crate::repair;
 use crate::slots::Slots;
+use crate::stream;
 use crate::xref::{self, Entry, Kind};
 
 /// Why a document could not be opened at all.
@@ -381,61 +382,22 @@ impl Document {
         &self.data
     }
 
-    /// The raw (still encoded) bytes of a stream as MuPDF reads them:
-    /// decrypted, unless a /Crypt filter in the chain does that. A broken
-    /// AES stream yields what MuPDF reads before the error.
+    /// The raw (still encoded) bytes of a stream as MuPDF reads them
+    /// (`pdf_load_raw_stream`): decrypted, unless a /Crypt filter in the
+    /// chain does that, and read whole, so a damaged stream ends where
+    /// MuPDF's read ends.
     pub fn raw_stream_data(&self, stream: &Stream) -> Result<Cow<'_, [u8]>, String> {
         let st = self.current();
-        let (raw, decrypted) = self.raw_stream_in(&st, stream, true)?;
-        Ok(match decrypted {
-            None => Cow::Borrowed(&raw[..self.read_all_len(&st, stream, raw.len())]),
-            Some(stage) => Cow::Owned(self.read_all(&st, stream, stage)),
-        })
+        let length = self.stream_length(&st, stream, true);
+        let mut raw = self.raw_stream_in(&st, stream, length)?;
+        raw.read_best(length, 0, self.limits.max_decoded_bytes)
+            .map(Cow::Owned)
+            .map_err(|e| DecodeError::from(e).report())
     }
 
-    /// The bytes `fz_read_best` gets from an unencrypted stream it reads
-    /// directly (see `xref::read_all_len`).
-    fn read_all_len(&self, st: &State, stream: &Stream, raw_len: usize) -> usize {
-        let length = self
-            .resolve_in(st, stream.dict.get(b"Length").unwrap_or(&Object::Null))
-            .to_int64();
-        let initial = usize::try_from(length)
-            .ok()
-            .filter(|&l| l <= self.file_size)
-            .unwrap_or(0);
-        xref::read_all_len(
-            &self.data,
-            stream.data_start,
-            length,
-            self.file_size,
-            initial,
-        )
-        .min(raw_len)
-    }
-
-    /// Whether the stream names any filter.
-    fn has_filters(&self, st: &State, dict: &Dict) -> bool {
-        let filters = dict
-            .get(b"F")
-            .or_else(|| dict.get(b"Filter"))
-            .map_or(Object::Null, |f| self.resolve_in(st, f));
-        match filters {
-            Object::Name(_) => true,
-            Object::Array(items) => !items.is_empty(),
-            _ => false,
-        }
-    }
-
-    /// `pdf_open_raw_filter`: the bytes between `stream` and `endstream`,
-    /// and, in an encrypted document, those bytes decrypted. `may_repair`
-    /// allows the /Length lookup to repair the document. Fails only where
-    /// MuPDF cannot open the decryption filter.
-    fn raw_stream_in(
-        &self,
-        st: &State,
-        stream: &Stream,
-        may_repair: bool,
-    ) -> Result<(&[u8], Option<filter::Stage>), String> {
+    /// `pdf_stream_length`: /Length, or 0 when it is negative or beyond the
+    /// file. `may_repair` allows the lookup to repair the document.
+    fn stream_length(&self, st: &State, stream: &Stream, may_repair: bool) -> usize {
         let length = stream.dict.get(b"Length").unwrap_or(&Object::Null);
         let length = if may_repair {
             self.resolve(length)
@@ -443,43 +405,59 @@ impl Document {
             self.resolve_in(st, length)
         }
         .to_int64();
-        let raw = xref::raw_stream(
-            &self.data,
-            stream.data_start,
-            length,
-            self.file_size,
+        usize::try_from(length)
+            .ok()
+            .filter(|&l| l <= self.file_size)
+            .unwrap_or(0)
+    }
+
+    /// `pdf_open_raw_filter`: the bytes between `stream` and `endstream`
+    /// (trusting /Length, then looking for `endstream`), decrypted in an
+    /// encrypted document. Fails only where MuPDF cannot open the
+    /// decryption filter.
+    fn raw_stream_in(
+        &self,
+        st: &State,
+        stream: &Stream,
+        length: usize,
+    ) -> Result<stream::Stream<'_>, String> {
+        let base = stream::Stream::new(
+            stream::Endstream::new(&self.data, length, stream.data_start),
             &self.diag,
         );
         match self.crypt() {
             Some(crypt) if !self.has_crypt_filter(st, &stream.dict) => {
-                let decrypted =
-                    crypt.decrypt_stream(raw, stream.num, entry_generation(st, stream.num))?;
-                Ok((raw, Some(decrypted.into())))
+                let cf = crypt.stream_filter();
+                let cipher = crypt.stream_cipher(&cf, stream.num, entry_generation(st, stream.num));
+                filter::open_cipher(base, cipher)
             }
-            _ => Ok((raw, None)),
+            _ => Ok(base),
         }
     }
 
-    /// `fz_read_best` over a stage that may stop with an error: it reads in
-    /// chunks of at most 256 bytes into a buffer of the stream's length (at
-    /// least 1024) plus one, grown by half when full, and loses the chunk
-    /// during which the error happens.
-    fn read_all(&self, st: &State, stream: &Stream, stage: filter::Stage) -> Vec<u8> {
-        let Some(error) = &stage.error else {
-            return stage.data;
-        };
-        filter::report_read_error(error, &self.diag);
-        let length = self
-            .resolve_in(st, stream.dict.get(b"Length").unwrap_or(&Object::Null))
-            .to_int64();
-        // pdf_stream_length: negative or beyond the file means 0.
-        let initial = usize::try_from(length)
-            .ok()
-            .filter(|&l| l <= self.file_size)
-            .unwrap_or(0);
-        let mut data = stage.data;
-        data.truncate(kept_before_error(data.len(), initial));
-        data
+    /// The decoded stream, opened as `pdf_open_stream_number` does (images
+    /// decoded too).
+    fn open_decoded(
+        &self,
+        st: &State,
+        stream: &Stream,
+        length: usize,
+    ) -> Result<stream::Stream<'_>, DecodeError> {
+        let raw = self
+            .raw_stream_in(st, stream, length)
+            .map_err(DecodeError::Failed)?;
+        let crypt = self.crypt();
+        filter::open_filters(
+            raw,
+            &stream.dict,
+            &|o| self.resolve_in(st, o),
+            crypt.as_deref().map(|crypt| filter::CryptContext {
+                crypt,
+                num: stream.num,
+                generation: entry_generation(st, stream.num),
+            }),
+            true,
+        )
     }
 
     /// `pdf_stream_has_crypt`: /Crypt among the filters.
@@ -733,33 +711,23 @@ impl Document {
         }
     }
 
+    /// `pdf_load_stream`: decoded and read whole (`fz_read_best`), with
+    /// MuPDF's compression bomb check.
     fn stream_data_in(&self, st: &State, stream: &Stream) -> Result<Vec<u8>, DecodeError> {
-        let (raw, decrypted) = self
-            .raw_stream_in(st, stream, false)
-            .map_err(DecodeError::Failed)?;
-        let input = decrypted.unwrap_or_else(|| {
-            // Read directly, without filters, the reader is fz_read_best.
-            let keep = if self.has_filters(st, &stream.dict) {
-                raw.len()
-            } else {
-                self.read_all_len(st, stream, raw.len())
-            };
-            filter::Stage::complete(raw[..keep].to_vec())
-        });
-        let crypt = self.crypt();
-        let out = filter::decode_stage(
-            &stream.dict,
-            input,
-            &|o| self.resolve_in(st, o),
-            &self.diag,
-            &self.limits,
-            crypt.as_deref().map(|crypt| filter::CryptContext {
-                crypt,
-                num: stream.num,
-                generation: entry_generation(st, stream.num),
-            }),
-        )?;
-        Ok(self.read_all(st, stream, out))
+        let length = self.stream_length(st, stream, false);
+        let mut s = self.open_decoded(st, stream, length)?;
+        let resolve = |o: &Object| self.resolve_in(st, o);
+        let initial = filter::guess_length(length, &stream.dict, &resolve);
+        let worst = filter::worst_case(&stream.dict, initial, &resolve);
+        Ok(s.read_best(initial, worst, self.limits.max_decoded_bytes)?)
+    }
+
+    /// The decoded stream read a byte at a time, as MuPDF's lexer reads
+    /// object streams.
+    fn stream_bytes_in(&self, st: &State, stream: &Stream) -> Result<Vec<u8>, DecodeError> {
+        let length = self.stream_length(st, stream, false);
+        let mut s = self.open_decoded(st, stream, length)?;
+        Ok(s.read_bytewise(self.limits.max_decoded_bytes)?)
     }
 
     /// `pdf_cache_object` against one state.
@@ -940,7 +908,7 @@ impl Document {
             );
             return fail(format!("object stream {stm} exceeds the object limit"));
         }
-        let data = match self.stream_data_in(st, &stream) {
+        let data = match self.stream_bytes_in(st, &stream) {
             Ok(d) => d,
             Err(e) => return fail(e.report()),
         };
@@ -1257,7 +1225,9 @@ impl Document {
         let count = self
             .resolve_in(st, stream.dict.get(b"N").unwrap_or(&Object::Null))
             .to_int();
-        let data = self.stream_data_in(st, stream).map_err(|e| e.to_string())?;
+        let data = self
+            .stream_bytes_in(st, stream)
+            .map_err(|e| e.to_string())?;
         let mut lx = Lexer::small(&data, 0, &self.diag);
         let mut i = 0;
         while i < count {
@@ -1353,23 +1323,6 @@ fn entry_generation(st: &State, num: i32) -> i32 {
         st.entries.get(num).generation
     } else {
         0
-    }
-}
-
-/// How many bytes `fz_read_best` keeps when the stream fails while
-/// producing byte `fail_at` (see `Document::read_all`).
-fn kept_before_error(fail_at: usize, initial: usize) -> usize {
-    let mut cap = initial.max(1024) + 1;
-    let mut pos = 0;
-    loop {
-        if pos == cap {
-            cap += cap >> 1;
-        }
-        let end = pos + (cap - pos).min(256);
-        if fail_at < end {
-            return pos;
-        }
-        pos = end;
     }
 }
 

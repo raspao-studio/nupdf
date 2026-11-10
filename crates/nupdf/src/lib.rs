@@ -19,6 +19,7 @@ pub mod page;
 pub mod parse;
 pub mod repair;
 pub mod slots;
+pub mod stream;
 pub mod strtof;
 pub mod text_string;
 pub mod xref;

@@ -748,111 +748,28 @@ impl Crypt {
         out
     }
 
-    /// The stream crypt filter (`pdf_open_crypt`) applied to a whole stream.
-    /// Fails only where opening the filter fails (an invalid AES key size).
-    pub fn decrypt_stream(
-        &self,
-        data: &[u8],
-        num: i32,
-        generation: i32,
-    ) -> Result<Decrypted, String> {
-        self.decrypt_with(&self.stmf, data, num, generation)
+    /// The filter that decrypts streams (`/StmF`, or RC4 before V4).
+    pub fn stream_filter(&self) -> CryptFilter {
+        self.stmf
     }
 
-    /// `pdf_open_crypt_with_filter`: a /Crypt filter naming a crypt filter.
-    pub fn decrypt_with_filter(
-        &self,
-        name: &[u8],
-        data: &[u8],
-        num: i32,
-        generation: i32,
-        diag: &Diagnostics,
-    ) -> Result<Decrypted, String> {
-        if name == b"Identity" {
-            return Ok(Decrypted::complete(data.to_vec()));
-        }
-        let cf = self.parse_filter(name, diag)?;
-        self.decrypt_with(&cf, data, num, generation)
-    }
-
-    fn decrypt_with(
-        &self,
-        cf: &CryptFilter,
-        data: &[u8],
-        num: i32,
-        generation: i32,
-    ) -> Result<Decrypted, String> {
+    /// The cipher and key for one object's stream data under `cf`
+    /// (`pdf_open_crypt_imp`), or `None` when `cf` does not encrypt.
+    pub fn stream_cipher(&self, cf: &CryptFilter, num: i32, generation: i32) -> Option<Cipher> {
         let key = self.object_key(cf, num, generation);
         match cf.method {
-            Method::Rc4 => {
-                let mut out = data.to_vec();
-                Arc4::new(&key).apply(&mut out);
-                Ok(Decrypted::complete(out))
-            }
-            Method::AesV2 | Method::AesV3 => aes_decrypt_stream(&key, data),
-            Method::None => Ok(Decrypted::complete(data.to_vec())),
+            Method::Rc4 => Some(Cipher::Rc4(key)),
+            Method::AesV2 | Method::AesV3 => Some(Cipher::Aes(key)),
+            Method::None => None,
         }
     }
 }
 
-/// A decrypted stream. MuPDF's AES filter can fail partway: then `data` is
-/// what it produced before the failing block, and `error` is what a reader
-/// that wants more gets, followed by end of data.
+/// A stream cipher and its key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Decrypted {
-    pub data: Vec<u8>,
-    pub error: Option<String>,
-    /// AES output reaches the next filter one byte per read.
-    pub byte_fed: bool,
-}
-
-impl Decrypted {
-    fn complete(data: Vec<u8>) -> Decrypted {
-        Decrypted {
-            data,
-            error: None,
-            byte_fed: false,
-        }
-    }
-}
-
-/// `fz_open_aesd` read to the end: a 16-byte IV, whole blocks, and padding
-/// stripped from the last block. A short IV, a partial block or bad padding
-/// stops it right before the offending block.
-fn aes_decrypt_stream(key: &[u8], data: &[u8]) -> Result<Decrypted, String> {
-    let bits = key.len() as i32 * 8;
-    let Some(aes) = Aes::new(key, bits) else {
-        return Err(format!("argument error: aes invalid key size ({bits})"));
-    };
-    let stop = |data: Vec<u8>, msg: String| Decrypted {
-        data,
-        error: Some(report::format(&msg)),
-        byte_fed: true,
-    };
-    if data.len() < 16 {
-        return Ok(stop(Vec::new(), "premature end in aes filter".into()));
-    }
-    let mut iv = [0u8; 16];
-    iv.copy_from_slice(&data[..16]);
-    let body = &data[16..];
-    let whole = body.len() / 16 * 16;
-    let mut out = body[..whole].to_vec();
-    aes.cbc_decrypt(&mut iv, &mut out);
-    if whole < body.len() {
-        return Ok(stop(out, "partial block in aes filter".into()));
-    }
-    if let Some(&pad) = out.last() {
-        if !(1..=16).contains(&pad) {
-            out.truncate(out.len() - 16);
-            return Ok(stop(out, format!("aes padding out of range: {pad}")));
-        }
-        out.truncate(out.len() - usize::from(pad));
-    }
-    Ok(Decrypted {
-        data: out,
-        error: None,
-        byte_fed: true,
-    })
+pub enum Cipher {
+    Rc4(Vec<u8>),
+    Aes(Vec<u8>),
 }
 
 /// `is_signature`: a direct /Type /Sig with /Contents, /ByteRange and
@@ -954,7 +871,7 @@ impl Arc4 {
 }
 
 /// AES with a 128, 192 or 256-bit key, in CBC mode.
-enum Aes {
+pub(crate) enum Aes {
     A128(aes::Aes128),
     A192(aes::Aes192),
     A256(aes::Aes256),
@@ -963,7 +880,7 @@ enum Aes {
 impl Aes {
     /// `fz_aes_setkey_*`: `bits` must be 128, 192 or 256, and `key` at
     /// least that long.
-    fn new(key: &[u8], bits: i32) -> Option<Aes> {
+    pub(crate) fn new(key: &[u8], bits: i32) -> Option<Aes> {
         let n = usize::try_from(bits / 8).ok()?;
         let key = key.get(..n)?;
         match bits {
@@ -991,7 +908,7 @@ impl Aes {
     }
 
     /// Decrypts whole blocks in place, updating `iv`.
-    fn cbc_decrypt(&self, iv: &mut [u8; 16], data: &mut [u8]) {
+    pub(crate) fn cbc_decrypt(&self, iv: &mut [u8; 16], data: &mut [u8]) {
         for chunk in data.as_chunks_mut::<16>().0 {
             let cipher = *chunk;
             let mut block = aes::Block::from(cipher);
@@ -1004,7 +921,7 @@ impl Aes {
     }
 
     /// Encrypts whole blocks in place, updating `iv`.
-    fn cbc_encrypt(&self, iv: &mut [u8; 16], data: &mut [u8]) {
+    pub(crate) fn cbc_encrypt(&self, iv: &mut [u8; 16], data: &mut [u8]) {
         for chunk in data.as_chunks_mut::<16>().0 {
             let mut plain = [0u8; 16];
             for (p, (c, v)) in plain.iter_mut().zip(chunk.iter().zip(iv.iter())) {
@@ -1056,45 +973,5 @@ mod tests {
         });
         assert!(aes.is_some());
         assert!(Aes::new(&key, 80).is_none());
-    }
-
-    #[test]
-    fn aes_streams_strip_padding_or_fail_like_mupdf() {
-        let key = [7u8; 16];
-        let aes = Aes::new(&key, 128);
-        let encrypt = |plain: &[u8]| {
-            let mut data = plain.to_vec();
-            let mut iv = [9u8; 16];
-            if let Some(a) = &aes {
-                a.cbc_encrypt(&mut iv, &mut data);
-            }
-            [&[9u8; 16][..], &data].concat()
-        };
-        let mut padded = b"hello".to_vec();
-        padded.extend([11u8; 11]);
-        let run = |data: &[u8]| aes_decrypt_stream(&key, data).map(|d| (d.data.len(), d.error));
-        assert_eq!(
-            aes_decrypt_stream(&key, &encrypt(&padded)).map(|d| d.data),
-            Ok(b"hello".to_vec())
-        );
-        assert_eq!(run(&[9u8; 16]), Ok((0, None)));
-        assert_eq!(
-            run(&[0u8; 10]),
-            Ok((0, Some("format error: premature end in aes filter".into())))
-        );
-        // A partial block stops after the whole blocks.
-        let mut partial = encrypt(&padded);
-        partial.push(0);
-        assert_eq!(
-            run(&partial),
-            Ok((16, Some("format error: partial block in aes filter".into())))
-        );
-        // Bad padding stops before the last block.
-        let bad = encrypt(&[[1u8; 16], [0u8; 16]].concat());
-        assert_eq!(
-            run(&bad),
-            Ok((16, Some("format error: aes padding out of range: 0".into())))
-        );
-        assert!(aes_decrypt_stream(&key[..5], &bad).is_err());
     }
 }
