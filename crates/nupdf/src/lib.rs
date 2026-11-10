@@ -13,6 +13,7 @@ pub mod diag;
 mod doc_id;
 pub mod document;
 pub mod fax;
+pub mod fax_encode;
 pub mod filter;
 mod garbage;
 pub mod header;
