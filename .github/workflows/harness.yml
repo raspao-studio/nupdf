@@ -24,6 +24,7 @@ jobs:
         with:
           path: target/oracle/mupdf-${{ steps.oracle.outputs.version }}/build/release/mutool
           key: mupdf-${{ runner.os }}-${{ steps.oracle.outputs.version }}
+      - run: sudo apt-get install -y qpdf
       - run: cargo xtask oracle build
       - run: cargo test --workspace -- --ignored
       - run: cargo xtask harness --tier smoke

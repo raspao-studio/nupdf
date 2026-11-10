@@ -292,3 +292,12 @@ What goes into the increment is whatever MuPDF's edits touch, not only what they
 
 As in MuPDF, a new document, a repaired file, garbage collection and a change of encryption are refused, with exit 2 and `usage.incremental`; nupdf also refuses object streams. The `meta-set-incremental`, `meta-strip-incremental` and `pages-rotate-incremental` checks compare the output's BLAKE3 with MuPDF's incremental save of the same edit, the comment line in the increment swapped first. On the standard tier they match on every file but AES ones, whose new strings get MuPDF's random IVs (D18); both tools refuse the 211 repaired files and the 45 locked ones, and fail on the 19 that do not open.
 
+## D28. Output is validated against MuPDF's, not against perfection
+
+*2026-11-10*
+
+`qpdf --check` and the Arlington PDF Model judge a file on its own. Most of what they find in nupdf's output was in the input, and MuPDF's output, which nupdf matches byte for byte almost everywhere, has the same findings. So the validation checks are differential like the rest: each side writes the document, the validator reads each output, and nupdf's output passes when the validator says the same of it as of MuPDF's. An absolute pass would fail nupdf on every damaged input MuPDF also writes back damaged.
+
+- **qpdf.** The `qpdf-clean`, `qpdf-clean-Z`, `qpdf-merge` and `qpdf-meta-incremental` checks compare qpdf's exit status (0 clean, 2 errors, 3 warnings) and its messages, with the file's path taken out. qpdf is a test dependency, installed in CI, never linked.
+- **Arlington.** nupdf vendors the definitions for the dictionaries it writes or edits: trailer and xref stream, catalog, page tree and pages, link annotations with their actions, border styles and file specifications, outline and outline items, and the document information. It applies the rules that need no predicates: required keys (inheritable ones looked up the page tree), value types with `fn:` version wrappers looked through, fixed name lists, and the direct and indirect requirements. A key whose value is null, or a reference to nothing, counts as absent, as ISO 32000 7.3.7 says. Keys the model does not list are not reported, since MuPDF writes some (a new document's /Info sits in its catalog, D25). The `arlington-clean`, `arlington-merge` and `arlington-meta-incremental` checks compare the violations. `cargo xtask arlington <files>` reports them for any file.
+

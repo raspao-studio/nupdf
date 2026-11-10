@@ -9,9 +9,9 @@ Related docs: [ARCHITECTURE](ARCHITECTURE.md) · [AGENT-INTERFACE](AGENT-INTERFA
 | Milestone | Scope | MuPDF C in scope | State |
 |---|---|---|---|
 | M0 | Foundation: repo, oracle, harness, bench, CI | — | done |
-| M1 | Syntax, xref, repair, page tree | ~25k lines | in progress |
-| M2 | Filters and encryption | ~15k | |
-| M3 | Writer and structural editing | ~10k | |
+| M1 | Syntax, xref, repair, page tree | ~25k lines | done |
+| M2 | Filters and encryption | ~15k | done |
+| M3 | Writer and structural editing | ~10k | done |
 | M4 | Content streams, resources, fonts | ~25k | |
 | M5 | Text extraction and search | ~15k | |
 | M6 | Redaction and verification | ~5k plus verifier | |
@@ -180,7 +180,7 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 - [x] `clean-Z`, `clean-Zg` and `clean-Zggz` checks: object streams alone, with unreachable objects packed, and with renumbering and compression
 - [x] `clean-D` check, and `roundtrip-E40`, `roundtrip-E128`, `roundtrip-Eaes128` and `roundtrip-Eaes256`: MuPDF reads each side's newly encrypted output back
 - [x] `clean --pages` (D23): `mutool clean`'s page arguments, as `pdf_rearrange_pages`, with the `clean-pages-reverse`, `clean-pages-first` and `clean-pages-rest` checks
-- [ ] Output validation: `qpdf --check` and selected Arlington PDF Model rules
+- [x] Output validation (DECISIONS D28): `qpdf --check` and selected Arlington PDF Model rules on what `clean`, `clean -Z`, `merge` and an incremental edit write, each side's output judged, and nupdf's matching when the validator says the same of it as of MuPDF's
 - [x] Fixtures: a 120-key dictionary, every string, real and name form the printer distinguishes, a signature, null values and trailer entries, free generations past 16 bits, a null object stream member, and an empty key name MuPDF writes lossily; for garbage collection, unreachable objects and references to nothing, duplicates that merge only once others have, the renumbering quirks, and an RC4 document renumbered; for the stream options, unfiltered 1-bit images, a mask, an 8-bit image, a font file and XML metadata, ASCIIHexDecode in each form MuPDF takes off, filter arrays shared by reference, an empty `/DecodeParms` array, and a `/Filter` MuPDF's lookup misses; for object streams, what gathering leaves out, two streams' worth of objects, and xref gaps that do and do not fail the save; an empty stream, which AES encryption loses; for page selection, a nested page tree with outlines, named destinations, links and a field across pages; for the editing commands, pages that are direct dictionaries and /Info in an xref stream's trailer; for merge, an indirect /Length, a font pages share, references to a null object, a free number and one past the xref, and links and outline items of every kind it copies (99 smoke fixtures)
 - [x] Fuzz: `open_walk` also writes the document, at a garbage collection level, with or without object streams, with the stream options and the security handler the input picks, checks that writing is deterministic, and reads the output back; then keeps some pages, as `clean --pages` does, makes the edits `meta` and `pages --rotate` make, and writes that, appended to the file or not; and merges its first pages into a new document, as `merge` does, links and outline included, and writes that. 15 minutes at the default level (22K runs), then 15 across all levels (7K runs), then 15 with the stream options too (7.6K runs), then 15 with object streams too (7.8K runs), then 15 with a new or removed security handler too (4.2K runs), then 15 that also keep some pages first (4.8K runs), then 15 with the edits too (4.4K runs), then 15 merging too (4.6K runs), then 15 with links and outlines (6K runs), then 15 appending the edits instead (an out-of-memory: repair took an entry per object number, 1.2 GB for a 300-byte file naming object 8,149,045; fixed, after which 15 more ran 225K runs); `encode` deflates and fax-encodes any input and decodes it back, 10 minutes (659K runs). Nothing found
 
@@ -207,10 +207,16 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 | `pages-rotate`, `pages-select-rotate` (`--rotate 90`; `--select N-1 --rotate -90 --rotate-pages 1`) | 99.6% (5,011 / 5,031, 4,957 / 4,977) | The 20 AES files. Both tools fail on 10 and 64 files more than `clean`, whose page trees cannot be walked |
 | `meta-set-incremental`, `meta-strip-incremental`, `pages-rotate-incremental` | 99.6% (4,847 / 4,867), 99.9% (4,861 / 4,867), 100% (4,859 / 4,859) | AES files only: a rewritten object's strings get MuPDF's random IVs. Both tools refuse the 211 repaired files and the 45 locked ones, and fail on the 19 that do not open |
 | `merge`, `merge-twice`, `merge-reverse` (pages, links, outlines) | 100% (5,123 / 5,123) each | The output is never encrypted, so no random IVs. A locked input, or one whose page tree fails, merges nothing or only the pages before the failure, in both tools; only the 19 files neither opens fail |
+| `qpdf-clean`, `qpdf-clean-Z`, `qpdf-merge`, `qpdf-meta-incremental` (`qpdf --check` on each output: its verdict and messages) | 100% (5,040 / 5,040), 99.98% (5,017 / 5,018), 100% (5,123 / 5,123), 100% (4,867 / 4,867) | One AES file under `-Z`, where qpdf names an offset in an object stream whose bytes follow MuPDF's random IVs. MuPDF fails to save `issue20453.pdf`, as in `clean` |
+| `arlington-clean`, `arlington-merge`, `arlington-meta-incremental` (selected Arlington rules on each output: the violations) | 100% (5,040 / 5,040, 5,123 / 5,123, 4,867 / 4,867) | |
 
 `clean` reads its output back by default and refuses 7 standard files, all cases where MuPDF's output loses something (D18). With `-g` it refuses the same 7, and with `-gggg` also the 33 empty outputs (D19). With `-Z` it refuses one more file, an AES-256 document whose crypt filter dictionary ends up in an object stream it is needed to decrypt (D21); with `-Zgggg` the empty outputs open, as an xref stream with no objects, and the same 8 files are refused. With `-D` it refuses 2, which it refuses without `-D` too; with `-E rc4-128`, 6 of the 7, and with `-E aes-256`, 266, the files where MuPDF's encrypted output loses a stream (D22). The 45 files the empty password does not open fail before any of this, with `input.needs_password` (D24). On a 300-file sample, `nupdf clean` takes 614 ms in total against `mutool clean`'s 900 ms (geometric-mean speedup 1.50x), with that check included, `clean -gggg` 724 ms against 1,035 ms (1.48x), and `clean -z` 916 ms against 1,050 ms (1.36x), where the check decodes every stream. It is slower on files of a megabyte or more, where hashing the input and the output for their `doc_id` costs more than MuPDF's whole save. On the same sample, `nupdf merge` of each file with itself takes 677 ms against `mutool merge`'s 924 ms (1.44x), links and outline included, and `nupdf split` 935 ms against 1,518 ms for a script that does the same with MuPDF (1.94x, the script's overhead included); each is slower on 5 to 11 files, the larger ones, for the same reason.
 
+On their own terms, qpdf finds nothing wrong with 4,779 of nupdf's 5,040 `clean` outputs, warns about 196 and reports errors in 65. In all but 8 the input gets the same verdict or a worse one. Of those 8, 2 hold an empty key name, which MuPDF writes lossily, so that `/` and the reference after it read back as a name. The other 6 are inputs qpdf repairs, where the output has no /Root or page tree, or a /Contents array item that is not a stream. The Arlington rules find violations in 201 outputs, all of them in the input too: pages without /Resources (117) or /MediaBox, trailers without /Root, page tree nodes missing required keys, and a string /Trapped.
+
 Exit: ≥99.5% round-trip parity on the standard tier: MuPDF reads our output with the same object graph (modulo renumbering) and the same text. `merge`, `split` and `clean` are at least as fast as mutool.
+
+Exit status: met for the object graph (`roundtrip` 99.96%) and for speed. The same text is checked once nupdf extracts text: M5's `roundtrip-text` check reads it from `clean`'s output.
 
 ## M4: Content streams, resources, fonts
 
@@ -237,6 +243,7 @@ MuPDF reference: `fitz/stext-device.c`, `stext-output.c`, `stext-search.c`, `ste
 - [ ] Page-parallel extraction with output identical at every thread count
 - [ ] Opt-in improved reading order, scored against hand-labeled ground truth rather than MuPDF
 - [ ] Bench pairs: against `mutool draw -F stext.json`, plus, for context, PyMuPDF, pypdf, pdfplumber, pdfminer.six, pdftotext and pdf_oxide
+- [ ] `roundtrip-text` check: MuPDF's text of each side's `clean` output, the same on both (moved from M3's exit)
 
 Exit: ≥99% of pages have the same character sequence as MuPDF's stext, and ≥98% of characters have bbox IoU ≥0.98. Single-threaded time ≤1.1× MuPDF's. ≥6× speedup on 8 cores for documents of 50+ pages.
 

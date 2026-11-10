@@ -38,6 +38,7 @@ cargo xtask corpus fetch qpdf           # sparse clone of one source
 - The oracle runs out of process: a MuPDF crash or hang becomes a classified outcome, not a harness failure.
 - Oracle scripts live in `oracle/js/` and run as `mutool run <script> <file>`. They print one JSON object whose field names match nupdf's, so the comparison is a field-by-field equality, with tolerances where a check defines them.
 - The MuPDF source tree in `target/oracle/` is also the reference for porting work.
+- The `qpdf-*` checks also need qpdf on `PATH`, or `NUPDF_QPDF=/path/to/qpdf`. Any recent version does: both sides' output is checked by the same binary, so its messages only have to agree with themselves. CI installs Ubuntu's.
 
 **Bumping the oracle:** change `MUPDF_VERSION`, rebuild, rerun every tier, and review upstream changes to the files in ARCHITECTURE's module map. Then re-baseline with `--update-baseline` in a commit that explains the differences.
 
@@ -87,6 +88,8 @@ Each file in a check gets one outcome:
 | `both_failed` | Both rejected the file |
 | `timeout` | Either side exceeded `--timeout` |
 | `crash` | Either side died from a signal. For nupdf this is always a bug |
+
+Some checks validate output instead of comparing it: `qpdf-*` run `qpdf --check` on each side's output and compare its verdict and messages (qpdf must be installed, or `NUPDF_QPDF` set to it), and `arlington-*` apply selected Arlington PDF Model rules to the dictionaries nupdf writes (DECISIONS D28). Either way nupdf's output matches when the validator says the same of it as of MuPDF's. `cargo xtask arlington <files>` prints the violations it finds in any file.
 
 Parity is `match` divided by the files MuPDF handled. Reports go to `target/harness/<tier>/` (`summary.md` plus one JSON file per check, with MuPDF's warnings per file). A capital in a check's name becomes `_` and the letter in its file name, so `clean-Z` and `clean-z` stay apart on a case-insensitive filesystem.
 
