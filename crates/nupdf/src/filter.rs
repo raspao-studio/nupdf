@@ -1,26 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 hum
-// Derived from MuPDF source/pdf/pdf-stream.c (build_filter),
-// source/fitz/filter-flate.c and source/fitz/filter-predict.c,
-// Copyright (C) 2004-2025 Artifex Software, Inc.
+// Derived from MuPDF source/pdf/pdf-stream.c (build_filter,
+// build_compression_params, pdf_open_filter, pdf_guess_filter_length),
+// source/pdf/pdf-colorspace.c (pdf_guess_colorspace_components),
+// source/fitz/compressed-buffer.c (fz_open_image_decomp_stream),
+// source/fitz/filter-basic.c (ASCIIHex, ASCII85, RunLength, RC4 and AES),
+// source/fitz/filter-flate.c, source/fitz/filter-predict.c,
+// source/fitz/filter-lzw.c and source/fitz/filter-brotli.c,
+// Copyright (C) 2004-2026 Artifex Software, Inc.
 
-//! Stream filters. M1 needs only what cross-reference streams and object
-//! streams use in practice: FlateDecode with PNG and TIFF predictors. The
-//! remaining filters arrive in M2 and report themselves as unsupported.
+//! Stream filters, as stages of a `Stream`. Each keeps MuPDF's buffer size
+//! and its way of asking for input, since both decide what a damaged
+//! stream yields: a filter that fails loses the buffer it was filling.
 
 use flate2::{Decompress, FlushDecompress, Status};
 
-use crate::crypt::Crypt;
-use crate::diag::Diagnostics;
-use crate::object::{Dict, Object};
-
+use crate::crypt::{Aes, Arc4, Cipher, Crypt};
+use crate::diag::{Diagnostics, report};
 use crate::limits::Limits;
+use crate::object::{Dict, Object};
+use crate::stream::{Next, ReadError, Source, Stream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
     /// The filter exists in PDF but nupdf does not decode it yet.
     Unsupported(String),
-    /// The data is broken in a way MuPDF also refuses.
+    /// Opening or reading failed where MuPDF also fails; the report line.
     Failed(String),
     Limit,
 }
@@ -29,7 +34,7 @@ impl DecodeError {
     /// The line MuPDF prints when this error is caught.
     pub fn report(&self) -> String {
         match self {
-            DecodeError::Failed(m) if m.starts_with("zlib error") => format!("library error: {m}"),
+            DecodeError::Failed(m) => report::line(m),
             DecodeError::Limit => format!("limit error: {self}"),
             other => format!("format error: {other}"),
         }
@@ -40,8 +45,17 @@ impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DecodeError::Unsupported(name) => write!(f, "unsupported filter {name}"),
-            DecodeError::Failed(msg) => f.write_str(msg),
+            DecodeError::Failed(msg) => f.write_str(report::strip(msg)),
             DecodeError::Limit => f.write_str("decoded stream exceeds the size limit"),
+        }
+    }
+}
+
+impl From<ReadError> for DecodeError {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::Bomb => DecodeError::Failed(report::format("compression bomb detected")),
+            ReadError::Limit => DecodeError::Limit,
         }
     }
 }
@@ -55,212 +69,165 @@ pub struct CryptContext<'a> {
     pub generation: i32,
 }
 
-/// Data between two stages of a filter chain. With `error`, the stage
-/// before stopped right after `data` (MuPDF's AES filter can), and the next
-/// reader that wants more gets the error and then end of data.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Stage {
-    pub data: Vec<u8>,
-    pub error: Option<String>,
-    /// The data arrives one byte per read, as from MuPDF's AES filter.
-    pub byte_fed: bool,
-}
-
-impl Stage {
-    pub fn complete(data: Vec<u8>) -> Stage {
-        Stage {
-            data,
-            error: None,
-            byte_fed: false,
+/// `pdf_open_crypt_imp`: decrypts `chain` with `cipher`, or leaves it.
+pub fn open_cipher<'a>(chain: Stream<'a>, cipher: Option<Cipher>) -> Result<Stream<'a>, String> {
+    let diag = chain.diag();
+    match cipher {
+        None => Ok(chain),
+        Some(Cipher::Rc4(key)) => Ok(Stream::new(
+            Rc4Filter {
+                chain,
+                arc4: Arc4::new(&key),
+            },
+            diag,
+        )),
+        Some(Cipher::Aes(key)) => {
+            let bits = key.len() as i32 * 8;
+            let aes = Aes::new(&key, bits)
+                .ok_or_else(|| format!("argument error: aes invalid key size ({bits})"))?;
+            Ok(Stream::new(
+                AesFilter {
+                    chain,
+                    aes,
+                    iv: [0; 16],
+                    ivcount: 0,
+                    block: [0; 16],
+                    rp: 0,
+                    wp: 0,
+                },
+                diag,
+            ))
         }
     }
 }
 
-impl From<crate::crypt::Decrypted> for Stage {
-    fn from(d: crate::crypt::Decrypted) -> Stage {
-        Stage {
-            data: d.data,
-            error: d.error,
-            byte_fed: d.byte_fed,
-        }
-    }
-}
+const IMAGE_FILTERS: [&[u8]; 6] = [
+    b"CCITTFaxDecode",
+    b"CCF",
+    b"DCTDecode",
+    b"DCT",
+    b"JBIG2Decode",
+    b"JPXDecode",
+];
 
-/// What MuPDF prints when a read fails: the error, then that it treats the
-/// failure as the end of the data (`fz_available`).
-pub fn report_read_error(error: &str, diag: &Diagnostics) {
-    for line in error.lines().filter(|l| !l.is_empty()) {
-        diag.warn("error.reported", line);
-    }
-    diag.warn("stream.read_error", "read error; treating as end of file");
-}
-
-/// Decodes `raw` according to the stream dictionary, for non-image use.
-/// `resolve` turns indirect references into objects; `crypt` is set in an
-/// encrypted document.
-pub fn decode(
+/// `pdf_open_filter`: `raw` through the stream's filter chain. With
+/// `might_be_image` false, image filters yield nothing, as in MuPDF.
+pub fn open_filters<'a>(
+    raw: Stream<'a>,
     dict: &Dict,
-    raw: &[u8],
     resolve: &dyn Fn(&Object) -> Object,
-    diag: &Diagnostics,
-    limits: &Limits,
-    crypt: Option<CryptContext>,
-) -> Result<Vec<u8>, DecodeError> {
-    let out = decode_stage(
-        dict,
-        Stage::complete(raw.to_vec()),
-        resolve,
-        diag,
-        limits,
-        crypt,
-    )?;
-    if let Some(e) = &out.error {
-        report_read_error(e, diag);
-    }
-    Ok(out.data)
-}
-
-/// Runs the filter chain over `input`. The result can still carry an error
-/// for the final reader, when no filter read past the end of the input.
-pub fn decode_stage(
-    dict: &Dict,
-    input: Stage,
-    resolve: &dyn Fn(&Object) -> Object,
-    diag: &Diagnostics,
-    limits: &Limits,
-    crypt: Option<CryptContext>,
-) -> Result<Stage, DecodeError> {
+    crypt: Option<CryptContext<'_>>,
+    might_be_image: bool,
+) -> Result<Stream<'a>, DecodeError> {
     // pdf_dict_geta: the abbreviation wins when both are present.
-    let filters = resolve(
-        dict.get(b"F")
-            .or_else(|| dict.get(b"Filter"))
-            .unwrap_or(&Object::Null),
-    );
-    let params = resolve(
-        dict.get(b"DP")
-            .or_else(|| dict.get(b"DecodeParms"))
-            .unwrap_or(&Object::Null),
-    );
-
-    let chain: Vec<(Object, Object)> = match &filters {
-        Object::Name(_) => vec![(filters.clone(), params)],
-        Object::Array(items) => items
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
+    let filters = dict
+        .get(b"F")
+        .or_else(|| dict.get(b"Filter"))
+        .map_or(Object::Null, resolve);
+    let params = dict.get(b"DP").or_else(|| dict.get(b"DecodeParms"));
+    match &filters {
+        Object::Name(_) => {
+            let p = params.map_or(Object::Null, resolve);
+            build_filter(raw, &filters, &p, resolve, crypt, might_be_image)
+        }
+        Object::Array(items) if !items.is_empty() => {
+            let params = params.map_or(Object::Null, resolve);
+            let mut chain = raw;
+            for (i, f) in items.iter().enumerate() {
                 let p = params
                     .as_array()
                     .and_then(|ps| ps.get(i))
                     .map_or(Object::Null, resolve);
-                (resolve(f), p)
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
-
-    let mut stage = input;
-    for (filter, params) in chain {
-        stage = apply(
-            &filter,
-            &params,
-            stage,
-            resolve,
-            diag,
-            limits.max_decoded_bytes,
-            crypt,
-        )?;
+                chain = build_filter(chain, &resolve(f), &p, resolve, crypt, might_be_image)?;
+            }
+            Ok(chain)
+        }
+        _ => Ok(raw),
     }
-    Ok(stage)
 }
 
-/// One filter. A filter that reads to the end of an input that stopped
-/// with an error reports it there, then sees the end of the data.
-fn apply(
+/// `build_filter` with `build_compression_params` and
+/// `fz_open_image_decomp_stream`.
+fn build_filter<'a>(
+    chain: Stream<'a>,
     filter: &Object,
     params: &Object,
-    stage: Stage,
     resolve: &dyn Fn(&Object) -> Object,
-    diag: &Diagnostics,
-    max: usize,
-    crypt: Option<CryptContext>,
-) -> Result<Stage, DecodeError> {
+    crypt: Option<CryptContext<'_>>,
+    might_be_image: bool,
+) -> Result<Stream<'a>, DecodeError> {
+    let diag = chain.diag();
     let name = filter.as_name().unwrap_or_default();
-    let input = stage.data.as_slice();
-    let reached_end = |wanted_more: bool| {
-        if wanted_more && let Some(e) = &stage.error {
-            report_read_error(e, diag);
-        }
-    };
+    if !might_be_image && IMAGE_FILTERS.contains(&name) {
+        diag.warn(
+            "filter.image_only",
+            "Can't open image only stream for non-image purposes",
+        );
+        return Ok(Stream::memory(b"", diag));
+    }
     let int = |key: &[u8], default: i32| {
         params
             .as_dict()
             .and_then(|d| d.get(key))
             .map_or(default, |v| resolve(v).to_int_or(default))
     };
+    let predictor = |head: Stream<'a>| -> Result<Stream<'a>, DecodeError> {
+        let p = int(b"Predictor", 1);
+        if p > 1 {
+            open_predict(
+                head,
+                p,
+                int(b"Columns", 1),
+                int(b"Colors", 1),
+                int(b"BitsPerComponent", 8),
+            )
+        } else {
+            Ok(head)
+        }
+    };
     match name {
-        b"FlateDecode" | b"Fl" => {
-            let (data, wanted_more) = inflate_fed(input, diag, max, stage.byte_fed)?;
-            reached_end(wanted_more);
-            let predictor = int(b"Predictor", 1);
-            if predictor > 1 {
-                predict(
-                    &data,
-                    predictor,
-                    int(b"Columns", 1),
-                    int(b"Colors", 1),
-                    int(b"BitsPerComponent", 8),
-                    diag,
-                )
-                .map(Stage::complete)
-            } else {
-                Ok(Stage::complete(data))
-            }
-        }
-        b"CCITTFaxDecode" | b"CCF" | b"DCTDecode" | b"DCT" | b"JBIG2Decode" | b"JPXDecode" => {
-            diag.warn(
-                "filter.image_only",
-                "Can't open image only stream for non-image purposes",
-            );
-            Ok(Stage::default())
-        }
-        b"ASCIIHexDecode" | b"AHx" => {
-            reached_end(!input.contains(&b'>'));
-            ascii_hex(input).map(Stage::complete)
-        }
-        b"ASCII85Decode" | b"A85" => {
-            reached_end(!input.contains(&b'~'));
-            ascii85(input, diag).map(Stage::complete)
-        }
-        b"RunLengthDecode" | b"RL" => {
-            reached_end(!run_length_ends(input));
-            run_length(input, max).map(Stage::complete)
-        }
-        b"LZWDecode" | b"LZW" | b"BrotliDecode" | b"Br" => Err(DecodeError::Unsupported(
+        b"CCITTFaxDecode" | b"CCF" | b"DCTDecode" | b"DCT" | b"JBIG2Decode" | b"BrotliDecode"
+        | b"Br" | b"LZWDecode" | b"LZW" => Err(DecodeError::Unsupported(
             String::from_utf8_lossy(name).into_owned(),
         )),
+        b"RunLengthDecode" | b"RL" => Ok(open_rld(chain)),
+        b"FlateDecode" | b"Fl" => predictor(Stream::new(
+            Flate {
+                chain,
+                z: Decompress::new(true),
+                bad: None,
+                done: false,
+            },
+            diag,
+        )),
+        // Decoded by the image code; for everything else, the raw data.
+        b"JPXDecode" => Ok(chain),
+        b"ASCIIHexDecode" | b"AHx" => Ok(Stream::new(AsciiHex { chain, eod: false }, diag)),
+        b"ASCII85Decode" | b"A85" => Ok(Stream::new(Ascii85 { chain, eod: false }, diag)),
         b"Crypt" => {
             let Some(cx) = crypt else {
                 diag.warn(
                     "filter.crypt_unencrypted",
                     "crypt filter in unencrypted document",
                 );
-                return Ok(stage);
+                return Ok(chain);
             };
-            // Without a /Name parameter the data passes through.
-            let name = params
+            let named = params
                 .as_dict()
                 .and_then(|d| d.get(b"Name"))
                 .map(resolve)
                 .and_then(|n| n.as_name().map(<[u8]>::to_vec));
-            match name {
-                Some(name) => {
-                    reached_end(true);
-                    cx.crypt
-                        .decrypt_with_filter(&name, input, cx.num, cx.generation, diag)
-                        .map(Stage::from)
+            match named {
+                // pdf_open_crypt_with_filter
+                Some(n) if n != b"Identity" => {
+                    let cf = cx
+                        .crypt
+                        .parse_filter(&n, diag)
+                        .map_err(DecodeError::Failed)?;
+                    open_cipher(chain, cx.crypt.stream_cipher(&cf, cx.num, cx.generation))
                         .map_err(DecodeError::Failed)
                 }
-                None => Ok(stage),
+                _ => Ok(chain),
             }
         }
         other => {
@@ -268,222 +235,523 @@ fn apply(
                 "filter.unknown",
                 format!("unknown filter name ({})", String::from_utf8_lossy(other)),
             );
-            Ok(stage)
+            Ok(chain)
         }
     }
 }
 
-/// MuPDF's `ahxd`: hex pairs until '>', whitespace ignored.
-pub fn ascii_hex(input: &[u8]) -> Result<Vec<u8>, DecodeError> {
-    let mut out = Vec::with_capacity(input.len() / 2);
-    let mut high: Option<u8> = None;
-    for &c in input {
-        if c.is_ascii_hexdigit() {
-            let v = (c as char).to_digit(16).unwrap_or(0) as u8;
-            match high.take() {
-                Some(h) => out.push((h << 4) | v),
-                None => high = Some(v),
-            }
-        } else if c == b'>' {
-            if let Some(h) = high {
-                out.push(h << 4);
-            }
-            return Ok(out);
-        } else if !crate::lex::is_white(c) {
-            return Err(DecodeError::Failed(format!(
-                "bad data in ahxd: '{}'",
-                c as char
-            )));
-        }
-    }
-    Ok(out)
-}
-
-/// MuPDF's `a85d`, including its handling of short final groups.
-pub fn ascii85(input: &[u8], diag: &Diagnostics) -> Result<Vec<u8>, DecodeError> {
-    let mut out = Vec::with_capacity(input.len() * 4 / 5);
-    let mut word: u32 = 0;
-    let mut count = 0;
-    let mut i = 0;
-    while let Some(&c) = input.get(i) {
-        i += 1;
-        if (b'!'..=b'u').contains(&c) {
-            word = word.wrapping_mul(85).wrapping_add(u32::from(c - b'!'));
-            if count == 4 {
-                out.extend_from_slice(&word.to_be_bytes());
-                word = 0;
-                count = 0;
-            } else {
-                count += 1;
-            }
-        } else if c == b'z' && count == 0 {
-            out.extend_from_slice(&[0, 0, 0, 0]);
-        } else if c == b'~' {
-            if input.get(i) != Some(&b'>') {
-                diag.warn("filter.a85_bad_eod", "bad eod marker in a85d");
-            }
-            let bytes = word_tail(word, count, diag);
-            out.extend_from_slice(&bytes);
-            return Ok(out);
-        } else if !crate::lex::is_white(c) {
-            return Err(DecodeError::Failed(format!(
-                "bad data in a85d: '{}'",
-                c as char
-            )));
-        }
-    }
-    Ok(out)
-}
-
-fn word_tail(word: u32, count: usize, diag: &Diagnostics) -> Vec<u8> {
-    let full = |w: u32, n: usize| w.to_be_bytes()[..n].to_vec();
-    match count {
-        1 => {
-            diag.warn("filter.a85_partial", "partial final byte in a85d");
-            Vec::new()
-        }
-        2 => full(word.wrapping_mul(85 * 85 * 85).wrapping_add(0xff_ffff), 1),
-        3 => full(word.wrapping_mul(85 * 85).wrapping_add(0xffff), 2),
-        4 => full(word.wrapping_mul(85).wrapping_add(0xff), 3),
-        _ => Vec::new(),
+/// Whether the filter chain (/F, else /Filter) names an image filter.
+pub fn has_image_filter(dict: &Dict, resolve: &dyn Fn(&Object) -> Object) -> bool {
+    let is_image = |o: &Object| o.as_name().is_some_and(|n| IMAGE_FILTERS.contains(&n));
+    match dict.get(b"F").or_else(|| dict.get(b"Filter")).map(resolve) {
+        Some(Object::Array(items)) => items.iter().any(|f| is_image(&resolve(f))),
+        Some(f) => is_image(&f),
+        None => false,
     }
 }
 
-/// Whether PackBits data reaches its end-of-data marker.
-fn run_length_ends(input: &[u8]) -> bool {
-    let mut i = 0;
-    while let Some(&run) = input.get(i) {
-        match run {
-            128 => return true,
-            0..=127 => i += usize::from(run) + 2,
-            _ => i += 2,
+/// `pdf_guess_filter_length` over /Filter (the full key only, as MuPDF).
+pub fn guess_length(len: usize, dict: &Dict, resolve: &dyn Fn(&Object) -> Object) -> usize {
+    let guess = |len: usize, name: &[u8]| -> usize {
+        match name {
+            b"ASCIIHexDecode" => return len / 2,
+            b"ASCII85Decode" => return len * 4 / 5,
+            _ => {}
+        }
+        let n = match name {
+            b"FlateDecode" | b"RunLengthDecode" => len.saturating_mul(3),
+            b"BrotliDecode" => len.saturating_mul(4),
+            b"LZWDecode" => len.saturating_mul(2),
+            _ => len,
+        };
+        n.max(len)
+    };
+    match dict.get(b"Filter").map(resolve) {
+        Some(Object::Name(n)) => guess(len, &n),
+        Some(Object::Array(items)) => items.iter().fold(guess(len, b""), |l, f| {
+            guess(l, resolve(f).as_name().unwrap_or_default())
+        }),
+        _ => guess(len, b""),
+    }
+}
+
+/// The image-size bound `pdf_load_image_stream` uses as the compression
+/// bomb limit for /Subtype /Image streams, or 0.
+pub fn worst_case(dict: &Dict, len: usize, resolve: &dyn Fn(&Object) -> Object) -> usize {
+    let get = |k: &[u8]| dict.get(k).map_or(Object::Null, resolve);
+    if !get(b"Subtype").is_name(b"Image") {
+        return 0;
+    }
+    let w = get(b"Width").to_int64();
+    let h = get(b"Height").to_int64();
+    let bpc = i64::from(get(b"BitsPerComponent").to_int_or(8));
+    let nc = i64::from(colorspace_components(
+        dict.get(b"ColorSpace").unwrap_or(&Object::Null),
+        resolve,
+        0,
+    ));
+    if w > 0 && h > 0 && bpc > 0 && nc > 0 {
+        let row = (w.saturating_mul(nc).saturating_mul(bpc).saturating_add(7)) >> 3;
+        let size = usize::try_from(row.saturating_mul(h)).unwrap_or(usize::MAX);
+        size.max(len)
+    } else {
+        0
+    }
+}
+
+/// `pdf_guess_colorspace_components`. MuPDF compares names by identity,
+/// so only direct names count.
+fn colorspace_components(cs: &Object, resolve: &dyn Fn(&Object) -> Object, depth: u8) -> i32 {
+    let name_count = |n: &[u8]| match n {
+        b"G" | b"DeviceGray" | b"I" | b"Indexed" | b"CalGray" | b"Separation" => Some(1),
+        b"RGB" | b"DeviceRGB" | b"CalRGB" | b"Lab" => Some(3),
+        b"CMYK" | b"DeviceCMYK" | b"CalCMYK" => Some(4),
+        _ => None,
+    };
+    match cs {
+        Object::Name(n) => match n.as_ref() {
+            b"Pattern" | b"G" | b"DeviceGray" => 1,
+            b"RGB" | b"DeviceRGB" => 3,
+            b"CMYK" | b"DeviceCMYK" => 4,
+            _ => 0,
+        },
+        _ => {
+            let Object::Array(items) = resolve(cs) else {
+                return 0;
+            };
+            let Some(Object::Name(first)) = items.first() else {
+                return 0;
+            };
+            if let Some(n) = name_count(first) {
+                return n;
+            }
+            let second = items.get(1).map_or(Object::Null, resolve);
+            match first.as_ref() {
+                b"ICCBased" => second
+                    .as_dict()
+                    .and_then(|d| d.get(b"N"))
+                    .map_or(0, |n| resolve(n).to_int())
+                    .clamp(0, 4),
+                b"DeviceN" => second.as_array().map_or(0, |a| a.len() as i32).clamp(0, 32),
+                b"Pattern" if depth < 8 => match items.get(1) {
+                    Some(inner) => {
+                        let resolved = resolve(inner);
+                        if resolved
+                            .as_array()
+                            .and_then(|a| a.first())
+                            .is_some_and(|f| f.is_name(b"Pattern"))
+                        {
+                            0
+                        } else {
+                            colorspace_components(inner, resolve, depth + 1)
+                        }
+                    }
+                    None => 0,
+                },
+                _ => 0,
+            }
         }
     }
-    false
 }
 
-/// MuPDF's `rld`: PackBits runs, 128 ends the data.
-pub fn run_length(input: &[u8], max: usize) -> Result<Vec<u8>, DecodeError> {
-    let premature = || DecodeError::Failed("premature end of data in run length decode".into());
-    let mut out = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while let Some(&run) = input.get(i) {
-        i += 1;
-        match run {
-            128 => break,
-            0..=127 => {
-                let n = usize::from(run) + 1;
-                let chunk = input.get(i..i + n).ok_or_else(premature)?;
-                out.extend_from_slice(chunk);
-                i += n;
-            }
-            _ => {
-                let &c = input.get(i).ok_or_else(premature)?;
-                i += 1;
-                out.extend(std::iter::repeat_n(c, 257 - usize::from(run)));
-            }
-        }
-        if out.len() > max {
-            return Err(DecodeError::Limit);
-        }
-    }
-    Ok(out)
-}
-
-/// zlib inflate with MuPDF's tolerance: truncated data and errors at the
-/// very end of the input keep what was decoded; other errors fail.
-pub fn inflate(input: &[u8], diag: &Diagnostics, max: usize) -> Result<Vec<u8>, DecodeError> {
-    inflate_fed(input, diag, max, false).map(|(out, _)| out)
-}
-
-/// `inflate`, also telling whether zlib wanted input past the end. When
-/// the input arrives a byte at a time (`byte_fed`), MuPDF only ever sees
-/// errors at the end of what it has, so every zlib error is ignored.
-fn inflate_fed(
-    input: &[u8],
+/// Decodes `raw` through the filters of `dict`, read whole as MuPDF's
+/// `pdf_load_stream` does (`fz_read_best`).
+pub fn decode(
+    dict: &Dict,
+    raw: &[u8],
+    resolve: &dyn Fn(&Object) -> Object,
     diag: &Diagnostics,
-    max: usize,
-    byte_fed: bool,
-) -> Result<(Vec<u8>, bool), DecodeError> {
-    let mut z = Decompress::new(true);
-    // Never hold more than one byte past the limit, so exceeding it is
-    // detected without first allocating the whole expansion.
-    let cap = |n: usize| n.min(max.saturating_add(1));
-    let mut out: Vec<u8> =
-        Vec::with_capacity(cap(input.len().saturating_mul(4).clamp(64, 1 << 20)));
-    loop {
-        if out.len() > max {
-            return Err(DecodeError::Limit);
+    limits: &Limits,
+) -> Result<Vec<u8>, DecodeError> {
+    let mut s = open_filters(Stream::memory(raw, diag), dict, resolve, None, true)?;
+    Ok(s.read_best(0, 0, limits.max_decoded_bytes)?)
+}
+
+// ---- RC4 and AES ---------------------------------------------------------
+
+struct Rc4Filter<'a> {
+    chain: Stream<'a>,
+    arc4: Arc4,
+}
+
+impl Source for Rc4Filter<'_> {
+    fn next(&mut self, max: usize, out: &mut Vec<u8>, _: &Diagnostics) -> Result<Next, String> {
+        let n = self.chain.available(max).min(256);
+        if n == 0 {
+            return Ok(Next::Eof);
         }
-        if out.len() == out.capacity() {
-            let grow = cap(out.len() + out.len().clamp(64 * 1024, 16 << 20)) - out.len();
-            out.reserve(grow.max(1));
+        out.extend_from_slice(&self.chain.data()[..n]);
+        self.arc4.apply(out);
+        self.chain.consume(n);
+        Ok(Next::Data)
+    }
+}
+
+/// `fz_open_aesd`: a 16-byte IV, then whole blocks; padding is stripped from
+/// the block that ends the input. It produces at most what the reader asks
+/// for, so a reader that takes one byte at a time sees every block before a
+/// failing one.
+struct AesFilter<'a> {
+    chain: Stream<'a>,
+    aes: Aes,
+    iv: [u8; 16],
+    ivcount: usize,
+    block: [u8; 16],
+    rp: usize,
+    wp: usize,
+}
+
+impl Source for AesFilter<'_> {
+    fn next(&mut self, max: usize, out: &mut Vec<u8>, _: &Diagnostics) -> Result<Next, String> {
+        let max = max.clamp(1, 256);
+        while self.ivcount < 16 {
+            let Some(c) = self.chain.read_byte() else {
+                return Err(report::format("premature end in aes filter"));
+            };
+            self.iv[self.ivcount] = c;
+            self.ivcount += 1;
         }
-        let consumed = usize::try_from(z.total_in())
-            .unwrap_or(input.len())
-            .min(input.len());
-        let rest = &input[consumed..];
-        let before = (z.total_in(), z.total_out());
-        match z.decompress_vec(rest, &mut out, FlushDecompress::Sync) {
-            Ok(Status::StreamEnd) if out.len() > max => return Err(DecodeError::Limit),
-            Ok(Status::StreamEnd) => return Ok((out, false)),
-            Ok(Status::BufError) => {
-                diag.warn(
-                    "filter.flate_truncated",
-                    "premature end of data in flate filter",
-                );
-                return Ok((out, true));
+        let take = |f: &mut Self, out: &mut Vec<u8>| {
+            let n = (f.wp - f.rp).min(max - out.len());
+            out.extend_from_slice(&f.block[f.rp..f.rp + n]);
+            f.rp += n;
+        };
+        take(self, out);
+        while out.len() < max {
+            let mut block = [0u8; 16];
+            let n = self.chain.read(&mut block);
+            if n == 0 {
+                break;
             }
-            Ok(Status::Ok) => {
-                // No progress with input left means zlib wants more than we have.
-                if (z.total_in(), z.total_out()) == before && out.len() < out.capacity() {
+            if n < 16 {
+                return Err(report::format("partial block in aes filter"));
+            }
+            self.aes.cbc_decrypt(&mut self.iv, &mut block);
+            self.block = block;
+            self.rp = 0;
+            self.wp = 16;
+            if self.chain.is_eof() {
+                let pad = block[15];
+                if !(1..=16).contains(&pad) {
+                    return Err(report::format(&format!("aes padding out of range: {pad}")));
+                }
+                self.wp -= usize::from(pad);
+            }
+            take(self, out);
+        }
+        Ok(if out.is_empty() {
+            Next::Eof
+        } else {
+            Next::Data
+        })
+    }
+}
+
+// ---- Flate ---------------------------------------------------------------
+
+/// `fz_open_flated`: fills a 4096-byte buffer per call, feeding zlib
+/// whatever the stage below has buffered.
+struct Flate<'a> {
+    chain: Stream<'a>,
+    z: Decompress,
+    /// zlib's message after an error it was told to ignore: zlib keeps
+    /// failing the same way afterwards.
+    bad: Option<String>,
+    done: bool,
+}
+
+impl Source for Flate<'_> {
+    fn next(&mut self, _: usize, out: &mut Vec<u8>, diag: &Diagnostics) -> Result<Next, String> {
+        if self.done {
+            return Ok(Next::Eof);
+        }
+        out.resize(4096, 0);
+        let mut produced = 0;
+        while produced < out.len() {
+            let avail = self.chain.available(1);
+            let (result, consumed, made) = match &self.bad {
+                Some(msg) => (Err(Some(msg.clone())), 0, 0),
+                None => {
+                    let (in0, out0) = (self.z.total_in(), self.z.total_out());
+                    let r = self.z.decompress(
+                        &self.chain.data()[..avail],
+                        &mut out[produced..],
+                        FlushDecompress::Sync,
+                    );
+                    let consumed = (self.z.total_in() - in0) as usize;
+                    let made = (self.z.total_out() - out0) as usize;
+                    let r = r.map_err(|e| {
+                        if e.needs_dictionary().is_some() {
+                            None
+                        } else {
+                            Some(e.message().unwrap_or("(null)").to_string())
+                        }
+                    });
+                    (r, consumed, made)
+                }
+            };
+            self.chain.consume(consumed);
+            produced += made;
+            let left = avail - consumed.min(avail);
+            match result {
+                Ok(Status::StreamEnd) => {
+                    self.done = true;
+                    break;
+                }
+                Ok(Status::BufError) => {
                     diag.warn(
                         "filter.flate_truncated",
                         "premature end of data in flate filter",
                     );
-                    return Ok((out, true));
+                    break;
                 }
-            }
-            Err(e) => {
-                let msg = e.message().unwrap_or("unknown error").to_string();
-                let consumed = usize::try_from(z.total_in()).unwrap_or(0);
-                if byte_fed || consumed >= input.len() || msg == "incorrect data check" {
+                Ok(Status::Ok) => {}
+                Err(Some(msg)) if left == 0 => {
                     diag.warn("filter.flate_error", format!("ignoring zlib error: {msg}"));
-                    return Ok((out, false));
+                    self.bad = Some(msg);
+                    break;
                 }
-                return Err(DecodeError::Failed(format!("zlib error: {msg}")));
+                Err(Some(msg)) if msg == "incorrect data check" => {
+                    diag.warn("filter.flate_error", format!("ignoring zlib error: {msg}"));
+                    self.chain.consume(left);
+                    self.bad = Some(msg);
+                    break;
+                }
+                Err(msg) => {
+                    return Err(format!(
+                        "library error: zlib error: {}",
+                        msg.as_deref().unwrap_or("(null)")
+                    ));
+                }
             }
         }
+        out.truncate(produced);
+        Ok(if out.is_empty() {
+            Next::Eof
+        } else {
+            Next::Data
+        })
     }
 }
 
-/// MuPDF's predictor filter, applied to a whole decoded buffer.
-pub fn predict(
-    input: &[u8],
+// ---- ASCIIHex, ASCII85, RunLength ---------------------------------------
+
+/// MuPDF's whitespace for these filters.
+fn is_white(c: u8) -> bool {
+    matches!(c, b'\n' | b'\r' | b'\t' | b' ' | 0 | 0x0c | 0x08 | 0x7f)
+}
+
+/// `fz_open_ahxd`.
+struct AsciiHex<'a> {
+    chain: Stream<'a>,
+    eod: bool,
+}
+
+impl Source for AsciiHex<'_> {
+    fn next(&mut self, max: usize, out: &mut Vec<u8>, _: &Diagnostics) -> Result<Next, String> {
+        let max = max.clamp(1, 256);
+        let mut high: Option<u8> = None;
+        while out.len() < max {
+            if self.eod {
+                break;
+            }
+            let Some(c) = self.chain.read_byte() else {
+                break;
+            };
+            if c.is_ascii_hexdigit() {
+                let v = (c as char).to_digit(16).unwrap_or(0) as u8;
+                match high.take() {
+                    Some(h) => out.push((h << 4) | v),
+                    None => high = Some(v),
+                }
+            } else if c == b'>' {
+                if let Some(h) = high {
+                    out.push(h << 4);
+                }
+                self.eod = true;
+                break;
+            } else if !is_white(c) {
+                return Err(report::format(&format!(
+                    "bad data in ahxd: '{}'",
+                    c as char
+                )));
+            }
+        }
+        Ok(if out.is_empty() {
+            Next::Eof
+        } else {
+            Next::Data
+        })
+    }
+}
+
+/// `fz_open_a85d`.
+struct Ascii85<'a> {
+    chain: Stream<'a>,
+    eod: bool,
+}
+
+impl Source for Ascii85<'_> {
+    fn next(&mut self, max: usize, out: &mut Vec<u8>, diag: &Diagnostics) -> Result<Next, String> {
+        if self.eod {
+            return Ok(Next::Eof);
+        }
+        let max = max.clamp(1, 256);
+        let mut word: u32 = 0;
+        let mut count = 0;
+        while out.len() < max {
+            let Some(c) = self.chain.read_byte() else {
+                break;
+            };
+            if (b'!'..=b'u').contains(&c) {
+                word = word.wrapping_mul(85).wrapping_add(u32::from(c - b'!'));
+                if count == 4 {
+                    out.extend_from_slice(&word.to_be_bytes());
+                    word = 0;
+                    count = 0;
+                } else {
+                    count += 1;
+                }
+            } else if c == b'z' && count == 0 {
+                out.extend_from_slice(&[0; 4]);
+            } else if c == b'~' {
+                if self.chain.read_byte() != Some(b'>') {
+                    diag.warn("filter.a85_bad_eod", "bad eod marker in a85d");
+                }
+                let tail = |w: u32, n: usize| w.to_be_bytes()[..n].to_vec();
+                match count {
+                    1 => diag.warn("filter.a85_partial", "partial final byte in a85d"),
+                    2 => out.extend(tail(
+                        word.wrapping_mul(85 * 85 * 85).wrapping_add(0xff_ffff),
+                        1,
+                    )),
+                    3 => out.extend(tail(word.wrapping_mul(85 * 85).wrapping_add(0xffff), 2)),
+                    4 => out.extend(tail(word.wrapping_mul(85).wrapping_add(0xff), 3)),
+                    _ => {}
+                }
+                self.eod = true;
+                break;
+            } else if !is_white(c) {
+                return Err(report::format(&format!(
+                    "bad data in a85d: '{}'",
+                    c as char
+                )));
+            }
+        }
+        Ok(if out.is_empty() {
+            Next::Eof
+        } else {
+            Next::Data
+        })
+    }
+}
+
+/// `fz_open_rld`, which refuses to stack on another run-length decoder.
+fn open_rld(chain: Stream<'_>) -> Stream<'_> {
+    let diag = chain.diag();
+    let stacked = chain.is_rld();
+    let mut s = Stream::new(
+        RunLength {
+            chain,
+            run: 0,
+            n: 0,
+            c: 0,
+        },
+        diag,
+    );
+    if stacked {
+        diag.warn("filter.rle_bomb", "RLE bomb defused");
+        s.finish();
+    }
+    s
+}
+
+struct RunLength<'a> {
+    chain: Stream<'a>,
+    run: i32,
+    n: i32,
+    c: u8,
+}
+
+impl Source for RunLength<'_> {
+    fn next(&mut self, max: usize, out: &mut Vec<u8>, _: &Diagnostics) -> Result<Next, String> {
+        if self.run == 128 {
+            return Ok(Next::Eof);
+        }
+        let premature = || report::format("premature end of data in run length decode");
+        let max = max.clamp(1, 256);
+        while out.len() < max {
+            if self.run == 128 {
+                break;
+            }
+            if self.n == 0 {
+                let Some(run) = self.chain.read_byte() else {
+                    self.run = 128;
+                    break;
+                };
+                self.run = i32::from(run);
+                if self.run < 128 {
+                    self.n = self.run + 1;
+                }
+                if self.run > 128 {
+                    self.n = 257 - self.run;
+                    self.c = self.chain.read_byte().ok_or_else(premature)?;
+                }
+            }
+            if self.run < 128 {
+                while out.len() < max && self.n > 0 {
+                    out.push(self.chain.read_byte().ok_or_else(premature)?);
+                    self.n -= 1;
+                }
+            }
+            if self.run > 128 {
+                while out.len() < max && self.n > 0 {
+                    out.push(self.c);
+                    self.n -= 1;
+                }
+            }
+        }
+        Ok(if out.is_empty() {
+            Next::Eof
+        } else {
+            Next::Data
+        })
+    }
+
+    fn is_rld(&self) -> bool {
+        true
+    }
+}
+
+// ---- Predictors ------------------------------------------------------------
+
+/// `fz_open_predict`.
+pub fn open_predict(
+    chain: Stream<'_>,
     predictor: i32,
     columns: i32,
     colors: i32,
     bpc: i32,
-    diag: &Diagnostics,
-) -> Result<Vec<u8>, DecodeError> {
+) -> Result<Stream<'_>, DecodeError> {
     const MAX_COLORS: i32 = 32;
+    let diag = chain.diag();
     let mut predictor = predictor.max(1);
     let columns = columns.max(1);
     let colors = colors.max(1);
     let bpc = if bpc < 1 { 8 } else { bpc };
     if ![1, 2, 4, 8, 16].contains(&bpc) {
         return Err(DecodeError::Failed(format!(
-            "invalid number of bits per component: {bpc}"
+            "argument error: invalid number of bits per component: {bpc}"
         )));
     }
     if colors > MAX_COLORS {
         return Err(DecodeError::Failed(format!(
-            "too many color components ({colors} > {MAX_COLORS})"
+            "argument error: too many color components ({colors} > {MAX_COLORS})"
         )));
     }
     if columns >= i32::MAX / (bpc * colors) {
         return Err(DecodeError::Failed(format!(
-            "too many columns lead to an integer overflow ({columns})"
+            "limit error: too many columns lead to an integer overflow ({columns})"
         )));
     }
     if ![1, 2, 10, 11, 12, 13, 14, 15].contains(&predictor) {
@@ -493,41 +761,89 @@ pub fn predict(
         );
         predictor = 1;
     }
-    let (colors, bpc) = (colors as usize, bpc as usize);
-    let stride = (bpc * colors * columns as usize).div_ceil(8);
-    let bpp = (bpc * colors).div_ceil(8);
-    let png = predictor >= 10;
-    let row_in = stride + usize::from(png);
+    let stride = ((bpc * colors * columns + 7) / 8) as usize;
+    let bpp = ((bpc * colors + 7) / 8) as usize;
+    Ok(Stream::new(
+        Predict {
+            chain,
+            predictor,
+            columns: columns as usize,
+            colors: colors as usize,
+            bpc: bpc as usize,
+            stride,
+            bpp,
+            input: vec![0; stride + 1],
+            output: vec![0; stride],
+            reference: vec![0; stride],
+            rp: 0,
+            wp: 0,
+        },
+        diag,
+    ))
+}
 
-    let mut out = Vec::with_capacity(input.len());
-    let mut row = vec![0u8; stride];
-    let mut reference = vec![0u8; stride];
-    let mut padded = vec![0u8; stride];
-    for chunk in input.chunks(row_in) {
-        let n = chunk.len();
-        match predictor {
-            1 => out.extend_from_slice(chunk),
-            2 => {
-                padded[..n].copy_from_slice(chunk);
-                tiff_row(&mut row, &padded, columns as usize, colors, bpc);
-                out.extend_from_slice(&row[..n]);
+struct Predict<'a> {
+    chain: Stream<'a>,
+    predictor: i32,
+    columns: usize,
+    colors: usize,
+    bpc: usize,
+    stride: usize,
+    bpp: usize,
+    input: Vec<u8>,
+    output: Vec<u8>,
+    reference: Vec<u8>,
+    rp: usize,
+    wp: usize,
+}
+
+impl Source for Predict<'_> {
+    fn next(&mut self, max: usize, out: &mut Vec<u8>, diag: &Diagnostics) -> Result<Next, String> {
+        let max = max.clamp(1, 4096);
+        let png = usize::from(self.predictor >= 10);
+        let copy = |f: &mut Self, out: &mut Vec<u8>| {
+            let n = (f.wp - f.rp).min(max - out.len());
+            out.extend_from_slice(&f.output[f.rp..f.rp + n]);
+            f.rp += n;
+        };
+        copy(self, out);
+        while out.len() < max {
+            let want = self.stride + png;
+            let n = self.chain.read(&mut self.input[..want]);
+            if n == 0 {
+                break;
             }
-            _ => {
-                let len = n - 1;
-                png_row(
-                    &mut row[..len],
-                    &chunk[1..],
-                    &reference,
-                    bpp,
-                    chunk[0],
-                    diag,
-                );
-                reference.copy_from_slice(&row);
-                out.extend_from_slice(&row[..len]);
+            match self.predictor {
+                1 => self.output[..n].copy_from_slice(&self.input[..n]),
+                2 => tiff_row(
+                    &mut self.output,
+                    &self.input,
+                    self.columns,
+                    self.colors,
+                    self.bpc,
+                ),
+                _ => {
+                    png_row(
+                        &mut self.output,
+                        &self.input[1..n],
+                        &self.reference,
+                        self.bpp,
+                        self.input[0],
+                        diag,
+                    );
+                    self.reference.copy_from_slice(&self.output);
+                }
             }
+            self.rp = 0;
+            self.wp = n - png;
+            copy(self, out);
         }
+        Ok(if out.is_empty() {
+            Next::Eof
+        } else {
+            Next::Data
+        })
     }
-    Ok(out)
 }
 
 fn png_row(
@@ -538,16 +854,14 @@ fn png_row(
     kind: u8,
     diag: &Diagnostics,
 ) {
-    let len = out.len();
+    let len = input.len();
     let bpp = bpp.min(len);
     match kind {
+        0 => out[..len].copy_from_slice(input),
         1 => {
-            for i in 0..len {
-                out[i] = if i < bpp {
-                    input[i]
-                } else {
-                    input[i].wrapping_add(out[i - bpp])
-                };
+            out[..bpp].copy_from_slice(&input[..bpp]);
+            for i in bpp..len {
+                out[i] = input[i].wrapping_add(out[i - bpp]);
             }
         }
         2 => {
@@ -556,43 +870,39 @@ fn png_row(
             }
         }
         3 => {
-            for i in 0..len {
-                let avg = if i < bpp {
-                    u16::from(reference[i]) / 2
-                } else {
-                    (u16::from(out[i - bpp]) + u16::from(reference[i])) / 2
-                };
+            for i in 0..bpp {
+                out[i] = input[i].wrapping_add(reference[i] / 2);
+            }
+            for i in bpp..len {
+                let avg = (u32::from(out[i - bpp]) + u32::from(reference[i])) / 2;
                 out[i] = input[i].wrapping_add(avg as u8);
             }
         }
         4 => {
-            for i in 0..len {
-                let p = if i < bpp {
-                    paeth(0, i32::from(reference[i]), 0)
-                } else {
-                    paeth(
-                        i32::from(out[i - bpp]),
-                        i32::from(reference[i]),
-                        i32::from(reference[i - bpp]),
-                    )
-                };
+            for i in 0..bpp {
+                out[i] = input[i].wrapping_add(paeth(0, i32::from(reference[i]), 0) as u8);
+            }
+            for i in bpp..len {
+                let p = paeth(
+                    i32::from(out[i - bpp]),
+                    i32::from(reference[i]),
+                    i32::from(reference[i - bpp]),
+                );
                 out[i] = input[i].wrapping_add(p as u8);
             }
         }
         other => {
-            if other != 0 {
-                diag.warn(
-                    "filter.bad_png_predictor",
-                    format!("unknown png predictor {other}, treating as none"),
-                );
-            }
-            out.copy_from_slice(&input[..len]);
+            diag.warn(
+                "filter.png_predictor",
+                format!("unknown png predictor {other}, treating as none"),
+            );
+            out[..len].copy_from_slice(input);
         }
     }
 }
 
 fn paeth(a: i32, b: i32, c: i32) -> i32 {
-    // MuPDF's definitions of ac and bc are deliberate, not a typo.
+    // ac and bc are as in MuPDF; not a typo.
     let ac = b - c;
     let bc = a - c;
     let abcc = ac + bc;
@@ -607,13 +917,15 @@ fn paeth(a: i32, b: i32, c: i32) -> i32 {
 }
 
 fn tiff_row(out: &mut [u8], input: &[u8], columns: usize, colors: usize, bpc: usize) {
-    let mut left = vec![0u32; colors];
-    let cells = (0..columns).flat_map(|i| (0..colors).map(move |k| (i * colors + k, k)));
+    let mut left = [0u32; 32];
+    let left = &mut left[..colors];
     if bpc == 8 {
-        for (x, k) in cells {
-            let v = (u32::from(input[x]) + left[k]) & 0xff;
-            out[x] = v as u8;
-            left[k] = v;
+        for i in 0..columns {
+            for (k, l) in left.iter_mut().enumerate() {
+                let x = i * colors + k;
+                *l = (u32::from(input[x]) + *l) & 0xff;
+                out[x] = *l as u8;
+            }
         }
         return;
     }
@@ -621,32 +933,50 @@ fn tiff_row(out: &mut [u8], input: &[u8], columns: usize, colors: usize, bpc: us
     if bpc < 8 {
         out.fill(0);
     }
-    for (x, k) in cells {
-        let c = (get_component(input, x, bpc) + left[k]) & mask;
-        put_component(out, x, bpc, c);
-        left[k] = c;
+    for i in 0..columns {
+        for (k, l) in left.iter_mut().enumerate() {
+            let x = i * colors + k;
+            let c = (get_component(input, x, bpc) + *l) & mask;
+            put_component(out, x, bpc, c);
+            *l = c;
+        }
     }
 }
 
 fn get_component(line: &[u8], x: usize, bpc: usize) -> u32 {
-    let byte = |i: usize| u32::from(line[i]);
+    let at = |i: usize| u32::from(line.get(i).copied().unwrap_or(0));
     match bpc {
-        1 => (byte(x >> 3) >> (7 - (x & 7))) & 1,
-        2 => (byte(x >> 2) >> ((3 - (x & 3)) << 1)) & 3,
-        4 => (byte(x >> 1) >> ((1 - (x & 1)) << 2)) & 15,
-        16 => (byte(x << 1) << 8) + byte((x << 1) + 1),
+        1 => (at(x >> 3) >> (7 - (x & 7))) & 1,
+        2 => (at(x >> 2) >> ((3 - (x & 3)) << 1)) & 3,
+        4 => (at(x >> 1) >> ((1 - (x & 1)) << 2)) & 15,
+        8 => at(x),
+        16 => (at(x << 1) << 8) + at((x << 1) + 1),
         _ => 0,
     }
 }
 
 fn put_component(buf: &mut [u8], x: usize, bpc: usize, value: u32) {
+    let mut or = |i: usize, v: u32| {
+        if let Some(b) = buf.get_mut(i) {
+            *b |= v as u8;
+        }
+    };
     match bpc {
-        1 => buf[x >> 3] |= (value << (7 - (x & 7))) as u8,
-        2 => buf[x >> 2] |= (value << ((3 - (x & 3)) << 1)) as u8,
-        4 => buf[x >> 1] |= (value << ((1 - (x & 1)) << 2)) as u8,
+        1 => or(x >> 3, value << (7 - (x & 7))),
+        2 => or(x >> 2, value << ((3 - (x & 3)) << 1)),
+        4 => or(x >> 1, value << ((1 - (x & 1)) << 2)),
+        8 => {
+            if let Some(b) = buf.get_mut(x) {
+                *b = value as u8;
+            }
+        }
         16 => {
-            buf[x << 1] = (value >> 8) as u8;
-            buf[(x << 1) + 1] = value as u8;
+            if let Some(b) = buf.get_mut(x << 1) {
+                *b = (value >> 8) as u8;
+            }
+            if let Some(b) = buf.get_mut((x << 1) + 1) {
+                *b = value as u8;
+            }
         }
         _ => {}
     }
@@ -663,167 +993,257 @@ mod tests {
         e.finish().unwrap()
     }
 
+    /// Decodes `input` with one filter and its parameters, read whole.
+    fn run(
+        filter: &str,
+        params: Option<Dict>,
+        input: &[u8],
+        diag: &Diagnostics,
+    ) -> Result<Vec<u8>, DecodeError> {
+        let mut dict = Dict::new();
+        dict.put(b"Filter", Object::name(filter.as_bytes()));
+        if let Some(p) = params {
+            dict.put(b"DecodeParms", Object::Dict(std::sync::Arc::new(p)));
+        }
+        decode(&dict, input, &|o| o.clone(), diag, &Limits::default())
+    }
+
+    fn predictor(predictor: i32, columns: i32, colors: i32, bpc: i32) -> Dict {
+        let mut p = Dict::new();
+        for (k, v) in [
+            (&b"Predictor"[..], predictor),
+            (b"Columns", columns),
+            (b"Colors", colors),
+            (b"BitsPerComponent", bpc),
+        ] {
+            p.put(k, Object::Int(i64::from(v)));
+        }
+        p
+    }
+
     #[test]
-    fn inflates_and_tolerates_truncation() {
+    fn flate_inflates_and_tolerates_truncation() {
         let diag = Diagnostics::new();
         let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
         let packed = zlib(&data);
-        assert_eq!(inflate(&packed, &diag, usize::MAX).unwrap(), data);
+        assert_eq!(run("FlateDecode", None, &packed, &diag).unwrap(), data);
         assert!(diag.snapshot().is_empty());
 
         let cut = &packed[..packed.len() / 2];
-        let partial = inflate(cut, &diag, usize::MAX).unwrap();
+        let partial = run("Fl", None, cut, &diag).unwrap();
         assert!(!partial.is_empty() && data.starts_with(&partial));
         assert!(diag.has("filter.flate_truncated"));
     }
 
     #[test]
-    fn bad_checksum_keeps_the_data() {
+    fn flate_errors_end_the_data_like_mupdf() {
+        // A bad checksum at the very end keeps everything.
         let diag = Diagnostics::new();
         let mut packed = zlib(b"hello hello hello");
         let n = packed.len();
         packed[n - 1] ^= 0xff;
         assert_eq!(
-            inflate(&packed, &diag, usize::MAX).unwrap(),
+            run("FlateDecode", None, &packed, &diag).unwrap(),
             b"hello hello hello"
         );
         assert!(diag.has("filter.flate_error"));
-    }
 
-    #[test]
-    fn bad_header_fails_like_mupdf() {
+        // A bad header with data left is an error, so the read ends there.
         let diag = Diagnostics::new();
-        assert!(matches!(
-            inflate(b"not zlib at all", &diag, usize::MAX),
-            Err(DecodeError::Failed(_))
-        ));
-    }
-
-    #[test]
-    fn png_up_predictor() {
-        let diag = Diagnostics::new();
-        // Two rows of 3 bytes, filter type 2 (Up).
-        let input = [2, 1, 2, 3, 2, 1, 1, 1];
         assert_eq!(
-            predict(&input, 12, 3, 1, 8, &diag).unwrap(),
-            vec![1, 2, 3, 2, 3, 4]
+            run("FlateDecode", None, b"not zlib at all", &diag).unwrap(),
+            b""
+        );
+        assert!(diag.has("stream.read_error"));
+        assert!(
+            diag.snapshot()
+                .iter()
+                .any(|d| d.message == "library error: zlib error: incorrect header check")
         );
     }
 
     #[test]
-    fn png_sub_average_paeth() {
+    fn flate_errors_lose_the_buffer_being_filled() {
+        // 10000 bytes decode in 4096-byte buffers; corrupting the stream
+        // late loses the buffer being filled, so whole buffers survive.
+        let data: Vec<u8> = (0..10000u32).map(|i| (i * 7 % 256) as u8).collect();
+        let mut packed = zlib(&data);
+        let at = packed.len() - 40;
+        packed[at] ^= 0x55;
+        packed.extend_from_slice(b"trailing");
         let diag = Diagnostics::new();
-        assert_eq!(
-            predict(&[1, 5, 1, 1], 11, 3, 1, 8, &diag).unwrap(),
-            vec![5, 6, 7]
-        );
-        assert_eq!(
-            predict(&[0, 10, 20, 3, 2, 2], 10, 2, 1, 8, &diag).unwrap(),
-            vec![10, 20, 7, 15]
-        );
-        assert_eq!(
-            predict(&[0, 10, 20, 4, 1, 1], 15, 2, 1, 8, &diag).unwrap(),
-            vec![10, 20, 11, 21]
-        );
+        let out = run("FlateDecode", None, &packed, &diag).unwrap();
+        assert_eq!(out.len() % 4096, 0, "{}", out.len());
+        assert!(data.starts_with(&out));
     }
 
     #[test]
-    fn partial_last_row_is_kept() {
+    fn png_and_tiff_predictors() {
         let diag = Diagnostics::new();
+        let unpack =
+            |input: &[u8], p: Dict| run("FlateDecode", Some(p), &zlib(input), &diag).unwrap();
         assert_eq!(
-            predict(&[0, 1, 2, 3, 2, 1], 12, 3, 1, 8, &diag).unwrap(),
-            vec![1, 2, 3, 2]
+            unpack(&[2, 1, 2, 3, 2, 1, 1, 1], predictor(12, 3, 1, 8)),
+            [1, 2, 3, 2, 3, 4]
         );
+        assert_eq!(unpack(&[1, 5, 1, 1], predictor(11, 3, 1, 8)), [5, 6, 7]);
+        assert_eq!(
+            unpack(&[0, 10, 20, 3, 2, 2], predictor(10, 2, 1, 8)),
+            [10, 20, 7, 15]
+        );
+        assert_eq!(
+            unpack(&[0, 10, 20, 4, 1, 1], predictor(15, 2, 1, 8)),
+            [10, 20, 11, 21]
+        );
+        // A partial last row is kept.
+        assert_eq!(
+            unpack(&[0, 1, 2, 3, 2, 1], predictor(12, 3, 1, 8)),
+            [1, 2, 3, 2]
+        );
+        assert_eq!(
+            unpack(&[1, 1, 1, 5, 5, 5], predictor(2, 3, 1, 8)),
+            [1, 2, 3, 5, 10, 15]
+        );
+        assert_eq!(unpack(&[0x11], predictor(2, 2, 1, 4)), [0x12]);
     }
 
     #[test]
-    fn tiff_predictor() {
+    fn predictor_parameters_are_checked_when_opening() {
         let diag = Diagnostics::new();
-        assert_eq!(
-            predict(&[1, 1, 1, 5, 5, 5], 2, 3, 1, 8, &diag).unwrap(),
-            vec![1, 2, 3, 5, 10, 15]
+        let packed = zlib(&[0]);
+        assert!(run("FlateDecode", Some(predictor(12, 1, 1, 3)), &packed, &diag).is_err());
+        assert!(run("FlateDecode", Some(predictor(12, 1, 33, 8)), &packed, &diag).is_err());
+        let out = run(
+            "FlateDecode",
+            Some(predictor(99, 1, 1, 8)),
+            &zlib(&[7, 8]),
+            &diag,
         );
-        // 4 bits per component: 0x11 = [1,1] -> [1,2] = 0x12
-        assert_eq!(predict(&[0x11], 2, 2, 1, 4, &diag).unwrap(), vec![0x12]);
-    }
-
-    #[test]
-    fn predictor_parameter_checks() {
-        let diag = Diagnostics::new();
-        assert!(predict(&[0], 12, 1, 1, 3, &diag).is_err());
-        assert!(predict(&[0], 12, 1, 33, 8, &diag).is_err());
-        assert_eq!(predict(&[7, 8], 99, 1, 1, 8, &diag).unwrap(), vec![7, 8]);
+        assert_eq!(out.unwrap(), [7, 8]);
         assert!(diag.has("filter.bad_predictor"));
+    }
+
+    #[test]
+    fn ascii_filters_end_the_data_at_bad_bytes() {
+        let diag = Diagnostics::new();
+        assert_eq!(
+            run("ASCIIHexDecode", None, b"48 65\n6C6c6F>ignored", &diag).unwrap(),
+            b"Hello"
+        );
+        assert_eq!(run("AHx", None, b"4>", &diag).unwrap(), [0x40]);
+        assert_eq!(run("AHx", None, b"414", &diag).unwrap(), [0x41]);
+        // A bad byte loses this call's buffer: here, everything.
+        assert_eq!(run("AHx", None, b"4142G>", &diag).unwrap(), b"");
+        assert!(diag.has("stream.read_error"));
+
+        let diag = Diagnostics::new();
+        assert_eq!(
+            run("ASCII85Decode", None, b"87cURD]i,\"Ebo80~>", &diag).unwrap(),
+            b"Hello World!"
+        );
+        assert_eq!(run("A85", None, b"z~>", &diag).unwrap(), [0, 0, 0, 0]);
+        assert_eq!(run("A85", None, b"9jqo~>", &diag).unwrap(), b"Man");
+        run("A85", None, b"9~>", &diag).unwrap();
+        assert!(diag.has("filter.a85_partial"));
+    }
+
+    #[test]
+    fn run_length_and_its_bomb_guard() {
+        let diag = Diagnostics::new();
+        assert_eq!(
+            run(
+                "RunLengthDecode",
+                None,
+                &[2, b'a', b'b', b'c', 254, b'z', 128, 9],
+                &diag
+            )
+            .unwrap(),
+            b"abczzz"
+        );
+        // Truncated runs end the data.
+        assert_eq!(run("RL", None, &[5, b'a'], &diag).unwrap(), b"");
+        let mut dict = Dict::new();
+        dict.put(
+            b"Filter",
+            Object::Array(std::sync::Arc::new(vec![
+                Object::name(b"RL"),
+                Object::name(b"RL"),
+            ])),
+        );
+        let out = decode(
+            &dict,
+            &[1, 1, 7, 128],
+            &|o| o.clone(),
+            &diag,
+            &Limits::default(),
+        );
+        assert_eq!(out.unwrap(), b"");
+        assert!(diag.has("filter.rle_bomb"));
+    }
+
+    #[test]
+    fn unknown_filters_pass_data_through() {
+        let diag = Diagnostics::new();
+        assert_eq!(run("Bogus", None, b"raw", &diag).unwrap(), b"raw");
+        assert!(diag.has("filter.unknown"));
+        // /F wins over /Filter; a non-name /F (a file spec) means no filter.
+        let mut dict = Dict::new();
+        dict.put(b"Filter", Object::name(b"FlateDecode"));
+        dict.put(b"F", Object::String(std::sync::Arc::from(&b"file.bin"[..])));
+        let out = decode(&dict, b"raw", &|o| o.clone(), &diag, &Limits::default());
+        assert_eq!(out.unwrap(), b"raw");
     }
 
     #[test]
     fn decode_limit_stops_expansion() {
         let diag = Diagnostics::new();
-        let packed = zlib(&vec![0u8; 1 << 20]);
-        assert_eq!(inflate(&packed, &diag, 1000), Err(DecodeError::Limit));
-        assert_eq!(run_length(&[129, 7, 129, 7], 100), Err(DecodeError::Limit));
-    }
-
-    #[test]
-    fn ascii_hex_decoding() {
-        assert_eq!(ascii_hex(b"48 65\n6C6c6F>ignored").unwrap(), b"Hello");
-        assert_eq!(ascii_hex(b"4>").unwrap(), vec![0x40]);
-        assert_eq!(ascii_hex(b"414").unwrap(), vec![0x41]);
-        assert!(ascii_hex(b"4G>").is_err());
-    }
-
-    #[test]
-    fn ascii85_decoding() {
-        let diag = Diagnostics::new();
-        assert_eq!(
-            ascii85(b"87cURD]i,\"Ebo80~>", &diag).unwrap(),
-            b"Hello World!"
-        );
-        assert_eq!(ascii85(b"z~>", &diag).unwrap(), vec![0, 0, 0, 0]);
-        assert_eq!(ascii85(b"9jqo^~>", &diag).unwrap(), b"Man ");
-        assert_eq!(ascii85(b"9jqo~>", &diag).unwrap(), b"Man");
-        assert!(ascii85(b"9j{", &diag).is_err());
-        ascii85(b"9~>", &diag).unwrap();
-        assert!(diag.has("filter.a85_partial"));
-    }
-
-    #[test]
-    fn run_length_decoding() {
-        assert_eq!(
-            run_length(&[2, b'a', b'b', b'c', 254, b'z', 128, 9], usize::MAX).unwrap(),
-            b"abczzz"
-        );
-        assert!(run_length(&[5, b'a'], usize::MAX).is_err());
-        assert!(run_length(&[200], usize::MAX).is_err());
-    }
-
-    #[test]
-    fn decode_chain_with_abbreviations_and_unknown_filters() {
-        let diag = Diagnostics::new();
-        let identity = |o: &Object| o.clone();
         let mut dict = Dict::new();
         dict.put(b"Filter", Object::name(b"FlateDecode"));
-        let packed = zlib(b"abc");
-        assert_eq!(
-            decode(&dict, &packed, &identity, &diag, &Limits::default(), None).unwrap(),
-            b"abc"
+        let limits = Limits {
+            max_decoded_bytes: 1000,
+            ..Limits::default()
+        };
+        let out = decode(
+            &dict,
+            &zlib(&vec![0u8; 1 << 20]),
+            &|o| o.clone(),
+            &diag,
+            &limits,
         );
+        assert_eq!(out, Err(DecodeError::Limit));
+    }
 
-        let mut dict = Dict::new();
-        dict.put(b"Filter", Object::name(b"Bogus"));
-        assert_eq!(
-            decode(&dict, b"raw", &identity, &diag, &Limits::default(), None).unwrap(),
-            b"raw"
-        );
-        assert!(diag.has("filter.unknown"));
-
-        // /F wins over /Filter; a non-name /F (a file spec) means no filter.
-        let mut dict = Dict::new();
-        dict.put(b"Filter", Object::name(b"FlateDecode"));
-        dict.put(b"F", Object::String(std::sync::Arc::from(&b"file.bin"[..])));
-        assert_eq!(
-            decode(&dict, b"raw", &identity, &diag, &Limits::default(), None).unwrap(),
-            b"raw"
-        );
+    #[test]
+    fn aes_stops_before_a_bad_block() {
+        let key = [7u8; 16];
+        let aes = Aes::new(&key, 128).unwrap();
+        let encrypt = |plain: &[u8]| {
+            let mut data = plain.to_vec();
+            aes.cbc_encrypt(&mut [9u8; 16], &mut data);
+            [&[9u8; 16][..], &data].concat()
+        };
+        let read = |data: &[u8], bytewise: bool| {
+            let diag = Diagnostics::new();
+            let base = Stream::memory(data, &diag);
+            let mut s = open_cipher(base, Some(Cipher::Aes(key.to_vec()))).unwrap();
+            let out = if bytewise {
+                s.read_bytewise(usize::MAX)
+            } else {
+                s.read_best(data.len(), 0, usize::MAX)
+            };
+            (out.unwrap(), diag.has("stream.read_error"))
+        };
+        let mut padded = b"hello".to_vec();
+        padded.extend([11u8; 11]);
+        assert_eq!(read(&encrypt(&padded), false), (b"hello".to_vec(), false));
+        assert_eq!(read(&[9u8; 16], false), (Vec::new(), false));
+        assert_eq!(read(&[0u8; 10], false), (Vec::new(), true));
+        // Bad padding: a whole read loses its last chunk (here, all of it),
+        // a byte-at-a-time reader keeps the blocks before the bad one.
+        let bad = encrypt(&[[1u8; 16], [0u8; 16]].concat());
+        assert_eq!(read(&bad, false), (Vec::new(), true));
+        assert_eq!(read(&bad, true), (vec![1u8; 16], true));
+        let diag = Diagnostics::new();
+        assert!(open_cipher(Stream::memory(&bad, &diag), Some(Cipher::Aes(vec![1; 5]))).is_err());
     }
 }

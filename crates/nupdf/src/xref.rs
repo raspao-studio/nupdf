@@ -20,6 +20,7 @@ use crate::limits::Limits;
 use crate::object::{Dict, MAX_OBJECT_NUMBER, Object, Stream};
 use crate::parse::{parse_dict, parse_indirect};
 use crate::slots::{DENSE_LIMIT, Slots};
+use crate::stream::{self, Endstream};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -1150,14 +1151,21 @@ fn read_new_xref(
     let Some(data_start) = ind.stream_start else {
         return Err(format!("xref stream has no data ({num} 0 R)"));
     };
+    // pdf_stream_length: negative or beyond the file means 0.
     let length = trailer.get(b"Length").map_or(0, Object::to_int64);
-    let raw = raw_stream(lx.data(), data_start, length, lx.data().len(), diag);
+    let length = usize::try_from(length)
+        .ok()
+        .filter(|&l| l <= lx.data().len())
+        .unwrap_or(0);
     let direct_only = |o: &Object| match o {
         Object::Ref(_) => Object::Null,
         other => other.clone(),
     };
-    let decoded =
-        filter::decode(&trailer, raw, &direct_only, diag, limits, None).map_err(|e| e.report())?;
+    // MuPDF reads the entries a byte at a time from the decoded stream.
+    let raw = stream::Stream::new(Endstream::new(lx.data(), length, data_start), diag);
+    let decoded = filter::open_filters(raw, &trailer, &direct_only, None, true)
+        .and_then(|mut s| Ok(s.read_bytewise(limits.max_decoded_bytes)?))
+        .map_err(|e| e.report())?;
 
     // A present but non-array /Index reads nothing, as in MuPDF.
     let ranges: Vec<(i32, i32)> = match trailer.get(b"Index") {
@@ -1244,175 +1252,9 @@ fn read_new_xref(
     Ok(trailer)
 }
 
-/// The raw bytes of a stream, as MuPDF's endstream filter delivers them:
-/// `/Length` bytes, then anything up to the next `endstream` (minus the EOL
-/// before it), because lengths in the wild are often wrong.
-///
-/// `max_length` is MuPDF's notion of the file size, which stays 0 when the
-/// header was never found; lengths above it are ignored.
-pub fn raw_stream<'a>(
-    data: &'a [u8],
-    start: usize,
-    length: i64,
-    max_length: usize,
-    diag: &Diagnostics,
-) -> &'a [u8] {
-    let length = if length < 0 || length > max_length as i64 {
-        0
-    } else {
-        length as usize
-    };
-    let start = start.min(data.len());
-    let end = start.saturating_add(length).min(data.len());
-    let stop = match memmem::find(&data[end..], b"endstream") {
-        Some(p) => {
-            let mut stop = end + p;
-            if stop > end && data[stop - 1] == b'\n' {
-                stop -= 1;
-            }
-            if stop > end && data[stop - 1] == b'\r' {
-                stop -= 1;
-            }
-            stop
-        }
-        None => data.len(),
-    };
-    if stop > end {
-        diag.warn("stream.length_incorrect", "PDF stream Length incorrect");
-    }
-    &data[start..stop]
-}
-
-/// How many bytes of `raw_stream` MuPDF's `fz_read_best` (with buffer hint
-/// `initial`) actually gets when it reads the endstream filter directly.
-///
-/// When /Length is too short, the filter looks for `endstream` in windows
-/// of 32, 64, ... 4096 bytes, keeping 11 bytes back each time. It marks
-/// itself finished as it hands over the window that holds the marker, and
-/// `fz_available` checks that mark before returning buffered bytes: what
-/// of that window does not fit the reader's buffer (1025 bytes, then grown
-/// by half) is dropped.
-pub fn read_all_len(
-    data: &[u8],
-    start: usize,
-    length: i64,
-    max_length: usize,
-    initial: usize,
-) -> usize {
-    let length = if length < 0 || length > max_length as i64 {
-        0
-    } else {
-        length as usize
-    };
-    let start = start.min(data.len());
-    let end = start.saturating_add(length).min(data.len());
-    let Some(found) = memmem::find(&data[end..], b"endstream") else {
-        return data.len() - start;
-    };
-    let marker = end + found;
-    let mut stop = marker;
-    if stop > end && data[stop - 1] == b'\n' {
-        stop -= 1;
-    }
-    if stop > end && data[stop - 1] == b'\r' {
-        stop -= 1;
-    }
-    let total = stop - start;
-    if stop <= end {
-        return total;
-    }
-
-    let file_end = data.len();
-    let (mut cap, mut len) = (initial.max(1024) + 1, 0usize);
-    let (mut remain, mut offset, mut emitted) = (end - start, start, 0usize);
-    let (mut avail, mut finished, mut size, mut extras) = (0usize, false, 16usize, 0usize);
-    loop {
-        if len == cap {
-            cap += cap >> 1;
-        }
-        let mut space = cap - len;
-        let mut count = 0;
-        while space > 0 {
-            // fz_available: a finished stream returns nothing, even with
-            // bytes still in its buffer.
-            let n = if finished {
-                0
-            } else if avail > 0 {
-                avail
-            } else if remain > 0 {
-                let n = remain.min(4096).min(file_end.saturating_sub(offset));
-                remain -= n;
-                offset += n;
-                emitted += n;
-                avail = n;
-                finished = n == 0;
-                n
-            } else {
-                size = (size * 2).min(4096);
-                let read = (size - extras).min(file_end.saturating_sub(offset));
-                let in_buffer = extras + read;
-                offset += read;
-                let n = if marker + 9 <= start + emitted + in_buffer {
-                    finished = true;
-                    total - emitted
-                } else if in_buffer > 11 {
-                    extras = 11;
-                    in_buffer - 11
-                } else {
-                    extras = 0;
-                    in_buffer
-                };
-                if n == 0 {
-                    finished = true;
-                }
-                emitted += n;
-                avail = n;
-                n
-            };
-            if n == 0 {
-                break;
-            }
-            let take = n.min(space);
-            avail -= take;
-            space -= take;
-            len += take;
-            count += take;
-        }
-        if count == 0 {
-            return len;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn read_all_drops_what_follows_a_found_endstream_in_a_full_buffer() {
-        // Measured with MuPDF 1.28.6: a 3-byte /Length that overshoots into
-        // "endstream", and the next marker `dist` bytes later.
-        for (dist, expect) in [
-            (500, 521),
-            (1500, 1025),
-            (2200, 2221),
-            (3000, 2305),
-            (5000, 5021),
-        ] {
-            let mut file = b"<</Length 3>>stream\r\n\r\nendstream\nendobj\n% ".to_vec();
-            let start = 21;
-            file.extend(std::iter::repeat_n(b'x', dist));
-            file.extend(b"\nendstream\n");
-            assert_eq!(
-                read_all_len(&file, start, 3, file.len(), 3),
-                expect,
-                "{dist}"
-            );
-        }
-        // A correct length reads exactly that.
-        let file = b"<<>>stream\nABC\nendstream";
-        assert_eq!(read_all_len(file, 11, 3, file.len(), 3), 3);
-    }
 
     #[test]
     fn atoi_matches_c() {
@@ -1440,31 +1282,6 @@ mod tests {
         );
         assert!(read_start_xref(b"startxref 0 %%EOF").is_err());
         assert!(read_start_xref(b"short").is_err());
-    }
-
-    #[test]
-    fn raw_stream_trusts_length_then_scans() {
-        let diag = Diagnostics::new();
-        let data = b"stream\nABCDE\nendstream";
-        let all = data.len();
-        assert_eq!(raw_stream(data, 7, 5, all, &diag), b"ABCDE");
-        assert!(diag.snapshot().is_empty());
-        // Too short: the rest up to endstream is included, with a warning.
-        assert_eq!(raw_stream(data, 7, 3, all, &diag), b"ABCDE");
-        assert!(diag.has("stream.length_incorrect"));
-        // Missing or absurd lengths scan from the start.
-        assert_eq!(raw_stream(data, 7, -1, all, &Diagnostics::new()), b"ABCDE");
-        assert_eq!(
-            raw_stream(b"stream\r\nAB\r\nendstream", 8, 0, 100, &Diagnostics::new()),
-            b"AB"
-        );
-        // Lengths above MuPDF's file size (0 without a header) are ignored.
-        assert_eq!(raw_stream(data, 7, 6, 0, &Diagnostics::new()), b"ABCDE");
-        // No endstream at all: everything to the end of the file.
-        assert_eq!(
-            raw_stream(b"stream\nABC", 7, 1, 100, &Diagnostics::new()),
-            b"ABC"
-        );
     }
 
     #[test]

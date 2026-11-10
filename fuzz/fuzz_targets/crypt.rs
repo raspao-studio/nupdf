@@ -30,9 +30,21 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = crypt.authenticate(&String::from_utf8_lossy(password));
     let _ = crypt.description();
-    let _ = crypt.decrypt_stream(rest, 7, 0);
-    let _ = crypt.decrypt_with_filter(b"StdCF", rest, 7, 1, &diag);
-    let _ = crypt.decrypt_with_filter(b"Identity", rest, 7, 1, &diag);
+    // Streams, through the default filter and a named one, read whole and
+    // byte by byte.
+    let mut filters = vec![crypt.stream_filter()];
+    filters.extend(crypt.parse_filter(b"StdCF", &diag));
+    for cf in filters {
+        let cipher = crypt.stream_cipher(&cf, 7, 0);
+        let raw = nupdf::stream::Stream::memory(rest, &diag);
+        if let Ok(mut s) = nupdf::filter::open_cipher(raw, cipher.clone()) {
+            let _ = s.read_best(rest.len(), 0, 1 << 26);
+        }
+        let raw = nupdf::stream::Stream::memory(rest, &diag);
+        if let Ok(mut s) = nupdf::filter::open_cipher(raw, cipher) {
+            let _ = s.read_bytewise(1 << 26);
+        }
+    }
     let string = Object::String(rest.into());
     let nested = Object::Array(std::sync::Arc::new(vec![string.clone(), string]));
     let _ = crypt.decrypt_object(nested, 7, 0, &diag);
