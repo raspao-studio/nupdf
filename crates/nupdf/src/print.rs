@@ -358,7 +358,7 @@ fn format_real(f: f32, out: &mut Vec<u8>) {
 }
 
 /// `fmtfloat`: shortest digits, never an exponent, no leading zero.
-fn fmtfloat(f: f32, out: &mut Vec<u8>) {
+pub(crate) fn fmtfloat(f: f32, out: &mut Vec<u8>) {
     let f = if f.is_nan() {
         0.0
     } else if f.is_infinite() {

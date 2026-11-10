@@ -345,6 +345,107 @@ fn rearrange_fixtures() -> Vec<Fixture> {
     g.obj(12, "<</Unused true>>");
     let graft = g.finish_with_size(16);
 
+    // For merge: links of every kind it copies or leaves, on a rotated and
+    // cropped page with fractional rectangles, and an outline whose items
+    // lead by explicit and named destinations, actions and nothing.
+    let mut l = Pdf::new("1.7");
+    l.obj(
+        1,
+        "<</Type/Catalog/Pages 2 0 R/Outlines 30 0 R/Names<</Dests 40 0 R>>/URI<</Base(https://example.com/docs/)>>>>",
+    );
+    l.obj(2, "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R]/Count 3>>");
+    l.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 400]/CropBox[10.5 20.25 290 380]/Rotate 90/Contents 6 0 R/Annots[10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R]>>",
+    );
+    l.obj(
+        4,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 6 0 R/Annots 18 0 R>>",
+    );
+    l.obj(
+        5,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/UserUnit 2/Contents 6 0 R>>",
+    );
+    l.stream(6, "", &text_content("Links"));
+    let link = |rect: &str, rest: &str| format!("<</Type/Annot/Subtype/Link/Rect[{rect}]{rest}>>");
+    l.obj(
+        10,
+        &link(
+            "10.5 20.25 100.75 40",
+            "/A<</S/URI/URI(http://example.com/a?b=c)>>",
+        ),
+    );
+    l.obj(
+        11,
+        &link("200 300 100 50", "/A<</S/URI/URI(rel/page.html)>>"),
+    );
+    l.obj(12, &link("1 2 3 4", "/A<</S/Launch/F(other.pdf)>>"));
+    l.obj(
+        13,
+        &link(
+            "5 6 7 8",
+            "/A<</S/GoToR/F<</Type/Filespec/F(doc dir/b.pdf)>>/D[2/FitH 500]>>",
+        ),
+    );
+    l.obj(
+        14,
+        &link("9 10 11 12", "/A<</S/GoToR/F(/abs/c.pdf)/D(named)>>"),
+    );
+    l.obj(15, &link("13 14 15 16", "/Dest[4 0 R/Fit]"));
+    l.obj(
+        16,
+        &link(
+            "17 18 19 20",
+            "/AA<</U<</S/URI/URI(mailto:a@example.com)>>>>",
+        ),
+    );
+    l.obj(17, "<</Type/Annot/Subtype/Text/Rect[0 0 1 1]>>");
+    l.obj(
+        18,
+        &format!(
+            "[{}]",
+            link("0 0 50.5 50", "/A<</S/URI/URI(ftp://example.com/f)>>")
+        ),
+    );
+    l.obj(30, "<</Type/Outlines/First 31 0 R/Last 35 0 R/Count 5>>");
+    l.obj(
+        31,
+        "<</Title(One)/Parent 30 0 R/Next 32 0 R/Dest[3 0 R/XYZ 10.5 20.25 1.5]/First 36 0 R/Last 37 0 R/Count 2>>",
+    );
+    l.obj(
+        36,
+        "<</Title(One, child)/Parent 31 0 R/Next 37 0 R/Dest[5 0 R/FitR 1 2 30.5 40]>>",
+    );
+    l.obj(
+        37,
+        "<</Title(One, web)/Parent 31 0 R/Prev 36 0 R/A<</S/URI/URI(https://example.com)>>>>",
+    );
+    l.obj(
+        32,
+        "<</Title(Two)/Parent 30 0 R/Prev 31 0 R/Next 33 0 R/A<</S/GoTo/D(dest2)>>>>",
+    );
+    l.obj(
+        33,
+        "<</Title(Three)/Parent 30 0 R/Prev 32 0 R/Next 34 0 R/A<</S/Named/N/NextPage>>/First 38 0 R/Last 38 0 R/Count -1>>",
+    );
+    l.obj(
+        38,
+        "<</Title(Three, last)/Parent 33 0 R/A<</S/Named/N/LastPage>>>>",
+    );
+    l.obj(
+        34,
+        "<</Title(Four)/Parent 30 0 R/Prev 33 0 R/Next 35 0 R/Dest/intro>>",
+    );
+    l.obj(
+        35,
+        "<</Title(Five)/Parent 30 0 R/Prev 34 0 R/Dest[4 0 R/FitBH 99.5]>>",
+    );
+    l.obj(
+        40,
+        "<</Names[(dest2)[4 0 R/FitB](intro)[3 0 R/FitV 12.5]]>>",
+    );
+    let links = l.finish_with_xref("");
+
     vec![
         Fixture {
             name: "pages-rearrange.pdf",
@@ -363,6 +464,12 @@ fn rearrange_fixtures() -> Vec<Fixture> {
             about: "For merge: an indirect /Length, a font two pages share, references to a null object, a free number and, last, one past the xref, which fails the page; a /Rotate of null, and a link to another page",
             needs_repair: false,
             bytes: graft,
+        },
+        Fixture {
+            name: "merge-links.pdf",
+            about: "For merge: URI, relative, Launch and GoToR links on a rotated, cropped page, an /Annots of its own, and outline items by explicit and named destinations, actions and none",
+            needs_repair: false,
+            bytes: links,
         },
         Fixture {
             name: "meta-xref-stream.pdf",

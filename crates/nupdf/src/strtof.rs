@@ -169,6 +169,17 @@ fn starts_with_ignore_case(s: &[u8], word: &[u8]) -> bool {
 }
 
 fn strtof(text: &[u8]) -> Parsed {
+    strtof_end(text).0
+}
+
+/// `fz_strtof` with its tail pointer: the value, and how many bytes it
+/// read (none when there is no number).
+pub(crate) fn fz_strtof(text: &[u8]) -> (f32, usize) {
+    let (parsed, end) = strtof_end(text);
+    (parsed.value, end)
+}
+
+fn strtof_end(text: &[u8]) -> (Parsed, usize) {
     let at = |i: usize| text.get(i).copied().unwrap_or(0);
     let mut i = 0;
     while matches!(at(i), b' ' | b'\x0c' | b'\n' | b'\r' | b'\t' | b'\x0b') {
@@ -216,25 +227,40 @@ fn strtof(text: &[u8]) -> Parsed {
     if i == number_start || (i == number_start + 1 && at(number_start) == b'.') {
         let rest = &text[number_start.min(text.len())..];
         if starts_with_ignore_case(rest, b"INF") {
-            return Parsed {
-                value: if negative {
-                    f32::NEG_INFINITY
-                } else {
-                    f32::INFINITY
-                },
-                range_error: true,
+            let len = if starts_with_ignore_case(rest, b"INFINITY") {
+                8
+            } else {
+                3
             };
+            let value = if negative {
+                f32::NEG_INFINITY
+            } else {
+                f32::INFINITY
+            };
+            return (
+                Parsed {
+                    value,
+                    range_error: true,
+                },
+                number_start + len,
+            );
         }
         if starts_with_ignore_case(rest, b"NAN") {
-            return Parsed {
-                value: f32::NAN,
-                range_error: false,
-            };
+            return (
+                Parsed {
+                    value: f32::NAN,
+                    range_error: false,
+                },
+                number_start + 3,
+            );
         }
-        return Parsed {
-            value: 0.0,
-            range_error: false,
-        };
+        return (
+            Parsed {
+                value: 0.0,
+                range_error: false,
+            },
+            0,
+        );
     }
     if matches!(at(i), b'e' | b'E') {
         let mut j = i + 1;
@@ -255,9 +281,10 @@ fn strtof(text: &[u8]) -> Parsed {
         }
         if j != digits_start {
             n += if exp_negative { -exp } else { exp };
+            i = j;
         }
     }
-    scale(m, n, negative)
+    (scale(m, n, negative), i)
 }
 
 /// MuPDF's `fz_atof`: `fz_strtof`, except that underflow and NaN become 1
@@ -274,6 +301,16 @@ pub fn fz_atof(text: &[u8]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tail_is_where_the_number_ends() {
+        assert_eq!(fz_strtof(b"72.5,720"), (72.5, 4));
+        assert_eq!(fz_strtof(b"1e3x"), (1000.0, 3));
+        assert_eq!(fz_strtof(b"2ex"), (2.0, 1));
+        let (v, n) = fz_strtof(b"nan,1");
+        assert!(v.is_nan() && n == 3);
+        assert_eq!(fz_strtof(b",1"), (0.0, 0));
+    }
 
     #[test]
     fn exact_for_small_exponents() {

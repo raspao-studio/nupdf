@@ -90,6 +90,20 @@ impl Document {
         self.lookup_page_slow(index).ok().map(|(_, path)| path)
     }
 
+    /// Whether lookups go through a page map (`doc->rev_page_map`).
+    pub(crate) fn has_page_map(&self) -> bool {
+        self.page_map().is_some_and(|m| !m.is_empty())
+    }
+
+    /// `pdf_lookup_page_number_fast`: the index of the page whose object
+    /// is `num`, from the page map; the first one when a page repeats.
+    pub(crate) fn page_index_by_number(&self, num: i32) -> Option<i32> {
+        let map = self.page_map().filter(|m| !m.is_empty())?;
+        map.iter()
+            .position(|p| p.as_ref().map_or(0, |r| r.num) == num)
+            .and_then(|i| i32::try_from(i).ok())
+    }
+
     /// `pdf_to_rect`: four numbers as a rectangle, corners ordered; empty
     /// for anything but an array.
     pub fn to_rect(&self, value: Option<&Object>) -> Rect {
