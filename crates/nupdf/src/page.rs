@@ -53,7 +53,58 @@ impl Document {
                 .and_then(|i| map.get(i).cloned())
                 .ok_or_else(not_found);
         }
-        self.lookup_page_slow(index)
+        self.lookup_page_slow(index).map(|(page, _)| page)
+    }
+
+    /// Where `page(index)` finds the page: the index in /Kids at each level
+    /// down from the root /Pages node. Editing a page that is a direct
+    /// dictionary changes it there, as MuPDF does.
+    pub(crate) fn page_path(&self, index: i32) -> Option<Vec<usize>> {
+        if self.page_map().is_some_and(|m| !m.is_empty()) {
+            let root = self.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
+            let pages = self.lookup(&root, b"Pages")?;
+            let mut seen = 0;
+            let target = usize::try_from(index).ok()?;
+            return self.find_path(&pages, target, &mut seen, &mut Vec::new());
+        }
+        self.lookup_page_slow(index).ok().map(|(_, path)| path)
+    }
+
+    /// `walk_tree`'s order, stopping at page `target`.
+    fn find_path(
+        &self,
+        node: &Object,
+        target: usize,
+        seen: &mut usize,
+        path: &mut Vec<usize>,
+    ) -> Option<Vec<usize>> {
+        let kind = self.lookup(node, b"Type");
+        if self.is_type(&kind, b"Pages") {
+            if path.len() > MAX_TREE_DEPTH {
+                return None;
+            }
+            let kids = self.lookup(node, b"Kids").map(|k| self.resolve(&k));
+            for (i, kid) in kids
+                .as_ref()
+                .and_then(Object::as_array)
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                path.push(i);
+                let found = self.find_path(kid, target, seen, path);
+                path.pop();
+                if found.is_some() {
+                    return found;
+                }
+            }
+            None
+        } else if self.is_type(&kind, b"Page") {
+            *seen += 1;
+            (*seen == target + 1).then(|| path.clone())
+        } else {
+            None
+        }
     }
 
     /// `pdf_dict_get_inheritable`: the value of `key` on the page or the
@@ -243,13 +294,14 @@ impl Document {
 
     /// `pdf_lookup_page_loc`: descend using /Count, guessing node types from
     /// /Kids and /MediaBox when /Type is missing.
-    fn lookup_page_slow(&self, index: i32) -> Result<Object, PageError> {
+    fn lookup_page_slow(&self, index: i32) -> Result<(Object, Vec<usize>), PageError> {
         let root = self.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
         let Some(mut node) = self.lookup(&root, b"Pages") else {
             return Err(PageError("cannot find page tree".into()));
         };
         let mut skip = index;
         let mut marks: Vec<i32> = Vec::new();
+        let mut path = Vec::new();
         loop {
             let kids = self.lookup(&node, b"Kids").map(|k| self.resolve(&k));
             let kids = kids.as_ref().and_then(Object::as_array).unwrap_or_default();
@@ -263,7 +315,7 @@ impl Document {
                 marks.push(r.num);
             }
             let mut next = None;
-            for kid in kids {
+            for (i, kid) in kids.iter().enumerate() {
                 let kind = self.lookup(kid, b"Type");
                 let has = |key: &[u8]| self.lookup(kid, key).is_some();
                 let is_pages = match &kind {
@@ -276,6 +328,7 @@ impl Document {
                         .map_or(0, |c| self.resolve(&c).to_int());
                     if skip < count {
                         next = Some(kid.clone());
+                        path.push(i);
                         break;
                     }
                     skip -= count;
@@ -289,7 +342,8 @@ impl Document {
                             .warn("page.non_page", "non-page object in page tree");
                     }
                     if skip == 0 {
-                        return Ok(kid.clone());
+                        path.push(i);
+                        return Ok((kid.clone(), path));
                     }
                     skip -= 1;
                 }

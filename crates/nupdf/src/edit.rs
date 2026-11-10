@@ -96,7 +96,8 @@ pub fn strip_metadata(doc: &Document) {
 
 /// Turns each page in `pages` (0-based, possibly repeated) by `degrees`,
 /// clockwise: its /Rotate becomes the inherited value plus `degrees`, in
-/// 0 to 359, put on the page itself.
+/// 0 to 359, put on the page itself. A page that is a direct dictionary is
+/// changed where it sits in its parent's /Kids, as MuPDF changes it.
 pub fn rotate_pages(doc: &Document, pages: &[i32], degrees: i32) -> Result<(), String> {
     for &index in pages {
         let page = doc.page(index).map_err(|e| e.0)?;
@@ -105,17 +106,105 @@ pub fn rotate_pages(doc: &Document, pages: &[i32], degrees: i32) -> Result<(), S
             .map_err(|e| e.0)?
             .map_or(0, |r| doc.resolve(&r).to_int());
         let rotate = (i64::from(current) + i64::from(degrees)).rem_euclid(360);
-        let Object::Ref(r) = page else {
-            return Err("cannot rotate a page that is not an indirect object".into());
-        };
-        let Object::Dict(d) = doc.resolve(&Object::Ref(r)) else {
-            return Err(format!("not a dict (page {})", index + 1));
-        };
-        let mut d = (*d).clone();
-        d.put(b"Rotate", Object::Int(rotate));
-        doc.alter_object(r.num, Object::Dict(Arc::new(d)));
+        let mut put = |d: &mut Dict| d.put(b"Rotate", Object::Int(rotate));
+        let not_dict = || format!("not a dict (page {})", index + 1);
+        match page {
+            Object::Ref(r) => {
+                let Object::Dict(d) = doc.resolve(&Object::Ref(r)) else {
+                    return Err(not_dict());
+                };
+                let mut d = (*d).clone();
+                put(&mut d);
+                doc.alter_object(r.num, Object::Dict(Arc::new(d)));
+            }
+            _ => {
+                let path = doc.page_path(index).ok_or_else(not_dict)?;
+                edit_direct_page(doc, &path, &mut put).ok_or_else(not_dict)?;
+            }
+        }
     }
     Ok(())
+}
+
+/// Changes the page `path` leads to from the root /Pages node, in the
+/// object that holds it.
+fn edit_direct_page(doc: &Document, path: &[usize], f: &mut dyn FnMut(&mut Dict)) -> Option<()> {
+    let mut trailer = doc.trailer();
+    let root = trailer.get(b"Root").cloned()?;
+    let Object::Dict(catalog) = doc.resolve(&root) else {
+        return None;
+    };
+    let pages = catalog.get(b"Pages").cloned()?;
+    // The root /Pages node is direct in the catalog: put it back there.
+    if let Some(changed) = edit_at(doc, &pages, path, f)? {
+        let mut catalog = (*catalog).clone();
+        catalog.put(b"Pages", changed);
+        let catalog = Object::Dict(Arc::new(catalog));
+        match root {
+            Object::Ref(r) => doc.alter_object(r.num, catalog),
+            _ => {
+                trailer.put(b"Root", catalog);
+                doc.set_trailer(trailer);
+            }
+        }
+    }
+    Some(())
+}
+
+/// Applies `f` to what `path` leads to from `node`, through /Kids. An
+/// indirect object on the way is changed in the edits, giving
+/// `Some(None)`; a direct dictionary's changed copy is returned, for the
+/// caller to put back. `None` when the path leads nowhere.
+fn edit_at(
+    doc: &Document,
+    node: &Object,
+    path: &[usize],
+    f: &mut dyn FnMut(&mut Dict),
+) -> Option<Option<Object>> {
+    let (dict, num) = match node {
+        Object::Ref(r) => match doc.object(r.num)? {
+            Object::Dict(d) => (d, Some(r.num)),
+            _ => return None,
+        },
+        Object::Dict(d) => (d.clone(), None),
+        _ => return None,
+    };
+    let changed = match path.split_first() {
+        None => {
+            let mut d = (*dict).clone();
+            f(&mut d);
+            Some(d)
+        }
+        Some((&i, rest)) => match dict.get(b"Kids")? {
+            Object::Ref(a) => {
+                let Object::Array(kids) = doc.object(a.num)? else {
+                    return None;
+                };
+                if let Some(kid) = edit_at(doc, kids.get(i)?, rest, f)? {
+                    let mut kids = (*kids).clone();
+                    kids[i] = kid;
+                    doc.alter_object(a.num, Object::Array(Arc::new(kids)));
+                }
+                None
+            }
+            Object::Array(kids) => edit_at(doc, kids.get(i)?, rest, f)?.map(|kid| {
+                let mut kids = (**kids).clone();
+                kids[i] = kid;
+                let mut d = (*dict).clone();
+                d.put(b"Kids", Object::Array(Arc::new(kids)));
+                d
+            }),
+            _ => return None,
+        },
+    };
+    let changed = changed.map(|d| Object::Dict(Arc::new(d)));
+    Some(match (num, changed) {
+        (Some(num), Some(d)) => {
+            doc.alter_object(num, d);
+            None
+        }
+        (_, changed) => changed,
+    })
 }
 
 #[cfg(test)]
@@ -167,5 +256,24 @@ mod tests {
         // Page 4 inherits 90, then turns twice.
         assert_eq!(rotate(3), Some(Object::Int(270)));
         assert!(rotate_pages(&doc, &[9], 90).is_err());
+    }
+
+    #[test]
+    fn direct_pages_turn_where_they_sit() {
+        // Two equal direct pages under an indirect /Kids array, in a /Pages
+        // node direct in the catalog.
+        let doc = open(
+            b"%PDF-1.4\n\
+            1 0 obj<</Type/Catalog/Pages<</Type/Pages/Kids 2 0 R/Count 2>>>>endobj\n\
+            2 0 obj[<</Type/Page/Rotate 90>><</Type/Page/Rotate 90>>]endobj\n\
+            trailer<</Root 1 0 R/Size 3>>\n",
+        );
+        rotate_pages(&doc, &[1], 90).unwrap_or_else(|e| panic!("{e}"));
+        let rotate = |i| doc.dict_get(&doc.page(i).unwrap_or(Object::Null), b"Rotate");
+        assert_eq!((rotate(0), rotate(1)), (Object::Int(90), Object::Int(180)));
+        // The catalog and its direct /Pages are left alone.
+        assert!(
+            matches!(doc.object(1), Some(Object::Dict(d)) if matches!(d.get(b"Pages"), Some(Object::Dict(_))))
+        );
     }
 }

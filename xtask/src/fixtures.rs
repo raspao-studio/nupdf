@@ -304,12 +304,36 @@ fn rearrange_fixtures() -> Vec<Fixture> {
         }
     }
 
-    vec![Fixture {
-        name: "pages-rearrange.pdf",
-        about: "For --pages: a nested page tree passing attributes down, outlines, named destinations by string and name, links and a field across pages, a catalog of generation 1",
-        needs_repair: false,
-        bytes: rearrange,
-    }]
+    // Pages that are direct dictionaries: two equal ones in the root's
+    // /Kids, one inside a /Pages node that is itself direct, and one
+    // indirect page after them.
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    let direct = "<</Type/Page/Parent 2 0 R/Contents 3 0 R/Rotate 90>>";
+    pdf.obj(
+        2,
+        &format!(
+            "<</Type/Pages/Kids[{direct}{direct}<</Type/Pages/Parent 2 0 R/Kids[<</Type/Page/Parent 2 0 R/Contents 3 0 R>>]/Count 1>>4 0 R]/Count 4/MediaBox[0 0 200 200]/Resources<</Font<</F1 5 0 R>>>>>>"
+        ),
+    );
+    pdf.stream(3, "", &text_content("Direct"));
+    pdf.obj(4, "<</Type/Page/Parent 2 0 R/Contents 3 0 R>>");
+    pdf.obj(5, FONT);
+
+    vec![
+        Fixture {
+            name: "pages-rearrange.pdf",
+            about: "For --pages: a nested page tree passing attributes down, outlines, named destinations by string and name, links and a field across pages, a catalog of generation 1",
+            needs_repair: false,
+            bytes: rearrange,
+        },
+        Fixture {
+            name: "pages-direct.pdf",
+            about: "Pages that are direct dictionaries, two of them equal, one under a direct /Pages node, for page edits made where the page sits",
+            needs_repair: false,
+            bytes: pdf.finish_with_xref(""),
+        },
+    ]
 }
 
 /// Cases for `clean -Z`.
