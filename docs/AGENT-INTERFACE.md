@@ -57,6 +57,23 @@ Before writing, nupdf opens the output (with `--password`, if given) and compare
 
 `verification` is null with `--no-verify`. An object that cannot be loaded while writing fails with `input.unloadable_object`; an output path that cannot be written fails with exit 3 and `output.unwritable`. The output is written to a temporary file beside it and renamed into place.
 
+## Editing documents
+
+Each editing command makes one edit, then writes the document as `clean` writes it with no options: `-o` or `--dry-run` is required, `--no-verify` skips the read-back check, and the report carries `applied`, `output` and `verification` as `clean`'s does (DECISIONS D24).
+
+`meta <file>` reports the document information dictionary as text, and `xmp`, whether the catalog has XMP `/Metadata`. `--set KEY=VALUE` (repeatable) sets an entry as MuPDF's `pdf_set_metadata` does: `info:Title` and `Title` are the same key, and the value is written as a text string. `--strip` removes `/Info` and the catalog's `/Metadata` first. The report shows the entries as written and `stripped`.
+
+```json
+{"schema":"nupdf.meta/v0","doc_id":"b3:...","applied":true,"info":{"Title":"Été"},"xmp":false,"stripped":false,
+ "output":{...},"verification":{"verified":true,"objects":7},"diagnostics":[]}
+```
+
+`pages <file>` lists the pages; with an edit it writes them changed. `--select 3,1-2` keeps those pages in that order and `--delete 2` drops those, both as `clean --pages`; `--rotate 90` turns pages clockwise by a multiple of 90, all of them or those `--rotate-pages` names, counted after the selection. The report's `kept` lists the pages kept, from 1, `rotated` the degrees and `page_count` the count after.
+
+`split <file> -o <dir>` writes one file per page, or per `--pages-per-file N` pages, or per page list in `--ranges "1-3;4-N"`, each as `clean --pages` would. The parts are `<stem>-1.pdf` onwards, zero-padded to the same width. The report's `parts` give each part's `pages`, `output` and `verification`; `--dry-run` writes nothing, not even the directory.
+
+`encrypt <file>` is `clean -E`: `--method` (`aes-256` by default), `--owner-password`, `--user-password` and `--permissions`. `decrypt <file>` is `clean -D`. Their reports (`nupdf.encrypt/v0`, `nupdf.decrypt/v0`) carry `encryption` as `clean`'s does.
+
 ## Addressing content
 
 - **Pages** are 1-based. Selections use MuPDF's syntax: `1-3,7`, `N` for the last page, `5-N`, `N-1` for reverse order.

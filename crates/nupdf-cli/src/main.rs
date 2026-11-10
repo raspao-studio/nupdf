@@ -4,6 +4,7 @@
 //! `nupdf`: JSON reports on stdout, JSON errors on stderr, meaningful exit
 //! codes. The contract is specified in docs/AGENT-INTERFACE.md.
 
+mod commands;
 mod objects;
 
 use std::io::Write;
@@ -44,8 +45,84 @@ enum Command {
     Info { file: PathBuf },
     /// Dump every object in the cross-reference table as canonical JSON.
     Objects { file: PathBuf },
-    /// List pages with their inherited MediaBox, CropBox, Rotate and Resources.
-    Pages { file: PathBuf },
+    /// List pages with their inherited MediaBox, CropBox, Rotate and
+    /// Resources; or, with --select, --delete or --rotate, write the document
+    /// with its pages changed.
+    Pages {
+        file: PathBuf,
+        /// Keep only these pages, in this order, as `clean --pages`
+        /// (`1-3,5`, `N` for the last, `5-1` backwards).
+        #[arg(long, conflicts_with = "delete")]
+        select: Option<String>,
+        /// Drop these pages.
+        #[arg(long)]
+        delete: Option<String>,
+        /// Turn pages clockwise by this many degrees, a multiple of 90.
+        #[arg(long, allow_negative_numbers = true)]
+        rotate: Option<i32>,
+        /// The pages --rotate turns, after --select or --delete; all by
+        /// default.
+        #[arg(long, requires = "rotate")]
+        rotate_pages: Option<String>,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Show the document information dictionary; or, with --set or
+    /// --strip, write the document with it changed.
+    Meta {
+        file: PathBuf,
+        /// Set an entry, as `KEY=VALUE` (repeatable), as MuPDF's
+        /// `pdf_set_metadata` does.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Remove /Info and the catalog's XMP /Metadata, before any --set.
+        #[arg(long)]
+        strip: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Write each range of pages to its own file in a directory, as
+    /// `clean --pages` writes it: one page per file by default.
+    Split {
+        file: PathBuf,
+        /// The directory for the parts, named after the input.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Pages in each part.
+        #[arg(long, default_value_t = 1)]
+        pages_per_file: usize,
+        /// The parts as page lists separated by `;`, such as `1-3;4-N`.
+        #[arg(long)]
+        ranges: Option<String>,
+        /// Report what would be written, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip reading each part back.
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Encrypt with a new security handler, as `clean -E`.
+    Encrypt {
+        file: PathBuf,
+        #[arg(long, default_value = "aes-256", value_parser = ["rc4-40", "rc4-128", "aes-128", "aes-256"])]
+        method: String,
+        /// Empty, the output opens without a password.
+        #[arg(long, default_value = "")]
+        user_password: String,
+        #[arg(long, default_value = "")]
+        owner_password: String,
+        /// Permission flags, as /P (-1 grants everything).
+        #[arg(long, default_value_t = -1, allow_negative_numbers = true)]
+        permissions: i32,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Write without encryption, as `clean -D`.
+    Decrypt {
+        file: PathBuf,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
     /// Decode every stream: length and BLAKE3 of the data. Streams with an
     /// image filter are listed but not decoded, unless --images.
     Streams {
@@ -227,8 +304,80 @@ fn main() -> ExitCode {
             Ok((doc, facts)) => return stream_objects(&doc, &facts, cli.pretty),
             Err(failure) => Err(failure),
         },
-        Command::Pages { file } => open(file)
-            .map(|(doc, facts)| report("nupdf.pages/v0", &facts, &doc, objects::pages(&doc))),
+        Command::Pages {
+            file,
+            select,
+            delete,
+            rotate,
+            rotate_pages,
+            write,
+        } => {
+            let edits = commands::PageEdits {
+                select: select.as_deref(),
+                delete: delete.as_deref(),
+                rotate: *rotate,
+                rotate_pages: rotate_pages.as_deref(),
+            };
+            open(file).and_then(|(doc, facts)| {
+                if edits.any() {
+                    commands::edit_pages(&doc, &facts, &edits, write, password)
+                } else {
+                    Ok(report("nupdf.pages/v0", &facts, &doc, objects::pages(&doc)))
+                }
+            })
+        }
+        Command::Meta {
+            file,
+            set,
+            strip,
+            write,
+        } => open(file)
+            .and_then(|(doc, facts)| commands::meta(&doc, &facts, set, *strip, write, password)),
+        Command::Split {
+            file,
+            output,
+            pages_per_file,
+            ranges,
+            dry_run,
+            no_verify,
+        } => commands::split(
+            file,
+            &open,
+            output,
+            *pages_per_file,
+            ranges.as_deref(),
+            *dry_run,
+            *no_verify,
+            password,
+        ),
+        Command::Encrypt {
+            file,
+            method,
+            user_password,
+            owner_password,
+            permissions,
+            write,
+        } => {
+            let encrypt = nupdf::crypt::NewMethod::from_name(method).map(|method| {
+                nupdf::write::Encrypt::New {
+                    method,
+                    owner: owner_password.clone(),
+                    user: user_password.clone(),
+                    permissions: *permissions,
+                }
+            });
+            open(file).and_then(|(doc, facts)| {
+                let encrypt = encrypt.ok_or_else(|| Failure {
+                    exit: Exit::Usage,
+                    code: "usage.bad_value",
+                    message: "unknown encryption method".into(),
+                })?;
+                commands::encryption(&doc, &facts, encrypt, write, password)
+            })
+        }
+        Command::Decrypt { file, write } => open(file).and_then(|(doc, facts)| {
+            commands::encryption(&doc, &facts, nupdf::write::Encrypt::Remove, write, password)
+        }),
         Command::Streams { file, images } => open(file).map(|(doc, facts)| {
             report(
                 "nupdf.streams/v0",
@@ -528,6 +677,70 @@ struct Clean<'a> {
 }
 
 fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::Value, Failure> {
+    let body = serde_json::json!({
+        "garbage": plan.options.garbage,
+        "streams": {
+            "decompress": plan.options.decompress,
+            "compress": plan.options.compress,
+            "compress_fonts": plan.options.compress_fonts,
+            "compress_images": plan.options.compress_images,
+            "ascii": plan.options.ascii,
+            "effort": plan.options.effort,
+        },
+        "syntax": if plan.options.pretty { "pretty" } else { "compact" },
+        "objstms": plan.options.objstms,
+        "pages": plan.pages.as_ref().map(|p| p.iter().map(|i| i + 1).collect::<Vec<_>>()),
+        "encryption": encryption_json(&plan.options.encrypt),
+    });
+    write_document(doc, facts, plan, "nupdf.clean/v0", body)
+}
+
+fn encryption_json(encrypt: &nupdf::write::Encrypt) -> serde_json::Value {
+    match encrypt {
+        nupdf::write::Encrypt::Keep => serde_json::json!("keep"),
+        nupdf::write::Encrypt::Remove => serde_json::json!("none"),
+        nupdf::write::Encrypt::New {
+            method,
+            permissions,
+            ..
+        } => serde_json::json!({
+            "method": method.name(),
+            "permissions": permissions,
+        }),
+    }
+}
+
+/// Saves `doc` as `plan` says, reads it back unless told not to, writes it
+/// unless a dry run, and reports `body` with the output and verification.
+fn write_document(
+    doc: &Document,
+    facts: &FileFacts,
+    plan: &Clean,
+    schema: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, Failure> {
+    let (output, verification) = save_checked(doc, plan)?;
+    let mut fields = serde_json::Map::new();
+    fields.insert("applied".into(), plan.apply.into());
+    if let serde_json::Value::Object(b) = body {
+        fields.extend(b);
+    }
+    fields.insert("output".into(), output);
+    fields.insert("verification".into(), verification);
+    Ok(report(
+        schema,
+        facts,
+        doc,
+        serde_json::Value::Object(fields),
+    ))
+}
+
+/// The save, check and write of `write_document`: the output's report and
+/// the verification's.
+fn save_checked(
+    doc: &Document,
+    plan: &Clean,
+) -> Result<(serde_json::Value, serde_json::Value), Failure> {
     let bytes = nupdf::write::save(doc, &plan.options).map_err(|e| Failure {
         exit: Exit::Input,
         code: "input.unloadable_object",
@@ -557,40 +770,19 @@ fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::
         })?;
     }
     let hash = blake3::hash(&bytes);
-    let body = serde_json::json!({
-        "applied": plan.apply,
-        "garbage": plan.options.garbage,
-        "streams": {
-            "decompress": plan.options.decompress,
-            "compress": plan.options.compress,
-            "compress_fonts": plan.options.compress_fonts,
-            "compress_images": plan.options.compress_images,
-            "ascii": plan.options.ascii,
-            "effort": plan.options.effort,
-        },
-        "syntax": if plan.options.pretty { "pretty" } else { "compact" },
-        "objstms": plan.options.objstms,
-        "pages": plan.pages.as_ref().map(|p| p.iter().map(|i| i + 1).collect::<Vec<_>>()),
-        "encryption": match &plan.options.encrypt {
-            nupdf::write::Encrypt::Keep => serde_json::json!("keep"),
-            nupdf::write::Encrypt::Remove => serde_json::json!("none"),
-            nupdf::write::Encrypt::New { method, permissions, .. } => serde_json::json!({
-                "method": method.name(),
-                "permissions": permissions,
-            }),
-        },
-        "output": {
-            "path": plan.output.map(|p| p.display().to_string()),
-            "doc_id": DocId::from_hash(&hash).to_string(),
-            "len": bytes.len(),
-            "blake3": hash.to_hex().to_string(),
-        },
-        "verification": verification.map(|v| serde_json::json!({
+    let output = serde_json::json!({
+        "path": plan.output.map(|p| p.display().to_string()),
+        "doc_id": DocId::from_hash(&hash).to_string(),
+        "len": bytes.len(),
+        "blake3": hash.to_hex().to_string(),
+    });
+    let verification = verification.map_or(serde_json::Value::Null, |v| {
+        serde_json::json!({
             "verified": true,
             "objects": v.objects,
-        })),
+        })
     });
-    Ok(report("nupdf.clean/v0", facts, doc, body))
+    Ok((output, verification))
 }
 
 /// Why the written document failed its self-check.

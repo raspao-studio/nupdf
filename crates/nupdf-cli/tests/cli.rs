@@ -701,3 +701,211 @@ fn clean_reports_an_unwritable_output() {
     let err: Value = serde_json::from_slice(&out.stderr).unwrap();
     assert_eq!(err["error"]["code"], "output.unwritable");
 }
+
+fn pages_at(path: &std::path::Path) -> Value {
+    run_json(&["pages", path.to_str().unwrap()])
+}
+
+#[test]
+fn meta_reads_sets_and_strips_the_information_dictionary() {
+    let input = smoke("incremental-update.pdf");
+    let file = input.to_str().unwrap();
+    let report = run_json(&["meta", file]);
+    assert_eq!(report["schema"], "nupdf.meta/v0");
+    assert_eq!(report["info"]["Title"], "Revision 2");
+    assert_eq!(report["xmp"], false);
+
+    let output = scratch("meta-set.pdf");
+    let out = output.to_str().unwrap();
+    let report = run_json(&[
+        "meta",
+        file,
+        "--set",
+        "info:Title=Été",
+        "--set",
+        "Subject=a=b",
+        "-o",
+        out,
+    ]);
+    assert_eq!(report["applied"], true);
+    assert_eq!(report["verification"]["verified"], true);
+    let written = run_json(&["meta", out]);
+    assert_eq!(written["info"]["Title"], "Été");
+    assert_eq!(written["info"]["Subject"], "a=b");
+    assert_eq!(written["info"]["Producer"], "nupdf fixtures");
+
+    // --strip drops /Info and the catalog's XMP before --set adds to a new
+    // /Info.
+    let xmp = smoke("streams-raw.pdf");
+    assert_eq!(run_json(&["meta", xmp.to_str().unwrap()])["xmp"], true);
+    let output = scratch("meta-strip.pdf");
+    let out = output.to_str().unwrap();
+    run_json(&[
+        "meta",
+        xmp.to_str().unwrap(),
+        "--strip",
+        "--set",
+        "Title=t",
+        "-o",
+        out,
+    ]);
+    let written = run_json(&["meta", out]);
+    assert_eq!(written["xmp"], false);
+    assert_eq!(written["info"], serde_json::json!({ "Title": "t" }));
+
+    for (argv, code) in [
+        (&["meta", file, "--set", "Title"][..], "usage.bad_value"),
+        (&["meta", file, "--strip"], "usage.missing_output"),
+    ] {
+        let out = nupdf(argv);
+        assert_eq!(out.status.code(), Some(2), "{argv:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["code"], code);
+    }
+}
+
+#[test]
+fn pages_selects_deletes_and_rotates() {
+    // Pages 3 and 4 inherit /Rotate 90 from their /Pages node.
+    let input = smoke("pages-rearrange.pdf");
+    let file = input.to_str().unwrap();
+    let boxes = |report: &Value| -> Vec<(i64, i64)> {
+        report["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    p["MediaBox"][2].as_i64().unwrap(),
+                    p["Rotate"].as_i64().unwrap_or(0),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        boxes(&run_json(&["pages", file])),
+        [(612, 0), (612, 0), (300, 90), (300, 90)]
+    );
+
+    let output = scratch("pages-select.pdf");
+    let out = output.to_str().unwrap();
+    let report = run_json(&[
+        "pages", file, "--select", "4,1", "--rotate", "-90", "-o", out,
+    ]);
+    assert_eq!(report["schema"], "nupdf.pages/v0");
+    assert_eq!(report["kept"], serde_json::json!([4, 1]));
+    assert_eq!(report["page_count"], 2);
+    assert_eq!(report["verification"]["verified"], true);
+    assert_eq!(boxes(&pages_at(&output)), [(300, 0), (612, 270)]);
+
+    let output = scratch("pages-delete.pdf");
+    let out = output.to_str().unwrap();
+    let report = run_json(&[
+        "pages",
+        file,
+        "--delete",
+        "2-3",
+        "--rotate",
+        "450",
+        "--rotate-pages",
+        "N",
+        "-o",
+        out,
+    ]);
+    assert_eq!(report["kept"], serde_json::json!([1, 4]));
+    assert_eq!(boxes(&pages_at(&output)), [(612, 0), (300, 180)]);
+
+    for argv in [
+        &["pages", file, "--rotate", "45", "--dry-run"][..],
+        &["pages", file, "--select", "1", "--delete", "2", "--dry-run"],
+        &["pages", file, "--select", "1"],
+    ] {
+        assert_eq!(nupdf(argv).status.code(), Some(2), "{argv:?}");
+    }
+}
+
+#[test]
+fn split_writes_each_range_to_its_own_file() {
+    let input = smoke("pages-rearrange.pdf");
+    let file = input.to_str().unwrap();
+    let dir = scratch("split-ranges");
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = dir.to_str().unwrap();
+
+    let report = run_json(&["split", file, "-o", out, "--dry-run"]);
+    assert_eq!(report["schema"], "nupdf.split/v0");
+    assert_eq!(report["applied"], false);
+    assert_eq!(report["parts"].as_array().unwrap().len(), 4);
+    assert!(!dir.exists());
+
+    let report = run_json(&["split", file, "-o", out, "--pages-per-file", "3"]);
+    let pages: Vec<&Value> = report["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| &p["pages"])
+        .collect();
+    assert_eq!(
+        pages,
+        [&serde_json::json!([1, 2, 3]), &serde_json::json!([4])]
+    );
+    let second = dir.join("pages-rearrange-2.pdf");
+    assert_eq!(pages_at(&second)["page_count"], 1);
+
+    let report = run_json(&["split", file, "-o", out, "--ranges", "N-3;1,1"]);
+    assert_eq!(report["parts"][0]["pages"], serde_json::json!([4, 3]));
+    assert_eq!(report["parts"][1]["pages"], serde_json::json!([1, 1]));
+    for part in report["parts"].as_array().unwrap() {
+        assert_eq!(part["verification"]["verified"], true);
+    }
+}
+
+#[test]
+fn encrypt_and_decrypt_round_trip() {
+    let input = smoke("minimal.pdf");
+    let locked = scratch("encrypt-locked.pdf");
+    let report = run_json(&[
+        "encrypt",
+        input.to_str().unwrap(),
+        "--method",
+        "aes-128",
+        "--user-password",
+        "u",
+        "--owner-password",
+        "o",
+        "--permissions",
+        "-4",
+        "-o",
+        locked.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.encrypt/v0");
+    assert_eq!(report["encryption"]["method"], "aes-128");
+    assert_eq!(report["verification"]["verified"], true);
+    let facts = info_at(&locked);
+    assert_eq!(facts["encryption"], "Standard V4 R4 128-bit AES");
+    assert_eq!(facts["needs_password"], true);
+
+    let open = scratch("encrypt-open.pdf");
+    let report = run_json(&[
+        "--password",
+        "o",
+        "decrypt",
+        locked.to_str().unwrap(),
+        "-o",
+        open.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.decrypt/v0");
+    assert_eq!(report["encryption"], "none");
+    let facts = info_at(&open);
+    assert_eq!(facts["encrypted"], false);
+    assert_eq!(facts["page_count"], 1);
+
+    let out = nupdf(&[
+        "encrypt",
+        input.to_str().unwrap(),
+        "--method",
+        "rot13",
+        "--dry-run",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+}

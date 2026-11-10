@@ -238,3 +238,14 @@ MuPDF moves an edited object's xref entry into an incremental section, and the w
 - A page or /Pages that is not a dictionary fails the command, as `pdf_dict_put` does.
 
 The harness's `clean-pages-reverse`, `clean-pages-first` and `clean-pages-rest` checks compare the output's BLAKE3 with MuPDF's for `N-1`, `1` and `2-N`. MuPDF's script interface has no `pdf_check_document`, so the oracle loads every object itself before rearranging, as `mutool clean` does. On the standard tier the checks match on every file but 25 AES ones. Both tools fail on 66 to 71 more files than `clean` does, whose page trees cannot be counted or walked.
+
+## D24. Editing commands write as `clean` does
+
+*2026-11-10*
+
+`meta`, `pages` with an edit, `split`, `encrypt` and `decrypt` have no `mutool` command of their own to match; `mutool clean` comes closest, and its page arguments already do what `pages --select` and `split` need. So each command is `clean` with MuPDF's defaults and one edit before the save: `pdf_check_document` first, so that a repair cannot lose the edit, then the edit on the overlay (D23), then the save and the read-back check. The output is what `mutool clean` would write had the same edit been made through MuPDF's API.
+
+- `meta --set KEY=VALUE` is `pdf_set_metadata`: an `info:` prefix is dropped, an /Info that is not a dictionary is replaced by a new object, and the value becomes a text string as `pdf_new_text_string` makes it: ASCII as is, anything else UTF-16BE after a byte order mark. Dates are stored as the text given, which is where MuPDF's parsed date ends up too, since it writes the text over it. `--strip` removes the trailer's /Info and the catalog's /Metadata, before any `--set`.
+- `pages --select` and `--delete` are `clean --pages`, with `--delete` keeping the pages it does not name, in order. `--rotate` adds a multiple of 90 to each page's inherited /Rotate, read as `pdf_to_int` reads it, and puts the result, from 0 to 359, on the page itself, after any selection.
+- `split` writes each part from a fresh copy of the input, as `clean --pages` would. Its parts are named after the input, numbered from 1 and zero-padded to the same width.
+- `encrypt` and `decrypt` are `clean -E` and `clean -D`.
