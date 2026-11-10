@@ -41,12 +41,14 @@ The stream options are `mutool clean`'s (DECISIONS D20). `-d` writes streams dec
 
 `-Z` packs objects into object streams and writes an xref stream instead of the table, as `mutool clean -Z` does, raising the version to 1.5 (DECISIONS D21). As in MuPDF, it fails with `input.unloadable_object` on a document with an object that does not load or, in most files, an object number the xref skips, even where `clean` without `-Z` writes it. The report's `objstms` says whether it was given.
 
+`-D` writes the document without encryption. `-E rc4-40|rc4-128|aes-128|aes-256` encrypts it with a new security handler, with `-O` and `-U` for the owner and user passwords (empty by default; with no user password the output opens without one) and `-P` for the permission flags (-1, everything, by default), as `mutool clean` does (DECISIONS D22). As in MuPDF, `-E` gives the document a new `/ID`; nupdf derives it, and every other value MuPDF draws at random, from the input, so the output is reproducible. `-D` and `-E` cannot be combined. The report's `encryption` is `"keep"`, `"none"`, or the new method and permissions. The read-back check opens the output with the new user password. It refuses output where MuPDF's encryption loses a stream: an empty stream under AES, or a stream with a crypt filter of its own.
+
 Before writing, nupdf opens the output (with `--password`, if given) and compares it with the input: the syntax of each object, apart from the stream `/Length` it recomputes, and each stream's raw data. With a stream option, streams are compared decoded instead, and their `/Filter` and `/DecodeParms` are left out. With `-Z`, objects in object streams are compared too, the object streams and xref stream the writer adds are not, and the catalog's `/Version` is left out. Without `-g`, every object the output has in use is compared with the input's of the same number. With `-g`, objects are paired by following references from the trailer, since they may be renumbered or merged, and `objects` counts the pairs. If the output does not open, needs a repair, or reads back differently, `clean` writes nothing and fails with exit 4 and `verify.failed`, naming the input's objects. MuPDF's writer is lossy in a few cases, such as an empty key name before a number, a stream under an Identity crypt filter, a document opened without its password, a reference renumbered in a dictionary of more than 100 entries, with `-gg` a document whose trailer has no `/Root`, or, with `-z` or `-a`, a filter array two streams share. `--no-verify` skips the check and writes MuPDF's output anyway.
 
 ```json
 {"schema":"nupdf.clean/v0","doc_id":"b3:...","applied":true,"garbage":0,
  "streams":{"decompress":false,"compress":false,"compress_fonts":false,
-  "compress_images":false,"ascii":false,"effort":0},"syntax":"compact","objstms":false,
+  "compress_images":false,"ascii":false,"effort":0},"syntax":"compact","objstms":false,"encryption":"keep",
  "output":{"path":"out.pdf","doc_id":"b3:...","len":1574,"blake3":"..."},
  "verification":{"verified":true,"objects":7},"diagnostics":[]}
 ```

@@ -15,14 +15,33 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::crypt::{Crypt, NewMethod};
 use crate::document::Document;
 use crate::garbage::{self, Slot};
 use crate::object::{Dict, ObjRef, Object, Stream};
 use crate::print::{self, Options};
 use crate::xref::Kind;
 
+/// What happens to the security handler (`do_encrypt`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Encrypt {
+    /// Kept as it is (`PDF_ENCRYPT_KEEP`).
+    #[default]
+    Keep,
+    /// Removed, and everything written in the clear (`PDF_ENCRYPT_NONE`,
+    /// `clean -D`).
+    Remove,
+    /// Replaced by a new handler (`clean -E`, `-O`, `-U`, `-P`).
+    New {
+        method: NewMethod,
+        owner: String,
+        user: String,
+        permissions: i32,
+    },
+}
+
 /// What `pdf_write_options` nupdf supports so far.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOptions {
     /// Dictionaries a line per entry (`do_pretty`).
     pub pretty: bool,
@@ -49,6 +68,8 @@ pub struct WriteOptions {
     /// Objects packed into object streams, and an xref stream instead of
     /// the table (`do_use_objstms`, `clean -Z`).
     pub objstms: bool,
+    /// The security handler to write with.
+    pub encrypt: Encrypt,
 }
 
 impl WriteOptions {
@@ -103,13 +124,34 @@ struct State {
     ofs_list: Vec<i64>,
     gen_list: Vec<i32>,
     crypt_object_number: i32,
+    /// The handler objects are encrypted with, if any.
+    crypt: Option<Arc<Crypt>>,
 }
 
 /// `pdf_save_document` with `options`, returning the bytes.
 pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteError> {
     check_document(doc);
-    let crypt = doc.crypt();
     let mut trailer = doc.trailer();
+    let crypt = match &options.encrypt {
+        Encrypt::Keep => doc.crypt(),
+        Encrypt::Remove => {
+            trailer.remove(b"Encrypt");
+            None
+        }
+        Encrypt::New {
+            method,
+            owner,
+            user,
+            permissions,
+        } => Some(Arc::new(new_encryption(
+            doc,
+            &mut trailer,
+            *method,
+            owner,
+            user,
+            *permissions,
+        ))),
+    };
     // MuPDF's null object is the null pointer: a null value counts as
     // absent wherever it checks for an object.
     let crypt_obj = trailer
@@ -227,7 +269,7 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
         use_list,
         xref_len,
         version,
-        has_crypt: crypt.is_some(),
+        crypt,
     };
     finish(doc, options, objects, plan)
 }
@@ -242,7 +284,8 @@ struct Plan {
     use_list: Vec<bool>,
     xref_len: usize,
     version: i32,
-    has_crypt: bool,
+    /// The handler to write with.
+    crypt: Option<Arc<Crypt>>,
 }
 
 /// The rest of `pdf_save_document`: gathering into object streams, then
@@ -262,11 +305,13 @@ fn finish(
         mut use_list,
         mut xref_len,
         version,
-        has_crypt,
+        crypt,
     } = plan;
     let garbage = options.garbage.min(4);
     let mut crypt_object_number = 0;
-    if has_crypt && let Some(Object::Ref(r)) = trailer.get(b"Encrypt") {
+    if crypt.is_some()
+        && let Some(Object::Ref(r)) = trailer.get(b"Encrypt")
+    {
         crypt_object_number = r.num;
     }
 
@@ -299,6 +344,7 @@ fn finish(
         ofs_list: vec![0; n],
         gen_list: vec![0; n],
         crypt_object_number,
+        crypt,
     };
     // flush_gathered gives a packed object its index as offset and
     // generation; an unused one, which is not written, keeps both.
@@ -386,6 +432,42 @@ fn finish(
         write_xref(&mut st, &trailer, crypt_obj.as_ref(), xref_len, startxref);
     }
     Ok(st.out)
+}
+
+/// The new handler and /Encrypt for `clean -E`: the dictionary goes into
+/// the trailer directly, after a new /ID. `mutool clean` keeps the /ID it
+/// reads (`dont_regenerate_id`), and so never hands it to the encryption
+/// step, which makes a new one, at random; nupdf derives it from the input.
+fn new_encryption(
+    doc: &Document,
+    trailer: &mut Dict,
+    method: NewMethod,
+    owner: &str,
+    user: &str,
+    permissions: i32,
+) -> Crypt {
+    let seed = *blake3::hash(doc.data()).as_bytes();
+    let mut h = blake3::Hasher::new_derive_key("nupdf 2026 file identifier");
+    h.update(&seed);
+    let bytes = *h.finalize().as_bytes();
+    trailer.put(
+        b"ID",
+        Object::Array(Arc::new(vec![
+            Object::String(Arc::from(&bytes[..16])),
+            Object::String(Arc::from(&bytes[16..])),
+        ])),
+    );
+    let crypt = Crypt::for_writing(
+        method,
+        owner,
+        user,
+        Some(&bytes[..16]),
+        permissions,
+        &seed,
+        doc.diagnostics(),
+    );
+    trailer.put(b"Encrypt", Object::Dict(Arc::new(crypt.encryption_dict())));
+    crypt
 }
 
 /// The version check before writing object streams: the catalog's
@@ -628,6 +710,12 @@ pub fn verify(
             mismatched: Vec::new(),
         };
     };
+    // The output opens with the input's password, unless the handler changed.
+    let password = match &options.encrypt {
+        Encrypt::Keep => password,
+        Encrypt::Remove => None,
+        Encrypt::New { user, .. } => Some(user.as_str()),
+    };
     if let Some(password) = password {
         let _ = again.authenticate(password);
     }
@@ -641,6 +729,7 @@ pub fn verify(
     let (objects, mismatched) = if options.garbage >= 1 {
         let mut walk = Walk::new(original, &again, options.changes_streams());
         walk.root = root;
+        walk.new_handler = options.encrypt != Encrypt::Keep;
         walk.run()
     } else {
         let mut objects = 0;
@@ -683,6 +772,8 @@ struct Walk<'a> {
     decoded: bool,
     /// The input's catalog, when its /Version may have been raised.
     root: Option<i32>,
+    /// The trailer's /Encrypt and /ID were replaced or removed.
+    new_handler: bool,
 }
 
 impl<'a> Walk<'a> {
@@ -694,6 +785,7 @@ impl<'a> Walk<'a> {
             queue: Vec::new(),
             decoded,
             root: None,
+            new_handler: false,
         }
     }
 
@@ -701,6 +793,9 @@ impl<'a> Walk<'a> {
         let (before, after) = (self.original.trailer(), self.again.trailer());
         let mut mismatched = Vec::new();
         for key in [&b"Root"[..], b"Info", b"ID", b"Encrypt"] {
+            if self.new_handler && (key == b"ID" || key == b"Encrypt") {
+                continue;
+            }
             let a = before.get(key).cloned().unwrap_or(Object::Null);
             let b = after.get(key).cloned().unwrap_or(Object::Null);
             if !self.same(&a, &b) {
@@ -1332,7 +1427,7 @@ fn write_object(
             return Ok(());
         }
     }
-    let crypt = if unenc { None } else { doc.crypt() };
+    let crypt = if unenc { None } else { st.crypt.clone() };
     let num = num as i32;
     let encrypt = |data: &[u8]| -> Vec<u8> {
         crypt
@@ -2075,5 +2170,109 @@ trailer\n<</Size 2>>\nstartxref\n34\n%%EOF\n",
             text.contains("1 0 obj\n<</Type/XRef/Size 1/W[1 4 1]/Index[0 1]"),
             "{text}"
         );
+    }
+
+    fn encrypted(method: NewMethod) -> WriteOptions {
+        WriteOptions {
+            encrypt: Encrypt::New {
+                method,
+                owner: "own".into(),
+                user: "usr".into(),
+                permissions: -1,
+            },
+            ..Default::default()
+        }
+    }
+
+    const ALL_METHODS: [NewMethod; 4] = [
+        NewMethod::Rc4_40,
+        NewMethod::Rc4_128,
+        NewMethod::Aes128,
+        NewMethod::Aes256,
+    ];
+
+    #[test]
+    fn decrypting_writes_everything_in_the_clear() {
+        let doc = open(include_bytes!(
+            "../../../corpus/smoke/encrypted-rc4-128.pdf"
+        ));
+        let options = WriteOptions {
+            encrypt: Encrypt::Remove,
+            ..Default::default()
+        };
+        let out = save(&doc, &options).unwrap_or_default();
+        let again = open(&out);
+        assert!(!again.is_encrypted());
+        assert!(!String::from_utf8_lossy(&out).contains("/Encrypt"));
+        assert!(verify(&doc, &out, None, &options).verified());
+    }
+
+    #[test]
+    fn new_encryption_opens_with_either_password() {
+        let doc = open(include_bytes!(
+            "../../../corpus/smoke/multipage-inherit.pdf"
+        ));
+        for method in ALL_METHODS {
+            let options = encrypted(method);
+            let out = save(&doc, &options).unwrap_or_default();
+            let again = open(&out);
+            assert!(again.needs_password(), "{method:?}");
+            assert_eq!(again.authenticate("nope").ok(), Some(0), "{method:?}");
+            assert_eq!(again.authenticate("usr").ok(), Some(2), "{method:?}");
+            assert_eq!(
+                again.authenticate("own").ok().map(|a| a & 4),
+                Some(4),
+                "{method:?}"
+            );
+            assert!(verify(&doc, &out, None, &options).verified(), "{method:?}");
+            assert_eq!(
+                save(&doc, &options).ok(),
+                Some(out),
+                "{method:?} deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn new_encryption_writes_a_new_id_and_a_direct_dictionary() {
+        let doc = open(include_bytes!(
+            "../../../corpus/smoke/encrypted-rc4-128.pdf"
+        ));
+        let out = save(&doc, &encrypted(NewMethod::Aes256)).unwrap_or_default();
+        let text = String::from_utf8_lossy(&out);
+        let trailer = &text[text.rfind("trailer\n").unwrap_or(0)..];
+        assert!(
+            trailer.contains("/Encrypt<</Filter/Standard/R 6/V 5/Length 256/P -4"),
+            "{trailer}"
+        );
+        assert_ne!(open(&out).trailer().get(b"ID"), doc.trailer().get(b"ID"));
+        // Permissions keep only the bits MuPDF keeps.
+        let options = WriteOptions {
+            encrypt: Encrypt::New {
+                method: NewMethod::Rc4_128,
+                owner: "own".into(),
+                user: String::new(),
+                permissions: 0,
+            },
+            ..Default::default()
+        };
+        let out = save(&doc, &options).unwrap_or_default();
+        assert!(String::from_utf8_lossy(&out).contains("/P -3904"));
+        assert!(!open(&out).needs_password());
+    }
+
+    #[test]
+    fn an_empty_stream_under_aes_does_not_read_back() {
+        // MuPDF writes no data, but the /Length of an IV and a block.
+        let doc = open(include_bytes!(
+            "../../../corpus/smoke/write-empty-stream.pdf"
+        ));
+        let rc4 = encrypted(NewMethod::Rc4_128);
+        let out = save(&doc, &rc4).unwrap_or_default();
+        assert!(verify(&doc, &out, None, &rc4).verified());
+        let aes = encrypted(NewMethod::Aes256);
+        let out = save(&doc, &aes).unwrap_or_default();
+        assert!(String::from_utf8_lossy(&out).contains("<</Length 32>>\nstream\n\nendstream"));
+        assert!(!verify(&doc, &out, None, &aes).verified());
     }
 }

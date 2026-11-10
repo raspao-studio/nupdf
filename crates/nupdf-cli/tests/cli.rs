@@ -589,6 +589,39 @@ fn clean_packs_objects_into_object_streams() {
 }
 
 #[test]
+fn clean_changes_the_security_handler() {
+    let input = smoke("encrypted-rc4-128.pdf");
+    let path = input.to_str().unwrap();
+    let report = run_json(&["clean", "-D", "--dry-run", path]);
+    assert_eq!(report["encryption"], "none");
+    assert_eq!(report["verification"]["verified"], true);
+    let output = scratch("clean-encrypted.pdf");
+    let report = run_json(&[
+        "clean",
+        "-E",
+        "aes-256",
+        "-O",
+        "own",
+        "-U",
+        "usr",
+        "-P",
+        "-4",
+        path,
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(report["encryption"]["method"], "aes-256");
+    assert_eq!(report["verification"]["verified"], true);
+    let reopened = run_json(&["--password", "usr", "info", output.to_str().unwrap()]);
+    assert_eq!(reopened["encryption"], "Standard V5 R6 256-bit AES");
+    // -D and -E conflict; an unknown method is a usage error.
+    let out = nupdf(&["clean", "-D", "-E", "rc4-40", "--dry-run", path]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = nupdf(&["clean", "-E", "rot13", "--dry-run", path]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
 fn clean_refuses_brotli() {
     let input = smoke("streams-raw.pdf");
     let out = nupdf(&["clean", "-zz", "--dry-run", input.to_str().unwrap()]);
