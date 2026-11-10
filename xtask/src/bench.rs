@@ -45,6 +45,12 @@ pub const PAIRS: &[Pair] = &[
         oracle: &["clean", "-gggg", "{file}", "{out}"],
         nupdf: &["clean", "-gggg", "{file}", "-o", "{out}"],
     },
+    Pair {
+        name: "clean-z",
+        about: "rewrite the document deflating every stream that has no filter; nupdf also reads its output back to verify it",
+        oracle: &["clean", "-z", "{file}", "{out}"],
+        nupdf: &["clean", "-z", "{file}", "-o", "{out}"],
+    },
 ];
 
 #[derive(Debug, Serialize)]
