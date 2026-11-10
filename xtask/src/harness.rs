@@ -226,6 +226,21 @@ pub const CHECKS: &[Check] = &[
         &["clean", "-dzgg", "--dry-run", "--no-verify"],
         &["decompress,compress,garbage=2"],
     ),
+    clean_objstms(
+        "clean-Z",
+        &["clean", "-Z", "--dry-run", "--no-verify"],
+        &["objstms"],
+    ),
+    clean_objstms(
+        "clean-Zg",
+        &["clean", "-Zg", "--dry-run", "--no-verify"],
+        &["objstms,garbage=1"],
+    ),
+    clean_objstms(
+        "clean-Zggz",
+        &["clean", "-Zggz", "--dry-run", "--no-verify"],
+        &["objstms,garbage=2,compress"],
+    ),
     Check {
         name: "roundtrip-gggg",
         about: "the `clean -gggg` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
@@ -241,6 +256,19 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["garbage=4"],
     },
 ];
+
+/// `clean` writing object streams and an xref stream, compared as `clean`
+/// is.
+const fn clean_objstms(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        about: "the document rewritten as `mutool clean -Z` writes it, objects packed into object streams with an xref stream, alone or with garbage collection and compression: BLAKE3 of the output",
+        ..clean_gc(name, nupdf_args, oracle_args)
+    }
+}
 
 /// `clean` with stream options, compared as `clean` is.
 const fn clean_streams(
