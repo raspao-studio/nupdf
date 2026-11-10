@@ -320,6 +320,31 @@ fn rearrange_fixtures() -> Vec<Fixture> {
     pdf.obj(4, "<</Type/Page/Parent 2 0 R/Contents 3 0 R>>");
     pdf.obj(5, FONT);
 
+    // For merge: what grafting copies, shares, deletes and leaves behind.
+    let mut g = Pdf::new("1.7");
+    g.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    g.obj(
+        2,
+        "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2/MediaBox[0 0 200 200]/Rotate 90/Resources<</Font<</F1 6 0 R>>>>>>",
+    );
+    g.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/Contents 5 0 R/Resources<</Font<</F1 6 0 R>>/XObject<</Free 11 0 R>>/ExtGState<</Null 9 0 R>>/Properties<</Past 14 0 R>>>>/Annots[10 0 R]>>",
+    );
+    g.obj(4, "<</Type/Page/Parent 2 0 R/Contents 7 0 R/Rotate null>>");
+    let one = text_content("One");
+    g.stream_as_is(5, "<</Length 8 0 R>>", &one);
+    g.obj(6, FONT);
+    g.stream(7, "", &text_content("Two"));
+    g.obj(8, &one.len().to_string());
+    g.obj(9, "null");
+    g.obj(
+        10,
+        "<</Type/Annot/Subtype/Link/Rect[0 0 10 10]/Dest[4 0 R/Fit]>>",
+    );
+    g.obj(12, "<</Unused true>>");
+    let graft = g.finish_with_size(16);
+
     vec![
         Fixture {
             name: "pages-rearrange.pdf",
@@ -332,6 +357,12 @@ fn rearrange_fixtures() -> Vec<Fixture> {
             about: "Pages that are direct dictionaries, two of them equal, one under a direct /Pages node, for page edits made where the page sits",
             needs_repair: false,
             bytes: pdf.finish_with_xref(""),
+        },
+        Fixture {
+            name: "merge-graft.pdf",
+            about: "For merge: an indirect /Length, a font two pages share, references to a null object, a free number and, last, one past the xref, which fails the page; a /Rotate of null, and a link to another page",
+            needs_repair: false,
+            bytes: graft,
         },
         Fixture {
             name: "meta-xref-stream.pdf",

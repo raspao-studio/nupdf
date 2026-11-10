@@ -267,3 +267,146 @@ pub fn encryption(
     let plan = write.plan(options, password)?;
     write_document(doc, facts, &plan, schema, body)
 }
+
+/// `fz_is_page_range`: only digits, `N`, `-` and `,`.
+fn is_page_range(s: &str) -> bool {
+    s.bytes()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'N' | b'-' | b','))
+}
+
+/// `merge`: the pages of each input, in its range, grafted into a new
+/// document, as `mutool merge` does. An input that fails is reported and
+/// skipped, keeping the pages it gave before failing; only when none can
+/// be opened does the command fail.
+pub fn merge(
+    args: &[String],
+    open: &dyn Fn(&Path) -> Opened,
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    let mut inputs: Vec<(PathBuf, &str)> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let path = PathBuf::from(&args[i]);
+        i += 1;
+        let range = match args.get(i) {
+            Some(r) if is_page_range(r) => {
+                i += 1;
+                r.as_str()
+            }
+            _ => "1-N",
+        };
+        inputs.push((path, range));
+    }
+    let plan = write.plan(nupdf::write::WriteOptions::default(), None)?;
+    let dst = Document::create().map_err(|e| Failure {
+        exit: Exit::Internal,
+        code: "internal.create",
+        message: e.message,
+    })?;
+    let mut first: Option<FileFacts> = None;
+    let mut first_failure: Option<Failure> = None;
+    let mut reports = Vec::new();
+    for (path, range) in &inputs {
+        let mut merged = Vec::new();
+        let mut diagnostics = serde_json::Value::Array(Vec::new());
+        let outcome = merge_one(
+            &dst,
+            path,
+            range,
+            open,
+            password,
+            &mut merged,
+            &mut diagnostics,
+        );
+        let (doc_id, error) = match outcome {
+            Ok(facts) => {
+                let id = facts.doc_id.clone();
+                first.get_or_insert(facts);
+                (Some(id), None)
+            }
+            Err((facts, failure)) => {
+                let id = facts.as_ref().map(|f| f.doc_id.clone());
+                if let Some(facts) = facts {
+                    first.get_or_insert(facts);
+                }
+                dst.diagnostics().warn(
+                    "merge.input_failed",
+                    format!(
+                        "cannot merge document '{}': {}",
+                        path.display(),
+                        failure.message
+                    ),
+                );
+                let error = serde_json::json!({ "code": failure.code, "message": failure.message });
+                first_failure.get_or_insert(failure);
+                (id, Some(error))
+            }
+        };
+        reports.push(serde_json::json!({
+            "path": path.display().to_string(),
+            "doc_id": doc_id,
+            "pages": merged.iter().map(|p| p + 1).collect::<Vec<_>>(),
+            "error": error,
+            "diagnostics": diagnostics,
+        }));
+    }
+    let Some(facts) = first else {
+        return Err(first_failure.unwrap_or(Failure {
+            exit: Exit::Usage,
+            code: "usage.missing_input",
+            message: "merge needs at least one input".into(),
+        }));
+    };
+    let body = serde_json::json!({
+        "inputs": reports,
+        "page_count": dst.page_count().ok(),
+    });
+    write_document(&dst, &facts, &plan, "nupdf.merge/v0", body)
+}
+
+/// `merge_range` for one input: its facts once it opened, the pages merged
+/// in `merged` (0-based), whether or not it failed partway, and what was
+/// noticed reading it in `diagnostics`.
+fn merge_one(
+    dst: &Document,
+    path: &Path,
+    range: &str,
+    open: &dyn Fn(&Path) -> Opened,
+    password: Option<&str>,
+    merged: &mut Vec<i32>,
+    diagnostics: &mut serde_json::Value,
+) -> Result<FileFacts, (Option<FileFacts>, Failure)> {
+    let (src, facts) = open(path).map_err(|f| (None, f))?;
+    let result = graft_input(dst, &src, range, password, merged);
+    *diagnostics = super::diagnostics(&src);
+    match result {
+        Ok(()) => Ok(facts),
+        Err(failure) => Err((Some(facts), failure)),
+    }
+}
+
+fn graft_input(
+    dst: &Document,
+    src: &Document,
+    range: &str,
+    password: Option<&str>,
+    merged: &mut Vec<i32>,
+) -> Result<(), Failure> {
+    if src.needs_password() && password.is_none() {
+        return Err(Failure {
+            exit: Exit::Input,
+            code: "input.needs_password",
+            message: "the empty password does not open the document: pass --password".into(),
+        });
+    }
+    let tree = |e: String| input_failure("input.page_tree", e);
+    let count = src.page_count().map_err(|e| tree(e.0))?;
+    let mut map = nupdf::graft::GraftMap::new(dst);
+    for page in nupdf::rearrange::parse_page_ranges(range, count, src) {
+        map.graft_page(src, page, -1)
+            .map_err(|e| tree(nupdf::diag::report::strip(&e).to_string()))?;
+        merged.push(page);
+    }
+    Ok(())
+}

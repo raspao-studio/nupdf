@@ -84,4 +84,21 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
+    // Merge its first pages into a new document, as `merge` does, and write
+    // that with the defaults.
+    if doc.xref_len() <= 4096
+        && let Ok(dst) = Document::create()
+        && let Ok(count) = doc.page_count()
+    {
+        let mut map = nupdf::graft::GraftMap::new(&dst);
+        for page in 0..count.min(8) {
+            if map.graft_page(&doc, page, -1).is_err() {
+                break;
+            }
+        }
+        let defaults = WriteOptions::default();
+        if let Ok(out) = save(&dst, &defaults) {
+            let _ = verify(&dst, &out, None, &defaults);
+        }
+    }
 });

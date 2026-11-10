@@ -72,6 +72,14 @@ Each editing command makes one edit, then writes the document as `clean` writes 
 
 `split <file> -o <dir>` writes one file per page, or per `--pages-per-file N` pages, or per page list in `--ranges "1-3;4-N"`, each as `clean --pages` would. The parts are `<stem>-1.pdf` onwards, zero-padded to the same width. The report's `parts` give each part's `pages`, `output` and `verification`; `--dry-run` writes nothing, not even the directory.
 
+`merge <inputs>... -o <out>` copies pages into a new document, as `mutool merge` does (DECISIONS D25). Each input file may be followed by its pages, in the same syntax (`a.pdf b.pdf 3-1 c.pdf N`); without them, all of its pages are copied. Objects two pages of one input share are copied once. The report's `doc_id` is the first input's that opened, and `inputs` gives each input's `path`, `doc_id`, the `pages` merged from 1, `error`, and the `diagnostics` from reading it. An input that fails partway, such as one whose page refers past its xref, keeps the pages merged before it, as in MuPDF; its `error` says why, and a `merge.input_failed` warning is in the report's `diagnostics`. A locked input fails that way without `--password`. Only when no input opens does the command fail. Links and outline items are not copied yet.
+
+```json
+{"schema":"nupdf.merge/v0","doc_id":"b3:...","applied":true,
+ "inputs":[{"path":"a.pdf","doc_id":"b3:...","pages":[1,2],"error":null,"diagnostics":[]}],
+ "page_count":2,"output":{...},"verification":{"verified":true,"objects":9},"diagnostics":[]}
+```
+
 `encrypt <file>` is `clean -E`: `--method` (`aes-256` by default), `--owner-password`, `--user-password` and `--permissions`. `decrypt <file>` is `clean -D`. Their reports (`nupdf.encrypt/v0`, `nupdf.decrypt/v0`) carry `encryption` as `clean`'s does.
 
 ## Addressing content
