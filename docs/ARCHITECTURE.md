@@ -44,9 +44,10 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `document` (state, loading, object streams, repair rebuild, version, page count) | `pdf/pdf-xref.c`, `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1 |
 | `diag` | MuPDF's `fz_warn` calls, as data | M1 |
 | `text_string` | `pdf/pdf-parse.c` (`pdf_new_utf8_from_pdf_string`), `fitz/string.c` (`fz_runetochar`), `fitz/encodings.h` (PDFDocEncoding) | M1 |
-| `filter` (Flate, predictors, ASCIIHex, ASCII85, RunLength) | `pdf/pdf-stream.c` (`build_filter`), `fitz/filter-flate.c`, `fitz/filter-predict.c`, `fitz/filter-basic.c` | M1 |
+| `stream` (MuPDF's stream model, the endstream filter) | `include/mupdf/fitz/stream.h`, `fitz/stream-read.c`, `fitz/stream-open.c`, `fitz/filter-basic.c` | M2 |
+| `filter` (Flate, LZW, Brotli, RunLength, ASCIIHex, ASCII85, predictors, RC4 and AES; the filter chain) | `pdf/pdf-stream.c` (`build_filter`, `build_compression_params`), `pdf/pdf-colorspace.c` (`pdf_guess_colorspace_components`), `fitz/compressed-buffer.c`, `fitz/filter-basic.c`, `fitz/filter-flate.c`, `fitz/filter-lzw.c`, `fitz/filter-brotli.c`, `fitz/filter-predict.c` | M1, M2 |
 | `page` | `pdf/pdf-page.c` (page map and lookup), `pdf/pdf-repair.c` (`pdf_walk_parent`, parent repair), `pdf/pdf-object.c` (`pdf_cycle`) | M1 |
-| `filter` (LZW, Brotli, image decoders) | `fitz/filter-lzw.c`, `fitz/filter-brotli.c`, `fitz/filter-*.c`, `fitz/load-jpx.c`, `fitz/load-jbig2.c` | M2 |
+| `filter` (image decoders: CCITT fax, DCT, JBIG2, JPX) | `fitz/filter-fax.c`, `fitz/filter-dct.c`, `fitz/filter-jbig2.c`, `fitz/load-jpx.c`, `fitz/load-jbig2.c` | M2 |
 | `write`, `edit`, `graft` | `pdf/pdf-write.c`, `pdf/pdf-graft.c`, `pdf/pdf-clean-file.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |

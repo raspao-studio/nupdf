@@ -111,3 +111,11 @@ nupdf copies MuPDF's handling, including two behaviors that look like accidents.
 
 Passwords are given with `--password`. A wrong one is an input error (exit 3, `input.wrong_password`); no password is not an error, since MuPDF opens such files too, and `info` reports `needs_password`.
 
+## D16. Streams are read through a port of MuPDF's stream model
+
+*2026-11-10*
+
+What a damaged stream yields in MuPDF is decided by its stream machinery rather than by any one filter. Each stage fills a buffer of a fixed size (4096 bytes for Flate, LZW, Brotli and predictors, 256 for ASCIIHex, ASCII85, RunLength, RC4 and AES). A stage that fails loses the buffer it was filling, and the reader above treats the failure as the end of the data after reporting it. The whole-stream reader asks for at most what is left in its own growing buffer. A stage can also mark itself finished while still holding bytes, which `fz_available` then drops and `fz_read_byte` does not. M1 approximated these rules case by case (the AES chunks, the endstream window). M2 ports the model itself (`stream`) with each filter as a stage, so they hold for every filter and every combination.
+
+LZW is a port of MuPDF's decoder rather than a library: its tolerance (a missing clear code, a single out-of-range code) and its reading past the end of a truncated stream are part of what it returns. Brotli uses brotli-decompressor, a port of the same reference decoder MuPDF links. One difference is deliberate: on a truncated Brotli stream MuPDF loops forever waiting for input, and nupdf ends the data instead.
+

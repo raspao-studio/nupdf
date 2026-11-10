@@ -111,10 +111,11 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 
 | Check | Parity | Remaining mismatches |
 |---|---|---|
-| `info` (version, encryption, pages, xref size, repaired, revisions, metadata) | 99.98% (5,122 / 5,123) | 1 Brotli file (M2) |
-| `pages` (page lookup, inherited attributes) | 99.98% (5,122 / 5,123) | 1 Brotli |
-| `objects` (every object, raw stream lengths) | 99.94% (5,120 / 5,123) | 1 Brotli, 1 oracle timeout (`base64image.pdf`), and `fuzz-16214.pdf`, where MuPDF still treats an xref stream as a stream after nupdf has demoted it |
-| `warnings` (distinct warnings and reported errors) | 99.4% (5,091 / 5,123) | Errors MuPDF reports from code paths nupdf does not run yet, mostly `invalid key in dict` and syntax errors in objects that only rendering touches; 1 Brotli |
+| `info` (version, encryption, pages, xref size, repaired, revisions, metadata) | 100% (5,123 / 5,123) | |
+| `pages` (page lookup, inherited attributes) | 100% (5,123 / 5,123) | |
+| `objects` (every object, raw stream lengths) | 99.98% (5,122 / 5,123) | 1 oracle timeout (`base64image.pdf`) |
+| `streams` (every non-image stream, decoded; M2) | 100% (5,123 / 5,123) | |
+| `warnings` (distinct warnings and reported errors) | 99.5% (5,095 / 5,123) | Errors MuPDF reports from code paths nupdf does not run yet, mostly `invalid key in dict` and syntax errors in objects that only rendering touches |
 
 There are no crashes, and no files that MuPDF opens but nupdf cannot. On a 300-file sample run sequentially, `nupdf info` takes 529 ms in total against MuPDF's 1,308 ms (geometric-mean speedup 2.47x, process start included; the MuPDF side also pays for its JavaScript runtime).
 
@@ -129,15 +130,16 @@ The security handler moved to M1 (DECISIONS D15).
 
 MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filter-predict.c`, `filter-fax.c`, `filter-dct.c`, `filter-jbig2.c`, `filter-sgi.c`, `filter-thunder.c`, `load-jpx.c`; `pdf/pdf-stream.c`.
 
-- [ ] Filter pipeline: streaming decode, decompressed-size and ratio limits
-- [ ] ASCIIHex, ASCII85, RunLength, LZW with EarlyChange (weezl or our own), Flate (zlib-rs) with MuPDF's tolerance for corrupt data (partial output plus a warning), PNG and TIFF predictors
+- [x] Filter pipeline (DECISIONS D16): a port of MuPDF's stream model (`stream`), with each filter as a stage keeping its buffer size and its way of reading input, so damaged data ends where MuPDF's read ends. Whole reads keep MuPDF's compression bomb check (200 times the guessed length, or the image size, and at least 100 MB) besides `--max-decoded-bytes`; object and xref streams are read a byte at a time, as MuPDF's lexer does. This replaced M1's case-by-case models of AES and the endstream filter
+- [x] ASCIIHex, ASCII85, RunLength (with MuPDF's guard against stacked decoders), LZW with EarlyChange (a port of MuPDF's decoder, its tolerances included), Flate (zlib-rs) with MuPDF's handling of corrupt data, PNG and TIFF predictors
 - [ ] CCITTFax (`fax` or hayro-ccitt), DCT (zune-jpeg, with raw passthrough), JPX (hayro-jpeg2000), JBIG2 with globals (hayro-jbig2)
-- [ ] Brotli (MuPDF 1.28 decodes `BrotliDecode`; the last `info` mismatch)
+- [x] Brotli (brotli-decompressor), which fixed the last `info` mismatch
 - [ ] Permissions (`pdf_has_permission`) reported by `info`
 - [x] `nupdf streams`: every stream's decoded length and BLAKE3 hash, as MuPDF's `pdf_load_stream` reads it; `show <ref> --data` decodes one
-- [x] Oracle and `streams` check: `streams.js` writes each decoded stream to a scratch directory and the harness hashes it, since mutool's JavaScript cannot. Streams with an image filter are listed on both sides but not compared; their pixels get their own check. First measurement: 98.7% (5,054 / 5,123); the rest are filter errors that MuPDF turns into the end of the data, LZW and Brotli
-- [ ] Fixtures: every filter
-- [ ] Fuzz targets per decoder
+- [x] Oracle and `streams` check: `streams.js` writes each decoded stream to a scratch directory and the harness hashes it, since mutool's JavaScript cannot. Streams with an image filter are listed on both sides but not compared; their pixels get their own check. First measurement: 98.7% (5,054 / 5,123); with the stream model, LZW and Brotli, 100% (5,123 / 5,123)
+- [x] Fixtures: every non-image filter, a chain, a PNG predictor, and damaged or truncated Flate, LZW and ASCIIHex whose recovery depends on MuPDF's buffer sizes (52 smoke fixtures, all matching MuPDF on every check)
+- [ ] Fixtures: every image filter
+- [x] Fuzz targets per decoder: `filters` runs every non-image decoder alone and in pairs, with predictor parameters, read whole and byte by byte; `crypt` covers the RC4 and AES stages. 15 minutes each, nothing found (`filters` 1.6M runs, `crypt` 5.2M, `open_walk` 0.9M)
 
 Exit: ≥99.9% decoded-stream parity for non-image filters. Image decoders within one level on 99% of pixels.
 
