@@ -284,6 +284,44 @@ pub const CHECKS: &[Check] = &[
         &["clean", "--pages", "2-N", "--dry-run", "--no-verify"],
         &["pages=2-N"],
     ),
+    edit(
+        "meta-set",
+        &[
+            "meta",
+            "--set",
+            "info:Title=nupdf",
+            "--set",
+            "Author=Été",
+            "--dry-run",
+            "--no-verify",
+        ],
+        &["meta=info:Title=nupdf,meta=Author=Été"],
+    ),
+    edit(
+        "meta-strip",
+        &["meta", "--strip", "--dry-run", "--no-verify"],
+        &["strip-meta"],
+    ),
+    edit(
+        "pages-rotate",
+        &["pages", "--rotate", "90", "--dry-run", "--no-verify"],
+        &["rotate=90"],
+    ),
+    edit(
+        "pages-select-rotate",
+        &[
+            "pages",
+            "--select",
+            "N-1",
+            "--rotate",
+            "-90",
+            "--rotate-pages",
+            "1",
+            "--dry-run",
+            "--no-verify",
+        ],
+        &["pages=N-1,rotate=-90@1"],
+    ),
     Check {
         name: "roundtrip-gggg",
         about: "the `clean -gggg` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
@@ -308,6 +346,19 @@ const fn clean_pages(
 ) -> Check {
     Check {
         about: "the document with only some pages kept, in a given order, as `mutool clean` writes it given page ranges (pdf_rearrange_pages): BLAKE3 of the output",
+        ..clean_gc(name, nupdf_args, oracle_args)
+    }
+}
+
+/// An edit command (`meta`, `pages`), written as `clean` writes, against
+/// the same edit made through MuPDF's API before saving.
+const fn edit(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        about: "the document edited as `meta` or `pages` edit it (pdf_set_metadata, removing /Info and XMP, page /Rotate), then written as `mutool clean` writes it: BLAKE3 of the output",
         ..clean_gc(name, nupdf_args, oracle_args)
     }
 }

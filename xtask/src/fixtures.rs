@@ -333,7 +333,64 @@ fn rearrange_fixtures() -> Vec<Fixture> {
             needs_repair: false,
             bytes: pdf.finish_with_xref(""),
         },
+        Fixture {
+            name: "meta-xref-stream.pdf",
+            about: "/Info in a trailer that is an xref stream's dictionary, and a catalog with XMP /Metadata, for meta --strip",
+            needs_repair: false,
+            bytes: meta_xref_stream(),
+        },
     ]
+}
+
+/// A document whose only trailer is an xref stream's dictionary, with
+/// /Info and the catalog's XMP /Metadata to remove.
+fn meta_xref_stream() -> Vec<u8> {
+    let mut pdf = Pdf::new("1.5");
+    let (info, xmp, xref) = (6, 7, 8);
+    pdf.obj(
+        1,
+        &format!("<</Type/Catalog/Pages 2 0 R/Metadata {xmp} 0 R>>"),
+    );
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+    pdf.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
+    );
+    pdf.stream(4, "", &text_content("Metadata"));
+    pdf.obj(5, FONT);
+    pdf.obj(
+        info,
+        "<</Title(In the xref stream)/Producer(nupdf fixtures)>>",
+    );
+    pdf.stream(
+        xmp,
+        "/Type/Metadata/Subtype/XML",
+        b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>",
+    );
+    let xref_offset = pdf.out.len();
+    let mut rows = Vec::new();
+    let mut row = |kind: u8, field2: usize, field3: u16| {
+        rows.push(kind);
+        rows.extend_from_slice(&u32::try_from(field2).unwrap_or(0).to_be_bytes());
+        rows.extend_from_slice(&field3.to_be_bytes());
+    };
+    row(0, 0, 65535);
+    for num in 1..xref {
+        row(1, pdf.offsets[&num], 0);
+    }
+    row(1, xref_offset, 0);
+    pdf.stream(
+        xref,
+        &format!(
+            "/Type/XRef/Size {}/W[1 4 2]/Root 1 0 R/Info {info} 0 R/ID[<0123456789ABCDEF0123456789ABCDEF><0123456789ABCDEF0123456789ABCDEF>]",
+            xref + 1
+        ),
+        &rows,
+    );
+    pdf.line("startxref");
+    pdf.line(&xref_offset.to_string());
+    pdf.line("%%EOF");
+    pdf.out
 }
 
 /// Cases for `clean -Z`.
