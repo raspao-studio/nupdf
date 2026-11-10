@@ -2,7 +2,8 @@
 // Copyright (C) 2026 hum
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use nupdf::write::{WriteOptions, save, verify};
+use nupdf::crypt::NewMethod;
+use nupdf::write::{Encrypt, WriteOptions, save, verify};
 use nupdf::{Document, Object};
 
 fuzz_target!(|data: &[u8]| {
@@ -19,8 +20,8 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     // Write it, as `clean` does, at a garbage collection level, with or
-    // without object streams, and with the stream options the input's last
-    // two bytes pick, and read the output back.
+    // without object streams, with the stream options and the security
+    // handler the input's last three bytes pick, and read the output back.
     let pick = |i: usize| data.len().checked_sub(i).and_then(|i| data.get(i)).copied().unwrap_or(0);
     let (last, flags) = (pick(1), pick(2));
     let options = WriteOptions {
@@ -32,6 +33,21 @@ fuzz_target!(|data: &[u8]| {
         ascii: flags & 16 != 0,
         effort: i32::from(flags >> 5) * 14,
         objstms: (last / 5) % 2 == 1,
+        encrypt: match pick(3) % 6 {
+            0 => Encrypt::Keep,
+            1 => Encrypt::Remove,
+            n => Encrypt::New {
+                method: [
+                    NewMethod::Rc4_40,
+                    NewMethod::Rc4_128,
+                    NewMethod::Aes128,
+                    NewMethod::Aes256,
+                ][usize::from(n - 2)],
+                owner: "o".into(),
+                user: "u".into(),
+                permissions: -4,
+            },
+        },
         ..Default::default()
     };
     if doc.xref_len() <= 4096

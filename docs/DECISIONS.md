@@ -208,3 +208,16 @@ The read-back check compares decoded data when any stream option is given, and l
 An encrypted document can have its crypt filter dictionary packed into an object stream that needs it to be decrypted; MuPDF writes that, and the read-back check refuses it. Otherwise `-Z` output reads back: the check also compares the objects in object streams, leaves out the object streams and xref stream the writer adds, and ignores the catalog's `/Version`.
 
 On the standard tier the three checks match MuPDF on every file except AES ones (random IVs, D18) and `issue20453.pdf`, where MuPDF's repair during the save differs from nupdf's (D18).
+
+## D22. New encryption follows `pdf_new_encrypt`, with derived secrets instead of random ones
+
+*2026-11-10*
+
+`clean -D` removes the security handler and `clean -E rc4-40|rc4-128|aes-128|aes-256` replaces it, with `-O`, `-U` and `-P` for the passwords and permissions, as `mutool clean` does. The new handler is a port of `pdf_new_encrypt` and `create_encryption_dictionary`: the same keys from the same passwords, the permissions masked to the bits MuPDF keeps, and an `/Encrypt` dictionary written directly into the trailer with its entries in MuPDF's order.
+
+- **`-D` is compared byte for byte** (`clean-D`), and matches MuPDF on every standard file both tools write, the AES ones included, since nothing is encrypted.
+- **`-E` cannot be.** `mutool clean` keeps the `/ID` it reads, and because of that never hands it to the encryption step, which then makes a new `/ID` at random. The RC4 and AES-128 keys come from that `/ID`. AES-256 also draws its file key, its salts and four bytes of `/Perms` at random, and AES output needs random initialization vectors. nupdf replaces the `/ID` too, but derives every one of these values from the input (D18 does the same for IVs), so the same input and passwords always write the same bytes. The AES-256 file key is derived from the passwords as well as the content. The `roundtrip-E40`, `roundtrip-E128`, `roundtrip-Eaes128` and `roundtrip-Eaes256` checks instead have MuPDF read each side's output back, with an owner password only, and compare the decrypted objects.
+- **An empty stream under AES** gets MuPDF's `/Length` of an IV and a block but no data (D18). Reading it back runs into the bytes after it, so the stream does not survive. 278 standard files have one, and nupdf's read-back check refuses them with `-E aes-128` or `aes-256`; `--no-verify` writes MuPDF's output.
+- **Streams under a crypt filter of their own** (`/Filter /Crypt`, as embedded files and some metadata use) are copied with their data still encrypted under the old key, then encrypted again under the new one, as in MuPDF. They no longer decrypt; the check refuses them (10 standard files).
+
+Passwords are cut at 127 bytes, as MuPDF's write options store them, and converted to PDFDocEncoding for revisions 2 to 4.

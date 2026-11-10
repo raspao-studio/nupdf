@@ -99,6 +99,22 @@ enum Command {
         /// `mutool clean -Z`. The version becomes at least 1.5.
         #[arg(short = 'Z', action = clap::ArgAction::Count)]
         objstms: u8,
+        /// Write without encryption, as `mutool clean -D`.
+        #[arg(short = 'D', conflicts_with = "encrypt")]
+        decrypt: bool,
+        /// Encrypt with a new security handler: rc4-40, rc4-128, aes-128 or
+        /// aes-256, as `mutool clean -E`.
+        #[arg(short = 'E', value_parser = ["rc4-40", "rc4-128", "aes-128", "aes-256"])]
+        encrypt: Option<String>,
+        /// Owner password for -E.
+        #[arg(short = 'O', default_value = "")]
+        owner_password: String,
+        /// User password for -E. Empty, the output opens without one.
+        #[arg(short = 'U', default_value = "")]
+        user_password: String,
+        /// Permission flags for -E, as /P (-1 grants everything).
+        #[arg(short = 'P', default_value_t = -1, allow_negative_numbers = true)]
+        permissions: i32,
         /// Report what would be written, and write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -229,6 +245,11 @@ fn main() -> ExitCode {
             effort,
             tight,
             objstms,
+            decrypt,
+            encrypt,
+            owner_password,
+            user_password,
+            permissions,
             dry_run,
             no_verify,
         } => clean_options(&CleanFlags {
@@ -241,6 +262,18 @@ fn main() -> ExitCode {
             tight: *tight,
             objstms: *objstms,
             effort: *effort,
+            encrypt: match (encrypt, *decrypt) {
+                (Some(method), _) => nupdf::crypt::NewMethod::from_name(method).map(|method| {
+                    nupdf::write::Encrypt::New {
+                        method,
+                        owner: owner_password.clone(),
+                        user: user_password.clone(),
+                        permissions: *permissions,
+                    }
+                }),
+                (None, true) => Some(nupdf::write::Encrypt::Remove),
+                (None, false) => Some(nupdf::write::Encrypt::Keep),
+            },
         })
         .and_then(|options| open(file).map(|opened| (options, opened)))
         .and_then(|(options, (doc, facts))| {
@@ -422,6 +455,8 @@ struct CleanFlags {
     tight: u8,
     objstms: u8,
     effort: i32,
+    /// `None` for a method nupdf does not know.
+    encrypt: Option<nupdf::write::Encrypt>,
 }
 
 /// `pdf_write_options` as `mutool clean` sets them from its flags.
@@ -448,6 +483,11 @@ fn clean_options(f: &CleanFlags) -> Result<nupdf::write::WriteOptions, Failure> 
         compress_fonts: f.fonts > 0,
         effort: f.effort.clamp(0, 100),
         objstms: f.objstms > 0,
+        encrypt: f.encrypt.clone().ok_or_else(|| Failure {
+            exit: Exit::Usage,
+            code: "usage.bad_value",
+            message: "unknown encryption method".into(),
+        })?,
     })
 }
 
@@ -502,6 +542,14 @@ fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::
         },
         "syntax": if plan.options.pretty { "pretty" } else { "compact" },
         "objstms": plan.options.objstms,
+        "encryption": match &plan.options.encrypt {
+            nupdf::write::Encrypt::Keep => serde_json::json!("keep"),
+            nupdf::write::Encrypt::Remove => serde_json::json!("none"),
+            nupdf::write::Encrypt::New { method, permissions, .. } => serde_json::json!({
+                "method": method.name(),
+                "permissions": permissions,
+            }),
+        },
         "output": {
             "path": plan.output.map(|p| p.display().to_string()),
             "doc_id": DocId::from_hash(&hash).to_string(),
