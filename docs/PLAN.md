@@ -157,7 +157,8 @@ Exit status: met. Image streams match MuPDF exactly, not just within a level.
 
 MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` (insert and delete), `pdf-crypt.c`, `pdf-outline.c`.
 
-- [ ] Edit overlay: copy-on-write over the parsed document; new and deleted objects; grafting between documents with a dedup map
+- [x] Edit overlay (DECISIONS D23): copy-on-write over the parsed document, seen by every lookup; replaced, changed and new objects, with the generations MuPDF's incremental section gives them; new streams and trailer
+- [ ] Grafting between documents with a dedup map; deleting objects
 - [x] Serializer, full rewrite (DECISIONS D18): `pdf_save_document` with default options, byte for byte. MuPDF's object printer (`print`), its dictionary sorting and two lookup paths, 16-bit generations and the free list, object streams and xref streams unpacked, streams copied raw, the security handler kept, with AES initialization vectors derived from the content instead of random
 - [x] Garbage collection (DECISIONS D19): `clean -g` through `-gggg` as MuPDF's `do_garbage` (`garbage`). Marking from the trailer, with references to nothing made null and indirect stream lengths baked; merging duplicates by its CRC-32 of the in-memory object and `pdf_objcmp`, until nothing changes; renumbering by key, quirks included; objects encrypted again under their new numbers
 - [x] Stream options (DECISIONS D20): `clean -d`, `-z`, `-f`, `-i`, `-a` and `-e` as MuPDF's `copystream` and `expandstream`. Deflate by a port of zlib 1.3.2 (`deflate`), 1-bit images by a port of MuPDF's CCITT G4 encoder (`fax_encode`), ASCIIHexDecode taken off before compressing and put on binary streams for `-a`, filter arrays edited in place where streams share them, and MuPDF's pretty-printing default. Brotli (`-zz`) refused
