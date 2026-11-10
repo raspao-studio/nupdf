@@ -3,7 +3,11 @@
 // as `mutool clean` does. Further write options, such as "garbage=2", may
 // follow the scratch directory. A "pages=..." option keeps those pages, as
 // `mutool clean`'s page arguments do (pdf_rearrange_pages), with ";" for
-// the commas in a page list.
+// the commas in a page list. Edits as the `meta` and `pages` commands make
+// them may come too, applied in order: "meta=KEY=VALUE" (setMetaData, as
+// pdf_set_metadata), "strip-meta" (drops /Info and the catalog's
+// /Metadata) and "rotate=DEGREES@PAGES" (adds to each page's inherited
+// /Rotate, put on the page).
 // Usage: mutool run oracle/js/clean.js <file> <scratch-dir> [options]
 // The output is written to <scratch-dir>/clean.pdf; the harness replaces
 // the "file" field with the BLAKE3 hash of what was written, after naming
@@ -47,19 +51,68 @@ var pdf = doc.asPDF ? doc.asPDF() : doc;
 if (pdf.needsPassword() && !pdf.authenticatePassword(""))
   throw new Error("cannot authenticate password: " + scriptArgs[0]);
 var options = "reproducible,regenerate-id=no";
+// pdf_clean_file loads every object first (pdf_check_document), so a
+// repair happens before the edits, which it would lose.
+var checked = false;
+function check() {
+  if (checked) return;
+  checked = true;
+  for (var i = 1; i < pdf.countObjects(); i++) {
+    try { pdf.newIndirect(i, 0).resolve(); } catch (e) {}
+  }
+}
+
+// Commas separate the options, so ";" stands for one in a page list.
+function pageList(spec) {
+  return parsePages(spec.replace(/;/g, ","), pdf.countPages());
+}
+
+function rotate(spec) {
+  var at = spec.indexOf("@");
+  var degrees = parseInt(at < 0 ? spec : spec.slice(0, at), 10);
+  var pages = at < 0 ? null : pageList(spec.slice(at + 1));
+  if (pages == null) {
+    pages = [];
+    for (var p = 0; p < pdf.countPages(); p++) pages.push(p);
+  }
+  pages.forEach(function (i) {
+    var page = pdf.findPage(i);
+    var r = page.getInheritable("Rotate");
+    // pdf_to_int: reals round, anything else is 0.
+    var current = r && r.isNumber() ? Math.floor(r.asNumber() + 0.5) : 0;
+    page.put("Rotate", (((current + degrees) % 360) + 360) % 360);
+  });
+}
+
+// A trailer that is an xref stream's dictionary belongs to that object, so
+// MuPDF's first edit to it moves the object into a new incremental section
+// whose trailer is copied before the edit, and the copy is what it writes.
+// The second delete edits the copy, so the entry is gone either way.
+function stripMeta() {
+  pdf.getTrailer().delete("Info");
+  pdf.getTrailer().delete("Info");
+  var root = pdf.getTrailer().get("Root");
+  if (root && root.isDictionary()) root.delete("Metadata");
+}
+
 if (scriptArgs[2]) {
   var rest = [];
   scriptArgs[2].split(",").forEach(function (o) {
     if (o.indexOf("pages=") == 0) {
-      // pdf_clean_file loads every object first (pdf_check_document), so
-      // a repair happens before the edits, which it would lose.
-      for (var i = 1; i < pdf.countObjects(); i++) {
-        try { pdf.newIndirect(i, 0).resolve(); } catch (e) {}
-      }
-      // Commas separate the options, so ";" stands for one in the pages.
-      pdf.rearrangePages(parsePages(o.slice(6).replace(/;/g, ","), pdf.countPages()));
-    }
-    else
+      check();
+      pdf.rearrangePages(pageList(o.slice(6)));
+    } else if (o.indexOf("meta=") == 0) {
+      check();
+      var kv = o.slice(5);
+      var eq = kv.indexOf("=");
+      pdf.setMetaData(kv.slice(0, eq), kv.slice(eq + 1));
+    } else if (o == "strip-meta") {
+      check();
+      stripMeta();
+    } else if (o.indexOf("rotate=") == 0) {
+      check();
+      rotate(o.slice(7));
+    } else
       rest.push(o);
   });
   if (rest.length) options += "," + rest.join(",");
