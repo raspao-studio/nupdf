@@ -741,6 +741,14 @@ fn save_checked(
     doc: &Document,
     plan: &Clean,
 ) -> Result<(serde_json::Value, serde_json::Value), Failure> {
+    // pdf_clean_file: "cannot authenticate password".
+    if doc.needs_password() && plan.password.is_none() {
+        return Err(Failure {
+            exit: Exit::Input,
+            code: "input.needs_password",
+            message: "the empty password does not open the document: pass --password".into(),
+        });
+    }
     let bytes = nupdf::write::save(doc, &plan.options).map_err(|e| Failure {
         exit: Exit::Input,
         code: "input.unloadable_object",

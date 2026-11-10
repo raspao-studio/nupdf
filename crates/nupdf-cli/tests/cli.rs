@@ -347,6 +347,26 @@ fn a_user_password_opens_what_the_empty_one_does_not() {
 }
 
 #[test]
+fn writing_a_locked_document_needs_its_password() {
+    // As pdf_clean_file: the empty password failed, so nothing is written,
+    // even where it left the right key behind.
+    let path = smoke("encrypted-user-password.pdf");
+    let file = path.to_str().unwrap();
+    for argv in [
+        &["clean", "--dry-run", file][..],
+        &["decrypt", "--dry-run", file],
+        &["meta", "--strip", "--dry-run", file],
+    ] {
+        let out = nupdf(argv);
+        assert_eq!(out.status.code(), Some(3), "{argv:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["code"], "input.needs_password", "{argv:?}");
+    }
+    let report = run_json(&["--password", "user", "decrypt", "--dry-run", file]);
+    assert_eq!(report["verification"]["verified"], true);
+}
+
+#[test]
 fn objects_report_decrypted_strings() {
     let path = smoke("encrypted-rc4-128.pdf");
     let report = run_json(&["objects", path.to_str().unwrap()]);
