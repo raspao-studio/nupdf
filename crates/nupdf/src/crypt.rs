@@ -18,6 +18,8 @@ use md5::{Digest, Md5};
 use sha2::{Sha256, Sha384, Sha512};
 
 use crate::diag::{Diagnostics, report};
+use std::sync::Arc;
+
 use crate::object::{Dict, Object};
 
 /// `PDF_CRYPT_*`.
@@ -78,6 +80,49 @@ pub struct Crypt {
     /// 2 = user, 4 = owner, 6 = both (`pdf_authenticate_password`).
     access: u8,
     key: [u8; 32],
+    /// /Perms of a handler made for writing (revision 6).
+    perms: [u8; 16],
+}
+
+/// The handlers `clean -E` can create (`PDF_ENCRYPT_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewMethod {
+    Rc4_40,
+    Rc4_128,
+    Aes128,
+    Aes256,
+}
+
+impl NewMethod {
+    /// `encrypt_method_from_string`.
+    pub fn from_name(name: &str) -> Option<NewMethod> {
+        match name {
+            "rc4-40" => Some(NewMethod::Rc4_40),
+            "rc4-128" => Some(NewMethod::Rc4_128),
+            "aes-128" => Some(NewMethod::Aes128),
+            "aes-256" => Some(NewMethod::Aes256),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            NewMethod::Rc4_40 => "rc4-40",
+            NewMethod::Rc4_128 => "rc4-128",
+            NewMethod::Aes128 => "aes-128",
+            NewMethod::Aes256 => "aes-256",
+        }
+    }
+}
+
+/// A password as `pdf_write_options` holds it: a C string in 128 bytes,
+/// which can end inside a character.
+fn option_password(password: &str) -> &[u8] {
+    let mut bytes = password.as_bytes();
+    if let Some(nul) = bytes.iter().position(|&b| b == 0) {
+        bytes = &bytes[..nul];
+    }
+    &bytes[..bytes.len().min(127)]
 }
 
 const PADDING: [u8; 32] = [
@@ -86,6 +131,186 @@ const PADDING: [u8; 32] = [
 ];
 
 impl Crypt {
+    /// `pdf_new_encrypt`: a handler for writing with `method`, the owner and
+    /// user passwords, the first string of the file's /ID and the
+    /// permissions to grant. Revision 6 needs a random file key, salts and
+    /// four bytes of /Perms; nupdf derives them from `seed` and the
+    /// passwords instead, so the same input writes the same bytes.
+    pub fn for_writing(
+        method: NewMethod,
+        owner: &str,
+        user: &str,
+        id: Option<&[u8]>,
+        permissions: i32,
+        seed: &[u8; 32],
+        diag: &Diagnostics,
+    ) -> Crypt {
+        let (v, r, m, length) = match method {
+            NewMethod::Rc4_40 => (1, 2, Method::Rc4, 40),
+            NewMethod::Rc4_128 => (2, 3, Method::Rc4, 128),
+            NewMethod::Aes128 => (4, 4, Method::AesV2, 128),
+            NewMethod::Aes256 => (5, 6, Method::AesV3, 256),
+        };
+        if id.is_none() {
+            diag.warn(
+                "crypt.missing_id",
+                "missing file identifier, may not be able to do decryption",
+            );
+        }
+        let filter = CryptFilter { method: m, length };
+        let mut crypt = Crypt {
+            id: id.map(<[u8]>::to_vec).unwrap_or_default(),
+            v,
+            length,
+            cf: None,
+            cf_num: 0,
+            stmf: filter,
+            strf: filter,
+            r,
+            o: [0; 48],
+            u: [0; 48],
+            oe: [0; 32],
+            ue: [0; 32],
+            p: ((permissions & 0xf3c) as u32 | 0xffff_f0c0) as i32,
+            encrypt_metadata: true,
+            access: 6,
+            key: [0; 32],
+            perms: [0; 16],
+        };
+        let (owner, user) = (option_password(owner), option_password(user));
+        if r <= 4 {
+            // pdf_docenc_from_utf8: a cut character decodes as U+FFFD,
+            // which PDFDocEncoding drops.
+            let docenc = |b: &[u8]| crate::text_string::pdf_doc_encode(&String::from_utf8_lossy(b));
+            let (opwd, upwd) = (docenc(owner), docenc(user));
+            let o = crypt.compute_owner_password(&opwd, &upwd);
+            crypt.o[..32].copy_from_slice(&o);
+            if let Ok(Some(u)) = crypt.compute_user_password(&upwd) {
+                crypt.u[..32].copy_from_slice(&u);
+            }
+        } else {
+            let derive = |label: &str| -> [u8; 32] {
+                let mut h = blake3::Hasher::new_derive_key(label);
+                h.update(seed);
+                h.update(owner);
+                h.update(&[0]);
+                h.update(user);
+                *h.finalize().as_bytes()
+            };
+            crypt.key = derive("nupdf 2026 AES-256 file key");
+            let salts = derive("nupdf 2026 AES-256 salts");
+            let (upwd, opwd) = (user, owner);
+            let (u, ue) = crypt.password_r6(upwd, &salts[0..16], None);
+            crypt.u = u;
+            crypt.ue = ue;
+            let owner_u = crypt.u;
+            let (o, oe) = crypt.password_r6(opwd, &salts[16..32], Some(&owner_u));
+            crypt.o = o;
+            crypt.oe = oe;
+            // Algorithm 10: /P, its extension, T or F, "adb", then four
+            // bytes MuPDF draws at random.
+            let mut buf = [0u8; 16];
+            buf[..4].copy_from_slice(&crypt.p.to_le_bytes());
+            buf[4..8].fill(0xff);
+            buf[8] = if crypt.encrypt_metadata { b'T' } else { b'F' };
+            buf[9..12].copy_from_slice(b"adb");
+            buf[12..].copy_from_slice(&derive("nupdf 2026 AES-256 perms")[..4]);
+            if let Some(aes) = Aes::new(&crypt.key, 256) {
+                aes.cbc_encrypt(&mut [0; 16], &mut buf);
+            }
+            crypt.perms = buf;
+        }
+        crypt
+    }
+
+    /// `pdf_compute_owner_password` (algorithm 3).
+    fn compute_owner_password(&self, owner: &[u8], user: &[u8]) -> [u8; 32] {
+        let n = self.key_bytes();
+        let mut key: [u8; 16] = Md5::digest(padded(owner)).into();
+        if self.r >= 3 {
+            for _ in 0..50 {
+                key = Md5::digest(&key[..n]).into();
+            }
+        }
+        let mut digest = padded(user);
+        Arc4::new(&key[..n]).apply(&mut digest);
+        if self.r >= 3 {
+            for x in 1..=19u8 {
+                let xor: Vec<u8> = key[..n].iter().map(|k| k ^ x).collect();
+                Arc4::new(&xor).apply(&mut digest);
+            }
+        }
+        digest
+    }
+
+    /// `pdf_compute_user_password_r6` and `pdf_compute_owner_password_r6`
+    /// (algorithms 8 and 9): /U or /O with its two salts, and /UE or /OE.
+    fn password_r6(
+        &self,
+        password: &[u8],
+        salts: &[u8],
+        owner_u: Option<&[u8; 48]>,
+    ) -> ([u8; 48], [u8; 32]) {
+        let (validation_salt, key_salt) = (&salts[..8], &salts[8..16]);
+        let mut out = [0u8; 48];
+        out[..32].copy_from_slice(&hardened_hash(password, validation_salt, owner_u));
+        out[32..40].copy_from_slice(validation_salt);
+        out[40..48].copy_from_slice(key_salt);
+        let hash = hardened_hash(password, key_salt, owner_u);
+        let mut encrypted = self.key;
+        if let Some(aes) = Aes::new(&hash, 256) {
+            aes.cbc_encrypt(&mut [0; 16], &mut encrypted);
+        }
+        (out, encrypted)
+    }
+
+    /// `create_encryption_dictionary`: the /Encrypt dictionary for a
+    /// handler made with `for_writing`, entries in MuPDF's order.
+    pub fn encryption_dict(&self) -> Dict {
+        let name = |n: &[u8]| Object::name(n);
+        let string = |b: &[u8]| Object::String(Arc::from(b));
+        let mut d = Dict::new();
+        d.put(b"Filter", name(b"Standard"));
+        d.put(b"R", Object::Int(i64::from(self.r)));
+        d.put(b"V", Object::Int(i64::from(self.v)));
+        d.put(b"Length", Object::Int(i64::from(self.length)));
+        d.put(b"P", Object::Int(i64::from(self.p)));
+        d.put(b"EncryptMetadata", Object::Bool(self.encrypt_metadata));
+        let std_cf = |cfm: &[u8], length: i64| {
+            let mut f = Dict::new();
+            f.put(b"AuthEvent", name(b"DocOpen"));
+            f.put(b"CFM", name(cfm));
+            f.put(b"Length", Object::Int(length));
+            let mut cf = Dict::new();
+            cf.put(b"StdCF", Object::Dict(Arc::new(f)));
+            Object::Dict(Arc::new(cf))
+        };
+        match self.r {
+            4 => {
+                d.put(b"StmF", name(b"StdCF"));
+                d.put(b"StrF", name(b"StdCF"));
+                d.put(b"CF", std_cf(b"AESV2", 16));
+                d.put(b"O", string(&self.o[..32]));
+                d.put(b"U", string(&self.u[..32]));
+            }
+            6 => {
+                d.put(b"StmF", name(b"StdCF"));
+                d.put(b"StrF", name(b"StdCF"));
+                d.put(b"CF", std_cf(b"AESV3", 32));
+                d.put(b"O", string(&self.o));
+                d.put(b"U", string(&self.u));
+                d.put(b"OE", string(&self.oe));
+                d.put(b"UE", string(&self.ue));
+                d.put(b"Perms", string(&self.perms));
+            }
+            _ => {
+                d.put(b"O", string(&self.o[..32]));
+                d.put(b"U", string(&self.u[..32]));
+            }
+        }
+        d
+    }
+
     /// `pdf_new_crypt`. `id` is the trailer's /ID; `resolve` follows
     /// indirect references. Errors are MuPDF's report lines.
     pub fn new(
@@ -236,6 +461,7 @@ impl Crypt {
             encrypt_metadata,
             access: 0,
             key: [0; 32],
+            perms: [0; 16],
         };
 
         if v == 4 || v == 5 {
