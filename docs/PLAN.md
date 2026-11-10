@@ -138,8 +138,16 @@ MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filte
 - [x] `nupdf streams`: every stream's decoded length and BLAKE3 hash, as MuPDF's `pdf_load_stream` reads it; `show <ref> --data` decodes one
 - [x] Oracle and `streams` check: `streams.js` writes each decoded stream to a scratch directory and the harness hashes it, since mutool's JavaScript cannot. Streams with an image filter are listed on both sides but not compared; their pixels get their own check. First measurement: 98.7% (5,054 / 5,123); with the stream model, LZW and Brotli, 100% (5,123 / 5,123)
 - [x] Fixtures: every non-image filter, a chain, a PNG predictor, and damaged or truncated Flate, LZW and ASCIIHex whose recovery depends on MuPDF's buffer sizes (52 smoke fixtures, all matching MuPDF on every check)
+- [x] `images` check: every stream with an image filter, decoded and compared byte for byte (`images.js`, `nupdf streams --images`). First measurement, with CCITT only: 94.1%; with zune-jpeg for DCT, 95.8%; with the libjpeg port and JBIG2, 99.6% (5,105 / 5,123)
 - [ ] Fixtures: every image filter
 - [x] Fuzz targets per decoder: `filters` runs every non-image decoder alone and in pairs, with predictor parameters, read whole and byte by byte; `crypt` covers the RC4 and AES stages. 15 minutes each, nothing found (`filters` 1.6M runs, `crypt` 5.2M, `open_walk` 0.9M)
+
+**Status** (standard tier, 5,142 files, of which 19 neither tool opens):
+
+| Check | Parity | Remaining mismatches |
+|---|---|---|
+| `streams` (every non-image stream, decoded) | 100% (5,123 / 5,123) | |
+| `images` (every image stream, decoded, byte for byte) | 99.6% (5,105 / 5,123) | JBIG2 test files only (D17): 14 that jbig2dec mis-decodes, 3 where it sets row padding bits, and a 1.25 GB page |
 
 Exit: ≥99.9% decoded-stream parity for non-image filters. Image decoders within one level on 99% of pixels.
 

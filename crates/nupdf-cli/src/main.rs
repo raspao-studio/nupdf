@@ -46,8 +46,14 @@ enum Command {
     Objects { file: PathBuf },
     /// List pages with their inherited MediaBox, CropBox, Rotate and Resources.
     Pages { file: PathBuf },
-    /// Decode every stream (for non-image use): length and BLAKE3 of the data.
-    Streams { file: PathBuf },
+    /// Decode every stream: length and BLAKE3 of the data. Streams with an
+    /// image filter are listed but not decoded, unless --images.
+    Streams {
+        file: PathBuf,
+        /// Decode only the streams with an image filter.
+        #[arg(long)]
+        images: bool,
+    },
     /// Show one object (`12`, `12 0 R`) or the trailer (`trailer`).
     Show {
         file: PathBuf,
@@ -149,8 +155,14 @@ fn main() -> ExitCode {
         },
         Command::Pages { file } => open(file)
             .map(|(doc, facts)| report("nupdf.pages/v0", &facts, &doc, objects::pages(&doc))),
-        Command::Streams { file } => open(file)
-            .map(|(doc, facts)| report("nupdf.streams/v0", &facts, &doc, objects::streams(&doc))),
+        Command::Streams { file, images } => open(file).map(|(doc, facts)| {
+            report(
+                "nupdf.streams/v0",
+                &facts,
+                &doc,
+                objects::streams(&doc, *images),
+            )
+        }),
         Command::Show {
             file,
             target,

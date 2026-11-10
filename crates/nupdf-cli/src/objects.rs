@@ -72,15 +72,21 @@ fn touch_references(doc: &Document, obj: &Object) {
 /// Every stream decoded for non-image use, in oracle/js/streams.js's
 /// format: the decoded length and BLAKE3 hash, or the error. Every object is
 /// loaded in ascending order, as the oracle's `isStream` lookups do.
-pub fn streams(doc: &Document) -> Value {
+///
+/// With `images`, only streams with an image filter are decoded and listed,
+/// in oracle/js/images.js's format.
+pub fn streams(doc: &Document, images: bool) -> Value {
     let count = doc.xref_len();
     let mut out = Map::new();
     for num in 1..count {
         let Some(Object::Stream(s)) = doc.object(num as i32) else {
             continue;
         };
-        if has_image_filter(doc, &s.dict) {
-            out.insert(num.to_string(), json!({ "image": true }));
+        let image = has_image_filter(doc, &s.dict);
+        if image != images {
+            if image {
+                out.insert(num.to_string(), json!({ "image": true }));
+            }
             continue;
         }
         let entry = match doc.stream_data(&s) {
