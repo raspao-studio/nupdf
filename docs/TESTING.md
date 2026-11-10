@@ -88,7 +88,7 @@ Each file in a check gets one outcome:
 | `timeout` | Either side exceeded `--timeout` |
 | `crash` | Either side died from a signal. For nupdf this is always a bug |
 
-Parity is `match` divided by the files MuPDF handled. Reports go to `target/harness/<tier>/` (`summary.md` plus one JSON file per check, with MuPDF's warnings per file).
+Parity is `match` divided by the files MuPDF handled. Reports go to `target/harness/<tier>/` (`summary.md` plus one JSON file per check, with MuPDF's warnings per file). A capital in a check's name becomes `_` and the letter in its file name, so `clean-Z` and `clean-z` stay apart on a case-insensitive filesystem.
 
 `harness/baselines/<tier>.json` records each file's outcome. A run fails if any file that matched in the baseline no longer matches. Newly matching files are reported, and `--update-baseline` locks them in. A baseline recorded with a different oracle version is refused.
 
