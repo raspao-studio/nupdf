@@ -187,9 +187,29 @@ fn build_filter<'a>(
         }
     };
     match name {
-        b"CCITTFaxDecode" | b"CCF" | b"DCTDecode" | b"DCT" | b"JBIG2Decode" => Err(
-            DecodeError::Unsupported(String::from_utf8_lossy(name).into_owned()),
-        ),
+        b"CCITTFaxDecode" | b"CCF" => {
+            let flag = |key: &[u8], default: bool| match params
+                .as_dict()
+                .and_then(|d| d.get(key))
+                .map(resolve)
+            {
+                Some(Object::Bool(b)) => b,
+                _ => default,
+            };
+            let p = crate::fax::FaxParams {
+                k: int(b"K", 0),
+                end_of_line: flag(b"EndOfLine", false),
+                encoded_byte_align: flag(b"EncodedByteAlign", false),
+                columns: int(b"Columns", 1728),
+                rows: int(b"Rows", 0),
+                end_of_block: flag(b"EndOfBlock", true),
+                black_is_1: flag(b"BlackIs1", false),
+            };
+            crate::fax::open(chain, p).map_err(DecodeError::Failed)
+        }
+        b"DCTDecode" | b"DCT" | b"JBIG2Decode" => Err(DecodeError::Unsupported(
+            String::from_utf8_lossy(name).into_owned(),
+        )),
         b"RunLengthDecode" | b"RL" => Ok(open_rld(chain)),
         b"FlateDecode" | b"Fl" => predictor(Stream::new(
             Flate {
