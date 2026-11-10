@@ -104,7 +104,127 @@ pub fn all() -> Vec<Fixture> {
     ]
     .into_iter()
     .chain(edge_cases())
+    .chain(encrypted_fixtures())
     .collect()
+}
+
+/// One file per security handler revision and method, plus files that need
+/// a user password. Each has an encrypted Info string and content stream.
+fn encrypted_fixtures() -> Vec<Fixture> {
+    use crate::encrypt::{Method, Spec};
+    let spec = |v, r, bits, method, crypt_filter| Spec {
+        v,
+        r,
+        bits,
+        method,
+        crypt_filter,
+        user: "",
+        owner: "owner",
+        encrypt_metadata: true,
+    };
+    let cases: [(&'static str, &'static str, Spec); 8] = [
+        (
+            "encrypted-rc4-40.pdf",
+            "Standard handler V1 R2, RC4 40-bit, empty user password",
+            spec(1, 2, 40, Method::Rc4, false),
+        ),
+        (
+            "encrypted-rc4-128.pdf",
+            "Standard handler V2 R3, RC4 128-bit, empty user password",
+            spec(2, 3, 128, Method::Rc4, false),
+        ),
+        (
+            "encrypted-rc4-crypt-filter.pdf",
+            "Standard handler V4 R4 with an RC4 (V2) crypt filter",
+            spec(4, 4, 128, Method::Rc4, true),
+        ),
+        (
+            "encrypted-aes-128.pdf",
+            "Standard handler V4 R4 with an AESV2 crypt filter",
+            spec(4, 4, 128, Method::AesV2, true),
+        ),
+        (
+            "encrypted-aes-128-clear-metadata.pdf",
+            "AESV2 with /EncryptMetadata false, which changes the file key",
+            Spec {
+                encrypt_metadata: false,
+                ..spec(4, 4, 128, Method::AesV2, true)
+            },
+        ),
+        (
+            "encrypted-aes-256-r5.pdf",
+            "Standard handler V5 R5 (Adobe extension level 3), AES-256",
+            spec(5, 5, 256, Method::AesV3, true),
+        ),
+        (
+            "encrypted-aes-256.pdf",
+            "Standard handler V5 R6 (ISO 32000-2), AES-256",
+            spec(5, 6, 256, Method::AesV3, true),
+        ),
+        (
+            "encrypted-user-password.pdf",
+            "AES-256 R6 with user password \"user\": opening needs a password",
+            Spec {
+                user: "user",
+                ..spec(5, 6, 256, Method::AesV3, true)
+            },
+        ),
+    ];
+    let mut out: Vec<Fixture> = cases
+        .into_iter()
+        .map(|(name, about, spec)| Fixture {
+            name,
+            about,
+            needs_repair: false,
+            bytes: encrypted(spec, name),
+        })
+        .collect();
+    out.push(Fixture {
+        name: "encrypted-rc4-user-password.pdf",
+        about: "RC4 128-bit with user password \"user\": decrypted with the wrong key",
+        needs_repair: false,
+        bytes: encrypted(
+            Spec {
+                user: "user",
+                ..spec(2, 3, 128, Method::Rc4, false)
+            },
+            "encrypted-rc4-user-password.pdf",
+        ),
+    });
+    out
+}
+
+/// The minimal document, encrypted: objects 1-5 as in `hello`, the Info
+/// dictionary (6) and the /Encrypt dictionary (7, not encrypted itself).
+fn encrypted(spec: crate::encrypt::Spec, seed: &str) -> Vec<u8> {
+    let handler = crate::encrypt::Handler::new(spec, seed);
+    let string = |num: u32, text: &str| {
+        format!(
+            "<{}>",
+            crate::encrypt::hex(&handler.encrypt(num, text.as_bytes()))
+        )
+    };
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+    pdf.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
+    );
+    let content = miniz_oxide::deflate::compress_to_vec_zlib(&text_content("Encrypted"), 6);
+    pdf.stream(4, "/Filter/FlateDecode", &handler.encrypt(4, &content));
+    pdf.obj(5, FONT);
+    pdf.obj(
+        6,
+        &format!(
+            "<</Title {}/Producer {}>>",
+            string(6, &format!("Encrypted: {seed}")),
+            string(6, "nupdf fixtures")
+        ),
+    );
+    pdf.obj(7, &handler.dict());
+    let id = crate::encrypt::hex(&handler.id);
+    pdf.finish_with_xref(&format!("/Info 6 0 R/Encrypt 7 0 R/ID[<{id}><{id}>]"))
 }
 
 pub fn run(root: &Path, check: bool) -> Result<()> {
