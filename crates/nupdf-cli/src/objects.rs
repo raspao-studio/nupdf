@@ -34,8 +34,10 @@ impl Serialize for Dump<'_> {
         for num in 1..self.count {
             let value = match self.doc.object(num as i32) {
                 Some(Object::Stream(s)) => {
-                    let raw = self.doc.raw_stream_data(&s);
-                    json!({ "stream": encode_dict(&s.dict), "raw_len": raw.len() })
+                    // Null when the data cannot be read (a broken AES stream),
+                    // as in the oracle.
+                    let raw_len = self.doc.raw_stream_data(&s).ok().map(|raw| raw.len());
+                    json!({ "stream": encode_dict(&s.dict), "raw_len": raw_len })
                 }
                 Some(obj) => encode(&obj),
                 None => Value::Null,

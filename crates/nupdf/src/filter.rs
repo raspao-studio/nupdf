@@ -10,6 +10,7 @@
 
 use flate2::{Decompress, FlushDecompress, Status};
 
+use crate::crypt::Crypt;
 use crate::diag::Diagnostics;
 use crate::object::{Dict, Object};
 
@@ -45,15 +46,90 @@ impl std::fmt::Display for DecodeError {
     }
 }
 
+/// What a `/Crypt` filter needs: the document's security handler and the
+/// object the stream belongs to.
+#[derive(Debug, Clone, Copy)]
+pub struct CryptContext<'a> {
+    pub crypt: &'a Crypt,
+    pub num: i32,
+    pub generation: i32,
+}
+
+/// Data between two stages of a filter chain. With `error`, the stage
+/// before stopped right after `data` (MuPDF's AES filter can), and the next
+/// reader that wants more gets the error and then end of data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Stage {
+    pub data: Vec<u8>,
+    pub error: Option<String>,
+    /// The data arrives one byte per read, as from MuPDF's AES filter.
+    pub byte_fed: bool,
+}
+
+impl Stage {
+    pub fn complete(data: Vec<u8>) -> Stage {
+        Stage {
+            data,
+            error: None,
+            byte_fed: false,
+        }
+    }
+}
+
+impl From<crate::crypt::Decrypted> for Stage {
+    fn from(d: crate::crypt::Decrypted) -> Stage {
+        Stage {
+            data: d.data,
+            error: d.error,
+            byte_fed: d.byte_fed,
+        }
+    }
+}
+
+/// What MuPDF prints when a read fails: the error, then that it treats the
+/// failure as the end of the data (`fz_available`).
+pub fn report_read_error(error: &str, diag: &Diagnostics) {
+    for line in error.lines().filter(|l| !l.is_empty()) {
+        diag.warn("error.reported", line);
+    }
+    diag.warn("stream.read_error", "read error; treating as end of file");
+}
+
 /// Decodes `raw` according to the stream dictionary, for non-image use.
-/// `resolve` turns indirect references into objects.
+/// `resolve` turns indirect references into objects; `crypt` is set in an
+/// encrypted document.
 pub fn decode(
     dict: &Dict,
     raw: &[u8],
     resolve: &dyn Fn(&Object) -> Object,
     diag: &Diagnostics,
     limits: &Limits,
+    crypt: Option<CryptContext>,
 ) -> Result<Vec<u8>, DecodeError> {
+    let out = decode_stage(
+        dict,
+        Stage::complete(raw.to_vec()),
+        resolve,
+        diag,
+        limits,
+        crypt,
+    )?;
+    if let Some(e) = &out.error {
+        report_read_error(e, diag);
+    }
+    Ok(out.data)
+}
+
+/// Runs the filter chain over `input`. The result can still carry an error
+/// for the final reader, when no filter read past the end of the input.
+pub fn decode_stage(
+    dict: &Dict,
+    input: Stage,
+    resolve: &dyn Fn(&Object) -> Object,
+    diag: &Diagnostics,
+    limits: &Limits,
+    crypt: Option<CryptContext>,
+) -> Result<Stage, DecodeError> {
     // pdf_dict_geta: the abbreviation wins when both are present.
     let filters = resolve(
         dict.get(b"F")
@@ -82,29 +158,39 @@ pub fn decode(
         _ => Vec::new(),
     };
 
-    let mut data = raw.to_vec();
+    let mut stage = input;
     for (filter, params) in chain {
-        data = apply(
+        stage = apply(
             &filter,
             &params,
-            &data,
+            stage,
             resolve,
             diag,
             limits.max_decoded_bytes,
+            crypt,
         )?;
     }
-    Ok(data)
+    Ok(stage)
 }
 
+/// One filter. A filter that reads to the end of an input that stopped
+/// with an error reports it there, then sees the end of the data.
 fn apply(
     filter: &Object,
     params: &Object,
-    input: &[u8],
+    stage: Stage,
     resolve: &dyn Fn(&Object) -> Object,
     diag: &Diagnostics,
     max: usize,
-) -> Result<Vec<u8>, DecodeError> {
+    crypt: Option<CryptContext>,
+) -> Result<Stage, DecodeError> {
     let name = filter.as_name().unwrap_or_default();
+    let input = stage.data.as_slice();
+    let reached_end = |wanted_more: bool| {
+        if wanted_more && let Some(e) = &stage.error {
+            report_read_error(e, diag);
+        }
+    };
     let int = |key: &[u8], default: i32| {
         params
             .as_dict()
@@ -113,7 +199,8 @@ fn apply(
     };
     match name {
         b"FlateDecode" | b"Fl" => {
-            let data = inflate(input, diag, max)?;
+            let (data, wanted_more) = inflate_fed(input, diag, max, stage.byte_fed)?;
+            reached_end(wanted_more);
             let predictor = int(b"Predictor", 1);
             if predictor > 1 {
                 predict(
@@ -124,8 +211,9 @@ fn apply(
                     int(b"BitsPerComponent", 8),
                     diag,
                 )
+                .map(Stage::complete)
             } else {
-                Ok(data)
+                Ok(Stage::complete(data))
             }
         }
         b"CCITTFaxDecode" | b"CCF" | b"DCTDecode" | b"DCT" | b"JBIG2Decode" | b"JPXDecode" => {
@@ -133,27 +221,54 @@ fn apply(
                 "filter.image_only",
                 "Can't open image only stream for non-image purposes",
             );
-            Ok(Vec::new())
+            Ok(Stage::default())
         }
-        b"ASCIIHexDecode" | b"AHx" => ascii_hex(input),
-        b"ASCII85Decode" | b"A85" => ascii85(input, diag),
-        b"RunLengthDecode" | b"RL" => run_length(input, max),
+        b"ASCIIHexDecode" | b"AHx" => {
+            reached_end(!input.contains(&b'>'));
+            ascii_hex(input).map(Stage::complete)
+        }
+        b"ASCII85Decode" | b"A85" => {
+            reached_end(!input.contains(&b'~'));
+            ascii85(input, diag).map(Stage::complete)
+        }
+        b"RunLengthDecode" | b"RL" => {
+            reached_end(!run_length_ends(input));
+            run_length(input, max).map(Stage::complete)
+        }
         b"LZWDecode" | b"LZW" | b"BrotliDecode" | b"Br" => Err(DecodeError::Unsupported(
             String::from_utf8_lossy(name).into_owned(),
         )),
         b"Crypt" => {
-            diag.warn(
-                "filter.crypt_unencrypted",
-                "crypt filter in unencrypted document",
-            );
-            Ok(input.to_vec())
+            let Some(cx) = crypt else {
+                diag.warn(
+                    "filter.crypt_unencrypted",
+                    "crypt filter in unencrypted document",
+                );
+                return Ok(stage);
+            };
+            // Without a /Name parameter the data passes through.
+            let name = params
+                .as_dict()
+                .and_then(|d| d.get(b"Name"))
+                .map(resolve)
+                .and_then(|n| n.as_name().map(<[u8]>::to_vec));
+            match name {
+                Some(name) => {
+                    reached_end(true);
+                    cx.crypt
+                        .decrypt_with_filter(&name, input, cx.num, cx.generation, diag)
+                        .map(Stage::from)
+                        .map_err(DecodeError::Failed)
+                }
+                None => Ok(stage),
+            }
         }
         other => {
             diag.warn(
                 "filter.unknown",
                 format!("unknown filter name ({})", String::from_utf8_lossy(other)),
             );
-            Ok(input.to_vec())
+            Ok(stage)
         }
     }
 }
@@ -234,6 +349,19 @@ fn word_tail(word: u32, count: usize, diag: &Diagnostics) -> Vec<u8> {
     }
 }
 
+/// Whether PackBits data reaches its end-of-data marker.
+fn run_length_ends(input: &[u8]) -> bool {
+    let mut i = 0;
+    while let Some(&run) = input.get(i) {
+        match run {
+            128 => return true,
+            0..=127 => i += usize::from(run) + 2,
+            _ => i += 2,
+        }
+    }
+    false
+}
+
 /// MuPDF's `rld`: PackBits runs, 128 ends the data.
 pub fn run_length(input: &[u8], max: usize) -> Result<Vec<u8>, DecodeError> {
     let premature = || DecodeError::Failed("premature end of data in run length decode".into());
@@ -265,6 +393,18 @@ pub fn run_length(input: &[u8], max: usize) -> Result<Vec<u8>, DecodeError> {
 /// zlib inflate with MuPDF's tolerance: truncated data and errors at the
 /// very end of the input keep what was decoded; other errors fail.
 pub fn inflate(input: &[u8], diag: &Diagnostics, max: usize) -> Result<Vec<u8>, DecodeError> {
+    inflate_fed(input, diag, max, false).map(|(out, _)| out)
+}
+
+/// `inflate`, also telling whether zlib wanted input past the end. When
+/// the input arrives a byte at a time (`byte_fed`), MuPDF only ever sees
+/// errors at the end of what it has, so every zlib error is ignored.
+fn inflate_fed(
+    input: &[u8],
+    diag: &Diagnostics,
+    max: usize,
+    byte_fed: bool,
+) -> Result<(Vec<u8>, bool), DecodeError> {
     let mut z = Decompress::new(true);
     // Never hold more than one byte past the limit, so exceeding it is
     // detected without first allocating the whole expansion.
@@ -286,13 +426,13 @@ pub fn inflate(input: &[u8], diag: &Diagnostics, max: usize) -> Result<Vec<u8>, 
         let before = (z.total_in(), z.total_out());
         match z.decompress_vec(rest, &mut out, FlushDecompress::Sync) {
             Ok(Status::StreamEnd) if out.len() > max => return Err(DecodeError::Limit),
-            Ok(Status::StreamEnd) => return Ok(out),
+            Ok(Status::StreamEnd) => return Ok((out, false)),
             Ok(Status::BufError) => {
                 diag.warn(
                     "filter.flate_truncated",
                     "premature end of data in flate filter",
                 );
-                return Ok(out);
+                return Ok((out, true));
             }
             Ok(Status::Ok) => {
                 // No progress with input left means zlib wants more than we have.
@@ -301,15 +441,15 @@ pub fn inflate(input: &[u8], diag: &Diagnostics, max: usize) -> Result<Vec<u8>, 
                         "filter.flate_truncated",
                         "premature end of data in flate filter",
                     );
-                    return Ok(out);
+                    return Ok((out, true));
                 }
             }
             Err(e) => {
                 let msg = e.message().unwrap_or("unknown error").to_string();
                 let consumed = usize::try_from(z.total_in()).unwrap_or(0);
-                if consumed >= input.len() || msg == "incorrect data check" {
+                if byte_fed || consumed >= input.len() || msg == "incorrect data check" {
                     diag.warn("filter.flate_error", format!("ignoring zlib error: {msg}"));
-                    return Ok(out);
+                    return Ok((out, false));
                 }
                 return Err(DecodeError::Failed(format!("zlib error: {msg}")));
             }
@@ -665,14 +805,14 @@ mod tests {
         dict.put(b"Filter", Object::name(b"FlateDecode"));
         let packed = zlib(b"abc");
         assert_eq!(
-            decode(&dict, &packed, &identity, &diag, &Limits::default()).unwrap(),
+            decode(&dict, &packed, &identity, &diag, &Limits::default(), None).unwrap(),
             b"abc"
         );
 
         let mut dict = Dict::new();
         dict.put(b"Filter", Object::name(b"Bogus"));
         assert_eq!(
-            decode(&dict, b"raw", &identity, &diag, &Limits::default()).unwrap(),
+            decode(&dict, b"raw", &identity, &diag, &Limits::default(), None).unwrap(),
             b"raw"
         );
         assert!(diag.has("filter.unknown"));
@@ -682,7 +822,7 @@ mod tests {
         dict.put(b"Filter", Object::name(b"FlateDecode"));
         dict.put(b"F", Object::String(std::sync::Arc::from(&b"file.bin"[..])));
         assert_eq!(
-            decode(&dict, b"raw", &identity, &diag, &Limits::default()).unwrap(),
+            decode(&dict, b"raw", &identity, &diag, &Limits::default(), None).unwrap(),
             b"raw"
         );
     }

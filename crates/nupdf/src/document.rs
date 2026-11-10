@@ -9,16 +9,19 @@
 //! on demand, object streams, and document-level facts.
 //!
 //! The xref lives in an immutable `State` behind an `Arc`. Objects are
-//! parsed on first use into per-slot `OnceLock`s, so any number of threads
-//! can resolve objects without locks. A repair builds a new `State` and swaps
-//! it in; threads holding the old one keep a consistent snapshot.
+//! parsed on first use into a sharded cache, so threads rarely contend. A
+//! repair builds a new `State` and swaps it in; threads holding the old one
+//! keep a consistent snapshot. In an encrypted document, strings are
+//! decrypted as objects load and streams as their data is read.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use crate::crypt::Crypt;
 use crate::diag::{Diagnostics, report};
 use crate::filter::{self, DecodeError};
 use crate::header::{self, Kind as HeaderKind, Version};
@@ -86,6 +89,14 @@ impl Cache {
 
     fn get(&self, num: i32) -> Option<Loaded> {
         self.shard(num).read().ok()?.get(&num).cloned()
+    }
+
+    fn clear(&self) {
+        for shard in &self.shards {
+            if let Ok(mut s) = shard.write() {
+                s.clear();
+            }
+        }
     }
 
     /// Stores `value` unless another thread got there first; returns the
@@ -219,7 +230,15 @@ pub struct Document {
     repair_attempted: AtomicBool,
     /// Serializes repairs so other threads wait for the new xref.
     repair_lock: Mutex<()>,
+    /// The security handler, created once while opening (MuPDF's
+    /// `doc->crypt`). Authenticating replaces it with a new key.
+    crypt: RwLock<Option<Arc<Crypt>>>,
+    /// Whether the empty password failed (`pdf_needs_password`).
+    needs_password: AtomicBool,
 }
+
+/// Marks a repair error that came from the security handler.
+const CRYPT_PREFIX: &str = "crypt: ";
 
 /// Page counting failed the way MuPDF's `pdf_count_pages` fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +311,8 @@ impl Document {
             state: RwLock::new(Arc::new(State::empty())),
             repair_attempted: AtomicBool::new(false),
             repair_lock: Mutex::new(()),
+            crypt: RwLock::new(None),
+            needs_password: AtomicBool::new(false),
         };
 
         let loaded = if broken.is_none() && !is_fdf {
@@ -314,7 +335,10 @@ impl Document {
                 for (num, obj) in l.cached {
                     state.precache(num, obj);
                 }
+                let trailer = state.trailer.clone();
                 doc.install(state);
+                doc.id_and_password(&trailer, &|o| doc.resolve(o))
+                    .map_err(|e| crypt_error(&e))?;
             }
             None => {
                 if let Some(e) = &broken {
@@ -322,9 +346,12 @@ impl Document {
                     doc.diag.warn("xref.repair", "trying to repair broken xref");
                 }
                 doc.repair_attempted.store(true, Ordering::SeqCst);
-                match doc.repair() {
+                match doc.repair(true) {
                     Ok(state) => doc.install(state),
                     Err(e) if e.starts_with(xref::LIMIT_PREFIX) => return Err(limit_error(&e)),
+                    Err(e) if e.starts_with(CRYPT_PREFIX) => {
+                        return Err(crypt_error(&e[CRYPT_PREFIX.len()..]));
+                    }
                     Err(e) => {
                         return Err(OpenError {
                             code: "input.unrepairable",
@@ -354,18 +381,144 @@ impl Document {
         &self.data
     }
 
-    /// The raw (still encoded) bytes of a stream, as MuPDF reads them.
-    pub fn raw_stream_data(&self, stream: &Stream) -> &[u8] {
-        let length = self
-            .resolve(stream.dict.get(b"Length").unwrap_or(&Object::Null))
-            .to_int64();
-        xref::raw_stream(
+    /// The raw (still encoded) bytes of a stream as MuPDF reads them:
+    /// decrypted, unless a /Crypt filter in the chain does that. A broken
+    /// AES stream yields what MuPDF reads before the error.
+    pub fn raw_stream_data(&self, stream: &Stream) -> Result<Cow<'_, [u8]>, String> {
+        let st = self.current();
+        let (raw, decrypted) = self.raw_stream_in(&st, stream, true)?;
+        Ok(match decrypted {
+            None => Cow::Borrowed(raw),
+            Some(stage) => Cow::Owned(self.read_all(&st, stream, stage)),
+        })
+    }
+
+    /// `pdf_open_raw_filter`: the bytes between `stream` and `endstream`,
+    /// and, in an encrypted document, those bytes decrypted. `may_repair`
+    /// allows the /Length lookup to repair the document. Fails only where
+    /// MuPDF cannot open the decryption filter.
+    fn raw_stream_in(
+        &self,
+        st: &State,
+        stream: &Stream,
+        may_repair: bool,
+    ) -> Result<(&[u8], Option<filter::Stage>), String> {
+        let length = stream.dict.get(b"Length").unwrap_or(&Object::Null);
+        let length = if may_repair {
+            self.resolve(length)
+        } else {
+            self.resolve_in(st, length)
+        }
+        .to_int64();
+        let raw = xref::raw_stream(
             &self.data,
             stream.data_start,
             length,
             self.file_size,
             &self.diag,
-        )
+        );
+        match self.crypt() {
+            Some(crypt) if !self.has_crypt_filter(st, &stream.dict) => {
+                let decrypted =
+                    crypt.decrypt_stream(raw, stream.num, entry_generation(st, stream.num))?;
+                Ok((raw, Some(decrypted.into())))
+            }
+            _ => Ok((raw, None)),
+        }
+    }
+
+    /// `fz_read_best` over a stage that may stop with an error: it reads in
+    /// chunks of at most 256 bytes into a buffer of the stream's length (at
+    /// least 1024) plus one, grown by half when full, and loses the chunk
+    /// during which the error happens.
+    fn read_all(&self, st: &State, stream: &Stream, stage: filter::Stage) -> Vec<u8> {
+        let Some(error) = &stage.error else {
+            return stage.data;
+        };
+        filter::report_read_error(error, &self.diag);
+        let length = self
+            .resolve_in(st, stream.dict.get(b"Length").unwrap_or(&Object::Null))
+            .to_int64();
+        // pdf_stream_length: negative or beyond the file means 0.
+        let initial = usize::try_from(length)
+            .ok()
+            .filter(|&l| l <= self.file_size)
+            .unwrap_or(0);
+        let mut data = stage.data;
+        data.truncate(kept_before_error(data.len(), initial));
+        data
+    }
+
+    /// `pdf_stream_has_crypt`: /Crypt among the filters.
+    fn has_crypt_filter(&self, st: &State, dict: &Dict) -> bool {
+        let filters = dict
+            .get(b"F")
+            .or_else(|| dict.get(b"Filter"))
+            .map_or(Object::Null, |f| self.resolve_in(st, f));
+        match &filters {
+            Object::Name(_) => filters.is_name(b"Crypt"),
+            Object::Array(items) => items
+                .iter()
+                .any(|f| self.resolve_in(st, f).is_name(b"Crypt")),
+            _ => false,
+        }
+    }
+
+    // ---- encryption ----------------------------------------------------
+
+    pub(crate) fn crypt(&self) -> Option<Arc<Crypt>> {
+        self.crypt.read().ok().and_then(|c| c.clone())
+    }
+
+    /// MuPDF's `id_and_password`: creates the security handler from the
+    /// trailer's /Encrypt and /ID, which are loaded before it exists and so
+    /// stay unencrypted, then tries the empty password.
+    fn id_and_password(
+        &self,
+        trailer: &Dict,
+        resolve: &dyn Fn(&Object) -> Object,
+    ) -> Result<(), String> {
+        let encrypt = trailer.get(b"Encrypt").map_or(Object::Null, resolve);
+        let id = trailer.get(b"ID").map_or(Object::Null, resolve);
+        let Some(dict) = encrypt.as_dict() else {
+            return Ok(());
+        };
+        let mut crypt = Crypt::new(dict, &id, resolve, &self.diag)?;
+        let access = crypt.authenticate("")?;
+        self.needs_password.store(access == 0, Ordering::SeqCst);
+        if let Ok(mut c) = self.crypt.write() {
+            *c = Some(Arc::new(crypt));
+        }
+        Ok(())
+    }
+
+    /// Whether the document needs a password: it is encrypted and the empty
+    /// password opens it neither as user nor as owner.
+    pub fn needs_password(&self) -> bool {
+        self.needs_password.load(Ordering::SeqCst)
+    }
+
+    /// `pdf_authenticate_password`: returns the access granted (0 none,
+    /// 2 user, 4 owner, 6 both) and keeps the key the attempt computed,
+    /// right or wrong, as MuPDF does. Objects already loaded stay as they
+    /// were decrypted. Unencrypted documents need no password and return 1.
+    pub fn authenticate(&self, password: &str) -> Result<u8, String> {
+        let Some(current) = self.crypt() else {
+            return Ok(1);
+        };
+        let mut crypt = (*current).clone();
+        let access = crypt.authenticate(password)?;
+        if let Ok(mut c) = self.crypt.write() {
+            *c = Some(Arc::new(crypt));
+        }
+        Ok(access)
+    }
+
+    /// MuPDF's encryption description, such as "Standard V4 R4 128-bit
+    /// AES", or "None".
+    pub fn encryption(&self) -> String {
+        self.crypt()
+            .map_or_else(|| "None".to_string(), |c| c.description())
     }
 
     pub fn diagnostics(&self) -> &Diagnostics {
@@ -548,23 +701,24 @@ impl Document {
     }
 
     fn stream_data_in(&self, st: &State, stream: &Stream) -> Result<Vec<u8>, DecodeError> {
-        let length = self
-            .resolve_in(st, stream.dict.get(b"Length").unwrap_or(&Object::Null))
-            .to_int64();
-        let raw = xref::raw_stream(
-            &self.data,
-            stream.data_start,
-            length,
-            self.file_size,
-            &self.diag,
-        );
-        filter::decode(
+        let (raw, decrypted) = self
+            .raw_stream_in(st, stream, false)
+            .map_err(DecodeError::Failed)?;
+        let input = decrypted.unwrap_or_else(|| filter::Stage::complete(raw.to_vec()));
+        let crypt = self.crypt();
+        let out = filter::decode_stage(
             &stream.dict,
-            raw,
+            input,
             &|o| self.resolve_in(st, o),
             &self.diag,
             &self.limits,
-        )
+            crypt.as_deref().map(|crypt| filter::CryptContext {
+                crypt,
+                num: stream.num,
+                generation: entry_generation(st, stream.num),
+            }),
+        )?;
+        Ok(self.read_all(st, stream, out))
     }
 
     /// `pdf_cache_object` against one state.
@@ -585,8 +739,37 @@ impl Document {
                 "recursive object lookup ({num} 0 R)"
             )));
         };
-        let loaded = self.load_slot(st, num, allow_repair);
+        let loaded = match (self.load_slot(st, num, allow_repair), self.crypt()) {
+            // pdf_cache_object decrypts what it parsed from the file. If AES
+            // fails partway, the object stays cached as far as it got and
+            // this lookup reports the error.
+            (Loaded::Obj(obj), Some(crypt)) if st.entries.get(num).kind == Kind::InFile => {
+                let (obj, error) =
+                    crypt.decrypt_object(obj, num, st.entries.get(num).generation, &self.diag);
+                if let Some(e) = error {
+                    st.cache.insert_if_absent(num, Loaded::Obj(obj));
+                    return Loaded::Failed(e);
+                }
+                Loaded::Obj(obj)
+            }
+            (loaded, _) => loaded,
+        };
         st.cache.insert_if_absent(num, loaded)
+    }
+
+    /// Loads an in-file object without decrypting it, as MuPDF does with
+    /// /Encrypt and /ID after a repair, and caches it.
+    fn precache_unencrypted(&self, st: &State, obj: Option<&Object>) {
+        let Some(Object::Ref(r)) = obj else {
+            return;
+        };
+        let entry = st.entries.get(r.num);
+        if entry.kind != Kind::InFile || st.cache.get(r.num).is_some() {
+            return;
+        }
+        if let Loaded::Obj(o) = self.load_slot(st, r.num, false) {
+            st.precache(r.num, o);
+        }
     }
 
     fn parse_at(&self, st: &State, ofs: i64) -> Result<IndirectObject, IndirectError> {
@@ -782,7 +965,7 @@ impl Document {
             return !Arc::ptr_eq(seen, &self.current());
         }
         self.repair_attempted.store(true, Ordering::SeqCst);
-        match self.repair() {
+        match self.repair(false) {
             Ok(state) => {
                 self.install(state);
                 true
@@ -799,7 +982,7 @@ impl Document {
 
     /// `pdf_repair_xref_aux`: scan, rebuild, then fix object streams,
     /// /Root and /Info.
-    fn repair(&self) -> Result<State, String> {
+    fn repair(&self, at_open: bool) -> Result<State, String> {
         if !self.is_fdf {
             self.diag.warn("xref.repairing", "repairing PDF document");
         }
@@ -869,6 +1052,12 @@ impl Document {
         let first = State::new(0, entries.clone(), trailer.clone(), 1, true);
         for (&num, obj) in &fixed {
             first.precache(num, obj.clone());
+        }
+        // While opening, the security handler is created here, after the
+        // scan and before object streams are read (pdf_repair_xref_aux).
+        if at_open {
+            self.id_and_password(&trailer, &|o| self.resolve_in(&first, o))
+                .map_err(|e| format!("{CRYPT_PREFIX}{e}"))?;
         }
         let initial_len = entries.len() as i32;
         let mut candidates: Vec<i32> = stream_at
@@ -987,6 +1176,15 @@ impl Document {
         }
 
         second.trailer = trailer;
+        // Objects loaded during the repair may have been decrypted with a
+        // half-built xref: MuPDF drops them, then caches /Encrypt and /ID
+        // without decryption.
+        if self.crypt().is_some() {
+            second.cache.clear();
+            let trailer = second.trailer.clone();
+            self.precache_unencrypted(&second, trailer.get(b"Encrypt"));
+            self.precache_unencrypted(&second, trailer.get(b"ID"));
+        }
         Ok(second)
     }
 
@@ -1088,8 +1286,43 @@ fn into_object(ind: IndirectObject) -> Object {
         (Some(data_start), Object::Dict(dict)) => Object::Stream(Arc::new(Stream {
             dict: Arc::unwrap_or_clone(dict),
             data_start,
+            num: ind.num,
         })),
         (_, obj) => obj,
+    }
+}
+
+/// The generation that seeds a stream's key: its xref entry's, or 0 when
+/// the number is outside the xref (`pdf_open_raw_filter`).
+fn entry_generation(st: &State, num: i32) -> i32 {
+    if num > 0 && (num as usize) < st.xref_len() {
+        st.entries.get(num).generation
+    } else {
+        0
+    }
+}
+
+/// How many bytes `fz_read_best` keeps when the stream fails while
+/// producing byte `fail_at` (see `Document::read_all`).
+fn kept_before_error(fail_at: usize, initial: usize) -> usize {
+    let mut cap = initial.max(1024) + 1;
+    let mut pos = 0;
+    loop {
+        if pos == cap {
+            cap += cap >> 1;
+        }
+        let end = pos + (cap - pos).min(256);
+        if fail_at < end {
+            return pos;
+        }
+        pos = end;
+    }
+}
+
+fn crypt_error(e: &str) -> OpenError {
+    OpenError {
+        code: "input.encryption",
+        message: report::strip(e).to_string(),
     }
 }
 
@@ -1142,6 +1375,14 @@ mod tests {
         assert!(d.diagnostics().has("xref.repairing"));
         assert_eq!(d.page_count(), Ok(0));
         assert_eq!(d.version(), Version(14));
+    }
+
+    #[test]
+    fn unknown_security_handlers_fail_to_open() {
+        let file = b"%PDF-1.4\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\ntrailer <</Root 1 0 R/Encrypt<</Filter/Adobe.PubSec/V 4>>>>\n";
+        let e = Document::open(file.to_vec()).unwrap_err();
+        assert_eq!(e.code, "input.encryption");
+        assert_eq!(e.message, "unknown encryption handler: 'Adobe.PubSec'");
     }
 
     #[test]

@@ -171,6 +171,25 @@ fn push_rune(out: &mut Vec<u8>, rune: u32) {
     }
 }
 
+/// `pdf_docenc_from_utf8`: each character as the first PDFDocEncoding
+/// byte that maps to it; characters with none are dropped. At most 2047
+/// bytes, and a NUL ends the text, as in MuPDF's C string.
+pub fn pdf_doc_encode(text: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for c in text.chars() {
+        if c == '\0' || out.len() >= 2047 {
+            break;
+        }
+        if let Some(k) = PDF_DOC_ENCODING
+            .iter()
+            .position(|&u| u32::from(u) == c as u32)
+        {
+            out.push(k as u8);
+        }
+    }
+    out
+}
+
 /// `fz_unicode_from_pdf_doc_encoding`.
 #[rustfmt::skip]
 const PDF_DOC_ENCODING: [u16; 256] = [
