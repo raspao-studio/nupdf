@@ -37,12 +37,26 @@ pub struct Check {
     pub oracle_file_fixup: Option<fn(&mut [u8])>,
     /// Further oracle arguments, after the file (and the scratch directory).
     pub oracle_args: &'static [&'static str],
-    /// Compare what MuPDF reads back from each side's output instead of
-    /// the output itself. The oracle script writes `clean.pdf` into its
-    /// scratch directory; `nupdf` writes with `-o`. This script then runs on
-    /// each written file with a scratch directory of its own, and MuPDF's
-    /// distinct warnings while reading it are added as `/warnings`.
-    pub reread: Option<&'static str>,
+    /// Compare what a reader makes of each side's output instead of the
+    /// output itself. The oracle script names the file it wrote in its
+    /// scratch directory (`clean.pdf` unless it says otherwise); `nupdf`
+    /// writes with `-o`. The reader then runs on each written file.
+    pub reread: Option<Reader>,
+}
+
+/// What reads each side's output back.
+#[derive(Debug, Clone, Copy)]
+pub enum Reader {
+    /// This MuPDF script, with a scratch directory of its own; MuPDF's
+    /// distinct warnings while reading are added as `/warnings`.
+    Mutool(&'static str),
+    /// `qpdf --check`: its exit status (0, or 2 for errors, 3 for
+    /// warnings) as `/qpdf/status`, and what it printed, with the file's
+    /// path taken out, as `/qpdf/messages`.
+    Qpdf,
+    /// nupdf's reading checked against the Arlington rules nupdf applies
+    /// (`arlington`): the violations, as `/arlington/violations`.
+    Arlington,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -172,7 +186,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: true,
         oracle_file_fixup: None,
-        reread: Some("oracle/js/objects.js"),
+        reread: Some(Reader::Mutool("oracle/js/objects.js")),
         oracle_args: &[],
     },
     clean_gc(
@@ -375,6 +389,60 @@ pub const CHECKS: &[Check] = &[
         &["merge", "--dry-run", "--no-verify", "{file}", "N-1"],
         &["pages=N-1"],
     ),
+    modelled(
+        "arlington-clean",
+        &["clean", "--no-verify"],
+        "oracle/js/clean.js",
+        &[],
+    ),
+    modelled(
+        "arlington-merge",
+        &["merge", "--no-verify", "{file}"],
+        "oracle/js/merge.js",
+        &[],
+    ),
+    modelled(
+        "arlington-meta-incremental",
+        &[
+            "meta",
+            "--set",
+            "info:Title=nupdf",
+            "--incremental",
+            "--no-verify",
+        ],
+        "oracle/js/clean.js",
+        &["meta=info:Title=nupdf,incremental"],
+    ),
+    validated(
+        "qpdf-clean",
+        &["clean", "--no-verify"],
+        "oracle/js/clean.js",
+        &[],
+    ),
+    validated(
+        "qpdf-clean-Z",
+        &["clean", "-Z", "--no-verify"],
+        "oracle/js/clean.js",
+        &["objstms"],
+    ),
+    validated(
+        "qpdf-merge",
+        &["merge", "--no-verify", "{file}"],
+        "oracle/js/merge.js",
+        &[],
+    ),
+    validated(
+        "qpdf-meta-incremental",
+        &[
+            "meta",
+            "--set",
+            "info:Title=nupdf",
+            "--incremental",
+            "--no-verify",
+        ],
+        "oracle/js/clean.js",
+        &["meta=info:Title=nupdf,incremental"],
+    ),
     Check {
         name: "roundtrip-gggg",
         about: "the `clean -gggg` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
@@ -386,7 +454,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: true,
         oracle_file_fixup: None,
-        reread: Some("oracle/js/objects.js"),
+        reread: Some(Reader::Mutool("oracle/js/objects.js")),
         oracle_args: &["garbage=4"],
     },
 ];
@@ -430,6 +498,48 @@ fn file_stem(name: &str) -> String {
         }
     }
     out
+}
+
+/// `qpdf --check` on each side's output: nupdf's output is as sound as
+/// MuPDF's when qpdf says the same of both.
+const fn validated(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_script: &'static str,
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        name,
+        about: "`qpdf --check` on each side's output, as `clean`, `clean -Z`, `merge` and an incremental edit write it: its verdict (0, or 2 for errors, 3 for warnings) and its messages",
+        oracle_script,
+        nupdf_args,
+        compare: Compare::Fields(&["/qpdf/status", "/qpdf/messages"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        reread: Some(Reader::Qpdf),
+        oracle_args,
+    }
+}
+
+/// The Arlington rules nupdf applies, on each side's output: nupdf's
+/// output breaks no rule MuPDF's keeps.
+const fn modelled(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_script: &'static str,
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        name,
+        about: "selected Arlington PDF Model rules (required keys, value types, fixed names, direct and indirect values) on the trailer, catalog, page tree, pages, links, outline and document information of each side's output, as `clean`, `merge` and an incremental edit write it: the violations",
+        oracle_script,
+        nupdf_args,
+        compare: Compare::Fields(&["/arlington/violations"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        reread: Some(Reader::Arlington),
+        oracle_args,
+    }
 }
 
 /// An edit appended as a new revision, against MuPDF's incremental save of
@@ -479,7 +589,7 @@ const fn roundtrip_encrypted(
         },
         oracle_writes_files: true,
         oracle_file_fixup: None,
-        reread: Some("oracle/js/objects.js"),
+        reread: Some(Reader::Mutool("oracle/js/objects.js")),
         oracle_args,
     }
 }
@@ -602,6 +712,17 @@ pub fn run(
     if checks.is_empty() {
         bail!("no check named {}", only.unwrap_or_default());
     }
+    let qpdf = find_qpdf();
+    if let Some(c) = checks
+        .iter()
+        .find(|c| matches!(c.reread, Some(Reader::Qpdf)))
+        && qpdf.is_none()
+    {
+        bail!(
+            "check {} needs qpdf: install it, or set NUPDF_QPDF to its path",
+            c.name
+        );
+    }
 
     let out_dir = root.join("target/harness").join(tier);
     std::fs::create_dir_all(&out_dir)?;
@@ -618,7 +739,15 @@ pub fn run(
     let mut notes = String::from("\n");
     for check in &checks {
         let _ = writeln!(notes, "- `{}`: {}", check.name, check.about);
-        let results = run_check(root, check, &mutool, &nupdf, &files, timeout);
+        let results = run_check(
+            root,
+            check,
+            &mutool,
+            &nupdf,
+            qpdf.as_deref(),
+            &files,
+            timeout,
+        );
         std::fs::write(
             out_dir.join(format!("{}.json", file_stem(check.name))),
             serde_json::to_string_pretty(&results)?,
@@ -674,10 +803,12 @@ fn run_check(
     check: &Check,
     mutool: &Path,
     nupdf: &Path,
+    qpdf: Option<&Path>,
     files: &[corpus::CorpusFile],
     timeout: Duration,
 ) -> Vec<FileResult> {
     let script = root.join(check.oracle_script);
+    let model = crate::arlington::Model::load();
     let scratch = root
         .join("target/harness/scratch")
         .join(file_stem(check.name));
@@ -695,11 +826,16 @@ fn run_check(
                     let dir = scratch.join(index.to_string());
                     let (oracle, ours) = match check.reread {
                         None => run_sides(check, &script, mutool, nupdf, &file.path, &dir, timeout),
-                        Some(reread) => {
-                            let reread = root.join(reread);
+                        Some(reader) => {
+                            let reread = match reader {
+                                Reader::Mutool(script) => root.join(script),
+                                Reader::Qpdf | Reader::Arlington => PathBuf::new(),
+                            };
                             let run = Reread {
                                 mutool,
                                 script: &reread,
+                                qpdf: matches!(reader, Reader::Qpdf).then_some(qpdf).flatten(),
+                                arlington: matches!(reader, Reader::Arlington).then_some(&model),
                                 timeout,
                             };
                             reread_sides(&run, &script, nupdf, check, &file.path, &dir)
@@ -768,6 +904,10 @@ fn nupdf_argv<'a>(check: &'a Check, file: &'a Path) -> Vec<&'a std::ffi::OsStr> 
 struct Reread<'a> {
     mutool: &'a Path,
     script: &'a Path,
+    /// `qpdf --check` reads instead of MuPDF.
+    qpdf: Option<&'a Path>,
+    /// Or the Arlington rules do.
+    arlington: Option<&'a crate::arlington::Model>,
     timeout: Duration,
 }
 
@@ -777,6 +917,26 @@ impl Reread<'_> {
     fn after(&self, writer: Side, written: &Path, dir: &Path) -> Side {
         if writer.json.is_none() {
             return writer;
+        }
+        if let Some(qpdf) = self.qpdf {
+            let mut read = qpdf_check(qpdf, written, self.timeout);
+            read.ms += writer.ms;
+            return read;
+        }
+        if let Some(model) = self.arlington {
+            let start = std::time::Instant::now();
+            let json = std::fs::read(written)
+                .ok()
+                .and_then(|bytes| nupdf::Document::open(bytes).ok())
+                .map(|doc| {
+                    serde_json::json!({ "arlington": { "violations": model.validate(&doc) } })
+                });
+            return Side {
+                status: Status::Exited(i32::from(json.is_none())),
+                json,
+                stderr: String::new(),
+                ms: writer.ms + start.elapsed().as_secs_f64() * 1000.0,
+            };
         }
         let _ = std::fs::create_dir_all(dir);
         let args = [
@@ -821,11 +981,14 @@ fn reread_sides(
     ];
     oracle_args.extend(check.oracle_args.iter().map(std::ffi::OsStr::new));
     let oracle = side(run.mutool, &oracle_args, run.timeout);
-    let oracle = run.after(
-        oracle,
-        &oracle_dir.join("clean.pdf"),
-        &dir.join("oracle-read"),
-    );
+    let name = oracle
+        .json
+        .as_ref()
+        .and_then(|j| j.pointer("/output/file"))
+        .and_then(Value::as_str)
+        .unwrap_or("clean.pdf")
+        .to_string();
+    let oracle = run.after(oracle, &oracle_dir.join(name), &dir.join("oracle-read"));
 
     let written = dir.join("nupdf.pdf");
     let mut args = nupdf_argv(check, file);
@@ -833,6 +996,51 @@ fn reread_sides(
     let ours = side(nupdf, &args, run.timeout);
     let ours = run.after(ours, &written, &dir.join("nupdf-read"));
     (oracle, ours)
+}
+
+/// `qpdf --check` on `written`. Its verdicts, 0 and the 2 and 3 for
+/// errors and warnings, are all a reading; only a crash or a timeout is a
+/// failure.
+fn qpdf_check(qpdf: &Path, written: &Path, timeout: Duration) -> Side {
+    let args = [std::ffi::OsStr::new("--check"), written.as_os_str()];
+    match proc::run(qpdf, &args, timeout) {
+        Ok(run) => {
+            let path = written.to_string_lossy();
+            let messages: Vec<Value> = String::from_utf8_lossy(&run.stdout)
+                .lines()
+                .chain(String::from_utf8_lossy(&run.stderr).lines())
+                .map(|l| Value::from(l.replace(path.as_ref(), "FILE")))
+                .collect();
+            let json = match run.status {
+                Status::Exited(code) => Some(serde_json::json!({
+                    "qpdf": { "status": code, "messages": messages }
+                })),
+                _ => None,
+            };
+            Side {
+                status: run.status,
+                json,
+                stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
+                ms: run.wall.as_secs_f64() * 1000.0,
+            }
+        }
+        Err(e) => Side {
+            status: Status::Exited(-1),
+            json: None,
+            stderr: e.to_string(),
+            ms: 0.0,
+        },
+    }
+}
+
+/// `qpdf` from `$NUPDF_QPDF`, else the first on `PATH`.
+fn find_qpdf() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("NUPDF_QPDF") {
+        return Some(PathBuf::from(p));
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join("qpdf"))
+        .find(|p| p.is_file())
 }
 
 fn side(program: &Path, args: &[&std::ffi::OsStr], timeout: Duration) -> Side {
