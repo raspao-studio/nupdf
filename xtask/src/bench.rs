@@ -19,8 +19,9 @@ use crate::{corpus, oracle, proc};
 pub struct Pair {
     pub name: &'static str,
     pub about: &'static str,
-    /// Arguments to `mutool`; `{file}` is replaced by the input path and
-    /// `{out}` by a scratch output path.
+    /// Arguments to `mutool`; `{file}` is replaced by the input path,
+    /// `{out}` by a scratch output path and `{dir}` by a scratch directory
+    /// (or, for a script, a prefix for the files it writes).
     pub oracle: &'static [&'static str],
     /// Arguments to `nupdf`, expanded the same way.
     pub nupdf: &'static [&'static str],
@@ -50,6 +51,18 @@ pub const PAIRS: &[Pair] = &[
         about: "rewrite the document deflating every stream that has no filter; nupdf also reads its output back to verify it",
         oracle: &["clean", "-z", "{file}", "{out}"],
         nupdf: &["clean", "-z", "{file}", "-o", "{out}"],
+    },
+    Pair {
+        name: "merge",
+        about: "merge the document with itself into a new one: pages, links and outline; nupdf also reads its output back to verify it",
+        oracle: &["merge", "-o", "{out}", "{file}", "{file}"],
+        nupdf: &["merge", "-o", "{out}", "{file}", "{file}"],
+    },
+    Pair {
+        name: "split",
+        about: "write each page to a file of its own from a fresh copy of the input; MuPDF has no split command, so a script does it (JS overhead included); nupdf also reads each part back",
+        oracle: &["run", "oracle/js/split.js", "{file}", "{dir}"],
+        nupdf: &["split", "{file}", "-o", "{dir}"],
     },
 ];
 
@@ -91,6 +104,7 @@ pub fn run(
     std::fs::create_dir_all(&out_dir)?;
 
     let scratch = out_dir.join("scratch.pdf");
+    let scratch_dir = out_dir.join("scratch-split");
     for pair in pairs {
         let mut rows = Vec::new();
         for file in &files {
@@ -99,6 +113,7 @@ pub fn run(
                     .map(|a| match *a {
                         "{file}" => file.path.clone().into_os_string(),
                         "{out}" => scratch.clone().into_os_string(),
+                        "{dir}" => scratch_dir.clone().into_os_string(),
                         a if a.starts_with("oracle/") => root.join(a).into_os_string(),
                         a => OsString::from(a),
                     })
