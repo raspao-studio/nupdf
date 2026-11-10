@@ -59,6 +59,7 @@ pub const CHECKS: &[Check] = &[
             "/pdf_version",
             "/encryption",
             "/needs_password",
+            "/permissions",
             "/page_count",
             "/object_count",
             "/repaired",

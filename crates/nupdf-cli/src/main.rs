@@ -94,6 +94,8 @@ struct InfoReport {
     /// The empty password does not open the document. Pages are not
     /// counted then, unless --password opened it.
     needs_password: bool,
+    /// What the document allows, by MuPDF's permission names.
+    permissions: serde_json::Map<String, serde_json::Value>,
     page_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     page_count_error: Option<String>,
@@ -373,6 +375,18 @@ fn show(
     Ok(report("nupdf.show/v0", &facts, &doc, body.into()))
 }
 
+/// MuPDF's permission names (`Document.hasPermission`).
+const PERMISSIONS: [&str; 8] = [
+    "print",
+    "edit",
+    "copy",
+    "annotate",
+    "form",
+    "accessibility",
+    "assemble",
+    "print-hq",
+];
+
 fn info((doc, facts): (Document, FileFacts), authenticated: bool) -> Result<InfoReport, Failure> {
     let FileFacts {
         header,
@@ -434,6 +448,10 @@ fn info((doc, facts): (Document, FileFacts), authenticated: bool) -> Result<Info
         header_offset: header.map(|h| h.offset),
         encryption,
         needs_password,
+        permissions: PERMISSIONS
+            .iter()
+            .map(|p| (p.to_string(), doc.has_permission(p).into()))
+            .collect(),
         page_count,
         page_count_error,
         object_count,
