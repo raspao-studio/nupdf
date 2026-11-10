@@ -59,7 +59,7 @@ Before writing, nupdf opens the output (with `--password`, if given) and compare
 
 ## Editing documents
 
-Each editing command makes one edit, then writes the document as `clean` writes it with no options: `-o` or `--dry-run` is required, `--no-verify` skips the read-back check, and the report carries `applied`, `output` and `verification` as `clean`'s does (DECISIONS D24).
+Each editing command makes one edit, then writes the document as `clean` writes it with no options: `-o` or `--dry-run` is required, `--no-verify` skips the read-back check, and the report carries `applied`, `output` and `verification` as `clean`'s does (DECISIONS D24). With `--incremental`, `meta` and `pages` append the edit to the file as a new revision instead, leaving its bytes as they were, as MuPDF's incremental save does (DECISIONS D27); a repaired file, and anything `merge` makes, cannot be appended to, which fails with exit 2 and `usage.incremental`.
 
 `meta <file>` reports the document information dictionary as text, and `xmp`, whether the catalog has XMP `/Metadata`. `--set KEY=VALUE` (repeatable) sets an entry as MuPDF's `pdf_set_metadata` does: `info:Title` and `Title` are the same key, and the value is written as a text string. `--strip` removes `/Info` and the catalog's `/Metadata` first. The report shows the entries as written and `stripped`.
 

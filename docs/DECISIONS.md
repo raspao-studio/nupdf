@@ -281,3 +281,14 @@ The `merge`, `merge-twice` and `merge-reverse` checks compare the output's BLAKE
 - **Floats.** A coordinate passes through `%g`, which in MuPDF's printf is the shortest form that reads back exactly, so the trip through a URI loses nothing; the transforms are single precision, as MuPDF's are.
 
 The `merge` checks' oracle mirrors pdfmerge.c through MuPDF's script interface, links and outline included. On the smoke fixtures with links and outlines it matches real `mutool merge` output apart from the comment line and the producer. `merge-links.pdf` covers URI, relative, Launch and GoToR links on a rotated and cropped page, and outline items by explicit and named destination, action and none.
+
+## D27. Incremental saves are MuPDF's, touches included
+
+*2026-11-10*
+
+`--incremental` on `meta` and `pages` appends the edit to the file as a new revision, as `pdf_save_document` with `incremental` does: the file's bytes as they were, then a blank line and the comment naming the writer, the objects in MuPDF's incremental section in number order, an xref for those entries alone, and a trailer pointing back with /Prev. MuPDF writes the xref in the style of the last one it read while loading, which for a file of several revisions is the oldest: a table, with the trailer copied from the newest and its /Size and /Prev set and /XRefStm removed, or an xref stream, a new object numbered after the others whose /Index lists the runs of entries. A free entry in the increment gets generation 65535, so it is never reused. Nothing changed leaves the file as it was. The /ID is kept, as in every nupdf write.
+
+What goes into the increment is whatever MuPDF's edits touch, not only what they change. `pdf_dict_del` moves its object into the incremental section even when the key is not there, so `meta --strip` writes the catalog either way. And a trailer that is an xref stream's dictionary belongs to that stream, so the first edit to it moves the stream object into the section, where the writer skips it, leaving a free entry in place of the old xref stream (D24's lost delete is the same effect). nupdf's edits touch the same objects; a full save, which writes everything, never shows the difference.
+
+As in MuPDF, a new document, a repaired file, garbage collection and a change of encryption are refused, with exit 2 and `usage.incremental`; nupdf also refuses object streams. The `meta-set-incremental`, `meta-strip-incremental` and `pages-rotate-incremental` checks compare the output's BLAKE3 with MuPDF's incremental save of the same edit, the comment line in the increment swapped first. On the standard tier they match on every file but AES ones, whose new strings get MuPDF's random IVs (D18); both tools refuse the 211 repaired files and the 45 locked ones, and fail on the 19 that do not open.
+

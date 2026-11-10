@@ -323,6 +323,43 @@ pub const CHECKS: &[Check] = &[
         ],
         &["pages=N-1,rotate=-90@1"],
     ),
+    incremental(
+        "meta-set-incremental",
+        &[
+            "meta",
+            "--set",
+            "info:Title=nupdf",
+            "--set",
+            "Author=Été",
+            "--incremental",
+            "--dry-run",
+            "--no-verify",
+        ],
+        &["meta=info:Title=nupdf,meta=Author=Été,incremental"],
+    ),
+    incremental(
+        "meta-strip-incremental",
+        &[
+            "meta",
+            "--strip",
+            "--incremental",
+            "--dry-run",
+            "--no-verify",
+        ],
+        &["strip-meta,incremental"],
+    ),
+    incremental(
+        "pages-rotate-incremental",
+        &[
+            "pages",
+            "--rotate",
+            "90",
+            "--incremental",
+            "--dry-run",
+            "--no-verify",
+        ],
+        &["rotate=90,incremental"],
+    ),
     merge(
         "merge",
         &["merge", "--dry-run", "--no-verify", "{file}"],
@@ -395,15 +432,29 @@ fn file_stem(name: &str) -> String {
     out
 }
 
-/// `merge` into a new document, against the same pages grafted through
-/// MuPDF's script interface as `mutool merge` grafts them.
+/// An edit appended as a new revision, against MuPDF's incremental save of
+/// the same edit.
+const fn incremental(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        about: "the edit appended to the file as MuPDF's incremental save appends it: the file's bytes, then the objects changed, an xref in the style of the last one read, and a trailer pointing back: BLAKE3 of the output",
+        oracle_file_fixup: Some(name_nupdf_in_increment),
+        ..clean_gc(name, nupdf_args, oracle_args)
+    }
+}
+
+/// `merge` into a new document, against `mutool merge` mirrored through
+/// MuPDF's script interface.
 const fn merge(
     name: &'static str,
     nupdf_args: &'static [&'static str],
     oracle_args: &'static [&'static str],
 ) -> Check {
     Check {
-        about: "the pages merged into a new document as `mutool merge` merges them (pdf_create_document, a graft map per input, pdf_graft_mapped_page), without links or outlines yet: BLAKE3 of the output",
+        about: "the pages merged into a new document as `mutool merge` merges them (pdf_create_document, a graft map per input, pdf_graft_mapped_page), with their external links and the outline items that lead to them: BLAKE3 of the output",
         oracle_script: "oracle/js/merge.js",
         ..clean_gc(name, nupdf_args, oracle_args)
     }
@@ -893,6 +944,16 @@ pub fn hash_written_files(value: &mut Value, dir: &Path, fixup: Option<fn(&mut [
 
 /// MuPDF's reproducible output names MuPDF in its comment line; nupdf's
 /// names nupdf, in a line of the same length, so offsets agree.
+/// `name_nupdf_as_writer` for an incremental save, which names its writer
+/// at the start of the increment: the last such line, after the file.
+fn name_nupdf_in_increment(data: &mut [u8]) {
+    const MUPDF: &[u8] = b"% Written by MuPDF\n";
+    const NUPDF: &[u8] = b"% Written by nupdf\n";
+    if let Some(at) = data.windows(MUPDF.len()).rposition(|w| w == MUPDF) {
+        data[at..at + MUPDF.len()].copy_from_slice(NUPDF);
+    }
+}
+
 fn name_nupdf_as_writer(data: &mut [u8]) {
     const MUPDF: &[u8] = b"% Written by MuPDF\n";
     const NUPDF: &[u8] = b"% Written by nupdf\n";
