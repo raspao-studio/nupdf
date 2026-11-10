@@ -111,6 +111,7 @@ pub fn all() -> Vec<Fixture> {
     .chain(garbage_fixtures())
     .chain(stream_fixtures())
     .chain(objstm_fixtures())
+    .chain(rearrange_fixtures())
     .collect()
 }
 
@@ -217,6 +218,98 @@ fn garbage_fixtures() -> Vec<Fixture> {
             encrypted_with_garbage(),
         ),
     ]
+}
+
+/// Cases for `clean --pages`.
+fn rearrange_fixtures() -> Vec<Fixture> {
+    // Four pages under two intermediate nodes that pass down MediaBox,
+    // Rotate and Resources. Outlines: one item per page, the third with a
+    // child, the fourth by name. Named destinations with a string key and a
+    // name key. Page 1 links to each page: by GoTo with an array, by a
+    // string destination, by a name /Dest. A text field has a widget on
+    // pages 1 and 4. The catalog has generation 1 and keys the new one
+    // drops.
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(
+        1,
+        "<</Type/Catalog/Pages 2 0 R/Outlines 20 0 R/Names<</Dests 30 0 R>>/AcroForm<</Fields[40 0 R]>>/Lang(en)/PageMode/UseOutlines>>",
+    );
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 4>>");
+    pdf.obj(
+        3,
+        "<</Type/Pages/Parent 2 0 R/Kids[5 0 R 6 0 R]/Count 2/MediaBox[0 0 612 792]/Resources<</Font<</F1 9 0 R>>>>>>",
+    );
+    pdf.obj(
+        4,
+        "<</Type/Pages/Parent 2 0 R/Kids[7 0 R 8 0 R]/Count 2/MediaBox[0 0 300 300]/Rotate 90/Resources<</Font<</F1 9 0 R>>>>>>",
+    );
+    let page = |parent: u32, content: u32, annots: &str| {
+        format!("<</Type/Page/Parent {parent} 0 R/Contents {content} 0 R{annots}>>")
+    };
+    pdf.obj(
+        5,
+        &page(3, 10, "/Annots[50 0 R 51 0 R 52 0 R 53 0 R 41 0 R]"),
+    );
+    pdf.obj(6, &page(3, 11, ""));
+    pdf.obj(7, &page(4, 12, ""));
+    pdf.obj(8, &page(4, 13, "/Annots 54 0 R"));
+    pdf.obj(9, FONT);
+    for (num, text) in [(10, "One"), (11, "Two"), (12, "Three"), (13, "Four")] {
+        pdf.stream(num, "", &text_content(text));
+    }
+    pdf.obj(20, "<</Type/Outlines/First 21 0 R/Last 24 0 R/Count 4>>");
+    pdf.obj(
+        21,
+        "<</Title(One)/Parent 20 0 R/Next 22 0 R/Dest[5 0 R/Fit]>>",
+    );
+    pdf.obj(
+        22,
+        "<</Title(Two)/Parent 20 0 R/Prev 21 0 R/Next 23 0 R/Dest[6 0 R/Fit]>>",
+    );
+    pdf.obj(
+        23,
+        "<</Title(Three)/Parent 20 0 R/Prev 22 0 R/Next 24 0 R/A<</S/GoTo/D[7 0 R/Fit]>>/First 25 0 R/Last 25 0 R/Count 1>>",
+    );
+    pdf.obj(24, "<</Title(Four)/Parent 20 0 R/Prev 23 0 R/Dest(four)>>");
+    pdf.obj(
+        25,
+        "<</Title(Three, again)/Parent 23 0 R/Dest[7 0 R/XYZ 0 0 0]>>",
+    );
+    pdf.obj(30, "<</Names[(four) 31 0 R /two 32 0 R]>>");
+    pdf.obj(31, "<</D[8 0 R/Fit]>>");
+    pdf.obj(32, "[6 0 R/Fit]");
+    pdf.obj(40, "<</FT/Tx/T(field)/Kids[41 0 R 42 0 R]>>");
+    pdf.obj(41, "<</Type/Annot/Subtype/Widget/Parent 40 0 R/P 5 0 R/Rect[0 0 10 10]/A<</S/GoTo/D[8 0 R/Fit]>>>>");
+    pdf.obj(
+        42,
+        "<</Type/Annot/Subtype/Widget/Parent 40 0 R/P 8 0 R/Rect[0 0 10 10]>>",
+    );
+    let link = |dest: &str| format!("<</Type/Annot/Subtype/Link/Rect[0 0 10 10]{dest}>>");
+    pdf.obj(50, &link("/A<</S/GoTo/D[6 0 R/Fit]>>"));
+    pdf.obj(51, &link("/Dest(four)"));
+    pdf.obj(52, &link("/Dest/two"));
+    pdf.obj(53, &link("/Dest[7 0 R/Fit]"));
+    pdf.obj(54, "[42 0 R]");
+    let mut rearrange = pdf.finish_with_xref("");
+    let header = b"1 0 obj";
+    if let Some(i) = rearrange.windows(header.len()).position(|w| w == header) {
+        rearrange[i + 2] = b'1';
+        // The first xref entry after the free head is object 1's.
+        let entry = format!("{:010} 00000 n", i);
+        if let Some(j) = rearrange
+            .windows(entry.len())
+            .position(|w| w == entry.as_bytes())
+        {
+            rearrange[j + 15] = b'1';
+        }
+    }
+
+    vec![Fixture {
+        name: "pages-rearrange.pdf",
+        about: "For --pages: a nested page tree passing attributes down, outlines, named destinations by string and name, links and a field across pages, a catalog of generation 1",
+        needs_repair: false,
+        bytes: rearrange,
+    }]
 }
 
 /// Cases for `clean -Z`.
