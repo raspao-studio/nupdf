@@ -405,3 +405,135 @@ fn permissions_follow_p_unless_the_owner_password_opened_it() {
     );
     assert!(info("minimal.pdf")["permissions"]["copy"] == true);
 }
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name)
+}
+
+#[test]
+fn clean_writes_a_verified_copy_atomically() {
+    let input = smoke("minimal.pdf");
+    let output = scratch("clean-hello.pdf");
+    let _ = std::fs::remove_file(&output);
+    let report = run_json(&[
+        "clean",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.clean/v0");
+    assert_eq!(report["applied"], true);
+    assert_eq!(report["verification"]["verified"], true);
+    let written = std::fs::read(&output).unwrap();
+    assert_eq!(report["output"]["len"], written.len());
+    assert!(written.starts_with(b"%PDF-"));
+    assert!(written.windows(18).any(|w| w == b"% Written by nupdf"));
+    // The report's doc_id is the output's, as `info` sees it.
+    assert_eq!(report["output"]["doc_id"], info_at(&output)["doc_id"]);
+    // Nothing is left beside it.
+    let leftovers: Vec<_> = std::fs::read_dir(output.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+fn info_at(path: &std::path::Path) -> Value {
+    run_json(&["info", path.to_str().unwrap()])
+}
+
+#[test]
+fn clean_dry_run_writes_nothing() {
+    let input = smoke("minimal.pdf");
+    let output = scratch("clean-dry-run.pdf");
+    let _ = std::fs::remove_file(&output);
+    let report = run_json(&[
+        "clean",
+        "--dry-run",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(report["applied"], false);
+    assert_eq!(report["verification"]["verified"], true);
+    assert!(!output.exists());
+    let again = run_json(&["clean", "--dry-run", input.to_str().unwrap()]);
+    assert_eq!(again["output"]["blake3"], report["output"]["blake3"]);
+    assert_eq!(again["output"]["path"], Value::Null);
+}
+
+#[test]
+fn clean_needs_an_output_or_a_dry_run() {
+    let input = smoke("minimal.pdf");
+    let out = nupdf(&["clean", input.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn clean_refuses_output_that_reads_back_differently() {
+    let input = smoke("write-lossy-name.pdf");
+    let output = scratch("clean-lossy.pdf");
+    let _ = std::fs::remove_file(&output);
+    let out = nupdf(&[
+        "clean",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(out.stdout.is_empty());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "verify.failed");
+    assert!(!output.exists());
+
+    // --no-verify writes MuPDF's output regardless.
+    let report = run_json(&[
+        "clean",
+        "--no-verify",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(report["verification"], Value::Null);
+    assert!(output.exists());
+}
+
+#[test]
+fn clean_keeps_encryption_and_the_password_reopens_it() {
+    let input = smoke("encrypted-user-password.pdf");
+    let output = scratch("clean-user-password.pdf");
+    let report = run_json(&[
+        "--password",
+        "user",
+        "clean",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(report["verification"]["verified"], true);
+    let reopened = run_json(&["--password", "user", "info", output.to_str().unwrap()]);
+    assert_eq!(reopened["encryption"], "Standard V5 R6 256-bit AES");
+    assert_eq!(
+        reopened["metadata"]["Title"],
+        "Encrypted: encrypted-user-password.pdf"
+    );
+}
+
+#[test]
+fn clean_reports_an_unwritable_output() {
+    let input = smoke("minimal.pdf");
+    let output = scratch("no-such-dir/out.pdf");
+    let out = nupdf(&[
+        "clean",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "output.unwritable");
+}

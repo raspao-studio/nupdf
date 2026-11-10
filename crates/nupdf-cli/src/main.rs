@@ -54,6 +54,23 @@ enum Command {
         #[arg(long)]
         images: bool,
     },
+    /// Rewrite the whole document as `mutool clean` does with no options:
+    /// every object in a plain xref table, object and xref streams
+    /// unpacked, encryption kept. The output is read back and compared
+    /// object by object before it is written.
+    Clean {
+        file: PathBuf,
+        /// Where to write, replacing the file atomically.
+        #[arg(short, long, required_unless_present = "dry_run")]
+        output: Option<PathBuf>,
+        /// Report what would be written, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip reading the output back. It is then exactly what MuPDF
+        /// writes, even where that does not read back the same.
+        #[arg(long)]
+        no_verify: bool,
+    },
     /// Show one object (`12`, `12 0 R`) or the trailer (`trailer`).
     Show {
         file: PathBuf,
@@ -73,6 +90,7 @@ enum Exit {
     Internal = 1,
     Usage = 2,
     Input = 3,
+    Verify = 4,
     Limit = 5,
 }
 
@@ -162,6 +180,20 @@ fn main() -> ExitCode {
                 &doc,
                 objects::streams(&doc, *images),
             )
+        }),
+        Command::Clean {
+            file,
+            output,
+            dry_run,
+            no_verify,
+        } => open(file).and_then(|(doc, facts)| {
+            let plan = Clean {
+                output: output.as_deref(),
+                apply: !dry_run,
+                verify: !no_verify,
+                password,
+            };
+            clean(&doc, &facts, &plan)
         }),
         Command::Show {
             file,
@@ -319,6 +351,103 @@ fn diagnostics(doc: &Document) -> serde_json::Value {
         .into_iter()
         .map(|d| serde_json::json!({ "code": d.code, "severity": "warning", "message": d.message }))
         .collect()
+}
+
+struct Clean<'a> {
+    output: Option<&'a Path>,
+    apply: bool,
+    verify: bool,
+    password: Option<&'a str>,
+}
+
+fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::Value, Failure> {
+    let bytes =
+        nupdf::write::save(doc, &nupdf::write::WriteOptions::default()).map_err(|e| Failure {
+            exit: Exit::Input,
+            code: "input.unloadable_object",
+            message: nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
+                .to_string(),
+        })?;
+    let verification = plan.verify.then(|| {
+        let v = nupdf::write::verify(doc, &bytes, plan.password);
+        if v.verified() {
+            Ok(v)
+        } else {
+            Err(Failure {
+                exit: Exit::Verify,
+                code: "verify.failed",
+                message: verify_failure(&v),
+            })
+        }
+    });
+    let verification = verification.transpose()?;
+    if plan.apply
+        && let Some(path) = plan.output
+    {
+        write_atomically(path, &bytes).map_err(|e| Failure {
+            exit: Exit::Input,
+            code: "output.unwritable",
+            message: format!("cannot write {}: {e}", path.display()),
+        })?;
+    }
+    let hash = blake3::hash(&bytes);
+    let body = serde_json::json!({
+        "applied": plan.apply,
+        "output": {
+            "path": plan.output.map(|p| p.display().to_string()),
+            "doc_id": DocId::from_hash(&hash).to_string(),
+            "len": bytes.len(),
+            "blake3": hash.to_hex().to_string(),
+        },
+        "verification": verification.map(|v| serde_json::json!({
+            "verified": true,
+            "objects": v.objects,
+        })),
+    });
+    Ok(report("nupdf.clean/v0", facts, doc, body))
+}
+
+/// Why the written document failed its self-check.
+fn verify_failure(v: &nupdf::write::Verification) -> String {
+    if !v.reopened {
+        return "the output does not open".into();
+    }
+    if v.repaired {
+        return "the output needs a repair to open".into();
+    }
+    const SHOWN: usize = 10;
+    let mut nums: Vec<String> = v
+        .mismatched
+        .iter()
+        .take(SHOWN)
+        .map(i32::to_string)
+        .collect();
+    if v.mismatched.len() > SHOWN {
+        nums.push(format!("and {} more", v.mismatched.len() - SHOWN));
+    }
+    format!(
+        "{} of {} objects read back differently from the input: {}",
+        v.mismatched.len(),
+        v.objects,
+        nums.join(", ")
+    )
+}
+
+/// Writes `data` next to `path` and renames it into place, so a reader
+/// never sees a partial file.
+fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp_name = format!(".{name}.nupdf-{}.tmp", std::process::id());
+    let tmp = dir.map_or_else(|| PathBuf::from(&tmp_name), |d| d.join(&tmp_name));
+    let written = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 fn show(
