@@ -293,9 +293,15 @@ fn every_handler_revision_decrypts_with_the_empty_password() {
     for (name, encryption) in [
         ("encrypted-rc4-40.pdf", "Standard V1 R2 40-bit RC4"),
         ("encrypted-rc4-128.pdf", "Standard V2 R3 128-bit RC4"),
-        ("encrypted-rc4-crypt-filter.pdf", "Standard V4 R4 128-bit RC4"),
+        (
+            "encrypted-rc4-crypt-filter.pdf",
+            "Standard V4 R4 128-bit RC4",
+        ),
         ("encrypted-aes-128.pdf", "Standard V4 R4 128-bit AES"),
-        ("encrypted-aes-128-clear-metadata.pdf", "Standard V4 R4 128-bit AES"),
+        (
+            "encrypted-aes-128-clear-metadata.pdf",
+            "Standard V4 R4 128-bit AES",
+        ),
         ("encrypted-aes-256-r5.pdf", "Standard V5 R5 256-bit AES"),
         ("encrypted-aes-256.pdf", "Standard V5 R6 256-bit AES"),
     ] {
