@@ -1511,7 +1511,11 @@ impl Document {
             ));
         }
         // Every slot below maxnum starts free; found objects then fill theirs.
-        let mut entries = Slots::filled(len, Entry::free(0));
+        // MuPDF then chains the free entries, which takes each generation
+        // from 0 to 1: filled that way from the start, a file that names a
+        // huge object number keeps a sparse table instead of one entry per
+        // number.
+        let mut entries = Slots::filled(len, Entry::free(1));
         let mut fixed: HashMap<i32, Object> = HashMap::new();
         // The scan's last stream offset per number picks object streams.
         let mut stream_at: HashMap<i32, i64> = HashMap::new();
@@ -1548,19 +1552,6 @@ impl Document {
             }
         }
         entries.set(0, Entry::free(65535));
-        // MuPDF then chains the free entries, bumping each generation.
-        for i in 0..len as i32 {
-            let e = entries.get(i);
-            if e.kind == Kind::Free && e.generation < 65535 {
-                entries.set(
-                    i,
-                    Entry {
-                        generation: e.generation + 1,
-                        ..e
-                    },
-                );
-            }
-        }
 
         let mut trailer = Dict::new();
         trailer.put(b"Size", Object::Int(i64::from(scan.maxnum) + 1));
@@ -1899,6 +1890,21 @@ mod tests {
         assert_eq!((e(2).kind, e(2).generation), (Kind::Free, 1));
         // The scanner clamps generations (an xref table wraps them).
         assert_eq!((e(3).kind, e(3).generation), (Kind::InFile, 65535));
+    }
+
+    #[test]
+    fn a_huge_object_number_repairs_without_an_entry_per_number() {
+        let d = doc(b"%PDF-1.4\n1 0 obj <</Type/Catalog>> endobj\n\
+8000000 0 obj <<>> endobj\ntrailer <</Root 1 0 R>>\n");
+        assert!(d.repair_attempted());
+        assert_eq!(d.xref_len(), 8_000_001);
+        let e = |num| d.xref_entry(num);
+        assert_eq!((e(0).kind, e(0).generation), (Kind::Free, 65535));
+        assert_eq!(
+            (e(4_000_000).kind, e(4_000_000).generation),
+            (Kind::Free, 1)
+        );
+        assert_eq!(e(8_000_000).kind, Kind::InFile);
     }
 
     #[test]
