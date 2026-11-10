@@ -140,7 +140,7 @@ MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filte
 - [x] Fixtures: every non-image filter, a chain, a PNG predictor, and damaged or truncated Flate, LZW and ASCIIHex whose recovery depends on MuPDF's buffer sizes (52 smoke fixtures, all matching MuPDF on every check)
 - [x] `images` check: every stream with an image filter, decoded and compared byte for byte (`images.js`, `nupdf streams --images`). First measurement, with CCITT only: 94.1%; with zune-jpeg for DCT, 95.8%; with the libjpeg port and JBIG2, 99.6% (5,105 / 5,123)
 - [x] Fixtures: every image filter, with each chroma subsampling libjpeg scales in the IDCT, color transforms, restarts, complete and partial progressive scans, damaged data, Group 4 CCITT, and JBIG2 pages, globals and what jbig2dec rejects (76 smoke fixtures, all matching MuPDF on every check). xtask has its own small JPEG encoder for them
-- [x] Fuzz targets per decoder: `filters` runs every non-image decoder alone and in pairs, with predictor parameters, read whole and byte by byte; `crypt` covers the RC4 and AES stages. 15 minutes each, nothing found (`filters` 1.6M runs, `crypt` 5.2M, `open_walk` 0.9M)
+- [x] Fuzz targets per decoder: `filters` runs every non-image decoder alone and in pairs, with predictor parameters, read whole and byte by byte; `crypt` covers the RC4 and AES stages; `images` runs the DCT, CCITT and JBIG2 decoders with their parameters, seeded with image streams from the corpus. 15 minutes each, nothing found in nupdf's own code (`filters` 1.6M runs, `crypt` 5.2M, `open_walk` 0.9M, `images` 40K). `images` found endless loops and unbounded work in hayro-jbig2's symbol dictionaries, now guarded in a vendored copy (D17)
 
 **Status** (standard tier, 5,142 files, of which 19 neither tool opens):
 
@@ -150,6 +150,8 @@ MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filte
 | `images` (every image stream, decoded, byte for byte) | 99.6% (5,105 / 5,123) | JBIG2 test files only (D17): 14 that jbig2dec mis-decodes, 3 where it sets row padding bits, and a 1.25 GB page |
 
 Exit: ≥99.9% decoded-stream parity for non-image filters. Image decoders within one level on 99% of pixels.
+
+Exit status: met. Image streams match MuPDF exactly, not just within a level.
 
 ## M3: Writer and structural editing
 
