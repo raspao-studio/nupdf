@@ -32,7 +32,11 @@ impl Serialize for Dump<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut map = s.serialize_map(Some(self.count.saturating_sub(1)))?;
         for num in 1..self.count {
-            let value = match self.doc.object(num as i32) {
+            let object = self.doc.object(num as i32);
+            if let Some(o) = &object {
+                touch_references(self.doc, o);
+            }
+            let value = match object {
                 Some(Object::Stream(s)) => {
                     // Null when the data cannot be read (a broken AES stream),
                     // as in the oracle.
@@ -45,6 +49,23 @@ impl Serialize for Dump<'_> {
             map.serialize_entry(&num.to_string(), &value)?;
         }
         map.end()
+    }
+}
+
+/// Loads every object `obj` refers to, in the order oracle/js/objects.js
+/// meets them: in mutool's JavaScript, looking up a method on an indirect
+/// object resolves it, so encoding an object loads its references (without
+/// descending into them). Loading order matters: a failed object stream is
+/// demoted, and a lazy repair changes what later objects look like.
+fn touch_references(doc: &Document, obj: &Object) {
+    match obj {
+        Object::Ref(r) => {
+            let _ = doc.object(r.num);
+        }
+        Object::Array(items) => items.iter().for_each(|o| touch_references(doc, o)),
+        Object::Dict(d) => d.iter().for_each(|(_, v)| touch_references(doc, v)),
+        Object::Stream(s) => s.dict.iter().for_each(|(_, v)| touch_references(doc, v)),
+        _ => {}
     }
 }
 
