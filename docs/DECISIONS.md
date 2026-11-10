@@ -146,6 +146,7 @@ The fuzzer found two loops in hayro-jbig2's symbol dictionary decoding that neve
 
 - **Dictionary order.** A put into a dictionary of more than 100 entries sorts it by key, and later keys go into their sorted place (`pdf_dict_get_put`); a delete moves the last entry into the gap and unsorts it. This revises D11, since the order is what gets written. Lookups take one of two paths. A name MuPDF interns as a constant (608 of them, `names`) goes through `pdf_dict_find`, which in a sorted dictionary reports the last key as absent when it is the key sought. Any other name goes through `pdf_dict_finds`, which does not. So a sorted dictionary whose last key is `/Type` does not get `/Type` moved to the front.
 - **Null is absent.** MuPDF's null object is the null pointer, so a null `/Type`, `/ID` or `/Info` counts as missing wherever it checks for an object.
+- **Reals that are integers.** MuPDF writes a real as an integer when `(int)f` converts back to it, a conversion C leaves undefined outside the int range. x86 gives INT_MIN there and ARM saturates, so MuPDF writes 2147483648.0 as `2147483700` on x86 and as `2147483647` on ARM. nupdf follows x86, which loses nothing, and the fixtures avoid that one value.
 - **Generations are 16 bits.** Xref generations are `unsigned short`, so 65536 reads as 0, and the free list then counts up from what was read.
 - **Objects that cannot be loaded.** Object stream members that parse as null, or fail to load, are written as free entries, with MuPDF's generations.
 
