@@ -39,6 +39,12 @@ pub const PAIRS: &[Pair] = &[
         oracle: &["clean", "{file}", "{out}"],
         nupdf: &["clean", "{file}", "-o", "{out}"],
     },
+    Pair {
+        name: "clean-gggg",
+        about: "rewrite the document with every garbage collection level; nupdf also reads its output back to verify it",
+        oracle: &["clean", "-gggg", "{file}", "{out}"],
+        nupdf: &["clean", "-gggg", "{file}", "-o", "{out}"],
+    },
 ];
 
 #[derive(Debug, Serialize)]
