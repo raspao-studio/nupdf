@@ -388,9 +388,42 @@ impl Document {
         let st = self.current();
         let (raw, decrypted) = self.raw_stream_in(&st, stream, true)?;
         Ok(match decrypted {
-            None => Cow::Borrowed(raw),
+            None => Cow::Borrowed(&raw[..self.read_all_len(&st, stream, raw.len())]),
             Some(stage) => Cow::Owned(self.read_all(&st, stream, stage)),
         })
+    }
+
+    /// The bytes `fz_read_best` gets from an unencrypted stream it reads
+    /// directly (see `xref::read_all_len`).
+    fn read_all_len(&self, st: &State, stream: &Stream, raw_len: usize) -> usize {
+        let length = self
+            .resolve_in(st, stream.dict.get(b"Length").unwrap_or(&Object::Null))
+            .to_int64();
+        let initial = usize::try_from(length)
+            .ok()
+            .filter(|&l| l <= self.file_size)
+            .unwrap_or(0);
+        xref::read_all_len(
+            &self.data,
+            stream.data_start,
+            length,
+            self.file_size,
+            initial,
+        )
+        .min(raw_len)
+    }
+
+    /// Whether the stream names any filter.
+    fn has_filters(&self, st: &State, dict: &Dict) -> bool {
+        let filters = dict
+            .get(b"F")
+            .or_else(|| dict.get(b"Filter"))
+            .map_or(Object::Null, |f| self.resolve_in(st, f));
+        match filters {
+            Object::Name(_) => true,
+            Object::Array(items) => !items.is_empty(),
+            _ => false,
+        }
     }
 
     /// `pdf_open_raw_filter`: the bytes between `stream` and `endstream`,
@@ -704,7 +737,15 @@ impl Document {
         let (raw, decrypted) = self
             .raw_stream_in(st, stream, false)
             .map_err(DecodeError::Failed)?;
-        let input = decrypted.unwrap_or_else(|| filter::Stage::complete(raw.to_vec()));
+        let input = decrypted.unwrap_or_else(|| {
+            // Read directly, without filters, the reader is fz_read_best.
+            let keep = if self.has_filters(st, &stream.dict) {
+                raw.len()
+            } else {
+                self.read_all_len(st, stream, raw.len())
+            };
+            filter::Stage::complete(raw[..keep].to_vec())
+        });
         let crypt = self.crypt();
         let out = filter::decode_stage(
             &stream.dict,
