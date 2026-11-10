@@ -59,7 +59,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `garbage` (garbage collection on save: marking, merging duplicates, renumbering) | `pdf/pdf-write.c`, `pdf/pdf-object.c` (`pdf_objcmp`, `pdf_hash_obj`) | M3 |
 | `deflate` (zlib's `compress2`, for the streams `clean -z` writes) | zlib 1.3.2 as bundled with MuPDF: `compress.c`, `deflate.c`, `trees.c`, `adler32.c` (NOTICE) | M3 |
 | `fax_encode` (CCITT G4 encoder, for 1-bit images `clean -z` writes) | `fitz/encode-fax.c`, `fitz/buffer.c` (`fz_append_bits`) | M3 |
-| `graft` | `pdf/pdf-graft.c` | M3 |
+| `graft` (copying objects and pages between documents) | `pdf/pdf-graft.c` | M3 |
 | `insert` (putting a page into the page tree, page labels shifted) | `pdf/pdf-page.c` (`pdf_insert_page`, `pdf_adjust_page_labels`), `pdf/pdf-repair.c` (`pdf_walk_parent`) | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |
