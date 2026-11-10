@@ -132,7 +132,7 @@ MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filte
 
 - [x] Filter pipeline (DECISIONS D16): a port of MuPDF's stream model (`stream`), with each filter as a stage keeping its buffer size and its way of reading input, so damaged data ends where MuPDF's read ends. Whole reads keep MuPDF's compression bomb check (200 times the guessed length, or the image size, and at least 100 MB) besides `--max-decoded-bytes`; object and xref streams are read a byte at a time, as MuPDF's lexer does. This replaced M1's case-by-case models of AES and the endstream filter
 - [x] ASCIIHex, ASCII85, RunLength (with MuPDF's guard against stacked decoders), LZW with EarlyChange (a port of MuPDF's decoder, its tolerances included), Flate (zlib-rs) with MuPDF's handling of corrupt data, PNG and TIFF predictors
-- [ ] CCITTFax (`fax` or hayro-ccitt), DCT (zune-jpeg, with raw passthrough), JPX (hayro-jpeg2000), JBIG2 with globals (hayro-jbig2)
+- [x] Image decoders (DECISIONS D17): CCITTFax (a port of MuPDF's decoder), DCT (a port of libjpeg 10, the decoder MuPDF bundles, since libjpeg upsamples chroma inside its IDCT), JBIG2 with globals (hayro-jbig2, failing where jbig2dec does on what it does not implement), JPX passed through as `pdf_load_stream` does
 - [x] Brotli (brotli-decompressor), which fixed the last `info` mismatch
 - [x] Permissions (`pdf_has_permission`) reported by `info` under MuPDF's names, compared by the `info` check; a fixture restricts them
 - [x] `nupdf streams`: every stream's decoded length and BLAKE3 hash, as MuPDF's `pdf_load_stream` reads it; `show <ref> --data` decodes one

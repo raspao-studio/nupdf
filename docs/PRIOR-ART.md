@@ -53,7 +53,7 @@ We found no open-source tool that removes content and then independently proves 
 
 ## Building blocks we plan to reuse
 
-All permissive and AGPL-compatible. See ARCHITECTURE's dependency table: zlib-rs, weezl, zune-jpeg, hayro-jpeg2000, hayro-jbig2, fax or hayro-ccitt, skrifa/read-fonts, subsetter, moxcms, vello_cpu or tiny-skia, and RustCrypto. ocrs (Latin script only, "early preview") is the optional pure-Rust OCR. ttf-parser and qcms are effectively unmaintained; fontations and moxcms replace them.
+All permissive and AGPL-compatible. See ARCHITECTURE's dependency table: zlib-rs, hayro-jpeg2000, hayro-jbig2, skrifa/read-fonts, subsetter, moxcms, vello_cpu or tiny-skia, and RustCrypto. ocrs (Latin script only, "early preview") is the optional pure-Rust OCR. ttf-parser and qcms are effectively unmaintained; fontations and moxcms replace them.
 
 ## Corpora
 

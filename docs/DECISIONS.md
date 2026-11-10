@@ -119,3 +119,21 @@ What a damaged stream yields in MuPDF is decided by its stream machinery rather 
 
 LZW is a port of MuPDF's decoder rather than a library: its tolerance (a missing clear code, a single out-of-range code) and its reading past the end of a truncated stream are part of what it returns. Brotli uses brotli-decompressor, a port of the same reference decoder MuPDF links. One difference is deliberate: on a truncated Brotli stream MuPDF loops forever waiting for input, and nupdf ends the data instead.
 
+
+## D17. JPEG is a port of libjpeg; JBIG2 uses hayro-jbig2 with jbig2dec's refusals
+
+*2026-11-10*
+
+The plan named zune-jpeg for DCTDecode. Measured against MuPDF it was close but not exact: 95.8% of files matched within the old tolerance, and 115 JPEGs differed by up to a dozen levels. jpeg-decoder did no better (95.9%). The cause is libjpeg itself. Since version 7 it upsamples subsampled chroma inside the inverse DCT (a 2x2-subsampled block goes through a 16x16 transform), where other decoders upsample afterwards; its integer IDCT also clamps the DC term and rounds in its own way. So nupdf ports libjpeg 10's decompressor, the copy MuPDF bundles (`jpeg`, NOTICE). The port is limited to how MuPDF drives libjpeg: default parameters, full scale, one scanline at a time, a source that never suspends. That still covers baseline, extended and progressive Huffman and arithmetic coding, restart resynchronization, block smoothing of incomplete progressive images, and libjpeg's handling of truncated data. Every DCT stream in the standard tier now matches MuPDF byte for byte, so the `images` check compares exactly rather than within a level.
+
+CCITTFax is a port of MuPDF's `filter-fax.c`, which also matches exactly.
+
+JBIG2 uses hayro-jbig2. Porting jbig2dec (17,000 lines) was not needed: on valid streams the two decoders agree. Where they do not, jbig2dec is usually the one refusing. It leaves parts of the standard unimplemented (intermediate generic regions, 12 adaptive template pixels, color extensions, reused coding contexts) and fails the whole stream on them, so MuPDF yields no image. nupdf scans the segment headers for those parts first, then fails the same way and reports jbig2dec's messages. It also accepts a JBIG2 file header in a PDF stream, as jbig2dec does. 18 files still differ, all of them test files for the corner cases:
+
+- 14 pdf.js refinement tests, where jbig2dec mis-decodes Huffman-coded text regions.
+- 3 where jbig2dec's XNOR composition sets the padding bits past the end of each row.
+- `bomb_giant.pdf`, whose 100,000 x 100,000 page MuPDF allocates before its compression bomb check stops it, and nupdf refuses.
+
+JPX passes through undecoded in `pdf_load_stream`, as in MuPDF; decoding it belongs to image loading (M4).
+
+One weakness is hayro-jbig2's, and jbig2dec shares it. Arithmetic-coded symbol dictionaries are decoded as declared, so a 600-byte stream can declare tens of thousands of large symbols. nupdf takes 11 seconds on the worst one the fuzzer found; MuPDF took more than five minutes.
