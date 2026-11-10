@@ -109,6 +109,7 @@ pub fn all() -> Vec<Fixture> {
     .chain(image_fixtures())
     .chain(writer_fixtures())
     .chain(garbage_fixtures())
+    .chain(stream_fixtures())
     .collect()
 }
 
@@ -213,6 +214,204 @@ fn garbage_fixtures() -> Vec<Fixture> {
             "gc-encrypted.pdf",
             "Garbage: an RC4 document whose strings and streams are encrypted again under new numbers",
             encrypted_with_garbage(),
+        ),
+    ]
+}
+
+/// 1-bit rows packed MSB first, 0 for black as DeviceGray reads them; the
+/// bits that pad a row to a byte are black, which a fax encoder drops.
+fn pack_rows(rows: &[Vec<bool>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for row in rows {
+        for chunk in row.chunks(8) {
+            let mut byte = 0u8;
+            for (i, &black) in chunk.iter().enumerate() {
+                if !black {
+                    byte |= 0x80 >> i;
+                }
+            }
+            out.push(byte);
+        }
+    }
+    out
+}
+
+/// Cases for `clean -d`, `-z`, `-f`, `-i` and `-a`.
+fn stream_fixtures() -> Vec<Fixture> {
+    use crate::encode;
+    let fx = |name, about, bytes| Fixture {
+        name,
+        about,
+        needs_repair: false,
+        bytes,
+    };
+    let text = sample_data();
+
+    // Streams with no filter, of every kind the options treat apart.
+    let mut pdf = Pdf::new("1.6");
+    pdf.obj(
+        1,
+        "<</Type/Catalog/Pages 2 0 R/Metadata 10 0 R/Extra[13 0 R 16 0 R]>>",
+    );
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+    pdf.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>\
+         /XObject<</Im1 6 0 R/Im2 7 0 R/Im3 8 0 R/Im4 9 0 R>>>>/Contents 4 0 R>>",
+    );
+    pdf.stream(
+        4,
+        "",
+        b"q 77 0 0 40 72 600 cm /Im1 Do Q q 300 0 0 3 72 500 cm /Im2 Do Q\n\
+          q 61 0 0 37 72 400 cm /Im3 Do Q BT /F1 12 Tf 72 300 Td (Raw) Tj ET\n",
+    );
+    pdf.obj(
+        5,
+        "<</Type/Font/Subtype/Type1/BaseFont/Example/FontDescriptor 11 0 R>>",
+    );
+    let gray = |w: usize, h: usize, extra: &str| {
+        format!(
+            "/Type/XObject/Subtype/Image/Width {w}/Height {h}/ColorSpace/DeviceGray/BitsPerComponent 1{extra}"
+        )
+    };
+    pdf.stream(6, &gray(77, 40, ""), &pack_rows(&bilevel(77, 40)));
+    // A run longer than 2560 needs two make-up codes.
+    let wide: Vec<Vec<bool>> = (0..3)
+        .map(|y| (0..3000).map(|x| y == 1 || x > 2900).collect())
+        .collect();
+    pdf.stream(
+        7,
+        "/Type/XObject/Subtype/Image/Width 3000/Height 3/ImageMask true",
+        &pack_rows(&wide),
+    );
+    let pixels: Vec<u8> = (0..37)
+        .flat_map(|y| (0..61).map(move |x| image_sample(0, x, y)))
+        .collect();
+    pdf.stream(
+        8,
+        "/Type/XObject/Subtype/Image/Width 61/Height 37/ColorSpace/DeviceGray/BitsPerComponent 8",
+        &pixels,
+    );
+    // One byte short of its rows: deflated, not fax encoded.
+    let mut short = pack_rows(&bilevel(32, 8));
+    short.pop();
+    pdf.stream(9, &gray(32, 8, ""), &short);
+    pdf.stream(
+        10,
+        "/Type/Metadata/Subtype/XML",
+        b"<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?><x:xmpmeta xmlns:x='adobe:ns:meta/'/><?xpacket end='w'?>",
+    );
+    pdf.obj(
+        11,
+        "<</Type/FontDescriptor/FontName/Example/Flags 32/FontBBox[0 0 1000 1000]/ItalicAngle 0\
+         /Ascent 800/Descent -200/CapHeight 700/StemV 80/FontFile 12 0 R>>",
+    );
+    let font: Vec<u8> = (0..300u32).map(|i| (i * 37 % 256) as u8).collect();
+    pdf.stream(12, "/Length1 300/Length2 0/Length3 0", &font);
+    // /Subtype by reference fails MuPDF's pointer comparison, so this is
+    // deflated; /BitsPerComponent by reference still counts.
+    pdf.stream(
+        13,
+        "/Type/XObject/Subtype 14 0 R/Width 16/Height 4/ColorSpace/DeviceGray/BitsPerComponent 1",
+        &pack_rows(&bilevel(16, 4)),
+    );
+    pdf.obj(14, "/Image");
+    pdf.obj(15, "1");
+    pdf.stream(
+        16,
+        "/Type/XObject/Subtype/Image/Width 24/Height 4/ColorSpace/DeviceGray/BitsPerComponent 15 0 R",
+        &pack_rows(&bilevel(24, 4)),
+    );
+    let raw = pdf.finish_with_xref("");
+
+    // ASCIIHexDecode as `-z` takes it off, and filter arrays as `-a` and
+    // `-z` edit them: in place, so a shared array changes for every stream
+    // that uses it.
+    let hex = encode::ascii_hex(&text);
+    let hex_flate = encode::ascii_hex(&encode::flate(&text));
+    let flate = encode::flate(&text);
+    let mut pdf = Pdf::new("1.6");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R/Extra[6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R]>>");
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+    pdf.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
+    );
+    pdf.stream(4, "", &text_content("Hex"));
+    pdf.obj(5, FONT);
+    pdf.stream(6, "/Filter/ASCIIHexDecode", &hex);
+    pdf.stream(
+        7,
+        "/Filter[/ASCIIHexDecode/FlateDecode]/DecodeParms[null<</Predictor 1>>]",
+        &hex_flate,
+    );
+    // An array of one filter becomes the filter; /DecodeParms, not an
+    // array, becomes null.
+    pdf.stream(
+        8,
+        "/Filter[/FlateDecode]/DecodeParms<</Predictor 1>>",
+        &flate,
+    );
+    pdf.stream(9, "/Filter 20 0 R/DecodeParms 21 0 R", &hex_flate);
+    pdf.stream(10, "/Filter 20 0 R/DecodeParms 21 0 R", &hex_flate);
+    pdf.stream(11, "/Filter 22 0 R", &flate);
+    pdf.stream(12, "/Filter 22 0 R", &flate);
+    // The abbreviation is not what MuPDF compares with.
+    pdf.stream(13, "/Filter/AHx", &hex);
+    let mut bad = encode::ascii_hex(b"Hello, world");
+    bad[10] = b'z';
+    pdf.stream(14, "/Filter/ASCIIHexDecode", &bad);
+    pdf.stream(15, "/Filter[/ASCIIHexDecode]", &hex);
+    let binary: Vec<u8> = (0..=255u8).collect();
+    pdf.stream(
+        16,
+        "/Filter[/FlateDecode]/DecodeParms[<</Predictor 1>>]",
+        &encode::flate(&binary),
+    );
+    pdf.obj(20, "[/ASCIIHexDecode/FlateDecode]");
+    pdf.obj(21, "[null null]");
+    pdf.obj(22, "[/FlateDecode]");
+    let hexed = pdf.finish_with_xref("");
+
+    // Taking ASCIIHexDecode off an array whose /DecodeParms is empty fails
+    // MuPDF's whole save.
+    let mut pdf = hello(Pdf::new("1.6"), "Empty", false);
+    pdf.stream(
+        6,
+        "/Filter[/ASCIIHexDecode/FlateDecode]/DecodeParms[]",
+        &hex_flate,
+    );
+    let empty_parms = pdf.finish_with_xref("");
+
+    // 101 keys and /Filter, with no /Length: parsing sorts the dictionary,
+    // so /Filter is its last key, and MuPDF's lookup of an interned name
+    // misses it. The stream reads as unfiltered, and -z appends a second
+    // /Filter.
+    let keys: String = (0..101).map(|i| format!("/A{i:03} {i}")).collect();
+    let mut pdf = hello(Pdf::new("1.6"), "Sorted", false);
+    pdf.stream_as_is(6, &format!("<<{keys}/Filter/FlateDecode>>"), &flate);
+    let sorted = pdf.finish_with_xref("");
+
+    vec![
+        fx(
+            "streams-raw.pdf",
+            "Streams with no filter: 1-bit images and a mask (fax encoded), one a byte short, one with /Subtype by reference, an 8-bit image, a font file, XML metadata",
+            raw,
+        ),
+        fx(
+            "streams-hex.pdf",
+            "ASCIIHexDecode alone, first in an array, abbreviated and damaged; filter arrays of one; filter arrays shared by reference, which -a and -z edit in place",
+            hexed,
+        ),
+        fx(
+            "streams-hex-empty-parms.pdf",
+            "ASCIIHexDecode first of two filters with an empty /DecodeParms array, which fails MuPDF's save with -z",
+            empty_parms,
+        ),
+        fx(
+            "streams-sorted-filter.pdf",
+            "A stream dictionary of 102 keys, no /Length, and /Filter last once sorted, which MuPDF's lookup misses",
+            sorted,
         ),
     ]
 }
