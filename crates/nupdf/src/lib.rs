@@ -17,6 +17,7 @@ pub mod fax;
 pub mod fax_encode;
 pub mod filter;
 mod garbage;
+pub mod graft;
 pub mod header;
 pub mod insert;
 pub mod jbig2;
