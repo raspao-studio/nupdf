@@ -109,6 +109,17 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: true,
     },
+    Check {
+        name: "images",
+        about: "every stream with an image filter, decoded: length and BLAKE3 of the samples, or the error",
+        oracle_script: "oracle/js/images.js",
+        nupdf_args: &["streams", "--images"],
+        compare: Compare::Collection {
+            counts: &["/object_count"],
+            items: "streams",
+        },
+        oracle_writes_files: true,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
