@@ -187,7 +187,7 @@ fn build_filter<'a>(
     };
     match name {
         b"CCITTFaxDecode" | b"CCF" | b"DCTDecode" | b"DCT" | b"JBIG2Decode" | b"BrotliDecode"
-        | b"Br" | b"LZWDecode" | b"LZW" => Err(DecodeError::Unsupported(
+        | b"Br" => Err(DecodeError::Unsupported(
             String::from_utf8_lossy(name).into_owned(),
         )),
         b"RunLengthDecode" | b"RL" => Ok(open_rld(chain)),
@@ -200,6 +200,9 @@ fn build_filter<'a>(
             },
             diag,
         )),
+        b"LZWDecode" | b"LZW" => {
+            predictor(Stream::new(Lzw::new(chain, int(b"EarlyChange", 1)), diag))
+        }
         // Decoded by the image code; for everything else, the raw data.
         b"JPXDecode" => Ok(chain),
         b"ASCIIHexDecode" | b"AHx" => Ok(Stream::new(AsciiHex { chain, eod: false }, diag)),
@@ -526,6 +529,179 @@ impl Source for Flate<'_> {
             }
         }
         out.truncate(produced);
+        Ok(if out.is_empty() {
+            Next::Eof
+        } else {
+            Next::Data
+        })
+    }
+}
+
+// ---- LZW -----------------------------------------------------------------
+
+const LZW_MAX_BITS: u32 = 12;
+const LZW_NUM_CODES: i32 = 1 << LZW_MAX_BITS;
+
+#[derive(Clone, Copy, Default)]
+struct LzwCode {
+    prev: i32,
+    length: u16,
+    value: u8,
+    first_char: u8,
+}
+
+/// `fz_open_lzwd` with 9-bit minimum codes, as PDF uses.
+struct Lzw<'a> {
+    chain: Stream<'a>,
+    eod: bool,
+    early_change: i32,
+    min_bits: u32,
+    code_bits: u32,
+    old_code: i32,
+    next_code: i32,
+    table: Vec<LzwCode>,
+    string: Vec<u8>,
+    rp: usize,
+}
+
+impl<'a> Lzw<'a> {
+    fn new(chain: Stream<'a>, early_change: i32) -> Lzw<'a> {
+        let min_bits = 9;
+        let clear = 1i32 << (min_bits - 1);
+        let mut table = vec![
+            LzwCode {
+                prev: -1,
+                ..LzwCode::default()
+            };
+            LZW_NUM_CODES as usize
+        ];
+        for (i, code) in table.iter_mut().enumerate().take(clear as usize) {
+            *code = LzwCode {
+                prev: -1,
+                length: 1,
+                value: i as u8,
+                first_char: i as u8,
+            };
+        }
+        Lzw {
+            chain,
+            eod: false,
+            early_change,
+            min_bits,
+            code_bits: min_bits,
+            old_code: -1,
+            next_code: clear + 2,
+            table,
+            string: Vec::new(),
+            rp: 0,
+        }
+    }
+
+    fn clear(&self) -> i32 {
+        1 << (self.min_bits - 1)
+    }
+}
+
+impl Source for Lzw<'_> {
+    fn next(&mut self, _: usize, out: &mut Vec<u8>, diag: &Diagnostics) -> Result<Next, String> {
+        const MAX: usize = 4096;
+        let out_of_range = || report::format("out of range code encountered in lzw decode");
+        let (clear, eod_code, first) = (self.clear(), self.clear() + 1, self.clear() + 2);
+        let copy = |f: &mut Self, out: &mut Vec<u8>| {
+            let n = (f.string.len() - f.rp).min(MAX - out.len());
+            out.extend_from_slice(&f.string[f.rp..f.rp + n]);
+            f.rp += n;
+        };
+        copy(self, out);
+        while out.len() < MAX {
+            if self.eod {
+                return Ok(Next::Eof);
+            }
+            if self.chain.is_eof_bits() {
+                diag.warn("filter.lzw_premature", "premature end in lzw decode");
+                self.eod = true;
+                break;
+            }
+            let mut code = self.chain.read_bits(self.code_bits) as i32;
+            if code == eod_code {
+                self.eod = true;
+                break;
+            }
+            if self.next_code > LZW_NUM_CODES && code != clear {
+                diag.warn(
+                    "filter.lzw_missing_clear",
+                    "missing clear code in lzw decode",
+                );
+                code = clear;
+            }
+            if code == clear {
+                self.code_bits = self.min_bits;
+                self.next_code = first;
+                self.old_code = -1;
+                continue;
+            }
+            if self.old_code == -1 {
+                // Right after a clear, a code must already be in the table.
+                if code >= first {
+                    return Err(out_of_range());
+                }
+                self.old_code = code;
+            } else if self.next_code == LZW_NUM_CODES {
+                diag.warn(
+                    "filter.lzw_out_of_range",
+                    "tolerating a single out of range code in lzw decode",
+                );
+                self.next_code += 1;
+            } else if code > self.next_code || self.next_code >= LZW_NUM_CODES {
+                return Err(out_of_range());
+            } else {
+                let next = self.next_code as usize;
+                let old = self.table[self.old_code as usize];
+                // A code cut short by the end of the data reads as -1; MuPDF
+                // then reads table[-1], the fields just before the table,
+                // whose first_char is the top byte of next_code: 0.
+                let value = if code < 0 {
+                    0
+                } else if code < self.next_code {
+                    self.table[code as usize].first_char
+                } else {
+                    old.first_char
+                };
+                self.table[next] = LzwCode {
+                    prev: self.old_code,
+                    length: old.length.saturating_add(1),
+                    value,
+                    first_char: old.first_char,
+                };
+                self.next_code += 1;
+                if self.next_code > (1 << self.code_bits) - self.early_change - 1 {
+                    self.code_bits = (self.code_bits + 1).min(LZW_MAX_BITS);
+                }
+                self.old_code = code;
+            }
+
+            // The code's string, written back to front.
+            self.string.clear();
+            self.rp = 0;
+            if code >= clear {
+                let len = usize::from(self.table[code as usize].length);
+                self.string.resize(len, 0);
+                let mut c = code;
+                let mut i = len;
+                while i > 0 {
+                    i -= 1;
+                    let entry = self.table[c as usize];
+                    self.string[i] = entry.value;
+                    c = entry.prev;
+                    if c < 0 {
+                        break;
+                    }
+                }
+            } else {
+                self.string.push(code as u8);
+            }
+            copy(self, out);
+        }
         Ok(if out.is_empty() {
             Next::Eof
         } else {
@@ -1121,6 +1297,25 @@ mod tests {
         );
         assert_eq!(out.unwrap(), [7, 8]);
         assert!(diag.has("filter.bad_predictor"));
+    }
+
+    #[test]
+    fn lzw_decodes_the_spec_example() {
+        // PDF 32000-1, 7.4.4.2: "-----A---B", with EarlyChange 1.
+        let diag = Diagnostics::new();
+        let encoded = [0x80, 0x0b, 0x60, 0x50, 0x22, 0x0c, 0x0c, 0x85, 0x01];
+        assert_eq!(
+            run("LZWDecode", None, &encoded, &diag).unwrap(),
+            b"-----A---B"
+        );
+        assert!(diag.snapshot().is_empty());
+        // Cut short: what was decoded, and a warning.
+        let diag = Diagnostics::new();
+        // The last, partial code reads as all ones, which MuPDF writes out
+        // as a single byte before noticing the end.
+        let partial = run("LZW", None, &encoded[..6], &diag).unwrap();
+        assert_eq!(partial, b"-----A\xff");
+        assert!(diag.has("filter.lzw_premature"));
     }
 
     #[test]
