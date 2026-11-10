@@ -1097,8 +1097,13 @@ fn parse_old_entry(buf: &[u8], num: i32) -> Result<Option<Entry>, XrefError> {
     Ok(Some(Entry {
         kind,
         ofs,
-        generation,
+        generation: gen16(i64::from(generation)),
     }))
+}
+
+/// MuPDF keeps an entry's generation in an `unsigned short`.
+pub fn gen16(generation: i64) -> i32 {
+    i32::from(generation as u16)
 }
 
 /// `pdf_read_new_xref`: a cross-reference stream.
@@ -1227,7 +1232,7 @@ fn read_new_xref(
             section.push(Entry {
                 kind,
                 ofs: if w1 > 0 { b } else { 0 },
-                generation: if w2 > 0 { c as i32 } else { 0 },
+                generation: if w2 > 0 { gen16(c) } else { 0 },
             });
         }
     }
@@ -1238,7 +1243,7 @@ fn read_new_xref(
         Entry {
             kind: Kind::InFile,
             ofs: (at.saturating_sub(bias)) as i64,
-            generation: ind.generation,
+            generation: gen16(i64::from(ind.generation)),
         },
     );
     section.cached.insert(
@@ -1255,6 +1260,15 @@ fn read_new_xref(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generations_are_unsigned_shorts() {
+        assert_eq!(gen16(7), 7);
+        assert_eq!(gen16(65535), 65535);
+        assert_eq!(gen16(65536), 0);
+        assert_eq!(gen16(65537), 1);
+        assert_eq!(gen16(-1), 65535);
+    }
 
     #[test]
     fn atoi_matches_c() {
