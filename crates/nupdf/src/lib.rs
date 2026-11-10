@@ -28,6 +28,7 @@ pub mod limits;
 pub mod link;
 mod names;
 pub mod object;
+pub mod outline;
 pub mod page;
 pub mod parse;
 pub mod print;

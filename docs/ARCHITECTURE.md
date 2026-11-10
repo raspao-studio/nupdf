@@ -63,6 +63,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `insert` (putting a page into the page tree, page labels shifted) | `pdf/pdf-page.c` (`pdf_insert_page`, `pdf_adjust_page_labels`), `pdf/pdf-repair.c` (`pdf_walk_parent`) | M3 |
 | `geometry` (points, rectangles, matrices in single precision) | `fitz/geometry.c` | M3 |
 | `link` (links read as URIs and written back: destinations, actions, file specifications, `pdf_create_link`) | `pdf/pdf-link.c`, `pdf/pdf-annot.c` (`pdf_create_link`), `pdf/pdf-nametree.c` (`pdf_lookup_dest`), `pdf/pdf-page.c` (`pdf_lookup_page_number`), `fitz/link.c`, `fitz/string.c` (URI encoding, `fz_cleanname`) | M3 |
+| `outline` (MuPDF's outline iterator, repair pass included) | `pdf/pdf-outline.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |
 | `resources`, `xobject`, `pattern`, `shade`, `function`, `colorspace`, `image` | `pdf/pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c`, `pdf-shade.c`, `pdf-function.c`, `pdf-colorspace.c`, `pdf-image.c` | M4 |
