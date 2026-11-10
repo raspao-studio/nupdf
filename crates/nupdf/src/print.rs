@@ -340,11 +340,16 @@ pub fn to_string(obj: &Object, options: Options) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// How `fmt_obj` writes a real: as an integer when it is one (with C's
-/// conversion, which saturates on the platforms MuPDF is built for),
-/// otherwise as `fmtfloat` does.
+/// How `fmt_obj` writes a real: as an integer when `(int)f` converts back
+/// to it, otherwise as `fmtfloat` does. C leaves the conversion undefined
+/// outside the int range. x86 gives INT_MIN there, which is what nupdf
+/// does; ARM saturates, so MuPDF built for ARM writes 2^31 as 2147483647.
 fn format_real(f: f32, out: &mut Vec<u8>) {
-    let i = f as i32;
+    let i = if (-2147483648.0..2147483648.0).contains(&f) {
+        f as i32
+    } else {
+        i32::MIN
+    };
     if f == i as f32 {
         out.extend_from_slice(i.to_string().as_bytes());
     } else {
@@ -665,8 +670,10 @@ mod tests {
         assert_eq!(real(0.001), ".001");
         assert_eq!(real(1e-7), ".0000001");
         assert_eq!(real(3e9), "3000000000");
-        // C's conversion saturates, so this one prints as an integer.
-        assert_eq!(real(2147483648.0), "2147483647");
+        // Outside the int range, as x86 converts.
+        assert_eq!(real(2147483648.0), "2147483700");
+        assert_eq!(real(-2147483648.0), "-2147483648");
+        assert_eq!(real(-3e9), "-3000000000");
         assert_eq!(real(f32::NAN), "0");
         assert_eq!(real(1.1), "1.1");
         assert_eq!(real(612.123), "612.123");

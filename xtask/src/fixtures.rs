@@ -578,7 +578,7 @@ fn writer_fixtures() -> Vec<Fixture> {
     let strings = "[(plain) (with \\(parens\\) and \\\\) (tab\\tnew\\nline) <00010203> \
         <FEFF00410042> (caf\\351) (\\000\\001) () <> (\\(\\(\\)\\))]";
     let reals = "[0.5 -0.25 .001 0.0000001 1.0 -0.0 3.4 123456789.0 99999.5 \
-        2147483648.0 1e5 0.30000001 612.123]";
+        -2147483648.0 3000000000.0 1e5 0.30000001 612.123]";
     let names = "[/A#20B /Hash#23 /Paren#28 /Slash#2F /caf#E9 /NUL#00x /x]";
     let mut doc = hello(Pdf::new("1.6"), "Writer", false);
     doc.obj(6, &big);
