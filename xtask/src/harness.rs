@@ -34,6 +34,8 @@ pub struct Check {
     pub oracle_writes_files: bool,
     /// Applied to each file the oracle wrote before it is hashed.
     pub oracle_file_fixup: Option<fn(&mut [u8])>,
+    /// Further oracle arguments, after the file (and the scratch directory).
+    pub oracle_args: &'static [&'static str],
     /// Compare what MuPDF reads back from each side's output instead of
     /// the output itself. The oracle script writes `clean.pdf` into its
     /// scratch directory; `nupdf` writes with `-o`. This script then runs on
@@ -77,6 +79,7 @@ pub const CHECKS: &[Check] = &[
         oracle_writes_files: false,
         oracle_file_fixup: None,
         reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "objects",
@@ -90,6 +93,7 @@ pub const CHECKS: &[Check] = &[
         oracle_writes_files: false,
         oracle_file_fixup: None,
         reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "pages",
@@ -103,6 +107,7 @@ pub const CHECKS: &[Check] = &[
         oracle_writes_files: false,
         oracle_file_fixup: None,
         reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "warnings",
@@ -113,6 +118,7 @@ pub const CHECKS: &[Check] = &[
         oracle_writes_files: false,
         oracle_file_fixup: None,
         reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "streams",
@@ -126,6 +132,7 @@ pub const CHECKS: &[Check] = &[
         oracle_writes_files: true,
         oracle_file_fixup: None,
         reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "images",
@@ -139,6 +146,7 @@ pub const CHECKS: &[Check] = &[
         oracle_writes_files: true,
         oracle_file_fixup: None,
         reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "clean",
@@ -150,6 +158,7 @@ pub const CHECKS: &[Check] = &[
         oracle_writes_files: true,
         oracle_file_fixup: Some(name_nupdf_as_writer),
         reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "roundtrip",
@@ -163,8 +172,62 @@ pub const CHECKS: &[Check] = &[
         oracle_writes_files: true,
         oracle_file_fixup: None,
         reread: Some("oracle/js/objects.js"),
+        oracle_args: &[],
+    },
+    clean_gc(
+        "clean-g",
+        &["clean", "-g", "--dry-run", "--no-verify"],
+        &["garbage=1"],
+    ),
+    clean_gc(
+        "clean-gg",
+        &["clean", "-gg", "--dry-run", "--no-verify"],
+        &["garbage=2"],
+    ),
+    clean_gc(
+        "clean-ggg",
+        &["clean", "-ggg", "--dry-run", "--no-verify"],
+        &["garbage=3"],
+    ),
+    clean_gc(
+        "clean-gggg",
+        &["clean", "-gggg", "--dry-run", "--no-verify"],
+        &["garbage=4"],
+    ),
+    Check {
+        name: "roundtrip-gggg",
+        about: "the `clean -gggg` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &["clean", "-gggg", "--no-verify"],
+        compare: Compare::Collection {
+            counts: &["/object_count", "/repaired", "/warnings"],
+            items: "objects",
+        },
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        reread: Some("oracle/js/objects.js"),
+        oracle_args: &["garbage=4"],
     },
 ];
+
+/// `clean` with garbage collection at one level, compared as `clean` is.
+const fn clean_gc(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        name,
+        about: "the document rewritten as `mutool clean` writes it at one garbage collection level (-g to -gggg): BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args,
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        reread: None,
+        oracle_args,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -374,6 +437,7 @@ fn run_sides(
         let _ = std::fs::create_dir_all(dir);
         oracle_args.push(dir.as_os_str());
     }
+    oracle_args.extend(check.oracle_args.iter().map(std::ffi::OsStr::new));
     let mut oracle = side(mutool, &oracle_args, timeout);
     if check.oracle_writes_files
         && let Some(json) = &mut oracle.json
@@ -434,12 +498,13 @@ fn reread_sides(
 ) -> (Side, Side) {
     let oracle_dir = dir.join("oracle");
     let _ = std::fs::create_dir_all(&oracle_dir);
-    let oracle_args = [
+    let mut oracle_args = vec![
         std::ffi::OsStr::new("run"),
         script.as_os_str(),
         file.as_os_str(),
         oracle_dir.as_os_str(),
     ];
+    oracle_args.extend(check.oracle_args.iter().map(std::ffi::OsStr::new));
     let oracle = side(run.mutool, &oracle_args, run.timeout);
     let oracle = run.after(
         oracle,
