@@ -27,6 +27,10 @@ The contract that agents program against. The CLI and the MCP server (M8) expose
 | 4 | Verification failed: a mutation's self-check found a problem, such as redacted text still present. |
 | 5 | Limit exceeded: time, memory, decompression or size. |
 
+## Encrypted documents
+
+Every command takes `--password`, tried as both the user and the owner password. Without it, nupdf tries the empty password, as MuPDF does, and opens the file either way: `info` reports `"needs_password": true` and leaves `page_count` null when the empty password does not work, and objects then decrypt to the same unreadable bytes MuPDF shows. A password that opens neither way fails with exit 3 and `input.wrong_password`. `info.encryption` is MuPDF's description, such as `"Standard V5 R6 256-bit AES"`, or `"None"`. A security handler nupdf does not support (anything but `/Standard`) fails to open with `input.encryption`.
+
 ## Addressing content
 
 - **Pages** are 1-based. Selections use MuPDF's syntax: `1-3,7`, `N` for the last page, `5-N`, `N-1` for reverse order.

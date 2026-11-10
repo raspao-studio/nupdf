@@ -77,7 +77,7 @@ Baseline at the end of M0: `info` matches MuPDF on 11 of 12 smoke files MuPDF op
 
 ## M1: Syntax, xref, repair, page tree
 
-MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-repair.c`, `pdf-stream.c` (raw access), `pdf-page.c` (page tree).
+MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-repair.c`, `pdf-stream.c` (raw access), `pdf-page.c` (page tree), `pdf-crypt.c` and `fitz/crypt-*.c` (encryption, pulled forward from M2).
 
 - [x] Fetch the standard tier (5,142 files) and record its first baseline with the existing `info` check
 - [x] Lexer: whitespace and comments, all three EOL styles, MuPDF's number leniency (`pdf_lex_number`: `--5`, `1.2.3`, `.`, Google Docs' `0.0-5684342`), names with `#xx` escapes, nested literal strings with escapes, odd-length hex strings, keywords
@@ -101,37 +101,45 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 - [x] Fuzzing scaffold (`fuzz/`, cargo-fuzz) with targets `lex`, `parse_object`, `filters` and `open_walk`; a first 60-second run per target found nothing, and CI runs each for 30 seconds
 - [x] One CPU-hour per fuzz target with no findings (the M1 exit criterion): lex 48.7M runs, parse_object 48.6M, filters 120M, open_walk 2.3M, nothing found
 - [x] Fixtures: one per lexer leniency, xref repair path and page tree quirk (32 smoke fixtures, all matching MuPDF on `info`, `objects` and `pages`)
-- [ ] Investigate the four non-encrypted `objects` mismatches listed below
+- [x] Investigate the four non-encrypted `objects` mismatches: `issue18986.pdf` and `poppler-90-0-fuzzed.pdf` came from the oracle itself, since mutool's JavaScript resolves an indirect object on any method lookup, so `objects.js` loads every object it meets as a reference; `nupdf objects` now loads them in the same order. `fuzz-16214.pdf` and the two veraPDF files come from MuPDF's endstream filter: when /Length is too short it marks itself finished as it hands over the window holding `endstream`, and whatever does not fit the reader's buffer is dropped (2305 bytes is the reader's buffer after two growths); `xref::read_all_len` models it
+- [x] Standard security handler, revisions 2 to 6 (pulled forward from M2, DECISIONS D15): RC4 and AES-128/256, user and owner passwords, crypt filters (`/CF`, `/StmF`, `/StrF`, `Identity`, `/Crypt` in a filter chain) and `EncryptMetadata`. Strings decrypt as objects load and streams as they are read, with MuPDF's mutable file key (a failed attempt leaves its key in place) and its AES error handling (an error ends the data where a reader reaches it)
+- [x] `--password` (user or owner; a wrong one exits 3 with `input.wrong_password`), and `encryption` (MuPDF's description string) and `needs_password` in `info`, both compared by the `info` check
+- [x] Fixtures: the smoke document encrypted with each handler revision and method, with `EncryptMetadata false`, and with a user password under RC4 and AES-256 (41 smoke fixtures, all matching MuPDF)
+- [x] `crypt` fuzz target: /Encrypt parsing, authentication, and string and stream decryption
 
-**Status after the first M1 pass** (standard tier, 5,142 files):
+**Status** (standard tier, 5,142 files, of which 19 neither tool opens):
 
 | Check | Parity | Remaining mismatches |
 |---|---|---|
-| `info` (version, pages, xref size, repaired, revisions, metadata) | 98.7% (5,054 / 5,123) | 68 encrypted files (M2; their Info strings are encrypted), 1 Brotli file (M2) |
-| `pages` (page lookup, inherited attributes) | 99.8% (5,114 / 5,123) | 8 encrypted, 1 Brotli |
-| `warnings` (distinct warnings and reported errors) | 98.9% (5,068 / 5,123) | 22 encrypted; the rest are errors MuPDF reports from code paths nupdf does not run yet (stream reads with recovery, decryption) |
-| `objects` (every object, raw stream lengths) | 98.6% (5,049 / 5,122) | 66 encrypted, 1 Brotli, and 4 others: `issue18986.pdf` and `poppler-90-0-fuzzed.pdf` (lazy repairs MuPDF triggers that nupdf does not), `fuzz-16214.pdf` and two veraPDF files (MuPDF stops reading a stream at a buffer boundary when /Length overshoots into `endstream`) |
+| `info` (version, encryption, pages, xref size, repaired, revisions, metadata) | 99.98% (5,122 / 5,123) | 1 Brotli file (M2) |
+| `pages` (page lookup, inherited attributes) | 99.98% (5,122 / 5,123) | 1 Brotli |
+| `objects` (every object, raw stream lengths) | 99.94% (5,120 / 5,123) | 1 Brotli, 1 oracle timeout (`base64image.pdf`), and `fuzz-16214.pdf`, where MuPDF still treats an xref stream as a stream after nupdf has demoted it |
+| `warnings` (distinct warnings and reported errors) | 99.4% (5,091 / 5,123) | Errors MuPDF reports from code paths nupdf does not run yet, mostly `invalid key in dict` and syntax errors in objects that only rendering touches; 1 Brotli |
 
 There are no crashes, and no files that MuPDF opens but nupdf cannot. On a 300-file sample run sequentially, `nupdf info` takes 529 ms in total against MuPDF's 1,308 ms (geometric-mean speedup 2.47x, process start included; the MuPDF side also pays for its JavaScript runtime).
 
 Checks: `info` (version, page count, boxes) and `objects` (the canonical graph, with raw stream bytes hashed).
-Exit: ≥99.5% `info` parity and ≥99% `objects` parity on the standard tier. Zero nupdf crashes. One CPU-hour per fuzz target, clean. Median open-and-walk time ≤ MuPDF's.
+Exit: ≥99.5% `info` parity and ≥99% `objects` parity on the standard tier. Zero nupdf crashes. One CPU-hour per fuzz target, clean. Median open-and-walk time ≤ MuPDF's. Every encryption fixture opens with the right password and fails cleanly with the wrong one (moved from M2).
 
-## M2: Filters and encryption
+Exit status: met.
 
-MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filter-predict.c`, `filter-fax.c`, `filter-dct.c`, `filter-jbig2.c`, `filter-sgi.c`, `filter-thunder.c`, `load-jpx.c`, `crypt-*.c`; `pdf/pdf-stream.c`, `pdf-crypt.c`.
+## M2: Filters
+
+The security handler moved to M1 (DECISIONS D15).
+
+MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filter-predict.c`, `filter-fax.c`, `filter-dct.c`, `filter-jbig2.c`, `filter-sgi.c`, `filter-thunder.c`, `load-jpx.c`; `pdf/pdf-stream.c`.
 
 - [ ] Filter pipeline: streaming decode, decompressed-size and ratio limits
 - [ ] ASCIIHex, ASCII85, RunLength, LZW with EarlyChange (weezl or our own), Flate (zlib-rs) with MuPDF's tolerance for corrupt data (partial output plus a warning), PNG and TIFF predictors
 - [ ] CCITTFax (`fax` or hayro-ccitt), DCT (zune-jpeg, with raw passthrough), JPX (hayro-jpeg2000), JBIG2 with globals (hayro-jbig2)
-- [ ] Crypt filter and Identity
-- [ ] Standard security handler R2–R6: RC4 and AES-128/256 (RustCrypto), user and owner passwords, permissions, `EncryptMetadata`, separate string and stream crypt filters, embedded-file filter
-- [ ] `nupdf streams` (list streams, decode one), encryption fields in `info`, a global `--password`
-- [ ] Oracle: `streams.js` (BLAKE3 of each decoded stream), and MuPDF's encryption description string
-- [ ] Fixtures: every filter, and encrypted variants of the smoke files for each handler revision
+- [ ] Brotli (MuPDF 1.28 decodes `BrotliDecode`; the last `info` mismatch)
+- [ ] Permissions (`pdf_has_permission`) reported by `info`
+- [ ] `nupdf streams` (list streams, decode one)
+- [ ] Oracle: `streams.js` (BLAKE3 of each decoded stream)
+- [ ] Fixtures: every filter
 - [ ] Fuzz targets per decoder
 
-Exit: ≥99.9% decoded-stream parity for non-image filters. Image decoders within one level on 99% of pixels. Every encryption fixture opens with the right password and fails cleanly with the wrong one.
+Exit: ≥99.9% decoded-stream parity for non-image filters. Image decoders within one level on 99% of pixels.
 
 ## M3: Writer and structural editing
 

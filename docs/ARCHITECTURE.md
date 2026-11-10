@@ -39,6 +39,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `object` | `pdf/pdf-object.c` | M1 |
 | `xref` | `pdf/pdf-xref.c` (loading), `fitz/filter-basic.c` (endstream filter) | M1 |
 | `slots` (sparse xref storage) | new; MuPDF allocates every declared slot | M1 |
+| `crypt` (standard security handler) | `pdf/pdf-crypt.c`, `fitz/crypt-arc4.c`, `fitz/filter-basic.c` (RC4 and AES filters) | M1 |
 | `repair` (scanner) | `pdf/pdf-repair.c` | M1 |
 | `document` (state, loading, object streams, repair rebuild, version, page count) | `pdf/pdf-xref.c`, `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1 |
 | `diag` | MuPDF's `fz_warn` calls, as data | M1 |
@@ -46,7 +47,6 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `filter` (Flate, predictors, ASCIIHex, ASCII85, RunLength) | `pdf/pdf-stream.c` (`build_filter`), `fitz/filter-flate.c`, `fitz/filter-predict.c`, `fitz/filter-basic.c` | M1 |
 | `page` | `pdf/pdf-page.c` (page map and lookup), `pdf/pdf-repair.c` (`pdf_walk_parent`, parent repair), `pdf/pdf-object.c` (`pdf_cycle`) | M1 |
 | `filter` (LZW, Brotli, image decoders) | `fitz/filter-lzw.c`, `fitz/filter-brotli.c`, `fitz/filter-*.c`, `fitz/load-jpx.c`, `fitz/load-jbig2.c` | M2 |
-| `crypt` | `pdf/pdf-crypt.c`, `fitz/crypt-*.c` | M2 |
 | `write`, `edit`, `graft` | `pdf/pdf-write.c`, `pdf/pdf-graft.c`, `pdf/pdf-clean-file.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |
@@ -128,7 +128,7 @@ Pure Rust, widely used, permissive licenses compatible with AGPL (cargo-deny enf
 | Fonts | skrifa / read-fonts (fontations), subsetter; Type1 from hayro-font or our own parser |
 | Color management | moxcms |
 | Rasterizer | vello_cpu or tiny-skia (decided in M7) |
-| Crypto | RustCrypto: aes, cbc, rc4, md-5, sha2 |
+| Crypto | RustCrypto: aes, md-5, sha2 (CBC and RC4 are small enough to write, and MuPDF's padding and error rules need them open-coded) |
 | Parallelism | rayon |
 | Hashing (doc ids) | blake3 |
 | OCR (optional) | ocrs, or Tesseract as a subprocess |
