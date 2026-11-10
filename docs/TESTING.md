@@ -65,6 +65,8 @@ Third-party PDFs are never committed; `corpus/manifest.toml` records each source
 | `clean-g` … `clean-gggg` | The same at each garbage collection level | exact | M3 |
 | `clean-d`, `clean-z`, `clean-ze`, `clean-a`, `clean-dfi`, `clean-dzgg` | The same with stream options: decompress, compress (at the default effort and at 100), hex, decompress all but fonts and images, and decompress and compress after renumbering | exact | M3 |
 | `clean-Z`, `clean-Zg`, `clean-Zggz` | The same with object streams and an xref stream: alone, at `-g`, and with `-gg` and `-z` | exact | M3 |
+| `clean-D` | The same without encryption | exact | M3 |
+| `roundtrip-E40`, `roundtrip-E128`, `roundtrip-Eaes128`, `roundtrip-Eaes256` | MuPDF reading back each side's output encrypted with a new handler (owner password only): objects decrypted, raw stream data, repair, warnings. Bytes differ by design: MuPDF's new /ID and AES secrets are random | exact | M3 |
 | `roundtrip`, `roundtrip-gggg` | MuPDF reading back each side's `clean` (or `clean -gggg`) output: objects, raw stream data, repair, warnings | exact | M3 |
 | `trace` | Device calls per page, against `mutool trace` | matrices within 1e-3 | M4 |
 | `stext` | Characters, bboxes and fonts, against MuPDF's stext JSON | IoU ≥ 0.98 | M5 |

@@ -242,6 +242,34 @@ pub const CHECKS: &[Check] = &[
         &["objstms,garbage=2,compress"],
     ),
     Check {
+        about: "the document rewritten without encryption, as `mutool clean -D` writes it: BLAKE3 of the output",
+        ..clean_gc(
+            "clean-D",
+            &["clean", "-D", "--dry-run", "--no-verify"],
+            &["encrypt=none"],
+        )
+    },
+    roundtrip_encrypted(
+        "roundtrip-E40",
+        &["clean", "-E", "rc4-40", "-O", "owner", "--no-verify"],
+        &["encrypt=rc4-40,owner-password=owner"],
+    ),
+    roundtrip_encrypted(
+        "roundtrip-E128",
+        &["clean", "-E", "rc4-128", "-O", "owner", "--no-verify"],
+        &["encrypt=rc4-128,owner-password=owner"],
+    ),
+    roundtrip_encrypted(
+        "roundtrip-Eaes128",
+        &["clean", "-E", "aes-128", "-O", "owner", "--no-verify"],
+        &["encrypt=aes-128,owner-password=owner"],
+    ),
+    roundtrip_encrypted(
+        "roundtrip-Eaes256",
+        &["clean", "-E", "aes-256", "-O", "owner", "--no-verify"],
+        &["encrypt=aes-256,owner-password=owner"],
+    ),
+    Check {
         name: "roundtrip-gggg",
         about: "the `clean -gggg` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
         oracle_script: "oracle/js/clean.js",
@@ -256,6 +284,30 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["garbage=4"],
     },
 ];
+
+/// `clean -E` with an owner password only, so the output opens without
+/// one, as MuPDF reads each side's output back. The bytes cannot be
+/// compared: MuPDF draws a new /ID, and AES keys and IVs, at random.
+const fn roundtrip_encrypted(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        name,
+        about: "the document encrypted with a new security handler, as MuPDF reads each side's output back: objects decrypted, raw stream data, repair, warnings",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args,
+        compare: Compare::Collection {
+            counts: &["/object_count", "/repaired", "/warnings"],
+            items: "objects",
+        },
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        reread: Some("oracle/js/objects.js"),
+        oracle_args,
+    }
+}
 
 /// `clean` writing object streams and an xref stream, compared as `clean`
 /// is.
