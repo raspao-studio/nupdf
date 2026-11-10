@@ -101,3 +101,13 @@ Each section stores what it read as runs: listed entries one by one, and long st
 
 Behavior stays MuPDF's (D5). The object count, the entries and the errors are the same. MuPDF checks entries in the order of its in-memory subsection list, which its merging rules shape: a subsection inside another is ignored, one that starts inside or right after another extends it, one that touches two makes the section a single subsection, and so does an xref stream whose own number lies outside its `/Index`. That order decides which error a broken file reports, so nupdf models the list on number ranges instead of allocating it. The rules are tested against MuPDF's output on constructed files.
 
+## D15. Encryption moves from M2 into M1
+
+*2026-11-09*
+
+Encrypted files were almost all of what kept M1 from its exit bar: 68 of the 69 `info` mismatches on the standard tier, most of `objects` and a third of `warnings`. Agents also meet them constantly, usually with only an owner password set, which every reader opens silently. So the standard security handler (revisions 2 to 6, RC4 and AES, crypt filters) is part of M1. LZW, Brotli and the image decoders stay in M2.
+
+nupdf copies MuPDF's handling, including two behaviors that look like accidents. The file key is state that each authentication attempt overwrites, so a document opened without its password is decrypted with the key from the last failed attempt, and reports the same unreadable strings MuPDF does. And MuPDF decrypts AES as a stream: a bad final block ends the data where a reader reaches it, so Flate usually fails first on a wrong key, and a whole-stream read keeps the 256-byte chunks it got before the error. Both decide what agents see in a file they cannot open, and both are tested against MuPDF.
+
+Passwords are given with `--password`. A wrong one is an input error (exit 3, `input.wrong_password`); no password is not an error, since MuPDF opens such files too, and `info` reports `needs_password`.
+
