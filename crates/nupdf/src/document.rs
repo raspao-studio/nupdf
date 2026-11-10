@@ -795,6 +795,11 @@ impl Document {
             }
             (loaded, _) => loaded,
         };
+        // MuPDF keeps no object for a member of a failed object stream, so
+        // every lookup goes back to the stream (and reports it again).
+        if matches!(loaded, Loaded::Failed(_)) && st.entries.get(num).kind == Kind::InStream {
+            return loaded;
+        }
         st.cache.insert_if_absent(num, loaded)
     }
 
@@ -877,6 +882,14 @@ impl Document {
     /// `pdf_load_obj_stm`, cached per state.
     fn objstm(&self, st: &State, stm: i32) -> Arc<ObjStm> {
         if let Some(found) = st.objstms.lock().ok().and_then(|m| m.get(&stm).cloned()) {
+            // After a failure MuPDF marks the stream's entry free, so later
+            // lookups give up before reading it, with a shorter message.
+            if found.error.is_some() {
+                return Arc::new(ObjStm {
+                    objects: Vec::new(),
+                    error: Some(report::format(&format!("corrupt object stream {stm}"))),
+                });
+            }
             return found;
         }
         let computed = Arc::new(self.load_objstm(st, stm));
