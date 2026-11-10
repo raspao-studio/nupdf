@@ -5,6 +5,7 @@
 
 mod bench;
 mod corpus;
+mod encode;
 mod encrypt;
 mod fixtures;
 mod harness;
