@@ -48,11 +48,13 @@ pub enum Compare {
 pub const CHECKS: &[Check] = &[
     Check {
         name: "info",
-        about: "document-level facts: effective version, page count, xref size, repair",
+        about: "document-level facts: effective version, encryption, page count, xref size, repair",
         oracle_script: "oracle/js/info.js",
         nupdf_args: &["info"],
         compare: Compare::Fields(&[
             "/pdf_version",
+            "/encryption",
+            "/needs_password",
             "/page_count",
             "/object_count",
             "/repaired",
