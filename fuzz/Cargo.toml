@@ -16,6 +16,10 @@ nupdf = { path = "../crates/nupdf" }
 [workspace]
 members = ["."]
 
+# As in the main workspace.
+[patch.crates-io]
+hayro-jbig2 = { path = "../vendor/hayro-jbig2" }
+
 [profile.release]
 debug = 1
 
