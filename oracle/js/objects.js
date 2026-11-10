@@ -1,5 +1,10 @@
 // Oracle for the `objects` check: every object in the xref as canonical JSON.
-// Usage: mutool run oracle/js/objects.js <file>
+// Usage: mutool run oracle/js/objects.js <file> [scratch-dir]
+//
+// With a scratch directory (the `roundtrip` check), each stream's raw data
+// is also written to <scratch-dir>/<num> and named in a "file" field, which
+// the harness replaces with its BLAKE3 hash, and the report says whether
+// opening and loading every object needed a repair.
 //
 // Encoding (shared with `nupdf objects`):
 //   null, true/false, integers as numbers, reals as {"r": n},
@@ -11,6 +16,7 @@
 // same point as in nupdf.
 
 var doc = Document.openDocument(scriptArgs[0]);
+var dir = scriptArgs[1];
 
 function hex(bytes) {
   var s = "";
@@ -57,9 +63,19 @@ for (var i = 1; i < count; i++) {
   var e = o === null || o === undefined ? null : enc(o);
   if (ref.isStream()) {
     var len = null;
-    try { len = ref.readRawStream().length; } catch (err) {}
+    var file = null;
+    try {
+      var raw = ref.readRawStream();
+      len = raw.length;
+      if (dir) {
+        raw.save(dir + "/" + i);
+        file = String(i);
+      }
+    } catch (err) {}
     e = { stream: e, raw_len: len };
+    if (dir) e.file = file;
   }
   out.objects[i] = e;
 }
+if (dir) out.repaired = doc.wasRepaired();
 print(JSON.stringify(out));

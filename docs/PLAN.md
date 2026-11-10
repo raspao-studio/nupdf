@@ -165,8 +165,19 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 - [ ] Deterministic output: `/ID` derived from content, no timestamps unless asked
 - [x] `clean` with MuPDF's defaults: `-o` or `--dry-run`, and a read-back check that refuses output that does not open, needs a repair, or reads back differently (exit 4, `--no-verify` to skip)
 - [ ] Commands: `merge`, `split`, `pages` (select, reorder, delete, rotate), `meta` (get, set, strip), `encrypt`, `decrypt`, and `clean`'s options
-- [ ] Output validation: `qpdf --check`, selected Arlington PDF Model rules, and MuPDF reopening the output with identical content
+- [x] `clean` check: BLAKE3 of the output against MuPDF's in reproducible mode, the comment line naming the writer swapped first
+- [x] `roundtrip` check: each side's `clean` output read back by MuPDF (`objects.js` with a scratch directory), comparing the object graph, raw stream data, repairs and warnings
+- [ ] Output validation: `qpdf --check` and selected Arlington PDF Model rules
 - [x] Fixtures: a 120-key dictionary, every string, real and name form the printer distinguishes, a signature, null values and trailer entries, free generations past 16 bits, a null object stream member, and an empty key name MuPDF writes lossily (82 smoke fixtures)
+
+**Status** (standard tier, 5,142 files, of which 56 neither tool writes):
+
+| Check | Parity | Remaining mismatches |
+|---|---|---|
+| `clean` (output bytes) | 99.4% (5,052 / 5,085) | AES files only (D18): random initialization vectors in MuPDF's output. Besides those, MuPDF fails to save `issue20453.pdf` after its repair; nupdf writes it |
+| `roundtrip` (MuPDF reads each output back) | 99.7% (5,070 / 5,084) | Random IVs again, where MuPDF's own output does not read back exactly: AES documents opened without their password, and streams under an Identity crypt filter. One more file times out on both sides |
+
+`clean` reads its output back by default and refuses 27 standard files, all cases where MuPDF's output loses something (D18).
 
 Exit: ≥99.5% round-trip parity on the standard tier: MuPDF reads our output with the same object graph (modulo renumbering) and the same text. `merge`, `split` and `clean` are at least as fast as mutool.
 
