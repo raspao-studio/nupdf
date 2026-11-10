@@ -625,6 +625,12 @@ pub fn is_known(name: &[u8]) -> bool {
     KNOWN.binary_search(&name).is_ok()
 }
 
+/// The constant's value (`PDF_ENUM_NAME_*`), which is also its pointer:
+/// null, true and false come first.
+pub fn constant(name: &[u8]) -> Option<usize> {
+    KNOWN.binary_search(&name).ok().map(|i| i + 3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,5 +647,12 @@ mod tests {
         assert!(is_known(b"1.2"));
         assert!(!is_known(b"K000"));
         assert!(!is_known(b""));
+    }
+
+    #[test]
+    fn constants_follow_null_true_and_false() {
+        assert_eq!(constant(b"1.2"), Some(3));
+        assert_eq!(constant(b"r"), Some(3 + 607));
+        assert_eq!(constant(b"K000"), None);
     }
 }

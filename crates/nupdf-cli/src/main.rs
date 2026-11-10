@@ -54,15 +54,20 @@ enum Command {
         #[arg(long)]
         images: bool,
     },
-    /// Rewrite the whole document as `mutool clean` does with no options:
-    /// every object in a plain xref table, object and xref streams
-    /// unpacked, encryption kept. The output is read back and compared
-    /// object by object before it is written.
+    /// Rewrite the whole document as `mutool clean` does: every object in a
+    /// plain xref table, object and xref streams unpacked, encryption kept.
+    /// The output is read back and compared object by object before it is
+    /// written.
     Clean {
         file: PathBuf,
         /// Where to write, replacing the file atomically.
         #[arg(short, long, required_unless_present = "dry_run")]
         output: Option<PathBuf>,
+        /// Garbage collect, as `mutool clean -g`: once drops objects
+        /// nothing reaches, -gg also renumbers, -ggg also merges duplicate
+        /// objects, -gggg also duplicate streams.
+        #[arg(short, action = clap::ArgAction::Count)]
+        garbage: u8,
         /// Report what would be written, and write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -184,10 +189,15 @@ fn main() -> ExitCode {
         Command::Clean {
             file,
             output,
+            garbage,
             dry_run,
             no_verify,
         } => open(file).and_then(|(doc, facts)| {
             let plan = Clean {
+                options: nupdf::write::WriteOptions {
+                    garbage: (*garbage).min(4),
+                    ..Default::default()
+                },
                 output: output.as_deref(),
                 apply: !dry_run,
                 verify: !no_verify,
@@ -354,6 +364,7 @@ fn diagnostics(doc: &Document) -> serde_json::Value {
 }
 
 struct Clean<'a> {
+    options: nupdf::write::WriteOptions,
     output: Option<&'a Path>,
     apply: bool,
     verify: bool,
@@ -361,15 +372,14 @@ struct Clean<'a> {
 }
 
 fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::Value, Failure> {
-    let bytes =
-        nupdf::write::save(doc, &nupdf::write::WriteOptions::default()).map_err(|e| Failure {
-            exit: Exit::Input,
-            code: "input.unloadable_object",
-            message: nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
-                .to_string(),
-        })?;
+    let bytes = nupdf::write::save(doc, &plan.options).map_err(|e| Failure {
+        exit: Exit::Input,
+        code: "input.unloadable_object",
+        message: nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
+            .to_string(),
+    })?;
     let verification = plan.verify.then(|| {
-        let v = nupdf::write::verify(doc, &bytes, plan.password);
+        let v = nupdf::write::verify(doc, &bytes, plan.password, &plan.options);
         if v.verified() {
             Ok(v)
         } else {
@@ -393,6 +403,7 @@ fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::
     let hash = blake3::hash(&bytes);
     let body = serde_json::json!({
         "applied": plan.apply,
+        "garbage": plan.options.garbage,
         "output": {
             "path": plan.output.map(|p| p.display().to_string()),
             "doc_id": DocId::from_hash(&hash).to_string(),
@@ -420,7 +431,10 @@ fn verify_failure(v: &nupdf::write::Verification) -> String {
         .mismatched
         .iter()
         .take(SHOWN)
-        .map(i32::to_string)
+        .map(|&n| match n {
+            0 => "the trailer".to_string(),
+            n => n.to_string(),
+        })
         .collect();
     if v.mismatched.len() > SHOWN {
         nums.push(format!("and {} more", v.mismatched.len() - SHOWN));

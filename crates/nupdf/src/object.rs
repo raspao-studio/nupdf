@@ -240,6 +240,22 @@ impl Dict {
         self.entries.iter().map(|(k, v)| (k.as_ref(), v))
     }
 
+    /// Entry `i` (`pdf_dict_get_key` and `pdf_dict_get_val`).
+    pub(crate) fn entry(&self, i: usize) -> Option<(&Arc<[u8]>, &Object)> {
+        self.entries.get(i).map(|(k, v)| (k, v))
+    }
+
+    /// The value of entry `i`, to change in place (`pdf_dict_put_val_null`
+    /// and its kin, which go by index rather than by key).
+    pub(crate) fn value_mut(&mut self, i: usize) -> Option<&mut Object> {
+        self.entries.get_mut(i).map(|(_, v)| v)
+    }
+
+    /// Whether a put has sorted it (`PDF_FLAGS_SORTED`).
+    pub(crate) fn is_sorted(&self) -> bool {
+        self.sorted
+    }
+
     /// Replaces every value with `f(key, value)`, keeping the order.
     pub fn map_values(&mut self, mut f: impl FnMut(&[u8], Object) -> Object) {
         for (k, v) in &mut self.entries {

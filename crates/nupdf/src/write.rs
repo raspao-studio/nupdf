@@ -3,18 +3,20 @@
 // Derived from MuPDF source/pdf/pdf-write.c,
 // Copyright (C) 2004-2026 Artifex Software, Inc.
 
-//! Writing a whole document (`pdf_save_document`), as MuPDF does with its
-//! default options: every object in number order, streams copied raw,
-//! object streams and xref streams unpacked into plain objects and a
-//! classic xref table, the security handler kept. The output is the same
-//! byte for byte as MuPDF's in reproducible mode, apart from the AES
-//! initialization vectors (DECISIONS D18) and the comment naming the
-//! writer.
+//! Writing a whole document (`pdf_save_document`), as MuPDF does: every
+//! object in number order, streams copied raw, object streams and xref
+//! streams unpacked into plain objects and a classic xref table, the
+//! security handler kept, and optionally garbage collected first
+//! ([`crate::garbage`]). The output is the same byte for byte as MuPDF's in
+//! reproducible mode, apart from the AES initialization vectors (DECISIONS
+//! D18) and the comment naming the writer.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::document::Document;
-use crate::object::{Dict, ObjRef, Object};
+use crate::garbage::{self, Slot};
+use crate::object::{Dict, ObjRef, Object, Stream};
 use crate::print::{self, Options};
 use crate::xref::Kind;
 
@@ -25,6 +27,10 @@ pub struct WriteOptions {
     pub pretty: bool,
     /// Hex strings for anything outside printable ASCII (`do_ascii`).
     pub ascii: bool,
+    /// Garbage collection (`do_garbage`, `mutool clean -g` to `-gggg`): 1
+    /// drops what the trailer does not reach, 2 also renumbers, 3 also
+    /// merges duplicate objects, 4 also duplicate streams. Higher counts as 4.
+    pub garbage: u8,
 }
 
 /// Why the document could not be written.
@@ -69,7 +75,7 @@ struct State {
 pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteError> {
     check_document(doc);
     let crypt = doc.crypt();
-    let trailer = doc.trailer();
+    let mut trailer = doc.trailer();
     // MuPDF's null object is the null pointer: a null value counts as
     // absent wherever it checks for an object.
     let crypt_obj = trailer
@@ -79,7 +85,7 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
 
     // preloadobjstms: objects in object streams become plain objects (or
     // free, if they cannot be loaded).
-    let xref_len = doc.xref_len();
+    let mut xref_len = doc.xref_len();
     let load = !doc.repair_attempted();
     let mut types = Vec::with_capacity(xref_len);
     let mut gens = Vec::with_capacity(xref_len);
@@ -104,21 +110,63 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
         gens.push(g);
     }
 
+    let garbage = options.garbage.min(4);
+    let mut collected = None;
+    if garbage >= 1 {
+        let slots = (0..xref_len)
+            .map(|num| match types[num] {
+                Type::InUse => match doc.load_object(num as i32) {
+                    Ok(Some(o)) => {
+                        let data = match &o {
+                            Object::Stream(s) => Some(Arc::clone(s)),
+                            _ => None,
+                        };
+                        Slot::Loaded(o, data)
+                    }
+                    Ok(None) => Slot::Empty,
+                    Err(_) => Slot::Failed(num as i32),
+                },
+                Type::Free | Type::Unset => Slot::Empty,
+            })
+            .collect();
+        let c = garbage::collect(doc, slots, &mut trailer, garbage)?;
+        if garbage >= 2 {
+            // Renumbered: entry 0 stays, and every other is in use.
+            types.truncate(1);
+            gens.truncate(1);
+            types.resize(c.slots.len(), Type::InUse);
+            gens.resize(c.slots.len(), 0);
+        }
+        xref_len = c.slots.len();
+        collected = Some(c);
+    }
+
     let n = xref_len + 3;
+    let mut use_list = vec![true; n];
+    if let Some(c) = &collected {
+        use_list[..xref_len].copy_from_slice(&c.use_list);
+        use_list[xref_len..].fill(false);
+    }
     let mut st = State {
         // Usually about the input's size.
         out: Vec::with_capacity(doc.data().len().saturating_add(4096)),
         tight: !options.pretty,
         ascii: options.ascii,
-        use_list: vec![true; n],
+        use_list,
         ofs_list: vec![0; n],
         gen_list: vec![0; n],
         crypt_object_number: 0,
     };
     if crypt.is_some()
-        && let Some(Object::Ref(r)) = &crypt_obj
+        && let Some(Object::Ref(r)) = trailer.get(b"Encrypt")
     {
         st.crypt_object_number = r.num;
+    }
+    // Truncate the xref after compacting and renumbering.
+    if garbage >= 2 {
+        while xref_len > 0 && !st.use_list[xref_len - 1] {
+            xref_len -= 1;
+        }
     }
 
     // writeobjects
@@ -129,16 +177,30 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
     st.out.extend_from_slice(WRITER_COMMENT);
     for num in 0..xref_len {
         // dowriteobject
-        let gen_ = gens[num];
-        st.gen_list[num] = match types[num] {
+        let mut generation = match types[num] {
             Type::Unset => st.gen_list[num],
-            Type::Free | Type::InUse => gen_,
+            Type::Free | Type::InUse => gens[num],
         };
+        // Renumbering resets every generation, which re-encrypting allows.
+        if garbage >= 2 {
+            generation = if num == 0 { 65535 } else { 0 };
+        }
+        st.gen_list[num] = generation;
+        if garbage >= 1 && !st.use_list[num] {
+            continue;
+        }
         if types[num] == Type::InUse {
             st.ofs_list[num] = st.out.len() as i64;
             let unenc = num as i32 == st.crypt_object_number;
-            let generation = st.gen_list[num];
-            write_object(doc, &mut st, num as i32, generation, unenc)?;
+            let (obj, data) = match &collected {
+                Some(c) => (c.slots[num].object().cloned(), c.slots[num].data()),
+                None => (
+                    doc.load_object(num as i32)
+                        .map_err(|message| WriteError { message })?,
+                    None,
+                ),
+            };
+            write_object(doc, &mut st, num as i32, generation, unenc, obj, data)?;
         } else {
             st.use_list[num] = false;
         }
@@ -179,10 +241,21 @@ impl Verification {
     }
 }
 
-/// Opens `written` (with `password`, as the original was) and compares each
-/// object it has in use with the original's: its syntax, apart from the
-/// stream /Length the writer recomputes, and a stream's raw data.
-pub fn verify(original: &Document, written: &[u8], password: Option<&str>) -> Verification {
+/// Opens `written` (with `password`, as the original was) and compares it
+/// with the original: the syntax of each object, apart from the stream
+/// /Length the writer recomputes, and each stream's raw data. Without
+/// garbage collection every object the output has in use is compared with
+/// the original's of the same number. With it, objects are paired by where
+/// the trailer's /Root, /Info, /ID and /Encrypt lead in each, since they
+/// can be renumbered or merged; a reference that reads as null may have
+/// become null. `mismatched` then names the original's objects, and 0 the
+/// trailer.
+pub fn verify(
+    original: &Document,
+    written: &[u8],
+    password: Option<&str>,
+    options: &WriteOptions,
+) -> Verification {
     let Ok(again) = Document::open_with(written.to_vec(), original.limits()) else {
         return Verification {
             reopened: false,
@@ -194,23 +267,158 @@ pub fn verify(original: &Document, written: &[u8], password: Option<&str>) -> Ve
     if let Some(password) = password {
         let _ = again.authenticate(password);
     }
-    let mut objects = 0;
-    let mut mismatched = Vec::new();
-    let mut num = 1;
-    while num < again.xref_len() as i32 {
-        if again.xref_entry(num).kind == Kind::InFile {
-            objects += 1;
-            if as_read(original, num) != as_read(&again, num) {
-                mismatched.push(num);
+    let (objects, mismatched) = if options.garbage >= 1 {
+        Walk::new(original, &again).run()
+    } else {
+        let mut objects = 0;
+        let mut mismatched = Vec::new();
+        let mut num = 1;
+        while num < again.xref_len() as i32 {
+            if again.xref_entry(num).kind == Kind::InFile {
+                objects += 1;
+                if as_read(original, num) != as_read(&again, num) {
+                    mismatched.push(num);
+                }
             }
+            num += 1;
         }
-        num += 1;
-    }
+        (objects, mismatched)
+    };
     Verification {
         reopened: true,
         repaired: again.repaired(),
         objects,
         mismatched,
+    }
+}
+
+/// The original and the written document side by side, from the trailer.
+struct Walk<'a> {
+    original: &'a Document,
+    again: &'a Document,
+    /// Original object number to written object number.
+    pairs: HashMap<i32, i32>,
+    queue: Vec<(i32, i32)>,
+}
+
+impl<'a> Walk<'a> {
+    fn new(original: &'a Document, again: &'a Document) -> Self {
+        Walk {
+            original,
+            again,
+            pairs: HashMap::new(),
+            queue: Vec::new(),
+        }
+    }
+
+    fn run(mut self) -> (usize, Vec<i32>) {
+        let (before, after) = (self.original.trailer(), self.again.trailer());
+        let mut mismatched = Vec::new();
+        for key in [&b"Root"[..], b"Info", b"ID", b"Encrypt"] {
+            let a = before.get(key).cloned().unwrap_or(Object::Null);
+            let b = after.get(key).cloned().unwrap_or(Object::Null);
+            if !self.same(&a, &b) {
+                mismatched.push(0);
+            }
+        }
+        let mut objects = 0;
+        while let Some((o, w)) = self.queue.pop() {
+            objects += 1;
+            if !self.same_object(o, w) {
+                mismatched.push(o);
+            }
+        }
+        mismatched.sort_unstable();
+        mismatched.dedup();
+        (objects, mismatched)
+    }
+
+    /// Pairs `o` with `w`; an object already paired must pair the same way.
+    fn pair(&mut self, o: i32, w: i32) -> bool {
+        match self.pairs.get(&o) {
+            Some(&before) => before == w,
+            None => {
+                self.pairs.insert(o, w);
+                self.queue.push((o, w));
+                true
+            }
+        }
+    }
+
+    /// Whether reference `num` in the original leads to nothing, as
+    /// garbage collection decides where it makes references null.
+    fn reads_null(&self, mut num: i32) -> bool {
+        for _ in 0..10 {
+            if num <= 0 || num as usize >= self.original.xref_len() {
+                return true;
+            }
+            match self.original.load_object(num) {
+                Ok(Some(Object::Ref(r))) => num = r.num,
+                Ok(Some(Object::Null) | None) | Err(_) => return true,
+                Ok(Some(_)) => return false,
+            }
+        }
+        true
+    }
+
+    fn same_object(&mut self, o: i32, w: i32) -> bool {
+        let a = self
+            .original
+            .load_object(o)
+            .ok()
+            .flatten()
+            .unwrap_or(Object::Null);
+        let Ok(b) = self.again.load_object(w) else {
+            return false;
+        };
+        let b = b.unwrap_or(Object::Null);
+        match (&a, &b) {
+            (Object::Stream(sa), Object::Stream(sb)) => {
+                let (ra, rb) = (
+                    self.original.raw_stream_data(sa),
+                    self.again.raw_stream_data(sb),
+                );
+                matches!((ra, rb), (Ok(x), Ok(y)) if x == y)
+                    && self.same_dict(&sa.dict.without(b"Length"), &sb.dict.without(b"Length"))
+            }
+            (Object::Stream(_), _) | (_, Object::Stream(_)) => false,
+            _ => self.same(&a, &b),
+        }
+    }
+
+    fn same(&mut self, a: &Object, b: &Object) -> bool {
+        match (a, b) {
+            (Object::Ref(x), Object::Ref(y)) => self.pair(x.num, y.num),
+            (Object::Ref(x), Object::Null) => self.reads_null(x.num),
+            (Object::Ref(_), _) | (_, Object::Ref(_)) => false,
+            (Object::Array(x), Object::Array(y)) => {
+                x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| self.same(p, q))
+            }
+            (Object::Dict(x), Object::Dict(y)) => self.same_dict(x, y),
+            _ => {
+                let show = |o: &Object| print::to_string(o, Options::default());
+                show(a) == show(b)
+            }
+        }
+    }
+
+    /// Dictionaries as a reader sees them: the order of keys aside.
+    fn same_dict(&mut self, x: &Dict, y: &Dict) -> bool {
+        if x.len() != y.len() {
+            return false;
+        }
+        let sorted = |d: &Dict| -> Vec<(Arc<[u8]>, Object)> {
+            let mut e: Vec<_> = d
+                .iter()
+                .map(|(k, v)| (Arc::<[u8]>::from(k), v.clone()))
+                .collect();
+            e.sort_by(|p, q| p.0.cmp(&q.0));
+            e
+        };
+        let (ex, ey) = (sorted(x), sorted(y));
+        ex.iter()
+            .zip(ey.iter())
+            .all(|((ka, va), (kb, vb))| ka == kb && self.same(va, vb))
     }
 }
 
@@ -256,17 +464,18 @@ fn options(st: &State) -> Options {
     }
 }
 
-/// `writeobject`.
+/// `writeobject`, for `obj` as it is to be written. A stream's data is read
+/// through `data`, the stream as loaded, when garbage collection has
+/// changed the references in its dictionary.
 fn write_object(
     doc: &Document,
     st: &mut State,
     num: i32,
     generation: i32,
     unenc: bool,
+    obj: Option<Object>,
+    data: Option<&Stream>,
 ) -> Result<(), WriteError> {
-    let obj = doc
-        .load_object(num)
-        .map_err(|message| WriteError { message })?;
     let dict = match &obj {
         Some(Object::Dict(d)) => Some(d.as_ref()),
         Some(Object::Stream(s)) => Some(&s.dict),
@@ -290,7 +499,7 @@ fn write_object(
         Some(Object::Stream(s)) => {
             // copystream
             let raw = doc
-                .raw_stream_data(s)
+                .raw_stream_data(data.unwrap_or(s))
                 .map_err(|message| WriteError { message })?;
             let mut dict: Dict = s.dict.clone();
             let len = crypt
@@ -457,7 +666,7 @@ xref\n0 5\n0000000000 65535 f \n";
             "../../../corpus/smoke/encrypted-aes-256.pdf"
         ));
         let out = save(&doc, &WriteOptions::default()).unwrap_or_default();
-        let v = verify(&doc, &out, None);
+        let v = verify(&doc, &out, None, &WriteOptions::default());
         assert!(v.verified(), "{v:?}");
         assert!(v.objects > 0);
 
@@ -466,11 +675,11 @@ xref\n0 5\n0000000000 65535 f \n";
         let mut out = save(&doc, &WriteOptions::default()).unwrap_or_default();
         let at = out.windows(5).position(|w| w == b"BT ET").unwrap_or(0);
         out[at..at + 5].copy_from_slice(b"BT EX");
-        let v = verify(&doc, &out, None);
+        let v = verify(&doc, &out, None, &WriteOptions::default());
         assert_eq!(v.mismatched, vec![4]);
         assert!(!v.verified());
 
-        let v = verify(&doc, b"not a pdf", None);
+        let v = verify(&doc, b"not a pdf", None, &WriteOptions::default());
         assert!(!v.reopened && !v.verified());
     }
 
@@ -544,5 +753,127 @@ xref\n0 5\n0000000000 65535 f \n";
             !trailer.contains("/ID") && !trailer.contains("/Info"),
             "{trailer}"
         );
+    }
+
+    fn garbage(level: u8) -> WriteOptions {
+        WriteOptions {
+            garbage: level,
+            ..Default::default()
+        }
+    }
+
+    /// The `num 0 obj` lines of `out` with the line after each.
+    fn objects_of(out: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(out);
+        let lines: Vec<&str> = text.lines().collect();
+        lines
+            .windows(2)
+            .filter(|w| w[0].ends_with(" 0 obj"))
+            .map(|w| format!("{} {}", w[0], w[1]))
+            .collect()
+    }
+
+    const REACH: &[u8] = include_bytes!("../../../corpus/smoke/gc-reach.pdf");
+
+    #[test]
+    fn garbage_collection_keeps_what_the_trailer_reaches() {
+        let doc = open(REACH);
+        let out = save(&doc, &garbage(1)).unwrap_or_default();
+        let objects = objects_of(&out);
+        let text = String::from_utf8_lossy(&out);
+        // Unreachable objects, and the /Length object once baked, are gone;
+        // the rest keep their numbers.
+        assert_eq!(
+            objects
+                .iter()
+                .map(|o| o.split(' ').next().unwrap_or(""))
+                .collect::<Vec<_>>(),
+            ["1", "2", "3", "4", "5"],
+            "{text}"
+        );
+        assert!(text.contains("<</Length 40>>"), "{text}");
+        // A reference to a missing, free or null object, or to a reference
+        // to nothing, becomes null wherever it appears.
+        assert!(
+            text.contains("/Missing null/Free null/Null null/Chain null>>"),
+            "{text}"
+        );
+        assert!(text.contains("/Later null>>"), "{text}");
+        assert_eq!(xref_section(&out).lines().count(), 2 + 14, "numbers kept");
+        assert!(verify(&doc, &out, None, &garbage(1)).verified());
+    }
+
+    #[test]
+    fn garbage_collection_renumbers_from_one() {
+        let doc = open(REACH);
+        let out = save(&doc, &garbage(2)).unwrap_or_default();
+        assert!(xref_section(&out).starts_with("xref\n0 6\n0000000000 65535 f \n"));
+        assert!(!xref_section(&out).contains(" 00001 "), "generation 0");
+        let v = verify(&doc, &out, None, &garbage(2));
+        assert!(v.verified(), "{v:?}");
+        assert_eq!(v.objects, 5);
+    }
+
+    #[test]
+    fn duplicates_merge_into_the_first_but_pages_never_do() {
+        let doc = open(include_bytes!("../../../corpus/smoke/gc-duplicates.pdf"));
+        let at3 = objects_of(&save(&doc, &garbage(3)).unwrap_or_default());
+        // The fonts merge, then the resources that differed only by font;
+        // the streams and the reordered dictionaries do not.
+        assert_eq!(at3.len(), 10, "{at3:#?}");
+        assert!(at3.contains(&"4 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources 7 0 R/Contents 6 0 R>>".to_string()), "{at3:#?}");
+        let at4 = objects_of(&save(&doc, &garbage(4)).unwrap_or_default());
+        // -gggg merges the streams too, which leaves the pages alike.
+        assert_eq!(at4.len(), 9, "{at4:#?}");
+        assert_eq!(at4[2][2..], at4[3][2..], "pages alike, kept apart");
+        for level in [3, 4] {
+            let out = save(&doc, &garbage(level)).unwrap_or_default();
+            assert!(verify(&doc, &out, None, &garbage(level)).verified());
+        }
+    }
+
+    #[test]
+    fn renumbering_quirks_are_written_and_refused_on_reading_back() {
+        let doc = open(include_bytes!("../../../corpus/smoke/gc-renumber.pdf"));
+        let out = save(&doc, &garbage(2)).unwrap_or_default();
+        let text = String::from_utf8_lossy(&out);
+        // The 101-entry dictionary is sorted by the put.
+        assert!(text.contains("<</A 9 0 R/K000 0/K001 1"), "{text}");
+        // The interned last key gains a duplicate, the old number first.
+        assert!(text.contains("/K100 100/ca 11 0 R/ca 10 0 R>>"), "{text}");
+        // The reference the sort moved last is renumbered twice.
+        assert!(text.contains("/K099 99/Z 10 0 R>>"), "{text}");
+        let v = verify(&doc, &out, None, &garbage(2));
+        assert_eq!(v.mismatched, [8, 12], "{v:?}");
+        // Without renumbering the output reads back the same.
+        let out = save(&doc, &garbage(1)).unwrap_or_default();
+        assert!(verify(&doc, &out, None, &garbage(1)).verified());
+    }
+
+    #[test]
+    fn renumbered_objects_are_encrypted_under_their_new_numbers() {
+        let doc = open(include_bytes!("../../../corpus/smoke/gc-encrypted.pdf"));
+        let out = save(&doc, &garbage(2)).unwrap_or_default();
+        let again = open(&out);
+        assert!(!again.repaired());
+        assert_eq!(again.metadata("Title").as_deref(), Some("Renumbered"));
+        assert!(verify(&doc, &out, None, &garbage(2)).verified());
+        assert_eq!(save(&doc, &garbage(2)).ok(), Some(out), "deterministic");
+    }
+
+    #[test]
+    fn a_document_without_a_root_collects_to_nothing() {
+        let doc = open(
+            b"%PDF-1.4\n1 0 obj\n<</A 1>>\nendobj\n\
+xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+trailer\n<</Size 2>>\nstartxref\n34\n%%EOF\n",
+        );
+        let out = save(&doc, &garbage(1)).unwrap_or_default();
+        assert!(objects_of(&out).is_empty());
+        assert!(xref_section(&out).starts_with("xref\n0 2\n"));
+        // Renumbering truncates the xref to nothing, which does not open.
+        let out = save(&doc, &garbage(2)).unwrap_or_default();
+        assert!(xref_section(&out).starts_with("xref\n0 0\n"));
+        assert!(!verify(&doc, &out, None, &garbage(2)).reopened);
     }
 }

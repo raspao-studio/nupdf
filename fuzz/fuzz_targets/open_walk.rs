@@ -18,12 +18,17 @@ fuzz_target!(|data: &[u8]| {
             let _ = doc.stream_data(&s);
         }
     }
-    // Write it, as `clean` does, and read the output back.
+    // Write it, as `clean` does, at a garbage collection level the input
+    // picks, and read the output back.
+    let options = WriteOptions {
+        garbage: data.last().map_or(0, |b| b % 5),
+        ..Default::default()
+    };
     if doc.xref_len() <= 4096
-        && let Ok(out) = save(&doc, &WriteOptions::default())
+        && let Ok(out) = save(&doc, &options)
     {
-        let _ = verify(&doc, &out, None);
-        let again = save(&doc, &WriteOptions::default()).ok();
+        let _ = verify(&doc, &out, None, &options);
+        let again = save(&doc, &options).ok();
         assert_eq!(again.as_deref(), Some(out.as_slice()), "writing is deterministic");
     }
 });
