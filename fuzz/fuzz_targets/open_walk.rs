@@ -57,8 +57,9 @@ fuzz_target!(|data: &[u8]| {
         let again = save(&doc, &options).ok();
         assert_eq!(again.as_deref(), Some(out.as_slice()), "writing is deterministic");
     }
-    // Keep some pages, as `clean --pages` does, on a fresh copy, and write
-    // that: the fourth byte from the end picks which.
+    // Keep some pages, as `clean --pages` does, on a fresh copy, then make
+    // the edits `meta` and `pages --rotate` make, and write that: the
+    // fourth byte from the end picks the pages, the fifth the edits.
     if doc.xref_len() <= 4096
         && let Ok(edited) = Document::open(data.to_vec())
         && let Ok(count) = edited.page_count()
@@ -66,10 +67,21 @@ fuzz_target!(|data: &[u8]| {
         nupdf::write::check_document(&edited);
         let spec = ["N-1", "1", "2-N", "1,1", "N"][usize::from(pick(4) % 5)];
         let pages = nupdf::rearrange::parse_page_ranges(spec, count, &edited);
-        if nupdf::rearrange::rearrange_pages(&edited, &pages).is_ok()
-            && let Ok(out) = save(&edited, &options)
-        {
-            let _ = verify(&edited, &out, None, &options);
+        if nupdf::rearrange::rearrange_pages(&edited, &pages).is_ok() {
+            let edits = pick(5);
+            if edits & 1 != 0 {
+                nupdf::edit::strip_metadata(&edited);
+            }
+            if edits & 2 != 0 {
+                nupdf::edit::set_metadata(&edited, "info:Title", "\u{e9}t\u{e9}");
+            }
+            let rotated = edits & 4 == 0 || {
+                let pages: Vec<i32> = (0..edited.page_count().unwrap_or(0)).collect();
+                nupdf::edit::rotate_pages(&edited, &pages, 90 * i32::from(edits >> 3)).is_ok()
+            };
+            if rotated && let Ok(out) = save(&edited, &options) {
+                let _ = verify(&edited, &out, None, &options);
+            }
         }
     }
 });

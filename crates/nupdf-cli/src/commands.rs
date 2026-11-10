@@ -1,0 +1,269 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hum
+
+//! The structural editing commands: `meta`, `split`, page edits, `encrypt`
+//! and `decrypt`. Each edits the document's overlay, then writes it as
+//! `clean` does with its defaults, read back and verified first.
+
+use std::path::{Path, PathBuf};
+
+use clap::Args;
+use nupdf::Document;
+
+use super::{Clean, Exit, Failure, FileFacts, report, write_document};
+
+/// Where an edit goes: `-o` and `--dry-run`, and the read-back check.
+#[derive(Debug, Args)]
+pub struct WriteArgs {
+    /// Where to write, replacing the file atomically.
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+    /// Report what would be written, and write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip reading the output back.
+    #[arg(long)]
+    pub no_verify: bool,
+}
+
+impl WriteArgs {
+    /// The plan for writing with `options`, once -o or --dry-run is given.
+    pub fn plan<'a>(
+        &'a self,
+        options: nupdf::write::WriteOptions,
+        password: Option<&'a str>,
+    ) -> Result<Clean<'a>, Failure> {
+        if self.output.is_none() && !self.dry_run {
+            return Err(Failure {
+                exit: Exit::Usage,
+                code: "usage.missing_output",
+                message: "an edit needs -o or --dry-run".into(),
+            });
+        }
+        Ok(Clean {
+            options,
+            output: self.output.as_deref(),
+            apply: !self.dry_run,
+            verify: !self.no_verify,
+            password,
+            pages: None,
+        })
+    }
+}
+
+fn input_failure(code: &'static str, message: String) -> Failure {
+    Failure {
+        exit: Exit::Input,
+        code,
+        message,
+    }
+}
+
+/// `meta`: the /Info entries, or the document with them changed.
+pub fn meta(
+    doc: &Document,
+    facts: &FileFacts,
+    set: &[String],
+    strip: bool,
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    if set.is_empty() && !strip {
+        return Ok(report("nupdf.meta/v0", facts, doc, info_json(doc)));
+    }
+    let mut pairs = Vec::new();
+    for entry in set {
+        let Some((key, value)) = entry.split_once('=') else {
+            return Err(Failure {
+                exit: Exit::Usage,
+                code: "usage.bad_value",
+                message: format!("--set takes KEY=VALUE, got {entry:?}"),
+            });
+        };
+        pairs.push((key, value));
+    }
+    let plan = write.plan(nupdf::write::WriteOptions::default(), password)?;
+    nupdf::write::check_document(doc);
+    if strip {
+        nupdf::edit::strip_metadata(doc);
+    }
+    for (key, value) in pairs {
+        nupdf::edit::set_metadata(doc, key, value);
+    }
+    let mut body = info_json(doc);
+    if let serde_json::Value::Object(b) = &mut body {
+        b.insert("stripped".into(), strip.into());
+    }
+    write_document(doc, facts, &plan, "nupdf.meta/v0", body)
+}
+
+/// The /Info entries as text, and whether the catalog has XMP metadata.
+fn info_json(doc: &Document) -> serde_json::Value {
+    let trailer = doc.trailer();
+    let info = trailer.get(b"Info").map(|i| doc.resolve(i));
+    let mut entries = serde_json::Map::new();
+    if let Some(nupdf::Object::Dict(d)) = &info {
+        for (key, value) in d.iter() {
+            let value = match doc.resolve(value) {
+                nupdf::Object::String(s) => nupdf::text_string::text_string(&s).into(),
+                other => nupdf::print::to_string(&other, nupdf::print::Options::default()).into(),
+            };
+            entries.insert(String::from_utf8_lossy(key).into_owned(), value);
+        }
+    }
+    let root = trailer.get(b"Root").cloned().unwrap_or(nupdf::Object::Null);
+    let xmp = !matches!(doc.dict_get(&root, b"Metadata"), nupdf::Object::Null);
+    serde_json::json!({ "info": entries, "xmp": xmp })
+}
+
+/// Page edits on `pages`: keep or drop pages, then rotate some.
+pub struct PageEdits<'a> {
+    pub select: Option<&'a str>,
+    pub delete: Option<&'a str>,
+    pub rotate: Option<i32>,
+    pub rotate_pages: Option<&'a str>,
+}
+
+impl PageEdits<'_> {
+    pub fn any(&self) -> bool {
+        self.select.is_some() || self.delete.is_some() || self.rotate.is_some()
+    }
+}
+
+/// `pages` with edits: the pages kept or dropped (as `clean --pages`), then
+/// rotated.
+pub fn edit_pages(
+    doc: &Document,
+    facts: &FileFacts,
+    edits: &PageEdits,
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    if let Some(degrees) = edits.rotate
+        && degrees % 90 != 0
+    {
+        return Err(Failure {
+            exit: Exit::Usage,
+            code: "usage.bad_value",
+            message: format!("--rotate takes a multiple of 90, got {degrees}"),
+        });
+    }
+    let plan = write.plan(nupdf::write::WriteOptions::default(), password)?;
+    let tree = |e: String| input_failure("input.page_tree", e);
+    nupdf::write::check_document(doc);
+    let count = doc.page_count().map_err(|e| tree(e.0))?;
+    let kept = match (edits.select, edits.delete) {
+        (Some(spec), _) => Some(nupdf::rearrange::parse_page_ranges(spec, count, doc)),
+        (None, Some(spec)) => {
+            let gone = nupdf::rearrange::parse_page_ranges(spec, count, doc);
+            Some((0..count).filter(|p| !gone.contains(p)).collect())
+        }
+        (None, None) => None,
+    };
+    if let Some(pages) = &kept {
+        nupdf::rearrange::rearrange_pages(doc, pages)
+            .map_err(|e| tree(nupdf::diag::report::strip(&e.0).to_string()))?;
+    }
+    if let Some(degrees) = edits.rotate {
+        let count = doc.page_count().map_err(|e| tree(e.0))?;
+        let pages = match edits.rotate_pages {
+            Some(spec) => nupdf::rearrange::parse_page_ranges(spec, count, doc),
+            None => (0..count).collect(),
+        };
+        nupdf::edit::rotate_pages(doc, &pages, degrees).map_err(tree)?;
+    }
+    let body = serde_json::json!({
+        "kept": kept.map(|p| p.iter().map(|i| i + 1).collect::<Vec<_>>()),
+        "rotated": edits.rotate,
+        "page_count": doc.page_count().ok(),
+    });
+    write_document(doc, facts, &plan, "nupdf.pages/v0", body)
+}
+
+/// A document opened as every command opens it, with its file facts.
+type Opened = Result<(Document, FileFacts), Failure>;
+
+/// `split`: one output per range of pages, each written as `clean --pages`
+/// writes it, from a fresh copy of the input.
+#[allow(clippy::too_many_arguments)]
+pub fn split(
+    path: &Path,
+    open: &dyn Fn(&Path) -> Opened,
+    out_dir: &Path,
+    per_file: usize,
+    ranges: Option<&str>,
+    dry_run: bool,
+    no_verify: bool,
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    let (doc, facts) = open(path)?;
+    let tree = |e: String| input_failure("input.page_tree", e);
+    let count = doc.page_count().map_err(|e| tree(e.0))?;
+    let specs: Vec<String> = match ranges {
+        Some(r) => r.split(';').map(str::to_string).collect(),
+        None => {
+            let per = per_file.max(1) as i32;
+            (0..count)
+                .step_by(per as usize)
+                .map(|first| format!("{}-{}", first + 1, (first + per).min(count)))
+                .collect()
+        }
+    };
+    if !dry_run {
+        std::fs::create_dir_all(out_dir).map_err(|e| Failure {
+            exit: Exit::Input,
+            code: "output.unwritable",
+            message: format!("cannot create {}: {e}", out_dir.display()),
+        })?;
+    }
+    let stem = path
+        .file_stem()
+        .map_or_else(|| "part".into(), |s| s.to_string_lossy().into_owned());
+    let width = specs.len().to_string().len();
+    let mut parts = Vec::new();
+    for (i, spec) in specs.iter().enumerate() {
+        let (part, _) = open(path)?;
+        nupdf::write::check_document(&part);
+        let pages = nupdf::rearrange::parse_page_ranges(spec, count, &part);
+        nupdf::rearrange::rearrange_pages(&part, &pages)
+            .map_err(|e| tree(nupdf::diag::report::strip(&e.0).to_string()))?;
+        let file = out_dir.join(format!("{stem}-{:0width$}.pdf", i + 1));
+        let plan = Clean {
+            options: nupdf::write::WriteOptions::default(),
+            output: Some(&file),
+            apply: !dry_run,
+            verify: !no_verify,
+            password,
+            pages: None,
+        };
+        let (output, verification) = super::save_checked(&part, &plan)?;
+        parts.push(serde_json::json!({
+            "pages": pages.iter().map(|p| p + 1).collect::<Vec<_>>(),
+            "output": output,
+            "verification": verification,
+        }));
+    }
+    let body = serde_json::json!({ "applied": !dry_run, "parts": parts });
+    Ok(report("nupdf.split/v0", &facts, &doc, body))
+}
+
+/// `encrypt` and `decrypt`: `clean -E` and `clean -D` under their own names.
+pub fn encryption(
+    doc: &Document,
+    facts: &FileFacts,
+    encrypt: nupdf::write::Encrypt,
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    let schema = match encrypt {
+        nupdf::write::Encrypt::Remove => "nupdf.decrypt/v0",
+        _ => "nupdf.encrypt/v0",
+    };
+    let body = serde_json::json!({ "encryption": super::encryption_json(&encrypt) });
+    let options = nupdf::write::WriteOptions {
+        encrypt,
+        ..Default::default()
+    };
+    let plan = write.plan(options, password)?;
+    write_document(doc, facts, &plan, schema, body)
+}

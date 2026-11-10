@@ -168,7 +168,8 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 - [x] Atomic file replacement: written beside the target, then renamed
 - [x] Deterministic output: nothing nupdf writes is random. The `/ID` a new security handler needs, the AES-256 file key, salts and `/Perms`, and AES initialization vectors (D18) are derived from the input; no timestamps are written
 - [x] `clean` with MuPDF's defaults: `-o` or `--dry-run`, and a read-back check that refuses output that does not open, needs a repair, or reads back differently (exit 4, `--no-verify` to skip)
-- [ ] Commands: `merge`, `split`, `pages` (select, reorder, delete, rotate), `meta` (get, set, strip), `encrypt`, `decrypt`, and `clean`'s options
+- [x] Commands (DECISIONS D24): `split`, `pages` (select, reorder, delete, rotate), `meta` (get, set, strip), `encrypt`, `decrypt`, and `clean`'s options. Each writes as `clean` does
+- [ ] Commands: `merge`, once grafting lands
 - [x] `clean` check: BLAKE3 of the output against MuPDF's in reproducible mode, the comment line naming the writer swapped first
 - [x] `roundtrip` check: each side's `clean` output read back by MuPDF (`objects.js` with a scratch directory), comparing the object graph, raw stream data, repairs and warnings
 - [x] `clean-g` through `clean-gggg` checks, `clean` at each garbage collection level, and `roundtrip-gggg`
