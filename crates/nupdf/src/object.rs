@@ -191,6 +191,12 @@ impl Dict {
         self.find(key).ok().map(|i| &self.entries[i].1)
     }
 
+    /// The value `get` finds, to change in place, as MuPDF changes a
+    /// container it got from a dictionary.
+    pub(crate) fn get_mut(&mut self, key: &[u8]) -> Option<&mut Object> {
+        self.find(key).ok().map(|i| &mut self.entries[i].1)
+    }
+
     pub fn insert(&mut self, key: Arc<[u8]>, value: Object) {
         if self.entries.len() > 100 && !self.sorted {
             self.entries.sort_by(|(a, _), (b, _)| a.cmp(b));

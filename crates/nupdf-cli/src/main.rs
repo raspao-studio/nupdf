@@ -68,6 +68,33 @@ enum Command {
         /// objects, -gggg also duplicate streams.
         #[arg(short, action = clap::ArgAction::Count)]
         garbage: u8,
+        /// Write streams decoded, as `mutool clean -d`. XML metadata and
+        /// JPEG 2000 images stay as they are.
+        #[arg(short, action = clap::ArgAction::Count)]
+        decompress: u8,
+        /// Deflate streams that have no filter, as `mutool clean -z`; a
+        /// 1-bit image is CCITT G4 encoded instead. Brotli (-zz) is not
+        /// supported.
+        #[arg(short = 'z', action = clap::ArgAction::Count)]
+        compress: u8,
+        /// Compress font streams that have no filter, and keep them encoded.
+        #[arg(short = 'f', action = clap::ArgAction::Count)]
+        compress_fonts: u8,
+        /// Compress image streams that have no filter, and keep them encoded.
+        #[arg(short = 'i', action = clap::ArgAction::Count)]
+        compress_images: u8,
+        /// Hex-encode binary streams, and write strings outside printable
+        /// ASCII in hex.
+        #[arg(short = 'a', action = clap::ArgAction::Count)]
+        ascii: u8,
+        /// Compression effort: 0 for zlib's default level, 1 to 100 for
+        /// levels 0 to 9.
+        #[arg(short = 'e', default_value_t = 0, allow_negative_numbers = true)]
+        effort: i32,
+        /// Object syntax: -t compact, -tt a dictionary entry per line. The
+        /// default is compact, or a line per entry with -a or -d and no -z.
+        #[arg(short = 't', action = clap::ArgAction::Count)]
+        tight: u8,
         /// Report what would be written, and write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -190,14 +217,29 @@ fn main() -> ExitCode {
             file,
             output,
             garbage,
+            decompress,
+            compress,
+            compress_fonts,
+            compress_images,
+            ascii,
+            effort,
+            tight,
             dry_run,
             no_verify,
-        } => open(file).and_then(|(doc, facts)| {
+        } => clean_options(&CleanFlags {
+            garbage: *garbage,
+            decompress: *decompress,
+            compress: *compress,
+            fonts: *compress_fonts,
+            images: *compress_images,
+            ascii: *ascii,
+            tight: *tight,
+            effort: *effort,
+        })
+        .and_then(|options| open(file).map(|opened| (options, opened)))
+        .and_then(|(options, (doc, facts))| {
             let plan = Clean {
-                options: nupdf::write::WriteOptions {
-                    garbage: (*garbage).min(4),
-                    ..Default::default()
-                },
+                options,
                 output: output.as_deref(),
                 apply: !dry_run,
                 verify: !no_verify,
@@ -363,6 +405,44 @@ fn diagnostics(doc: &Document) -> serde_json::Value {
         .collect()
 }
 
+/// `mutool clean`'s stream and syntax flags, counted as it counts them.
+struct CleanFlags {
+    garbage: u8,
+    decompress: u8,
+    compress: u8,
+    fonts: u8,
+    images: u8,
+    ascii: u8,
+    tight: u8,
+    effort: i32,
+}
+
+/// `pdf_write_options` as `mutool clean` sets them from its flags.
+fn clean_options(f: &CleanFlags) -> Result<nupdf::write::WriteOptions, Failure> {
+    if f.compress > 1 {
+        return Err(Failure {
+            exit: Exit::Usage,
+            code: "usage.unsupported",
+            message: "Brotli compression (-zz) is not supported".into(),
+        });
+    }
+    let pretty = match f.tight {
+        0 => (f.ascii > 0 || f.decompress > 0) && f.compress == 0,
+        1 => false,
+        _ => true,
+    };
+    Ok(nupdf::write::WriteOptions {
+        pretty,
+        ascii: f.ascii > 0,
+        garbage: f.garbage.min(4),
+        decompress: f.decompress > 0,
+        compress: f.compress > 0,
+        compress_images: f.images > 0,
+        compress_fonts: f.fonts > 0,
+        effort: f.effort.clamp(0, 100),
+    })
+}
+
 struct Clean<'a> {
     options: nupdf::write::WriteOptions,
     output: Option<&'a Path>,
@@ -404,6 +484,15 @@ fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::
     let body = serde_json::json!({
         "applied": plan.apply,
         "garbage": plan.options.garbage,
+        "streams": {
+            "decompress": plan.options.decompress,
+            "compress": plan.options.compress,
+            "compress_fonts": plan.options.compress_fonts,
+            "compress_images": plan.options.compress_images,
+            "ascii": plan.options.ascii,
+            "effort": plan.options.effort,
+        },
+        "syntax": if plan.options.pretty { "pretty" } else { "compact" },
         "output": {
             "path": plan.output.map(|p| p.display().to_string()),
             "doc_id": DocId::from_hash(&hash).to_string(),

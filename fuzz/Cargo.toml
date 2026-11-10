@@ -64,3 +64,10 @@ path = "fuzz_targets/images.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "encode"
+path = "fuzz_targets/encode.rs"
+test = false
+doc = false
+bench = false
