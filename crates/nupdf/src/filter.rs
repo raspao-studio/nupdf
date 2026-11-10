@@ -13,6 +13,7 @@
 //! and its way of asking for input, since both decide what a damaged
 //! stream yields: a filter that fails loses the buffer it was filling.
 
+use brotli_decompressor::{BrotliDecompressStream, BrotliResult, BrotliState, StandardAlloc};
 use flate2::{Decompress, FlushDecompress, Status};
 
 use crate::crypt::{Aes, Arc4, Cipher, Crypt};
@@ -186,16 +187,27 @@ fn build_filter<'a>(
         }
     };
     match name {
-        b"CCITTFaxDecode" | b"CCF" | b"DCTDecode" | b"DCT" | b"JBIG2Decode" | b"BrotliDecode"
-        | b"Br" => Err(DecodeError::Unsupported(
-            String::from_utf8_lossy(name).into_owned(),
-        )),
+        b"CCITTFaxDecode" | b"CCF" | b"DCTDecode" | b"DCT" | b"JBIG2Decode" => Err(
+            DecodeError::Unsupported(String::from_utf8_lossy(name).into_owned()),
+        ),
         b"RunLengthDecode" | b"RL" => Ok(open_rld(chain)),
         b"FlateDecode" | b"Fl" => predictor(Stream::new(
             Flate {
                 chain,
                 z: Decompress::new(true),
                 bad: None,
+                done: false,
+            },
+            diag,
+        )),
+        b"BrotliDecode" | b"Br" => predictor(Stream::new(
+            Brotli {
+                chain,
+                state: Box::new(BrotliState::new(
+                    StandardAlloc::default(),
+                    StandardAlloc::default(),
+                    StandardAlloc::default(),
+                )),
                 done: false,
             },
             diag,
@@ -526,6 +538,62 @@ impl Source for Flate<'_> {
                         msg.as_deref().unwrap_or("(null)")
                     ));
                 }
+            }
+        }
+        out.truncate(produced);
+        Ok(if out.is_empty() {
+            Next::Eof
+        } else {
+            Next::Data
+        })
+    }
+}
+
+// ---- Brotli --------------------------------------------------------------
+
+/// `fz_open_brotlid`.
+struct Brotli<'a> {
+    chain: Stream<'a>,
+    state: Box<BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>>,
+    done: bool,
+}
+
+impl Source for Brotli<'_> {
+    fn next(&mut self, _: usize, out: &mut Vec<u8>, _: &Diagnostics) -> Result<Next, String> {
+        if self.done {
+            return Ok(Next::Eof);
+        }
+        out.resize(4096, 0);
+        let mut produced = 0;
+        while produced < out.len() {
+            let avail = self.chain.available(1);
+            let mut available_in = avail;
+            let mut input_offset = 0;
+            let mut available_out = out.len() - produced;
+            let mut total_out = 0;
+            let result = BrotliDecompressStream(
+                &mut available_in,
+                &mut input_offset,
+                &self.chain.data()[..avail],
+                &mut available_out,
+                &mut produced,
+                out,
+                &mut total_out,
+                &mut self.state,
+            );
+            self.chain.consume(input_offset);
+            match result {
+                BrotliResult::ResultSuccess => {
+                    self.done = true;
+                    break;
+                }
+                BrotliResult::ResultFailure => {
+                    return Err("library error: brotli decompression error".into());
+                }
+                // MuPDF loops forever here on a truncated stream; nupdf
+                // treats it as the end.
+                BrotliResult::NeedsMoreInput if avail == 0 => break,
+                _ => {}
             }
         }
         out.truncate(produced);

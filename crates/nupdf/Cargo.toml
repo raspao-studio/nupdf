@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 aes = "0.9"
 blake3.workspace = true
+brotli-decompressor = "6"
 # zlib-rs: a pure-Rust port of zlib, so corrupt-stream behavior matches MuPDF's zlib.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 md-5 = "0.11"
