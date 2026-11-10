@@ -18,10 +18,19 @@ fuzz_target!(|data: &[u8]| {
             let _ = doc.stream_data(&s);
         }
     }
-    // Write it, as `clean` does, at a garbage collection level the input
-    // picks, and read the output back.
+    // Write it, as `clean` does, at a garbage collection level and with
+    // the stream options the input's last two bytes pick, and read the
+    // output back.
+    let pick = |i: usize| data.len().checked_sub(i).and_then(|i| data.get(i)).copied().unwrap_or(0);
+    let (last, flags) = (pick(1), pick(2));
     let options = WriteOptions {
-        garbage: data.last().map_or(0, |b| b % 5),
+        garbage: last % 5,
+        decompress: flags & 1 != 0,
+        compress: flags & 2 != 0,
+        compress_images: flags & 4 != 0,
+        compress_fonts: flags & 8 != 0,
+        ascii: flags & 16 != 0,
+        effort: i32::from(flags >> 5) * 14,
         ..Default::default()
     };
     if doc.xref_len() <= 4096

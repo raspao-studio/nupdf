@@ -432,11 +432,15 @@ fn clean_writes_a_verified_copy_atomically() {
     assert!(written.windows(18).any(|w| w == b"% Written by nupdf"));
     // The report's doc_id is the output's, as `info` sees it.
     assert_eq!(report["output"]["doc_id"], info_at(&output)["doc_id"]);
-    // Nothing is left beside it.
+    // Nothing is left beside it. Other tests write to the same directory,
+    // so only this output's temporary names count.
     let leftovers: Vec<_> = std::fs::read_dir(output.parent().unwrap())
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(".clean-hello.pdf.") && name.ends_with(".tmp")
+        })
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
@@ -539,6 +543,58 @@ fn clean_refuses_what_renumbering_breaks() {
     );
     let report = run_json(&["clean", "-g", "--dry-run", input.to_str().unwrap()]);
     assert_eq!(report["verification"]["verified"], true);
+}
+
+#[test]
+fn clean_writes_streams_as_the_options_say() {
+    let input = smoke("streams-raw.pdf");
+    let path = input.to_str().unwrap();
+    let report = run_json(&["clean", "-dz", "--dry-run", path]);
+    assert_eq!(report["streams"]["decompress"], true);
+    assert_eq!(report["streams"]["compress"], true);
+    assert_eq!(report["syntax"], "compact");
+    assert_eq!(report["verification"]["verified"], true);
+    // -d and -a turn on a line per dictionary entry, unless -z or -t.
+    for (args, syntax) in [
+        (&["-d"][..], "pretty"),
+        (&["-a"], "pretty"),
+        (&["-d", "-t"], "compact"),
+        (&["-tt"], "pretty"),
+        (&["-z"], "compact"),
+    ] {
+        let mut argv = vec!["clean", "--dry-run", path];
+        argv.extend_from_slice(args);
+        assert_eq!(run_json(&argv)["syntax"], syntax, "{args:?}");
+    }
+    let report = run_json(&["clean", "-i", "-e", "250", "--dry-run", path]);
+    assert_eq!(report["streams"]["compress_images"], true);
+    assert_eq!(report["streams"]["effort"], 100);
+}
+
+#[test]
+fn clean_refuses_brotli() {
+    let input = smoke("streams-raw.pdf");
+    let out = nupdf(&["clean", "-zz", "--dry-run", input.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "usage.unsupported");
+}
+
+#[test]
+fn clean_refuses_streams_that_editing_shared_filters_breaks() {
+    // -z takes ASCIIHexDecode off an array two streams share, so the
+    // second stream's hex data is read as flate (MuPDF writes the same).
+    let input = smoke("streams-hex.pdf");
+    let out = nupdf(&["clean", "-z", "--dry-run", input.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4));
+    let report = run_json(&[
+        "clean",
+        "-z",
+        "--dry-run",
+        "--no-verify",
+        input.to_str().unwrap(),
+    ]);
+    assert_eq!(report["verification"], Value::Null);
 }
 
 #[test]

@@ -4,12 +4,13 @@
 // Copyright (C) 2004-2026 Artifex Software, Inc.
 
 //! Writing a whole document (`pdf_save_document`), as MuPDF does: every
-//! object in number order, streams copied raw, object streams and xref
-//! streams unpacked into plain objects and a classic xref table, the
-//! security handler kept, and optionally garbage collected first
-//! ([`crate::garbage`]). The output is the same byte for byte as MuPDF's in
-//! reproducible mode, apart from the AES initialization vectors (DECISIONS
-//! D18) and the comment naming the writer.
+//! object in number order, streams copied raw unless the stream options
+//! decode or encode them ([`crate::deflate`], [`crate::fax_encode`]),
+//! object streams and xref streams unpacked into plain objects and a
+//! classic xref table, the security handler kept, and optionally garbage
+//! collected first ([`crate::garbage`]). The output is the same byte for
+//! byte as MuPDF's in reproducible mode, apart from the AES initialization
+//! vectors (DECISIONS D18) and the comment naming the writer.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +32,31 @@ pub struct WriteOptions {
     /// drops what the trailer does not reach, 2 also renumbers, 3 also
     /// merges duplicate objects, 4 also duplicate streams. Higher counts as 4.
     pub garbage: u8,
+    /// Streams written decoded (`do_decompress`, `clean -d`), apart from
+    /// XML metadata and JPEG 2000 images.
+    pub decompress: bool,
+    /// Streams with no filter deflated (`do_compress`, `clean -z`), or for
+    /// a 1-bit image, CCITT G4 encoded.
+    pub compress: bool,
+    /// The same for images, which also keeps them from being decoded
+    /// (`do_compress_images`, `clean -i`).
+    pub compress_images: bool,
+    /// The same for fonts (`do_compress_fonts`, `clean -f`).
+    pub compress_fonts: bool,
+    /// `compression_effort` (`clean -e`): 0 for zlib's default level,
+    /// else 1 to 100 for levels 0 to 9. Values outside count as the nearest.
+    pub effort: i32,
+}
+
+impl WriteOptions {
+    /// Whether a stream's data can be written differently from the input's.
+    pub fn changes_streams(&self) -> bool {
+        self.decompress
+            || self.compress
+            || self.compress_images
+            || self.compress_fonts
+            || self.ascii
+    }
 }
 
 /// Why the document could not be written.
@@ -147,6 +173,11 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
         use_list[..xref_len].copy_from_slice(&c.use_list);
         use_list[xref_len..].fill(false);
     }
+    let mut objects = Objects {
+        doc,
+        slots: collected.map(|c| c.slots),
+        changed: HashMap::new(),
+    };
     let mut st = State {
         // Usually about the input's size.
         out: Vec::with_capacity(doc.data().len().saturating_add(4096)),
@@ -192,15 +223,8 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
         if types[num] == Type::InUse {
             st.ofs_list[num] = st.out.len() as i64;
             let unenc = num as i32 == st.crypt_object_number;
-            let (obj, data) = match &collected {
-                Some(c) => (c.slots[num].object().cloned(), c.slots[num].data()),
-                None => (
-                    doc.load_object(num as i32)
-                        .map_err(|message| WriteError { message })?,
-                    None,
-                ),
-            };
-            write_object(doc, &mut st, num as i32, generation, unenc, obj, data)?;
+            let obj = objects.get(num).map_err(|message| WriteError { message })?;
+            write_object(&mut objects, &mut st, options, num, generation, unenc, obj)?;
         } else {
             st.use_list[num] = false;
         }
@@ -268,7 +292,7 @@ pub fn verify(
         let _ = again.authenticate(password);
     }
     let (objects, mismatched) = if options.garbage >= 1 {
-        Walk::new(original, &again).run()
+        Walk::new(original, &again, options.changes_streams()).run()
     } else {
         let mut objects = 0;
         let mut mismatched = Vec::new();
@@ -276,7 +300,12 @@ pub fn verify(
         while num < again.xref_len() as i32 {
             if again.xref_entry(num).kind == Kind::InFile {
                 objects += 1;
-                if as_read(original, num) != as_read(&again, num) {
+                let decoded = options.changes_streams();
+                if !same_read(
+                    as_read(original, num, decoded),
+                    as_read(&again, num, decoded),
+                    decoded,
+                ) {
                     mismatched.push(num);
                 }
             }
@@ -299,15 +328,18 @@ struct Walk<'a> {
     /// Original object number to written object number.
     pairs: HashMap<i32, i32>,
     queue: Vec<(i32, i32)>,
+    /// Streams compared decoded, as the options change their encoding.
+    decoded: bool,
 }
 
 impl<'a> Walk<'a> {
-    fn new(original: &'a Document, again: &'a Document) -> Self {
+    fn new(original: &'a Document, again: &'a Document, decoded: bool) -> Self {
         Walk {
             original,
             again,
             pairs: HashMap::new(),
             queue: Vec::new(),
+            decoded,
         }
     }
 
@@ -375,11 +407,18 @@ impl<'a> Walk<'a> {
         match (&a, &b) {
             (Object::Stream(sa), Object::Stream(sb)) => {
                 let (ra, rb) = (
-                    self.original.raw_stream_data(sa),
-                    self.again.raw_stream_data(sb),
+                    content(self.original, sa, self.decoded),
+                    content(self.again, sb, self.decoded),
                 );
-                matches!((ra, rb), (Ok(x), Ok(y)) if x == y)
-                    && self.same_dict(&sa.dict.without(b"Length"), &sb.dict.without(b"Length"))
+                let same_data = match (ra, rb) {
+                    (Ok(x), Ok(y)) => same_content(&x, &y, &sb.dict, self.decoded),
+                    _ => false,
+                };
+                same_data
+                    && self.same_dict(
+                        &stream_dict(&sa.dict, self.decoded),
+                        &stream_dict(&sb.dict, self.decoded),
+                    )
             }
             (Object::Stream(_), _) | (_, Object::Stream(_)) => false,
             _ => self.same(&a, &b),
@@ -422,18 +461,93 @@ impl<'a> Walk<'a> {
     }
 }
 
-/// An object as a reader sees it.
-fn as_read(doc: &Document, num: i32) -> Result<(String, Option<Vec<u8>>), String> {
+/// An object as a reader sees it: its syntax, and for a stream its data
+/// (decoded when `decoded`) and dictionary.
+type Read = Result<(String, Option<(Vec<u8>, Dict)>), String>;
+
+fn as_read(doc: &Document, num: i32, decoded: bool) -> Read {
     let show = |o: &Object| print::to_string(o, Options::default());
     match doc.load_object(num)? {
         Some(Object::Stream(s)) => {
-            let raw = doc.raw_stream_data(&s)?.into_owned();
-            let dict = Object::Dict(Arc::new(s.dict.without(b"Length")));
-            Ok((show(&dict), Some(raw)))
+            let data = content(doc, &s, decoded)?;
+            let dict = Object::Dict(Arc::new(stream_dict(&s.dict, decoded)));
+            Ok((show(&dict), Some((data, s.dict.clone()))))
         }
         Some(o) => Ok((show(&o), None)),
         None => Ok((String::new(), None)),
     }
+}
+
+fn same_read(original: Read, again: Read, decoded: bool) -> bool {
+    match (original, again) {
+        (Ok((ta, da)), Ok((tb, db))) => {
+            ta == tb
+                && match (da, db) {
+                    (None, None) => true,
+                    (Some((a, _)), Some((b, written))) => same_content(&a, &b, &written, decoded),
+                    _ => false,
+                }
+        }
+        (Err(a), Err(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// A stream's data for comparison: raw, or decoded as `pdf_load_stream`
+/// reads it.
+fn content(doc: &Document, s: &Stream, decoded: bool) -> Result<Vec<u8>, String> {
+    if decoded {
+        doc.stream_data(s).map_err(|e| e.report())
+    } else {
+        doc.raw_stream_data(s).map(std::borrow::Cow::into_owned)
+    }
+}
+
+/// A stream dictionary for comparison: without /Length, which the writer
+/// recomputes, nor, when the data is compared decoded, the filters.
+fn stream_dict(d: &Dict, decoded: bool) -> Dict {
+    let d = d.without(b"Length");
+    if decoded {
+        d.without(b"Filter").without(b"DecodeParms")
+    } else {
+        d
+    }
+}
+
+/// Whether two streams' data agree, `written` being the written stream's
+/// dictionary. A fax encoder reads only the pixels of each row, so the bits
+/// that pad a row to a whole byte come back white.
+fn same_content(original: &[u8], again: &[u8], written: &Dict, decoded: bool) -> bool {
+    if !decoded
+        || !written
+            .get(b"Filter")
+            .is_some_and(|f| f.is_name(b"CCITTFaxDecode"))
+    {
+        return original == again;
+    }
+    rows_padded(original.to_vec(), written) == rows_padded(again.to_vec(), written)
+}
+
+/// 1-bit rows of `written`'s /Columns with their padding bits set.
+fn rows_padded(mut data: Vec<u8>, written: &Dict) -> Vec<u8> {
+    let columns = written
+        .get(b"DecodeParms")
+        .and_then(Object::as_dict)
+        .and_then(|p| p.get(b"Columns"))
+        .map_or(0, Object::to_int);
+    let (Ok(columns), true) = (usize::try_from(columns), columns % 8 != 0) else {
+        return data;
+    };
+    let stride = columns.div_ceil(8);
+    let pad = 0xffu8 >> (columns % 8);
+    for row in data.chunks_mut(stride) {
+        if row.len() == stride
+            && let Some(last) = row.last_mut()
+        {
+            *last |= pad;
+        }
+    }
+    data
 }
 
 /// `pdf_check_document`: loads every object, so repairs happen before
@@ -457,25 +571,357 @@ fn report(doc: &Document, cause: &str) {
     }
 }
 
-fn options(st: &State) -> Options {
+fn options_of(st: &State) -> Options {
     Options {
         tight: st.tight,
         ascii: st.ascii,
     }
 }
 
-/// `writeobject`, for `obj` as it is to be written. A stream's data is read
-/// through `data`, the stream as loaded, when garbage collection has
-/// changed the references in its dictionary.
+/// The objects as the writer sees them: garbage collection's working copy
+/// when it ran, else the document's, with what writing has changed on top.
+/// MuPDF changes a filter array it reaches through a reference in place,
+/// so the change shows wherever that object is used or written later.
+struct Objects<'a> {
+    doc: &'a Document,
+    slots: Option<Vec<Slot>>,
+    changed: HashMap<usize, Object>,
+}
+
+impl Objects<'_> {
+    /// `pdf_load_object` for writing object `num`.
+    fn get(&self, num: usize) -> Result<Option<Object>, String> {
+        if let Some(o) = self.changed.get(&num) {
+            return Ok(Some(o.clone()));
+        }
+        match &self.slots {
+            Some(slots) => Ok(slots.get(num).and_then(Slot::object).cloned()),
+            None => self.doc.load_object(num as i32),
+        }
+    }
+
+    /// The stream as loaded, which locates the data in the input, when
+    /// garbage collection has changed the dictionary.
+    fn data(&self, num: usize) -> Option<&Stream> {
+        self.slots.as_ref()?.get(num)?.data()
+    }
+
+    /// `pdf_resolve_indirect` of one reference.
+    fn load(&self, num: i32) -> Object {
+        if let Some(o) = usize::try_from(num).ok().and_then(|n| self.changed.get(&n)) {
+            return o.clone();
+        }
+        match &self.slots {
+            None => self.doc.object(num),
+            Some(slots) => match usize::try_from(num).ok().and_then(|n| slots.get(n)) {
+                Some(Slot::Loaded(o, _)) => Some(o.clone()),
+                Some(Slot::Failed(original)) => self.doc.object(*original),
+                Some(Slot::Empty) | None => None,
+            },
+        }
+        .unwrap_or(Object::Null)
+    }
+
+    /// RESOLVE: the object `obj` leads to, and the number of the last
+    /// reference on the way.
+    fn resolve_num(&self, obj: &Object) -> (Object, Option<i32>) {
+        let mut obj = obj.clone();
+        let mut num = None;
+        let mut sanity = 10;
+        while let Object::Ref(r) = obj {
+            sanity -= 1;
+            if sanity == 0 {
+                self.doc.diagnostics().warn(
+                    "object.indirection_cycle",
+                    format!(
+                        "too many indirections (possible indirection cycle involving {} 0 R)",
+                        r.num
+                    ),
+                );
+                return (Object::Null, None);
+            }
+            num = Some(r.num);
+            obj = self.load(r.num);
+        }
+        (obj, num)
+    }
+
+    fn resolve(&self, obj: &Object) -> Object {
+        self.resolve_num(obj).0
+    }
+
+    /// `pdf_name_eq` against an interned name: resolving.
+    fn name_is(&self, obj: Option<&Object>, name: &[u8]) -> bool {
+        obj.is_some_and(|o| self.resolve(o).is_name(name))
+    }
+
+    /// Changes the array `value` holds or leads to, as MuPDF changes it in
+    /// place: in the object it references, or in `value` itself.
+    fn edit_array(&mut self, value: &mut Object, f: impl FnOnce(&mut Vec<Object>)) {
+        let (resolved, num) = self.resolve_num(value);
+        let Object::Array(mut items) = resolved else {
+            return;
+        };
+        f(Arc::make_mut(&mut items));
+        match num {
+            Some(num) => {
+                if let Ok(num) = usize::try_from(num) {
+                    self.changed.insert(num, Object::Array(items));
+                }
+            }
+            None => *value = Object::Array(items),
+        }
+    }
+}
+
+/// A value MuPDF holds as a pointer other than null.
+fn present(obj: Option<&Object>) -> Option<&Object> {
+    obj.filter(|o| !matches!(o, Object::Null))
+}
+
+/// A direct name, which is what MuPDF's pointer comparisons with an
+/// interned name match.
+fn is_direct(obj: Option<&Object>, name: &[u8]) -> bool {
+    obj.is_some_and(|o| o.is_name(name))
+}
+
+fn is_image_filter(obj: &Object) -> bool {
+    const IMAGE_FILTERS: [&[u8]; 8] = [
+        b"CCITTFaxDecode",
+        b"CCF",
+        b"DCTDecode",
+        b"DCT",
+        b"RunLengthDecode",
+        b"RL",
+        b"JBIG2Decode",
+        b"JPXDecode",
+    ];
+    IMAGE_FILTERS.iter().any(|n| obj.is_name(n))
+}
+
+/// Whether the filter, or a filter in the array, satisfies `test`; array
+/// items are not resolved.
+fn any_filter(objects: &Objects, filter: Option<&Object>, test: fn(&Object) -> bool) -> bool {
+    let Some(f) = filter else { return false };
+    if let Object::Name(_) = f {
+        return test(f);
+    }
+    match objects.resolve(f) {
+        Object::Array(items) => items.iter().any(test),
+        _ => false,
+    }
+}
+
+/// `pdf_is_image_stream`.
+fn is_image_stream(objects: &Objects, d: &Dict) -> bool {
+    (objects.name_is(d.get(b"Type"), b"XObject") && objects.name_is(d.get(b"Subtype"), b"Image"))
+        || any_filter(objects, d.get(b"Filter"), is_image_filter)
+        || (present(d.get(b"Width")).is_some() && present(d.get(b"Height")).is_some())
+}
+
+/// `is_font_stream`.
+fn is_font_stream(objects: &Objects, d: &Dict) -> bool {
+    objects.name_is(d.get(b"Type"), b"Font")
+        || objects.name_is(d.get(b"Type"), b"FontDescriptor")
+        || [&b"Length1"[..], b"Length2", b"Length3"]
+            .iter()
+            .any(|k| present(d.get(k)).is_some())
+        || objects.name_is(d.get(b"Subtype"), b"Type1C")
+        || objects.name_is(d.get(b"Subtype"), b"CIDFontType0C")
+}
+
+/// `is_jpx_stream`.
+fn is_jpx_stream(objects: &Objects, d: &Dict) -> bool {
+    any_filter(objects, d.get(b"Filter"), |o| o.is_name(b"JPXDecode"))
+}
+
+/// `is_xml_metadata`.
+fn is_xml_metadata(objects: &Objects, d: &Dict) -> bool {
+    objects.name_is(d.get(b"Type"), b"Metadata") && objects.name_is(d.get(b"Subtype"), b"XML")
+}
+
+/// `is_bitmap_stream`: a 1-bit gray image or an image mask whose data is
+/// exactly its rows, as width and height.
+fn bitmap_size(objects: &Objects, d: &Dict, len: usize) -> Option<(i32, i32)> {
+    if !is_direct(d.get(b"Subtype"), b"Image") {
+        return None;
+    }
+    let int = |key: &[u8]| d.get(key).map_or(0, |o| objects.resolve(o).to_int());
+    let (w, h) = (int(b"Width"), int(b"Height"));
+    // (size_t)stride * h, as C converts the ints.
+    let stride = w.wrapping_add(7) >> 3;
+    if (stride as i64 as u64).wrapping_mul(h as i64 as u64) != len as u64 {
+        return None;
+    }
+    let resolved = |key: &[u8]| d.get(key).map_or(Object::Null, |o| objects.resolve(o));
+    if matches!(resolved(b"ImageMask"), Object::Bool(true)) {
+        return Some((w, h));
+    }
+    let one_bit = matches!(resolved(b"BitsPerComponent"), Object::Int(1));
+    (one_bit && resolved(b"ColorSpace").is_name(b"DeviceGray")).then_some((w, h))
+}
+
+/// `isbinarystream`.
+fn is_binary(data: &[u8]) -> bool {
+    data.iter()
+        .any(|&c| !matches!(c, b'\n' | b'\r' | b'\t') && !(32..=127).contains(&c))
+}
+
+/// `hexbuf`: two digits a byte, a newline every 32 bytes, and `>`.
+fn hex(data: &[u8]) -> Vec<u8> {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(data.len() * 2 + data.len() / 32 + 1);
+    for (i, &c) in data.iter().enumerate() {
+        out.push(DIGITS[usize::from(c >> 4)]);
+        out.push(DIGITS[usize::from(c & 15)]);
+        if i % 32 == 31 {
+            out.push(b'\n');
+        }
+    }
+    out.push(b'>');
+    out
+}
+
+/// `addhexfilter`: ASCIIHexDecode in front of the filters.
+fn add_hex_filter(objects: &mut Objects, d: &mut Dict) {
+    let mut f = present(d.get(b"Filter")).cloned();
+    let mut dp = present(d.get(b"DecodeParms")).cloned();
+    let hex = Object::name(b"ASCIIHexDecode");
+    let resolved = f.as_ref().map(|o| objects.resolve(o));
+    match (&mut f, resolved) {
+        (Some(value), Some(Object::Name(_))) => {
+            *value = Object::Array(Arc::new(vec![hex, value.clone()]));
+            if let Some(p) = &mut dp
+                && matches!(objects.resolve(p), Object::Dict(_))
+            {
+                *p = Object::Array(Arc::new(vec![Object::Null, p.clone()]));
+            }
+        }
+        (Some(value), Some(Object::Array(_))) => {
+            objects.edit_array(value, |items| items.insert(0, hex));
+            if let Some(p) = &mut dp {
+                objects.edit_array(p, |items| items.insert(0, Object::Null));
+            }
+        }
+        _ => f = Some(hex),
+    }
+    if let Some(f) = f {
+        d.put(b"Filter", f);
+    }
+    if let Some(dp) = dp {
+        d.put(b"DecodeParms", dp);
+    }
+}
+
+/// `striphexfilter`: takes an ASCIIHexDecode off the front of the filters,
+/// returning whether there was one. An array left with one filter becomes
+/// that filter, with the first of /DecodeParms, or null when /DecodeParms
+/// is not an array.
+fn strip_hex_filter(objects: &mut Objects, d: &mut Dict) -> Result<bool, WriteError> {
+    let Some(f) = present(d.get(b"Filter")).cloned() else {
+        return Ok(false);
+    };
+    let dp = present(d.get(b"DecodeParms")).cloned();
+    if f.is_name(b"ASCIIHexDecode") {
+        d.remove(b"Filter");
+        d.remove(b"DecodeParms");
+        return Ok(true);
+    }
+    let Object::Array(items) = objects.resolve(&f) else {
+        return Ok(false);
+    };
+    // The arrays as edited: in place, so the dictionary holds them too.
+    let (mut f, mut dp) = (f, dp);
+    let is_hex = is_direct(items.first(), b"ASCIIHexDecode");
+    if is_hex {
+        objects.edit_array(&mut f, |items| {
+            items.remove(0);
+        });
+        if let Some(v) = d.get_mut(b"Filter") {
+            *v = f.clone();
+        }
+        if let Some(p) = &mut dp
+            && let Object::Array(parms) = objects.resolve(p)
+        {
+            if parms.is_empty() {
+                return Err(WriteError {
+                    message: "argument error: index out of bounds".into(),
+                });
+            }
+            objects.edit_array(p, |items| {
+                items.remove(0);
+            });
+            if let Some(v) = d.get_mut(b"DecodeParms") {
+                *v = p.clone();
+            }
+        }
+    }
+    let Object::Array(items) = objects.resolve(&f) else {
+        return Ok(is_hex);
+    };
+    if items.len() == 1 {
+        d.put(b"Filter", items[0].clone());
+        if let Some(p) = &dp {
+            let first = match objects.resolve(p) {
+                Object::Array(parms) => parms.first().cloned(),
+                _ => None,
+            };
+            d.put(b"DecodeParms", first.unwrap_or(Object::Null));
+        }
+    } else if items.is_empty() {
+        d.remove(b"Filter");
+        d.remove(b"DecodeParms");
+    }
+    Ok(is_hex)
+}
+
+/// The deflate or CCITT G4 step of `copystream` and `expandstream`:
+/// `data` encoded, and `d` saying how.
+fn encode(
+    objects: &Objects,
+    d: &mut Dict,
+    data: Vec<u8>,
+    effort: i32,
+    drop_parms: bool,
+) -> Result<Vec<u8>, WriteError> {
+    let limit = objects.doc.limits().max_decoded_bytes;
+    if let Some((w, h)) = bitmap_size(objects, d, data.len()) {
+        let stride = usize::try_from(w.wrapping_add(7) >> 3).unwrap_or(0);
+        let out = crate::fax_encode::compress_g4(&data, w, h, stride, limit).ok_or_else(|| {
+            WriteError {
+                message: "limit error: fax data exceeds the size limit".into(),
+            }
+        })?;
+        d.put(b"Filter", Object::name(b"CCITTFaxDecode"));
+        let mut dp = Dict::new();
+        dp.put(b"K", Object::Int(-1));
+        dp.put(b"Columns", Object::Int(i64::from(w)));
+        d.put(b"DecodeParms", Object::Dict(Arc::new(dp)));
+        return Ok(out);
+    }
+    let effort = effort.clamp(0, 100);
+    let level = if effort == 0 { -1 } else { effort * 9 / 100 };
+    let out = crate::deflate::compress(&data, level).ok_or_else(|| WriteError {
+        message: "library error: cannot deflate buffer".into(),
+    })?;
+    d.put(b"Filter", Object::name(b"FlateDecode"));
+    if drop_parms {
+        d.remove(b"DecodeParms");
+    }
+    Ok(out)
+}
+
+/// `writeobject`, for `obj` as it is to be written.
 fn write_object(
-    doc: &Document,
+    objects: &mut Objects,
     st: &mut State,
-    num: i32,
+    options: &WriteOptions,
+    num: usize,
     generation: i32,
     unenc: bool,
     obj: Option<Object>,
-    data: Option<&Stream>,
 ) -> Result<(), WriteError> {
+    let doc = objects.doc;
     let dict = match &obj {
         Some(Object::Dict(d)) => Some(d.as_ref()),
         Some(Object::Stream(s)) => Some(&s.dict),
@@ -484,11 +930,12 @@ fn write_object(
     if let Some(d) = dict {
         let ty = d.get(b"Type");
         if ty.is_some_and(|t| t.is_name(b"ObjStm") || t.is_name(b"XRef")) {
-            st.use_list[num as usize] = false;
+            st.use_list[num] = false;
             return Ok(());
         }
     }
     let crypt = if unenc { None } else { doc.crypt() };
+    let num = num as i32;
     let encrypt = |data: &[u8]| -> Vec<u8> {
         crypt
             .as_ref()
@@ -497,20 +944,72 @@ fn write_object(
     let encrypt_ref: Option<print::Encrypt> = crypt.as_ref().map(|_| &encrypt as _);
     match &obj {
         Some(Object::Stream(s)) => {
-            // copystream
-            let raw = doc
-                .raw_stream_data(data.unwrap_or(s))
-                .map_err(|message| WriteError { message })?;
+            let mut deflate = options.compress;
+            let mut expand = options.decompress;
+            if options.compress_images && is_image_stream(objects, &s.dict) {
+                (deflate, expand) = (true, false);
+            }
+            if options.compress_fonts && is_font_stream(objects, &s.dict) {
+                (deflate, expand) = (true, false);
+            }
+            if is_xml_metadata(objects, &s.dict) || is_jpx_stream(objects, &s.dict) {
+                (deflate, expand) = (false, false);
+            }
+            // pdf_copy_dict: the same entries, and the same values.
             let mut dict: Dict = s.dict.clone();
+            let source = objects.data(num as usize).unwrap_or(s);
+            let mut data = if expand {
+                // expandstream: decoded as pdf_load_stream_number reads it.
+                // MuPDF decodes the dictionary after garbage collection;
+                // the input's, which leads to the same objects, is used.
+                dict.remove(b"Filter");
+                dict.remove(b"DecodeParms");
+                let data = doc.stream_data(source).map_err(|e| WriteError {
+                    message: e.report(),
+                })?;
+                if deflate {
+                    encode(objects, &mut dict, data, options.effort, false)?
+                } else {
+                    data
+                }
+            } else {
+                // copystream: the raw data.
+                let mut data = doc
+                    .raw_stream_data(source)
+                    .map_err(|message| WriteError { message })?
+                    .into_owned();
+                if deflate && strip_hex_filter(objects, &mut dict)? {
+                    let mut hex = Dict::new();
+                    hex.put(b"Filter", Object::name(b"ASCIIHexDecode"));
+                    data = crate::filter::decode(
+                        &hex,
+                        &data,
+                        &|o| o.clone(),
+                        doc.diagnostics(),
+                        &doc.limits(),
+                    )
+                    .map_err(|e| WriteError {
+                        message: e.report(),
+                    })?;
+                }
+                if deflate && present(dict.get(b"Filter")).is_none() {
+                    data = encode(objects, &mut dict, data, options.effort, true)?;
+                }
+                data
+            };
+            if options.ascii && is_binary(&data) {
+                data = hex(&data);
+                add_hex_filter(objects, &mut dict);
+            }
             let len = crypt
                 .as_ref()
-                .map_or(raw.len(), |c| c.encrypted_len(raw.len()));
+                .map_or(data.len(), |c| c.encrypted_len(data.len()));
             dict.put(b"Length", Object::Int(len as i64));
             st.out
                 .extend_from_slice(format!("{num} {generation} obj\n").as_bytes());
             print::print_encrypted(
                 &Object::Dict(Arc::new(dict)),
-                options(st),
+                options_of(st),
                 encrypt_ref,
                 &mut st.out,
             );
@@ -518,15 +1017,15 @@ fn write_object(
             match &crypt {
                 Some(c) => st
                     .out
-                    .extend_from_slice(&c.encrypt_data(num, generation, &raw)),
-                None => st.out.extend_from_slice(&raw),
+                    .extend_from_slice(&c.encrypt_data(num, generation, &data)),
+                None => st.out.extend_from_slice(&data),
             }
             st.out.extend_from_slice(b"\nendstream\nendobj\n\n");
         }
         Some(o) => {
             st.out
                 .extend_from_slice(format!("{num} {generation} obj\n").as_bytes());
-            print::print_encrypted(o, options(st), encrypt_ref, &mut st.out);
+            print::print_encrypted(o, options_of(st), encrypt_ref, &mut st.out);
             st.out.extend_from_slice(b"\nendobj\n\n");
         }
         None => {
@@ -573,7 +1072,11 @@ fn write_xref(
         None => {}
     }
     st.out.extend_from_slice(b"trailer\n");
-    print::print(&Object::Dict(Arc::new(trailer)), options(st), &mut st.out);
+    print::print(
+        &Object::Dict(Arc::new(trailer)),
+        options_of(st),
+        &mut st.out,
+    );
     st.out.push(b'\n');
     st.out
         .extend_from_slice(format!("startxref\n{startxref}\n%%EOF\n").as_bytes());
@@ -875,5 +1378,206 @@ trailer\n<</Size 2>>\nstartxref\n34\n%%EOF\n",
         let out = save(&doc, &garbage(2)).unwrap_or_default();
         assert!(xref_section(&out).starts_with("xref\n0 0\n"));
         assert!(!verify(&doc, &out, None, &garbage(2)).reopened);
+    }
+
+    fn streams(options: WriteOptions) -> WriteOptions {
+        WriteOptions {
+            pretty: false,
+            ..options
+        }
+    }
+
+    /// Object `num` of `out` as read back, and its stream data decoded.
+    fn stream_of(out: &[u8], num: i32) -> (String, Vec<u8>) {
+        let again = open(out);
+        let Some(Object::Stream(s)) = again.load_object(num).ok().flatten() else {
+            return (String::new(), Vec::new());
+        };
+        let dict = print::to_string(&Object::Dict(Arc::new(s.dict.clone())), Options::default());
+        (dict, again.stream_data(&s).unwrap_or_default())
+    }
+
+    const RAW: &[u8] = include_bytes!("../../../corpus/smoke/streams-raw.pdf");
+    const HEX: &[u8] = include_bytes!("../../../corpus/smoke/streams-hex.pdf");
+
+    #[test]
+    fn compress_deflates_streams_without_a_filter() {
+        let options = streams(WriteOptions {
+            compress: true,
+            ..Default::default()
+        });
+        let out = save(&open(MINIMAL), &options).unwrap_or_default();
+        let (dict, data) = stream_of(&out, 4);
+        assert_eq!(dict, "<</Length 13/Filter/FlateDecode>>");
+        assert_eq!(data, b"BT ET");
+        assert!(verify(&open(MINIMAL), &out, None, &options).verified());
+    }
+
+    #[test]
+    fn one_bit_images_are_fax_encoded_and_others_deflated() {
+        let doc = open(RAW);
+        let options = streams(WriteOptions {
+            compress: true,
+            ..Default::default()
+        });
+        let out = save(&doc, &options).unwrap_or_default();
+        let filter = |num| {
+            let (dict, _) = stream_of(&out, num);
+            let at = dict.find("/Filter").unwrap_or(dict.len());
+            dict[at..].to_string()
+        };
+        assert_eq!(
+            filter(6),
+            "/Filter/CCITTFaxDecode/DecodeParms<</K -1/Columns 77>>>>"
+        );
+        assert_eq!(
+            filter(7),
+            "/Filter/CCITTFaxDecode/DecodeParms<</K -1/Columns 3000>>>>"
+        );
+        assert_eq!(filter(8), "/Filter/FlateDecode>>");
+        // A byte short, and /Subtype by reference: deflated.
+        assert_eq!(filter(9), "/Filter/FlateDecode>>");
+        assert_eq!(filter(13), "/Filter/FlateDecode>>");
+        // /BitsPerComponent by reference still counts.
+        assert!(filter(16).starts_with("/Filter/CCITTFaxDecode"));
+        // XML metadata stays as it is.
+        assert_eq!(filter(10), "");
+        // The rows decode back, but for the black bits that pad them.
+        assert!(verify(&doc, &out, None, &options).verified());
+        let (_, rows) = stream_of(&out, 6);
+        assert_eq!(rows.len(), 10 * 40);
+        assert_eq!(rows[9] & 0x07, 0x07);
+    }
+
+    #[test]
+    fn fonts_and_images_compress_alone_and_stay_encoded() {
+        let doc = open(RAW);
+        let options = streams(WriteOptions {
+            decompress: true,
+            compress_fonts: true,
+            ..Default::default()
+        });
+        let out = save(&doc, &options).unwrap_or_default();
+        assert!(stream_of(&out, 12).0.contains("/Filter/FlateDecode"));
+        assert!(!stream_of(&out, 8).0.contains("/Filter"));
+        assert!(verify(&doc, &out, None, &options).verified());
+    }
+
+    #[test]
+    fn decompress_writes_streams_decoded() {
+        let doc = open(include_bytes!("../../../corpus/smoke/flate-content.pdf"));
+        let options = streams(WriteOptions {
+            decompress: true,
+            ..Default::default()
+        });
+        let out = save(&doc, &options).unwrap_or_default();
+        let (dict, data) = stream_of(&out, 4);
+        assert!(!dict.contains("/Filter"), "{dict}");
+        assert!(String::from_utf8_lossy(&out).contains("(Compressed) Tj"));
+        assert!(!data.is_empty());
+        assert!(verify(&doc, &out, None, &options).verified());
+    }
+
+    #[test]
+    fn ascii_writes_binary_streams_in_hex() {
+        assert_eq!(hex(&[0xab; 33]).len(), 33 * 2 + 1 + 1);
+        assert_eq!(&hex(&[0xab; 33])[62..], b"ab\nab>");
+        assert!(!is_binary(b"text\r\n\t~\x7f"));
+        assert!(is_binary(b"\x80"));
+        let doc = open(HEX);
+        let options = streams(WriteOptions {
+            ascii: true,
+            ..Default::default()
+        });
+        let out = save(&doc, &options).unwrap_or_default();
+        let text = String::from_utf8_lossy(&out);
+        // A filter name becomes an array; an array gets ASCIIHexDecode in
+        // front, with null in front of its parameters.
+        assert!(
+            stream_of(&out, 16)
+                .0
+                .contains("/Filter[/ASCIIHexDecode/FlateDecode]/DecodeParms[null<</Predictor 1>>]")
+        );
+        // Streams 11 and 12 share array 22, which is edited for each.
+        assert!(text.contains("22 0 obj\n[/ASCIIHexDecode/ASCIIHexDecode/FlateDecode]"));
+        assert!(!verify(&doc, &out, None, &options).verified());
+    }
+
+    #[test]
+    fn compress_takes_hex_off_first() {
+        let doc = open(HEX);
+        let options = streams(WriteOptions {
+            compress: true,
+            ..Default::default()
+        });
+        let out = save(&doc, &options).unwrap_or_default();
+        assert!(stream_of(&out, 6).0.contains("/Filter/FlateDecode"));
+        assert!(
+            stream_of(&out, 7)
+                .0
+                .starts_with("<</Filter/FlateDecode/DecodeParms<</Predictor 1>>/Length")
+        );
+        // An array of one filter is unpacked, and /DecodeParms, a dictionary,
+        // becomes null.
+        assert!(
+            stream_of(&out, 8)
+                .0
+                .starts_with("<</Filter/FlateDecode/DecodeParms null/Length")
+        );
+        // The abbreviation stays.
+        assert!(stream_of(&out, 13).0.contains("/Filter/AHx"));
+        // Array 20 lost its ASCIIHexDecode to stream 9, so stream 10, whose
+        // data is still hex, is now read as flate.
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("20 0 obj\n[/FlateDecode]"));
+        assert!(text.contains("21 0 obj\n[null]"));
+        assert!(!verify(&doc, &out, None, &options).verified());
+    }
+
+    #[test]
+    fn hex_off_an_empty_parameter_array_fails_the_save() {
+        let doc = open(include_bytes!(
+            "../../../corpus/smoke/streams-hex-empty-parms.pdf"
+        ));
+        let options = WriteOptions {
+            compress: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            save(&doc, &options).err().map(|e| e.message),
+            Some("argument error: index out of bounds".to_string())
+        );
+    }
+
+    #[test]
+    fn a_filter_the_lookup_misses_is_written_twice() {
+        let doc = open(include_bytes!(
+            "../../../corpus/smoke/streams-sorted-filter.pdf"
+        ));
+        let options = WriteOptions {
+            compress: true,
+            ..Default::default()
+        };
+        let out = save(&doc, &options).unwrap_or_default();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("/A100 100/Filter/FlateDecode/Filter/FlateDecode/Length"));
+    }
+
+    #[test]
+    fn effort_picks_the_zlib_level() {
+        let doc = open(RAW);
+        let at = |effort| {
+            let options = WriteOptions {
+                compress: true,
+                effort,
+                ..Default::default()
+            };
+            save(&doc, &options).unwrap_or_default().len()
+        };
+        // 1 to 11 is level 0, stored; 100 is level 9; 0 is level 6.
+        assert!(at(1) > at(0));
+        assert!(at(100) <= at(0));
+        assert_eq!(at(-5), at(0));
+        assert_eq!(at(1000), at(100));
     }
 }

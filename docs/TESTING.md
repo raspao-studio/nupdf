@@ -104,7 +104,7 @@ cargo +nightly fuzz run -O open_walk -- -max_total_time=3600   # one CPU-hour
 cargo +nightly fuzz run -O lex                                  # until stopped
 ```
 
-Targets live in `fuzz/fuzz_targets`: `lex`, `parse_object`, `filters` and `open_walk` (open a document, compute its version and page count, load every object and decode every stream). Seed `fuzz/corpus/open_walk/` with the smoke fixtures and small standard-tier files; corpora and crash artifacts are not committed.
+Targets live in `fuzz/fuzz_targets`: `lex`, `parse_object`, `filters`, `crypt`, `images`, `encode` (the deflate and CCITT G4 encoders `clean` writes with, each output decoded back) and `open_walk` (open a document, compute its version and page count, load every object, decode every stream, and write it as `clean` does with options the input picks). Seed `fuzz/corpus/open_walk/` with the smoke fixtures and small standard-tier files; corpora and crash artifacts are not committed.
 
 - cargo-fuzz targets per parser surface: `lex`, `parse_object`, `open_walk`, one per decoder, the content parser and the font parsers.
 - Seeds come from the smoke and standard tiers.

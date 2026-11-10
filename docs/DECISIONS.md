@@ -171,3 +171,23 @@ The `roundtrip` check covers what bytes cannot. Each side writes its file, MuPDF
 On the standard tier all four levels match MuPDF on every file except the 33 AES files `clean` differs on (random IVs, D18). Collecting also lets both tools write 37 files that fail without it, because the objects that cannot be loaded are ones nothing reaches. `roundtrip-gggg` covers the AES files, as `roundtrip` does for `clean`.
 
 With garbage collection, objects can be renumbered or merged, so `clean`'s read-back check cannot compare them by number. It walks both documents from the trailer's `/Root`, `/Info`, `/ID` and `/Encrypt`, pairing objects where the same reference leads, and fails if an object pairs two ways or reads back differently. Merged objects may share a partner, and a reference that reads as null in the input may be null in the output. The check refuses the renumbering quirks above and the empty outputs: 20 standard files at `-g` (all also refused without `-g`) and 53 at `-gggg`, 33 of them empty.
+
+## D20. Stream options follow `copystream` and `expandstream`, with zlib's own deflate
+
+*2026-11-10*
+
+`clean -d`, `-z`, `-f`, `-i`, `-a` and `-e` decide each stream as MuPDF's `writeobject` does, and the `clean-d`, `clean-z`, `clean-ze`, `clean-a`, `clean-dfi` and `clean-dzgg` checks compare the output's BLAKE3 with MuPDF's. Byte-identical output needs MuPDF's encoders as well as its decisions:
+
+- **Deflate is a port of zlib 1.3.2** (`deflate`), the copy MuPDF bundles, reduced to the one `compress2` call MuPDF makes. zlib-rs, which nupdf decodes with, is a port of zlib-ng, whose match finder differs: its output differed from MuPDF's at most levels. The port matched MuPDF's zlib on 52 inputs (empty to several megabytes of text, binary, random and PDF data) at every level before any PDF was written with it. `-e` maps effort 1 to 100 onto levels 0 to 9 as MuPDF does, so efforts 1 to 11 store the data uncompressed.
+- **1-bit images are CCITT G4 encoded** with a port of MuPDF's encoder (`fax_encode`), when the data is exactly the image's rows. MuPDF compares `/Subtype` with `/Image` by pointer, so an image whose `/Subtype` is a reference is deflated instead; the port keeps that.
+- **Filter arrays are edited in place.** Taking `ASCIIHexDecode` off for `-z`, or putting it on for `-a`, changes the filter array, and an array reached through a reference is shared: every later stream that uses it, and the array object when it is written, sees the change. MuPDF writes streams whose filters no longer match their data this way, and so does nupdf; the read-back check then refuses the output. An array left with one filter becomes that filter, and a `/DecodeParms` that is not an array becomes null. An empty `/DecodeParms` array fails the whole save, in both tools.
+- **Lookups miss what MuPDF's miss.** A sorted dictionary whose last key is `/Filter` reads as unfiltered (D18's lookup quirk), so `-z` compresses its data again and appends a second `/Filter`.
+- **Brotli (`-zz`) is refused.** MuPDF marks it experimental, and matching it would need a port of Google's encoder.
+
+`mutool clean` turns on a line per dictionary entry for `-a` and `-d` without `-z`; the write options MuPDF's script interface takes do not, so the checks pass `pretty` to the oracle explicitly.
+
+With `-d` after `-gg`, MuPDF decodes each stream through its renumbered dictionary; nupdf decodes it through the input's, which leads to the same objects except where renumbering's own quirks (D19) point a reference elsewhere.
+
+On the standard tier the checks match MuPDF on every file except AES ones (random IVs, D18) and, where images are decoded, the files whose image decoding already differs in the `images` check (JBIG2 refinement and halftone regions, mostly). On `bomb_giant.pdf`, jbig2dec decodes a 100000 by 100000 page until MuPDF's compression-bomb check fails the save; nupdf's JBIG2 decoder refuses the page and writes the stream empty.
+
+The read-back check compares decoded data when any stream option is given, and leaves `/Filter` and `/DecodeParms` out of the dictionary comparison, since changing them is the point. Data that went through the fax encoder is compared without the bits that pad each row to a byte: the encoder never reads them, so they come back white.
