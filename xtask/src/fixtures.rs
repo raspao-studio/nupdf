@@ -295,7 +295,25 @@ fn objstm_fixtures() -> Vec<Fixture> {
     pdf.trailer(&format!("/Root 1 0 R/Prev {first}"), second);
     let gap_update = pdf.out;
 
+    // An empty stream, which MuPDF writes under AES with the /Length of an
+    // IV and a block but no data.
+    let mut pdf = Pdf::new("1.5");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+    pdf.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents[4 0 R 5 0 R]>>",
+    );
+    pdf.stream(4, "", b"0 0 1 rg 0 0 100 100 re f");
+    pdf.stream(5, "", b"");
+    let empty_stream = pdf.finish_with_xref("");
+
     vec![
+        fx(
+            "write-empty-stream.pdf",
+            "Writer: an empty content stream, which MuPDF's AES encryption writes without data",
+            empty_stream,
+        ),
         fx(
             "objstm-pack.pdf",
             "For -Z: objects gathering leaves out, objects packed with nothing between them, two object streams' worth, and a catalog /Version below 1.5",
