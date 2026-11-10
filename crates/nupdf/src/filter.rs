@@ -207,7 +207,8 @@ fn build_filter<'a>(
             };
             crate::fax::open(chain, p).map_err(DecodeError::Failed)
         }
-        b"DCTDecode" | b"DCT" | b"JBIG2Decode" => Err(DecodeError::Unsupported(
+        b"DCTDecode" | b"DCT" => Ok(crate::dct::open(chain, int(b"ColorTransform", -1))),
+        b"JBIG2Decode" => Err(DecodeError::Unsupported(
             String::from_utf8_lossy(name).into_owned(),
         )),
         b"RunLengthDecode" | b"RL" => Ok(open_rld(chain)),

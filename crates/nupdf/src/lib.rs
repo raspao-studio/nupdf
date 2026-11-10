@@ -7,12 +7,14 @@
 //! `docs/ARCHITECTURE.md`.
 
 pub mod crypt;
+pub mod dct;
 pub mod diag;
 mod doc_id;
 pub mod document;
 pub mod fax;
 pub mod filter;
 pub mod header;
+pub mod jpeg;
 pub mod lex;
 pub mod limits;
 pub mod object;
