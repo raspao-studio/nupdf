@@ -110,6 +110,7 @@ pub fn all() -> Vec<Fixture> {
     .chain(writer_fixtures())
     .chain(garbage_fixtures())
     .chain(stream_fixtures())
+    .chain(objstm_fixtures())
     .collect()
 }
 
@@ -214,6 +215,101 @@ fn garbage_fixtures() -> Vec<Fixture> {
             "gc-encrypted.pdf",
             "Garbage: an RC4 document whose strings and streams are encrypted again under new numbers",
             encrypted_with_garbage(),
+        ),
+    ]
+}
+
+/// Cases for `clean -Z`.
+fn objstm_fixtures() -> Vec<Fixture> {
+    let fx = |name, about, bytes| Fixture {
+        name,
+        about,
+        needs_repair: false,
+        bytes,
+    };
+
+    // What gathering leaves out: the catalog and /Info, a bare integer, a
+    // bare reference, an object of generation 1, streams. The rest is
+    // packed in number order with nothing between objects, so `true`,
+    // `null`, a real and a name run together, each read back from its own
+    // range. 300 small dictionaries fill a second object stream. The
+    // catalog's /Version 1.4 becomes 1.5.
+    let mut pdf = Pdf::new("1.4");
+    pdf.obj(
+        1,
+        "<</Type/Catalog/Pages 2 0 R/Version/1.4/Extra 9 0 R/Many 315 0 R>>",
+    );
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+    pdf.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
+    );
+    pdf.stream(4, "", &text_content("Packed"));
+    pdf.obj(5, FONT);
+    pdf.obj(6, "<</Title(Packed)>>");
+    pdf.obj(7, "42");
+    pdf.obj(8, "5 0 R");
+    pdf.obj(9, "[7 0 R 8 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 1 R]");
+    pdf.obj(10, "true");
+    pdf.obj(11, "null");
+    pdf.obj(12, "0.5");
+    pdf.obj(13, "/Name");
+    let at = pdf.out.len();
+    pdf.obj(14, "<</Generation 1>>");
+    for i in 15..315 {
+        pdf.obj(i, &format!("<</I {i}>>"));
+    }
+    let refs: String = (15..315).map(|i| format!("{i} 0 R ")).collect();
+    pdf.obj(315, &format!("[{refs}]"));
+    let mut pack = pdf.finish_with_xref("/Info 6 0 R");
+    // Object 14 has generation 1, in its header and its xref entry.
+    let header = b"14 0 obj";
+    if let Some(i) = pack[at..].windows(header.len()).position(|w| w == header) {
+        pack[at + i + 3] = b'1';
+    }
+    let entry = format!("{at:010} 00000 n");
+    if let Some(i) = pack
+        .windows(entry.len())
+        .position(|w| w == entry.as_bytes())
+    {
+        pack[i + 15] = b'1';
+    }
+
+    // An object number the only xref section skips: gathering loads it,
+    // which fails MuPDF's save.
+    let mut pdf = hello(Pdf::new("1.5"), "Gap", false);
+    pdf.obj(7, "<</After (the gap)>>");
+    let start = pdf.xref(&[1, 2, 3, 4, 5, 7], true);
+    pdf.trailer("/Root 1 0 R", start);
+    let gap = pdf.out;
+
+    // The same gap made by an update whose numbers start past the first
+    // section's size: MuPDF's lookup then finds no entry, and the save
+    // goes on.
+    let mut pdf = hello(Pdf::new("1.5"), "Update", false);
+    let nums: Vec<u32> = (1..pdf.size()).collect();
+    let first = pdf.xref(&nums, true);
+    pdf.trailer("/Root 1 0 R", first);
+    pdf.obj(8, "<</Added (in the update)>>");
+    let second = pdf.xref(&[8], true);
+    pdf.trailer(&format!("/Root 1 0 R/Prev {first}"), second);
+    let gap_update = pdf.out;
+
+    vec![
+        fx(
+            "objstm-pack.pdf",
+            "For -Z: objects gathering leaves out, objects packed with nothing between them, two object streams' worth, and a catalog /Version below 1.5",
+            pack,
+        ),
+        fx(
+            "objstm-gap.pdf",
+            "For -Z: an object number the only xref section skips, which fails MuPDF's save",
+            gap,
+        ),
+        fx(
+            "objstm-gap-update.pdf",
+            "For -Z: undefined object numbers past the first section's size, which MuPDF's lookup skips",
+            gap_update,
         ),
     ]
 }
