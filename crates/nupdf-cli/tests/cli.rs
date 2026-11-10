@@ -1035,3 +1035,49 @@ fn merge_copies_external_links_and_the_outline() {
     }
     assert!(written.contains("/Type/Outlines/Count -7"));
 }
+
+#[test]
+fn incremental_edits_append_a_revision() {
+    let input = smoke("minimal.pdf");
+    let original = std::fs::read(&input).unwrap();
+    let output = scratch("meta-incremental.pdf");
+    let report = run_json(&[
+        "meta",
+        "--set",
+        "Title=inc",
+        "--incremental",
+        "-o",
+        output.to_str().unwrap(),
+        input.to_str().unwrap(),
+    ]);
+    assert_eq!(report["verification"]["verified"], true);
+    let written = std::fs::read(&output).unwrap();
+    assert_eq!(&written[..original.len()], &original[..]);
+    let facts = info_at(&output);
+    assert_eq!(facts["revisions"], 2);
+    assert_eq!(facts["metadata"]["Title"], "inc");
+
+    // A new document has no file to add to; a repaired one, MuPDF will not
+    // append to.
+    for argv in [
+        &[
+            "merge",
+            "--incremental",
+            "--dry-run",
+            input.to_str().unwrap(),
+        ][..],
+        &[
+            "pages",
+            "--rotate",
+            "90",
+            "--incremental",
+            "--dry-run",
+            smoke("broken-xref-offsets.pdf").to_str().unwrap(),
+        ],
+    ] {
+        let out = nupdf(argv);
+        assert_eq!(out.status.code(), Some(2), "{argv:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["code"], "usage.incremental", "{argv:?}");
+    }
+}

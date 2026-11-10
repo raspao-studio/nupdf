@@ -79,6 +79,12 @@ fuzz_target!(|data: &[u8]| {
                 let pages: Vec<i32> = (0..edited.page_count().unwrap_or(0)).collect();
                 nupdf::edit::rotate_pages(&edited, &pages, 90 * i32::from(edits >> 3)).is_ok()
             };
+            // The top bit appends the edits instead, which MuPDF refuses
+            // with most options; the refusal is a result too.
+            let options = WriteOptions {
+                incremental: edits & 0x80 != 0,
+                ..options
+            };
             if rotated && let Ok(out) = save(&edited, &options) {
                 let _ = verify(&edited, &out, None, &options);
             }

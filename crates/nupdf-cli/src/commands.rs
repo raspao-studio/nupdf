@@ -24,6 +24,10 @@ pub struct WriteArgs {
     /// Skip reading the output back.
     #[arg(long)]
     pub no_verify: bool,
+    /// Append the changes to the file as a new revision, leaving its bytes
+    /// as they were, instead of rewriting it.
+    #[arg(long)]
+    pub incremental: bool,
 }
 
 impl WriteArgs {
@@ -40,6 +44,10 @@ impl WriteArgs {
                 message: "an edit needs -o or --dry-run".into(),
             });
         }
+        let options = nupdf::write::WriteOptions {
+            incremental: self.incremental,
+            ..options
+        };
         Ok(Clean {
             options,
             output: self.output.as_deref(),

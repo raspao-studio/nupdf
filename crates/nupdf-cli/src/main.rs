@@ -761,11 +761,23 @@ fn save_checked(
             message: "the empty password does not open the document: pass --password".into(),
         });
     }
-    let bytes = nupdf::write::save(doc, &plan.options).map_err(|e| Failure {
-        exit: Exit::Input,
-        code: "input.unloadable_object",
-        message: nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
-            .to_string(),
+    let bytes = nupdf::write::save(doc, &plan.options).map_err(|e| {
+        let message =
+            nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default()).to_string();
+        // MuPDF's refusals of an incremental write are argument errors.
+        if plan.options.incremental && message.starts_with("Can't do incremental") {
+            Failure {
+                exit: Exit::Usage,
+                code: "usage.incremental",
+                message,
+            }
+        } else {
+            Failure {
+                exit: Exit::Input,
+                code: "input.unloadable_object",
+                message,
+            }
+        }
     })?;
     let verification = plan.verify.then(|| {
         let v = nupdf::write::verify(doc, &bytes, plan.password, &plan.options);
