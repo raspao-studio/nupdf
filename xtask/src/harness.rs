@@ -379,6 +379,22 @@ const fn edit(
     }
 }
 
+/// A check's name as a file name that stays apart from the others on a
+/// case-insensitive filesystem: `clean-Z` and `clean-z` would be one file,
+/// so a capital becomes `_` and the letter.
+fn file_stem(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    for c in name.chars() {
+        if c.is_ascii_uppercase() {
+            out.push('_');
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// `merge` into a new document, against the same pages grafted through
 /// MuPDF's script interface as `mutool merge` grafts them.
 const fn merge(
@@ -553,7 +569,7 @@ pub fn run(
         let _ = writeln!(notes, "- `{}`: {}", check.name, check.about);
         let results = run_check(root, check, &mutool, &nupdf, &files, timeout);
         std::fs::write(
-            out_dir.join(format!("{}.json", check.name)),
+            out_dir.join(format!("{}.json", file_stem(check.name))),
             serde_json::to_string_pretty(&results)?,
         )?;
         summary.push_str(&summary_row(check.name, &results));
@@ -611,7 +627,9 @@ fn run_check(
     timeout: Duration,
 ) -> Vec<FileResult> {
     let script = root.join(check.oracle_script);
-    let scratch = root.join("target/harness/scratch").join(check.name);
+    let scratch = root
+        .join("target/harness/scratch")
+        .join(file_stem(check.name));
     let next = AtomicUsize::new(0);
     let results = Mutex::new(Vec::with_capacity(files.len()));
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -1254,6 +1272,16 @@ mod tests {
             oracle: "1.28.6".into(),
             checks: BTreeMap::from([("info".to_string(), files)]),
         }
+    }
+
+    #[test]
+    fn result_files_stay_apart_without_case() {
+        let stems: std::collections::HashSet<String> = CHECKS
+            .iter()
+            .map(|c| file_stem(c.name).to_ascii_lowercase())
+            .collect();
+        assert_eq!(stems.len(), CHECKS.len());
+        assert_eq!(file_stem("clean-Zggz"), "clean-_zggz");
     }
 
     #[test]
