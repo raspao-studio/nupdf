@@ -32,6 +32,14 @@ pub struct Check {
     /// files it wrote there in `"file"` fields. The harness replaces each
     /// with `"blake3"`, the hash of that file, before comparing.
     pub oracle_writes_files: bool,
+    /// Applied to each file the oracle wrote before it is hashed.
+    pub oracle_file_fixup: Option<fn(&mut [u8])>,
+    /// Compare what MuPDF reads back from each side's output instead of
+    /// the output itself. The oracle script writes `clean.pdf` into its
+    /// scratch directory; `nupdf` writes with `-o`. This script then runs on
+    /// each written file with a scratch directory of its own, and MuPDF's
+    /// distinct warnings while reading it are added as `/warnings`.
+    pub reread: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +75,8 @@ pub const CHECKS: &[Check] = &[
             "/metadata",
         ]),
         oracle_writes_files: false,
+        oracle_file_fixup: None,
+        reread: None,
     },
     Check {
         name: "objects",
@@ -78,6 +88,8 @@ pub const CHECKS: &[Check] = &[
             items: "objects",
         },
         oracle_writes_files: false,
+        oracle_file_fixup: None,
+        reread: None,
     },
     Check {
         name: "pages",
@@ -89,6 +101,8 @@ pub const CHECKS: &[Check] = &[
             items: "pages",
         },
         oracle_writes_files: false,
+        oracle_file_fixup: None,
+        reread: None,
     },
     Check {
         name: "warnings",
@@ -97,6 +111,8 @@ pub const CHECKS: &[Check] = &[
         nupdf_args: &["info"],
         compare: Compare::Warnings,
         oracle_writes_files: false,
+        oracle_file_fixup: None,
+        reread: None,
     },
     Check {
         name: "streams",
@@ -108,6 +124,8 @@ pub const CHECKS: &[Check] = &[
             items: "streams",
         },
         oracle_writes_files: true,
+        oracle_file_fixup: None,
+        reread: None,
     },
     Check {
         name: "images",
@@ -119,6 +137,32 @@ pub const CHECKS: &[Check] = &[
             items: "streams",
         },
         oracle_writes_files: true,
+        oracle_file_fixup: None,
+        reread: None,
+    },
+    Check {
+        name: "clean",
+        about: "the document rewritten as `mutool clean` writes it: BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        // The bytes MuPDF writes, whether or not they read back the same.
+        nupdf_args: &["clean", "--dry-run", "--no-verify"],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        reread: None,
+    },
+    Check {
+        name: "roundtrip",
+        about: "the `clean` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &["clean", "--no-verify"],
+        compare: Compare::Collection {
+            counts: &["/object_count", "/repaired", "/warnings"],
+            items: "objects",
+        },
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        reread: Some("oracle/js/objects.js"),
     },
 ];
 
@@ -285,26 +329,19 @@ fn run_check(
                         break;
                     };
                     let dir = scratch.join(index.to_string());
-                    let mut oracle_args = vec![
-                        std::ffi::OsStr::new("run"),
-                        script.as_os_str(),
-                        file.path.as_os_str(),
-                    ];
-                    if check.oracle_writes_files {
-                        let _ = std::fs::create_dir_all(&dir);
-                        oracle_args.push(dir.as_os_str());
-                    }
-                    let mut oracle = side(mutool, &oracle_args, timeout);
-                    if check.oracle_writes_files {
-                        if let Some(json) = &mut oracle.json {
-                            hash_written_files(json, &dir);
+                    let (oracle, ours) = match check.reread {
+                        None => run_sides(check, &script, mutool, nupdf, &file.path, &dir, timeout),
+                        Some(reread) => {
+                            let reread = root.join(reread);
+                            let run = Reread {
+                                mutool,
+                                script: &reread,
+                                timeout,
+                            };
+                            reread_sides(&run, &script, nupdf, check, &file.path, &dir)
                         }
-                        let _ = std::fs::remove_dir_all(&dir);
-                    }
-                    let mut args: Vec<&std::ffi::OsStr> =
-                        check.nupdf_args.iter().map(std::ffi::OsStr::new).collect();
-                    args.push(file.path.as_os_str());
-                    let ours = side(nupdf, &args, timeout);
+                    };
+                    let _ = std::fs::remove_dir_all(&dir);
                     let result = judge(check, &file.name, oracle, ours);
                     if let Ok(mut results) = results.lock() {
                         results.push(result);
@@ -316,6 +353,107 @@ fn run_check(
     let mut results = results.into_inner().unwrap_or_default();
     results.sort_by(|a, b| a.file.cmp(&b.file));
     results
+}
+
+/// The oracle script and `nupdf` on the file itself.
+fn run_sides(
+    check: &Check,
+    script: &Path,
+    mutool: &Path,
+    nupdf: &Path,
+    file: &Path,
+    dir: &Path,
+    timeout: Duration,
+) -> (Side, Side) {
+    let mut oracle_args = vec![
+        std::ffi::OsStr::new("run"),
+        script.as_os_str(),
+        file.as_os_str(),
+    ];
+    if check.oracle_writes_files {
+        let _ = std::fs::create_dir_all(dir);
+        oracle_args.push(dir.as_os_str());
+    }
+    let mut oracle = side(mutool, &oracle_args, timeout);
+    if check.oracle_writes_files
+        && let Some(json) = &mut oracle.json
+    {
+        hash_written_files(json, dir, check.oracle_file_fixup);
+    }
+    let mut args: Vec<&std::ffi::OsStr> =
+        check.nupdf_args.iter().map(std::ffi::OsStr::new).collect();
+    args.push(file.as_os_str());
+    (oracle, side(nupdf, &args, timeout))
+}
+
+struct Reread<'a> {
+    mutool: &'a Path,
+    script: &'a Path,
+    timeout: Duration,
+}
+
+impl Reread<'_> {
+    /// MuPDF reading `written`, once `writer` succeeded. A failed write or
+    /// read is that side's failure.
+    fn after(&self, writer: Side, written: &Path, dir: &Path) -> Side {
+        if writer.json.is_none() {
+            return writer;
+        }
+        let _ = std::fs::create_dir_all(dir);
+        let args = [
+            std::ffi::OsStr::new("run"),
+            self.script.as_os_str(),
+            written.as_os_str(),
+            dir.as_os_str(),
+        ];
+        let mut read = side(self.mutool, &args, self.timeout);
+        if let Some(Value::Object(map)) = &mut read.json {
+            let warnings: std::collections::BTreeSet<&str> = read
+                .stderr
+                .lines()
+                .filter_map(|l| l.strip_prefix("warning: "))
+                .collect();
+            map.insert("warnings".into(), Value::from(Vec::from_iter(warnings)));
+        }
+        if let Some(json) = &mut read.json {
+            hash_written_files(json, dir, None);
+        }
+        read.ms += writer.ms;
+        read
+    }
+}
+
+/// Each side writes the document, then MuPDF reads each output back.
+fn reread_sides(
+    run: &Reread,
+    script: &Path,
+    nupdf: &Path,
+    check: &Check,
+    file: &Path,
+    dir: &Path,
+) -> (Side, Side) {
+    let oracle_dir = dir.join("oracle");
+    let _ = std::fs::create_dir_all(&oracle_dir);
+    let oracle_args = [
+        std::ffi::OsStr::new("run"),
+        script.as_os_str(),
+        file.as_os_str(),
+        oracle_dir.as_os_str(),
+    ];
+    let oracle = side(run.mutool, &oracle_args, run.timeout);
+    let oracle = run.after(
+        oracle,
+        &oracle_dir.join("clean.pdf"),
+        &dir.join("oracle-read"),
+    );
+
+    let written = dir.join("nupdf.pdf");
+    let mut args: Vec<&std::ffi::OsStr> =
+        check.nupdf_args.iter().map(std::ffi::OsStr::new).collect();
+    args.extend([file.as_os_str(), "-o".as_ref(), written.as_os_str()]);
+    let ours = side(nupdf, &args, run.timeout);
+    let ours = run.after(ours, &written, &dir.join("nupdf-read"));
+    (oracle, ours)
 }
 
 fn side(program: &Path, args: &[&std::ffi::OsStr], timeout: Duration) -> Side {
@@ -403,19 +541,35 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
 
 /// Replaces every `"file": name` with `"blake3": <hash of dir/name>`, or
 /// with `"blake3": null` when the file is missing.
-pub fn hash_written_files(value: &mut Value, dir: &Path) {
+pub fn hash_written_files(value: &mut Value, dir: &Path, fixup: Option<fn(&mut [u8])>) {
     match value {
         Value::Object(map) => {
             if let Some(Value::String(name)) = map.remove("file") {
-                let hash = std::fs::read(dir.join(&name))
-                    .ok()
-                    .map(|data| blake3::hash(&data).to_hex().to_string());
+                let hash = std::fs::read(dir.join(&name)).ok().map(|mut data| {
+                    if let Some(f) = fixup {
+                        f(&mut data);
+                    }
+                    blake3::hash(&data).to_hex().to_string()
+                });
                 map.insert("blake3".into(), hash.map_or(Value::Null, Value::from));
             }
-            map.values_mut().for_each(|v| hash_written_files(v, dir));
+            map.values_mut()
+                .for_each(|v| hash_written_files(v, dir, fixup));
         }
-        Value::Array(items) => items.iter_mut().for_each(|v| hash_written_files(v, dir)),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|v| hash_written_files(v, dir, fixup)),
         _ => {}
+    }
+}
+
+/// MuPDF's reproducible output names MuPDF in its comment line; nupdf's
+/// names nupdf, in a line of the same length, so offsets agree.
+fn name_nupdf_as_writer(data: &mut [u8]) {
+    const MUPDF: &[u8] = b"% Written by MuPDF\n";
+    const NUPDF: &[u8] = b"% Written by nupdf\n";
+    if let Some(at) = data.windows(MUPDF.len()).take(64).position(|w| w == MUPDF) {
+        data[at..at + MUPDF.len()].copy_from_slice(NUPDF);
     }
 }
 
@@ -698,7 +852,7 @@ mod tests {
         std::fs::write(dir.join("4"), b"abc").unwrap();
         let mut v =
             serde_json::json!({"streams": {"4": {"len": 3, "file": "4"}, "5": {"file": "5"}}});
-        hash_written_files(&mut v, &dir);
+        hash_written_files(&mut v, &dir, None);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(
             v,
