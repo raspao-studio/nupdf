@@ -572,6 +572,23 @@ fn clean_writes_streams_as_the_options_say() {
 }
 
 #[test]
+fn clean_packs_objects_into_object_streams() {
+    let input = smoke("multipage-inherit.pdf");
+    let path = input.to_str().unwrap();
+    let report = run_json(&["clean", "-Z", "--dry-run", path]);
+    assert_eq!(report["objstms"], true);
+    assert_eq!(report["verification"]["verified"], true);
+    let input = smoke("objstm-gap.pdf");
+    let out = nupdf(&["clean", "-Z", "--dry-run", input.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(3));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(
+        err["error"]["message"],
+        "cannot find object in xref (6 0 R)"
+    );
+}
+
+#[test]
 fn clean_refuses_brotli() {
     let input = smoke("streams-raw.pdf");
     let out = nupdf(&["clean", "-zz", "--dry-run", input.to_str().unwrap()]);

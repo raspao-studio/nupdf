@@ -95,6 +95,10 @@ enum Command {
         /// default is compact, or a line per entry with -a or -d and no -z.
         #[arg(short = 't', action = clap::ArgAction::Count)]
         tight: u8,
+        /// Pack objects into object streams and write an xref stream, as
+        /// `mutool clean -Z`. The version becomes at least 1.5.
+        #[arg(short = 'Z', action = clap::ArgAction::Count)]
+        objstms: u8,
         /// Report what would be written, and write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -224,6 +228,7 @@ fn main() -> ExitCode {
             ascii,
             effort,
             tight,
+            objstms,
             dry_run,
             no_verify,
         } => clean_options(&CleanFlags {
@@ -234,6 +239,7 @@ fn main() -> ExitCode {
             images: *compress_images,
             ascii: *ascii,
             tight: *tight,
+            objstms: *objstms,
             effort: *effort,
         })
         .and_then(|options| open(file).map(|opened| (options, opened)))
@@ -414,6 +420,7 @@ struct CleanFlags {
     images: u8,
     ascii: u8,
     tight: u8,
+    objstms: u8,
     effort: i32,
 }
 
@@ -440,6 +447,7 @@ fn clean_options(f: &CleanFlags) -> Result<nupdf::write::WriteOptions, Failure> 
         compress_images: f.images > 0,
         compress_fonts: f.fonts > 0,
         effort: f.effort.clamp(0, 100),
+        objstms: f.objstms > 0,
     })
 }
 
@@ -493,6 +501,7 @@ fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::
             "effort": plan.options.effort,
         },
         "syntax": if plan.options.pretty { "pretty" } else { "compact" },
+        "objstms": plan.options.objstms,
         "output": {
             "path": plan.output.map(|p| p.display().to_string()),
             "doc_id": DocId::from_hash(&hash).to_string(),
