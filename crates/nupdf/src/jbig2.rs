@@ -405,6 +405,17 @@ mod tests {
     }
 
     #[test]
+    fn endless_empty_export_runs_end_the_decode() {
+        // A fuzzer find: a symbol dictionary whose export runs decode as
+        // zeros forever. MuPDF fails it with jbig2dec's guard; so does the
+        // patched hayro-jbig2.
+        let data = include_bytes!("../testdata/jbig2-endless-export-runs.jb2");
+        let diag = Diagnostics::new();
+        let mut s = open(Stream::memory(data, &diag), None);
+        assert_eq!(s.read_best(0, 0, 1 << 20), Ok(Vec::new()));
+    }
+
+    #[test]
     fn undecodable_pages_end_the_stream_empty() {
         let diag = Diagnostics::new();
         let mut s = open(Stream::memory(b"not jbig2", &diag), None);

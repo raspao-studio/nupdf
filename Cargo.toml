@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/nupdf", "crates/nupdf-cli", "xtask"]
+exclude = ["vendor"]
 default-members = ["crates/nupdf", "crates/nupdf-cli"]
 
 [workspace.package]
@@ -37,3 +38,8 @@ unimplemented = "warn"
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
+
+# hayro-jbig2 with guards against endless loops on damaged data
+# (vendor/hayro-jbig2/NUPDF.md).
+[patch.crates-io]
+hayro-jbig2 = { path = "vendor/hayro-jbig2" }
