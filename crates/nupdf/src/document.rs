@@ -676,7 +676,8 @@ impl Document {
 
     /// Decoded data of a stream object, for non-image use.
     pub fn stream_data(&self, stream: &Stream) -> Result<Vec<u8>, DecodeError> {
-        self.stream_data_in(&self.current(), stream)
+        // The /Length lookup may repair the document, as in MuPDF.
+        self.stream_data_in(&self.current(), stream, true)
     }
 
     // ---- loading -------------------------------------------------------
@@ -713,8 +714,13 @@ impl Document {
 
     /// `pdf_load_stream`: decoded and read whole (`fz_read_best`), with
     /// MuPDF's compression bomb check.
-    fn stream_data_in(&self, st: &State, stream: &Stream) -> Result<Vec<u8>, DecodeError> {
-        let length = self.stream_length(st, stream, false);
+    fn stream_data_in(
+        &self,
+        st: &State,
+        stream: &Stream,
+        may_repair: bool,
+    ) -> Result<Vec<u8>, DecodeError> {
+        let length = self.stream_length(st, stream, may_repair);
         let mut s = self.open_decoded(st, stream, length)?;
         let resolve = |o: &Object| self.resolve_in(st, o);
         let initial = filter::guess_length(length, &stream.dict, &resolve);
