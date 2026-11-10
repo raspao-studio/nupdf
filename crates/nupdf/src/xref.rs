@@ -1283,9 +1283,136 @@ pub fn raw_stream<'a>(
     &data[start..stop]
 }
 
+/// How many bytes of `raw_stream` MuPDF's `fz_read_best` (with buffer hint
+/// `initial`) actually gets when it reads the endstream filter directly.
+///
+/// When /Length is too short, the filter looks for `endstream` in windows
+/// of 32, 64, ... 4096 bytes, keeping 11 bytes back each time. It marks
+/// itself finished as it hands over the window that holds the marker, and
+/// `fz_available` checks that mark before returning buffered bytes: what
+/// of that window does not fit the reader's buffer (1025 bytes, then grown
+/// by half) is dropped.
+pub fn read_all_len(
+    data: &[u8],
+    start: usize,
+    length: i64,
+    max_length: usize,
+    initial: usize,
+) -> usize {
+    let length = if length < 0 || length > max_length as i64 {
+        0
+    } else {
+        length as usize
+    };
+    let start = start.min(data.len());
+    let end = start.saturating_add(length).min(data.len());
+    let Some(found) = memmem::find(&data[end..], b"endstream") else {
+        return data.len() - start;
+    };
+    let marker = end + found;
+    let mut stop = marker;
+    if stop > end && data[stop - 1] == b'\n' {
+        stop -= 1;
+    }
+    if stop > end && data[stop - 1] == b'\r' {
+        stop -= 1;
+    }
+    let total = stop - start;
+    if stop <= end {
+        return total;
+    }
+
+    let file_end = data.len();
+    let (mut cap, mut len) = (initial.max(1024) + 1, 0usize);
+    let (mut remain, mut offset, mut emitted) = (end - start, start, 0usize);
+    let (mut avail, mut finished, mut size, mut extras) = (0usize, false, 16usize, 0usize);
+    loop {
+        if len == cap {
+            cap += cap >> 1;
+        }
+        let mut space = cap - len;
+        let mut count = 0;
+        while space > 0 {
+            // fz_available: a finished stream returns nothing, even with
+            // bytes still in its buffer.
+            let n = if finished {
+                0
+            } else if avail > 0 {
+                avail
+            } else if remain > 0 {
+                let n = remain.min(4096).min(file_end.saturating_sub(offset));
+                remain -= n;
+                offset += n;
+                emitted += n;
+                avail = n;
+                finished = n == 0;
+                n
+            } else {
+                size = (size * 2).min(4096);
+                let read = (size - extras).min(file_end.saturating_sub(offset));
+                let in_buffer = extras + read;
+                offset += read;
+                let n = if marker + 9 <= start + emitted + in_buffer {
+                    finished = true;
+                    total - emitted
+                } else if in_buffer > 11 {
+                    extras = 11;
+                    in_buffer - 11
+                } else {
+                    extras = 0;
+                    in_buffer
+                };
+                if n == 0 {
+                    finished = true;
+                }
+                emitted += n;
+                avail = n;
+                n
+            };
+            if n == 0 {
+                break;
+            }
+            let take = n.min(space);
+            avail -= take;
+            space -= take;
+            len += take;
+            count += take;
+        }
+        if count == 0 {
+            return len;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_all_drops_what_follows_a_found_endstream_in_a_full_buffer() {
+        // Measured with MuPDF 1.28.6: a 3-byte /Length that overshoots into
+        // "endstream", and the next marker `dist` bytes later.
+        for (dist, expect) in [
+            (500, 521),
+            (1500, 1025),
+            (2200, 2221),
+            (3000, 2305),
+            (5000, 5021),
+        ] {
+            let mut file = b"<</Length 3>>stream\r\n\r\nendstream\nendobj\n% ".to_vec();
+            let start = 21;
+            file.extend(std::iter::repeat_n(b'x', dist));
+            file.extend(b"\nendstream\n");
+            assert_eq!(
+                read_all_len(&file, start, 3, file.len(), 3),
+                expect,
+                "{dist}"
+            );
+        }
+        // A correct length reads exactly that.
+        let file = b"<<>>stream\nABC\nendstream";
+        assert_eq!(read_all_len(file, 11, 3, file.len(), 3), 3);
+    }
 
     #[test]
     fn atoi_matches_c() {
