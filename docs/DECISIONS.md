@@ -191,3 +191,20 @@ With `-d` after `-gg`, MuPDF decodes each stream through its renumbered dictiona
 On the standard tier the checks match MuPDF on every file except AES ones (random IVs, D18) and, where images are decoded, the files whose image decoding already differs in the `images` check (JBIG2 refinement and halftone regions, mostly). On `bomb_giant.pdf`, jbig2dec decodes a 100000 by 100000 page until MuPDF's compression-bomb check fails the save; nupdf's JBIG2 decoder refuses the page and writes the stream empty.
 
 The read-back check compares decoded data when any stream option is given, and leaves `/Filter` and `/DecodeParms` out of the dictionary comparison, since changing them is the point. Data that went through the fax encoder is compared without the bits that pad each row to a byte: the encoder never reads them, so they come back white.
+
+## D21. Object streams are gathered as `gather_to_objstms` gathers them
+
+*2026-11-10*
+
+`clean -Z` packs objects into object streams and ends the file with an xref stream instead of a table, and the `clean-Z`, `clean-Zg` and `clean-Zggz` checks compare the output's BLAKE3 with MuPDF's. What gets packed, and where the save fails, follows MuPDF's loop, not the PDF specification:
+
+- **What is packed.** Every object whose xref entry is in use with generation 0, in number order, 256 at most to a stream, printed compact with nothing between them. Left out are streams, the trailer's `/Root` and `/Info`, the encryption dictionary, bare integers (they may be a `/Length`) and bare references. The test is the xref entry's generation, which renumbering moves with the object, so after `-gg` an object that had generation 1 is still left out although it is written with 0.
+- **Unused objects are packed too.** At `-g`, an object nothing reaches still goes into an object stream; it is just listed as free, with its index as offset and generation.
+- **Loading comes first.** Gathering loads each entry before looking at it. An object that does not load fails the save, so `-Z` fails on files `clean` writes. So does a number no xref section defines, when MuPDF's entry lookup falls back to the newest section: always for a file with one section, and below the oldest section's size for a file with several. 22 standard files fail this way with `-Z`, in both tools.
+- **Object streams from the input are written** as ordinary streams, since only `-Z` keeps them. One that failed to load has a free entry from then on, so it is neither written nor packed.
+- **The version becomes 1.5** when it is lower, and the catalog's `/Version`, if it has one, is rewritten.
+- **The xref stream** is a new object after every other one. Its entries stop at the xref's length after truncation, so when renumbering leaves nothing, the stream is not among its own entries.
+
+An encrypted document can have its crypt filter dictionary packed into an object stream that needs it to be decrypted; MuPDF writes that, and the read-back check refuses it. Otherwise `-Z` output reads back: the check also compares the objects in object streams, leaves out the object streams and xref stream the writer adds, and ignores the catalog's `/Version`.
+
+On the standard tier the three checks match MuPDF on every file except AES ones (random IVs, D18) and `issue20453.pdf`, where MuPDF's repair during the save differs from nupdf's (D18).

@@ -145,6 +145,9 @@ pub(crate) struct State {
     /// Xref section offsets relative to the header, newest first; empty
     /// after a repair.
     section_offsets: Vec<i64>,
+    /// The oldest xref section's size (`Loaded::oldest_size`); 0 when
+    /// there is one section, as after a repair.
+    oldest_size: i32,
 }
 
 impl State {
@@ -162,6 +165,7 @@ impl State {
             page_count_override: OnceLock::new(),
             repaired_parents: OnceLock::new(),
             section_offsets: Vec::new(),
+            oldest_size: 0,
         }
     }
 
@@ -333,6 +337,9 @@ impl Document {
             Some(l) => {
                 let mut state = State::new(bias, l.entries, l.trailer, l.revisions, false);
                 state.section_offsets = l.section_offsets;
+                if l.revisions > 1 {
+                    state.oldest_size = l.oldest_size;
+                }
                 for (num, obj) in l.cached {
                     state.precache(num, obj);
                 }
@@ -596,6 +603,25 @@ impl Document {
         let s = self.current();
         let sections = if s.repaired { 1 } else { s.revisions };
         sections.saturating_sub(usize::from(self.linearized))
+    }
+
+    /// Whether `num` is an object stream that failed to load, whose entry
+    /// MuPDF has marked free.
+    pub(crate) fn is_demoted(&self, num: i32) -> bool {
+        self.current()
+            .demoted
+            .lock()
+            .is_ok_and(|d| d.contains(&num))
+    }
+
+    /// Whether MuPDF's `pdf_get_xref_entry` finds an entry for `num`, which
+    /// no section defines, once the save has made the newest section
+    /// solid: always with one section, and with several only below the
+    /// oldest section's size. Loading such an entry fails.
+    pub(crate) fn has_unset_entry(&self, num: i32) -> bool {
+        let s = self.current();
+        let sections = if s.repaired { 1 } else { s.revisions };
+        sections <= 1 || num < s.oldest_size
     }
 
     /// Absolute file offsets of the xref sections, newest first: one per

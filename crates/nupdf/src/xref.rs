@@ -495,6 +495,9 @@ pub struct Loaded {
     pub revisions: usize,
     /// Where each xref section starts, relative to the header, newest first.
     pub section_offsets: Vec<i64>,
+    /// The size of the oldest section, below which MuPDF's entry lookup
+    /// falls back to the newest section for a number no section defines.
+    pub oldest_size: i32,
 }
 
 pub type XrefError = String;
@@ -612,6 +615,7 @@ pub fn load(
         trailer,
         revisions: sections.len(),
         section_offsets: seen,
+        oldest_size: sections.last().map_or(0, |s| s.num_objects),
     })
 }
 

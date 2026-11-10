@@ -55,10 +55,12 @@ impl Slot {
     }
 }
 
-/// The working copy and `use_list` as garbage collection leaves them.
+/// The working copy and `use_list` as garbage collection leaves them, and
+/// the input's number of each slot, whose xref entry renumbering moves.
 pub(crate) struct Collected {
     pub slots: Vec<Slot>,
     pub use_list: Vec<bool>,
+    pub origin: Vec<i32>,
 }
 
 /// Runs `do_garbage` at `level` (1 to 4) over `slots`, the document's
@@ -75,6 +77,7 @@ pub(crate) fn collect(
         slots,
         use_list: vec![false; len],
         renumber: (0..len as i32).collect(),
+        origin: (0..len as i32).collect(),
     };
     loop {
         c.bake_stream_lengths();
@@ -91,6 +94,7 @@ pub(crate) fn collect(
     Ok(Collected {
         slots: c.slots,
         use_list: c.use_list,
+        origin: c.origin,
     })
 }
 
@@ -99,6 +103,7 @@ struct Collector<'a> {
     slots: Vec<Slot>,
     use_list: Vec<bool>,
     renumber: Vec<i32>,
+    origin: Vec<i32>,
 }
 
 /// What marking a reference found (`markref`).
@@ -371,18 +376,22 @@ impl Collector<'_> {
         let mut len = 1;
         let mut slots = vec![Slot::Empty; self.slots.len()];
         let mut use_list = vec![false; self.slots.len()];
+        let mut origin = vec![0; self.slots.len()];
         for (num, &to) in map.iter().enumerate().skip(1) {
             if self.use_list[num] {
                 let to = to as usize;
                 len = len.max(to + 1);
                 slots[to] = std::mem::take(&mut self.slots[num]);
                 use_list[to] = true;
+                origin[to] = self.origin[num];
             }
         }
         slots.truncate(len);
         use_list.truncate(len);
+        origin.truncate(len);
         self.slots = slots;
         self.use_list = use_list;
+        self.origin = origin;
         self.renumber = (0..len as i32).collect();
     }
 }

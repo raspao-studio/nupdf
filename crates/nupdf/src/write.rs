@@ -46,6 +46,9 @@ pub struct WriteOptions {
     /// `compression_effort` (`clean -e`): 0 for zlib's default level,
     /// else 1 to 100 for levels 0 to 9. Values outside count as the nearest.
     pub effort: i32,
+    /// Objects packed into object streams, and an xref stream instead of
+    /// the table (`do_use_objstms`, `clean -Z`).
+    pub objstms: bool,
 }
 
 impl WriteOptions {
@@ -84,6 +87,11 @@ enum Type {
     Unset,
     Free,
     InUse,
+    /// In the object stream numbered `stream`, at `index`.
+    Packed {
+        stream: usize,
+        index: usize,
+    },
 }
 
 /// The parts of `pdf_write_state` the default save uses.
@@ -136,12 +144,23 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
         gens.push(g);
     }
 
+    // Object streams need PDF 1.5: MuPDF raises the version, and writes
+    // it into the catalog when the catalog names one.
+    let mut changed = HashMap::new();
+    let mut version = doc.version().0;
+    if options.objstms && version < 15 {
+        version = 15;
+        raise_catalog_version(doc, &mut trailer, &mut changed);
+    }
+
     let garbage = options.garbage.min(4);
+    let input_gens = gens.clone();
     let mut collected = None;
     if garbage >= 1 {
         let slots = (0..xref_len)
-            .map(|num| match types[num] {
-                Type::InUse => match doc.load_object(num as i32) {
+            .map(|num| match (changed.get(&num), types[num]) {
+                (Some(o), _) => Slot::Loaded(o.clone(), None),
+                (None, Type::InUse) => match doc.load_object(num as i32) {
                     Ok(Some(o)) => {
                         let data = match &o {
                             Object::Stream(s) => Some(Arc::clone(s)),
@@ -152,7 +171,7 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
                     Ok(None) => Slot::Empty,
                     Err(_) => Slot::Failed(num as i32),
                 },
-                Type::Free | Type::Unset => Slot::Empty,
+                (None, _) => Slot::Empty,
             })
             .collect();
         let c = garbage::collect(doc, slots, &mut trailer, garbage)?;
@@ -164,20 +183,113 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
             gens.resize(c.slots.len(), 0);
         }
         xref_len = c.slots.len();
+        changed.clear();
         collected = Some(c);
+    }
+    // The generation in each xref entry, which renumbering moves with the
+    // entry: what decides whether an object can go in an object stream.
+    let entry_gens: Vec<i32> = match &collected {
+        Some(c) if garbage >= 2 => c
+            .origin
+            .iter()
+            .map(|&o| input_gens.get(o as usize).copied().unwrap_or(0))
+            .collect(),
+        _ => input_gens,
+    };
+
+    // An object stream that failed to load has a free entry from then on,
+    // although garbage collection still reaches its dictionary.
+    for (num, t) in types.iter_mut().enumerate() {
+        let input = match &collected {
+            Some(c) => c.origin.get(num).copied().unwrap_or(0),
+            None => num as i32,
+        };
+        if *t == Type::InUse && input > 0 && doc.is_demoted(input) {
+            *t = Type::Free;
+        }
+    }
+    let (slots, use_list) = match collected {
+        Some(c) => (Some(c.slots), c.use_list),
+        None => (None, vec![true; xref_len]),
+    };
+    let objects = Objects {
+        doc,
+        slots,
+        changed,
+        buffers: HashMap::new(),
+    };
+    let plan = Plan {
+        trailer,
+        crypt_obj,
+        types,
+        gens,
+        entry_gens,
+        use_list,
+        xref_len,
+        version,
+        has_crypt: crypt.is_some(),
+    };
+    finish(doc, options, objects, plan)
+}
+
+/// What `save` has worked out before writing.
+struct Plan {
+    trailer: Dict,
+    crypt_obj: Option<Object>,
+    types: Vec<Type>,
+    gens: Vec<i32>,
+    entry_gens: Vec<i32>,
+    use_list: Vec<bool>,
+    xref_len: usize,
+    version: i32,
+    has_crypt: bool,
+}
+
+/// The rest of `pdf_save_document`: gathering into object streams, then
+/// writing the objects, the free list and the xref.
+fn finish(
+    doc: &Document,
+    options: &WriteOptions,
+    mut objects: Objects,
+    plan: Plan,
+) -> Result<Vec<u8>, WriteError> {
+    let Plan {
+        trailer,
+        crypt_obj,
+        mut types,
+        mut gens,
+        entry_gens,
+        mut use_list,
+        mut xref_len,
+        version,
+        has_crypt,
+    } = plan;
+    let garbage = options.garbage.min(4);
+    let mut crypt_object_number = 0;
+    if has_crypt && let Some(Object::Ref(r)) = trailer.get(b"Encrypt") {
+        crypt_object_number = r.num;
+    }
+
+    if options.objstms {
+        let root = trailer
+            .get(b"Root")
+            .and_then(Object::as_ref)
+            .map_or(0, |r| r.num);
+        let info = trailer
+            .get(b"Info")
+            .and_then(Object::as_ref)
+            .map_or(0, |r| r.num);
+        let skip = [root, info, crypt_object_number];
+        gather(&mut objects, &mut types, &entry_gens, skip, xref_len)?;
+        // The object streams are new objects at the end, in use.
+        let len = types.len();
+        gens.resize(len, 0);
+        use_list.resize(len, true);
+        xref_len = len;
     }
 
     let n = xref_len + 3;
-    let mut use_list = vec![true; n];
-    if let Some(c) = &collected {
-        use_list[..xref_len].copy_from_slice(&c.use_list);
-        use_list[xref_len..].fill(false);
-    }
-    let mut objects = Objects {
-        doc,
-        slots: collected.map(|c| c.slots),
-        changed: HashMap::new(),
-    };
+    use_list.resize(n, false);
     let mut st = State {
         // Usually about the input's size.
         out: Vec::with_capacity(doc.data().len().saturating_add(4096)),
@@ -186,12 +298,15 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
         use_list,
         ofs_list: vec![0; n],
         gen_list: vec![0; n],
-        crypt_object_number: 0,
+        crypt_object_number,
     };
-    if crypt.is_some()
-        && let Some(Object::Ref(r)) = trailer.get(b"Encrypt")
-    {
-        st.crypt_object_number = r.num;
+    // flush_gathered gives a packed object its index as offset and
+    // generation; an unused one, which is not written, keeps both.
+    for (num, t) in types.iter().enumerate() {
+        if let Type::Packed { index, .. } = *t {
+            st.ofs_list[num] = index as i64;
+            st.gen_list[num] = index as i32;
+        }
     }
     // Truncate the xref after compacting and renumbering.
     if garbage >= 2 {
@@ -201,7 +316,6 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
     }
 
     // writeobjects
-    let version = doc.version().0;
     st.out
         .extend_from_slice(format!("%PDF-{}.{}\n", version / 10, version % 10).as_bytes());
     st.out.extend_from_slice(b"%\xC2\xB5\xC2\xB6\n");
@@ -210,23 +324,38 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
         // dowriteobject
         let mut generation = match types[num] {
             Type::Unset => st.gen_list[num],
-            Type::Free | Type::InUse => gens[num],
+            Type::Free | Type::InUse | Type::Packed { .. } => gens[num],
         };
         // Renumbering resets every generation, which re-encrypting allows.
         if garbage >= 2 {
             generation = if num == 0 { 65535 } else { 0 };
         }
+        // An object in an object stream has its index as its generation.
+        if let Type::Packed { index, .. } = types[num] {
+            generation = index as i32;
+        }
         st.gen_list[num] = generation;
         if garbage >= 1 && !st.use_list[num] {
             continue;
         }
-        if types[num] == Type::InUse {
-            st.ofs_list[num] = st.out.len() as i64;
-            let unenc = num as i32 == st.crypt_object_number;
-            let obj = objects.get(num).map_err(|message| WriteError { message })?;
-            write_object(&mut objects, &mut st, options, num, generation, unenc, obj)?;
-        } else {
-            st.use_list[num] = false;
+        match types[num] {
+            Type::Packed { stream, .. } => st.ofs_list[num] = stream as i64,
+            Type::InUse => {
+                st.ofs_list[num] = st.out.len() as i64;
+                let unenc = num as i32 == st.crypt_object_number;
+                let obj = objects.get(num).map_err(|message| WriteError { message })?;
+                write_object(
+                    &mut objects,
+                    &mut st,
+                    options,
+                    num,
+                    generation,
+                    unenc,
+                    obj,
+                    true,
+                )?;
+            }
+            Type::Free | Type::Unset => st.use_list[num] = false,
         }
     }
 
@@ -242,8 +371,219 @@ pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteErro
     st.gen_list[0] = 0xffff;
 
     let startxref = st.out.len();
-    write_xref(&mut st, &trailer, crypt_obj.as_ref(), xref_len, startxref);
+    if options.objstms {
+        write_xref_stream(
+            &mut objects,
+            &mut st,
+            options,
+            &types,
+            &trailer,
+            crypt_obj.as_ref(),
+            xref_len,
+            startxref,
+        )?;
+    } else {
+        write_xref(&mut st, &trailer, crypt_obj.as_ref(), xref_len, startxref);
+    }
     Ok(st.out)
+}
+
+/// The version check before writing object streams: the catalog's
+/// /Version, when it has one, becomes 1.5, where MuPDF puts it.
+fn raise_catalog_version(doc: &Document, trailer: &mut Dict, changed: &mut HashMap<usize, Object>) {
+    let one_five = Object::name(b"1.5");
+    match trailer.get(b"Root").cloned() {
+        Some(Object::Dict(root)) => {
+            if present(root.get(b"Version")).is_some() {
+                let mut root = (*root).clone();
+                root.put(b"Version", one_five);
+                trailer.put(b"Root", Object::Dict(Arc::new(root)));
+            }
+        }
+        Some(Object::Ref(r)) => {
+            let mut num = r.num;
+            for _ in 0..10 {
+                match doc.load_object(num) {
+                    Ok(Some(Object::Ref(next))) => num = next.num,
+                    Ok(Some(Object::Dict(root))) => {
+                        if present(root.get(b"Version")).is_some() {
+                            let mut root = (*root).clone();
+                            root.put(b"Version", one_five);
+                            if let Ok(num) = usize::try_from(num) {
+                                changed.insert(num, Object::Dict(Arc::new(root)));
+                            }
+                        }
+                        return;
+                    }
+                    _ => return,
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Most objects in one object stream, and the data that ends one early.
+const OBJSTM_MAXOBJS: usize = 256;
+const OBJSTM_MAXLEN: usize = 1 << 24;
+
+/// `gather_to_objstms`: every object that can be packed goes into an
+/// object stream, in number order, 256 at most to a stream. Streams,
+/// objects whose xref entry has a generation other than 0, the trailer's
+/// /Root and /Info, the encryption dictionary, bare integers and bare
+/// references stay out. Unused objects are packed too: MuPDF does not
+/// check, though it does not list them as in use.
+fn gather(
+    objects: &mut Objects,
+    types: &mut Vec<Type>,
+    entry_gens: &[i32],
+    skip: [i32; 3],
+    xref_len: usize,
+) -> Result<(), WriteError> {
+    let mut members: Vec<usize> = Vec::new();
+    let mut offsets: Vec<usize> = Vec::new();
+    let mut content: Vec<u8> = Vec::new();
+    let tight = Options {
+        tight: true,
+        ascii: false,
+    };
+    for num in 1..xref_len {
+        if skip.contains(&(num as i32)) {
+            continue;
+        }
+        // pdf_cache_object comes first: an object that does not load fails
+        // the save, and so does an entry the xref never defined.
+        let obj = match types[num] {
+            Type::InUse => objects
+                .load_member(num)
+                .map_err(|message| WriteError { message })?,
+            Type::Unset if objects.doc.has_unset_entry(num as i32) => {
+                return Err(WriteError {
+                    message: format!("format error: cannot find object in xref ({num} 0 R)"),
+                });
+            }
+            Type::Unset => continue,
+            Type::Free | Type::Packed { .. } => continue,
+        };
+        if entry_gens.get(num).copied().unwrap_or(0) != 0 {
+            continue;
+        }
+        let obj = obj.unwrap_or(Object::Null);
+        if matches!(obj, Object::Stream(_) | Object::Int(_) | Object::Ref(_)) {
+            continue;
+        }
+        offsets.push(content.len());
+        print::print(&obj, tight, &mut content);
+        members.push(num);
+        if members.len() == OBJSTM_MAXOBJS || content.len() > OBJSTM_MAXLEN {
+            flush_gathered(objects, types, &mut members, &mut offsets, &mut content);
+        }
+    }
+    flush_gathered(objects, types, &mut members, &mut offsets, &mut content);
+    Ok(())
+}
+
+/// `flush_gathered`: the object stream for the gathered objects, as a new
+/// object at the end.
+fn flush_gathered(
+    objects: &mut Objects,
+    types: &mut Vec<Type>,
+    members: &mut Vec<usize>,
+    offsets: &mut Vec<usize>,
+    content: &mut Vec<u8>,
+) {
+    if members.is_empty() {
+        return;
+    }
+    let mut data = Vec::with_capacity(content.len() + members.len() * 12);
+    for (num, at) in members.iter().zip(offsets.iter()) {
+        data.extend_from_slice(format!("{num} {at} ").as_bytes());
+    }
+    let first = data.len();
+    data.append(content);
+    let mut dict = Dict::new();
+    dict.put(b"First", Object::Int(first as i64));
+    dict.put(b"N", Object::Int(members.len() as i64));
+    dict.put(b"Type", Object::name(b"ObjStm"));
+    dict.put(b"Length", Object::Int(data.len() as i64));
+    let stream = types.len();
+    objects.add_stream(stream, dict, data);
+    types.push(Type::InUse);
+    for (index, &num) in members.iter().enumerate() {
+        types[num] = Type::Packed { stream, index };
+    }
+    members.clear();
+    offsets.clear();
+}
+
+/// `writexrefstream` for a full save: a new object after the others, with
+/// the trailer's entries and an entry per object of 1, 4 and 1 bytes. The
+/// entries stop at `xref_len`, after truncation, while the stream takes the
+/// number after every object: when renumbering leaves nothing, the stream
+/// is not among its own entries.
+#[allow(clippy::too_many_arguments)]
+fn write_xref_stream(
+    objects: &mut Objects,
+    st: &mut State,
+    options: &WriteOptions,
+    types: &[Type],
+    trailer: &Dict,
+    crypt_obj: Option<&Object>,
+    xref_len: usize,
+    startxref: usize,
+) -> Result<(), WriteError> {
+    let num = types.len();
+    let size = xref_len + 1;
+    let need = size.max(num + 1);
+    if st.use_list.len() < need {
+        st.use_list.resize(need, false);
+        st.ofs_list.resize(need, 0);
+        st.gen_list.resize(need, 0);
+    }
+    st.use_list[num] = true;
+    st.ofs_list[num] = startxref as i64;
+    st.gen_list[num] = 0;
+
+    let mut dict = Dict::new();
+    for key in [&b"Info"[..], b"Root", b"ID"] {
+        if let Some(v) = present(trailer.get(key)) {
+            dict.put(key, v.clone());
+        }
+    }
+    match crypt_obj {
+        Some(Object::Ref(_)) => dict.put(
+            b"Encrypt",
+            Object::Ref(ObjRef::new(st.crypt_object_number, 0)),
+        ),
+        Some(o) => dict.put(b"Encrypt", o.clone()),
+        None => {}
+    }
+    dict.put(b"Size", Object::Int(size as i64));
+    dict.put(b"Type", Object::name(b"XRef"));
+    let ints = |v: &[i64]| Object::Array(Arc::new(v.iter().map(|&i| Object::Int(i)).collect()));
+    dict.put(b"W", ints(&[1, 4, 1]));
+    dict.put(b"Index", ints(&[0, size as i64]));
+
+    let mut data = Vec::with_capacity(6 * size);
+    for n in 0..size {
+        let kind: u8 = if !st.use_list[n] {
+            0
+        } else if matches!(types.get(n), Some(Type::Packed { .. })) {
+            2
+        } else {
+            1
+        };
+        data.push(kind);
+        data.extend_from_slice(&(st.ofs_list[n] as i32).to_be_bytes());
+        data.push(st.gen_list[n] as u8);
+    }
+    dict.put(b"Length", Object::Int(data.len() as i64));
+    objects.add_stream(num, dict, data);
+    let obj = objects.get(num).map_err(|message| WriteError { message })?;
+    write_object(objects, st, options, num, 0, true, obj, false)?;
+    st.out
+        .extend_from_slice(format!("startxref\n{startxref}\n%%EOF\n").as_bytes());
+    Ok(())
 }
 
 /// What reading a written document back found: `clean`'s self-check.
@@ -291,25 +631,36 @@ pub fn verify(
     if let Some(password) = password {
         let _ = again.authenticate(password);
     }
+    // -Z raises the catalog's /Version to 1.5, on purpose.
+    let root = original
+        .trailer()
+        .get(b"Root")
+        .and_then(Object::as_ref)
+        .filter(|_| options.objstms)
+        .map(|r| r.num);
     let (objects, mismatched) = if options.garbage >= 1 {
-        Walk::new(original, &again, options.changes_streams()).run()
+        let mut walk = Walk::new(original, &again, options.changes_streams());
+        walk.root = root;
+        walk.run()
     } else {
         let mut objects = 0;
         let mut mismatched = Vec::new();
-        let mut num = 1;
-        while num < again.xref_len() as i32 {
-            if again.xref_entry(num).kind == Kind::InFile {
+        let decoded = options.changes_streams();
+        // Object streams and the xref stream the writer adds come after
+        // the input's objects.
+        let len = (again.xref_len()).min(original.xref_len());
+        for num in 1..len as i32 {
+            if matches!(again.xref_entry(num).kind, Kind::InFile | Kind::InStream) {
                 objects += 1;
-                let decoded = options.changes_streams();
+                let catalog = root == Some(num);
                 if !same_read(
-                    as_read(original, num, decoded),
-                    as_read(&again, num, decoded),
+                    as_read(original, num, decoded, catalog),
+                    as_read(&again, num, decoded, catalog),
                     decoded,
                 ) {
                     mismatched.push(num);
                 }
             }
-            num += 1;
         }
         (objects, mismatched)
     };
@@ -330,6 +681,8 @@ struct Walk<'a> {
     queue: Vec<(i32, i32)>,
     /// Streams compared decoded, as the options change their encoding.
     decoded: bool,
+    /// The input's catalog, when its /Version may have been raised.
+    root: Option<i32>,
 }
 
 impl<'a> Walk<'a> {
@@ -340,6 +693,7 @@ impl<'a> Walk<'a> {
             pairs: HashMap::new(),
             queue: Vec::new(),
             decoded,
+            root: None,
         }
     }
 
@@ -404,6 +758,11 @@ impl<'a> Walk<'a> {
             return false;
         };
         let b = b.unwrap_or(Object::Null);
+        if self.root == Some(o)
+            && let (Object::Dict(x), Object::Dict(y)) = (&a, &b)
+        {
+            return self.same_dict(&x.without(b"Version"), &y.without(b"Version"));
+        }
         match (&a, &b) {
             (Object::Stream(sa), Object::Stream(sb)) => {
                 let (ra, rb) = (
@@ -465,9 +824,12 @@ impl<'a> Walk<'a> {
 /// (decoded when `decoded`) and dictionary.
 type Read = Result<(String, Option<(Vec<u8>, Dict)>), String>;
 
-fn as_read(doc: &Document, num: i32, decoded: bool) -> Read {
+fn as_read(doc: &Document, num: i32, decoded: bool, catalog: bool) -> Read {
     let show = |o: &Object| print::to_string(o, Options::default());
     match doc.load_object(num)? {
+        Some(Object::Dict(d)) if catalog => {
+            Ok((show(&Object::Dict(Arc::new(d.without(b"Version")))), None))
+        }
         Some(Object::Stream(s)) => {
             let data = content(doc, &s, decoded)?;
             let dict = Object::Dict(Arc::new(stream_dict(&s.dict, decoded)));
@@ -586,6 +948,9 @@ struct Objects<'a> {
     doc: &'a Document,
     slots: Option<Vec<Slot>>,
     changed: HashMap<usize, Object>,
+    /// The data of the streams the writer makes: object streams and the
+    /// xref stream (`stm_buf`).
+    buffers: HashMap<usize, Vec<u8>>,
 }
 
 impl Objects<'_> {
@@ -598,6 +963,33 @@ impl Objects<'_> {
             Some(slots) => Ok(slots.get(num).and_then(Slot::object).cloned()),
             None => self.doc.load_object(num as i32),
         }
+    }
+
+    /// `pdf_cache_object` for gathering object `num`, which fails where
+    /// loading it fails.
+    fn load_member(&self, num: usize) -> Result<Option<Object>, String> {
+        if let Some(o) = self.changed.get(&num) {
+            return Ok(Some(o.clone()));
+        }
+        match &self.slots {
+            Some(slots) => match slots.get(num) {
+                Some(Slot::Loaded(o, _)) => Ok(Some(o.clone())),
+                Some(Slot::Failed(original)) => self.doc.load_object(*original),
+                Some(Slot::Empty) | None => Ok(None),
+            },
+            None => self.doc.load_object(num as i32),
+        }
+    }
+
+    /// A stream the writer makes, with its data in memory.
+    fn add_stream(&mut self, num: usize, dict: Dict, data: Vec<u8>) {
+        let stream = Stream {
+            dict,
+            data_start: 0,
+            num: num as i32,
+        };
+        self.changed.insert(num, Object::Stream(Arc::new(stream)));
+        self.buffers.insert(num, data);
     }
 
     /// The stream as loaded, which locates the data in the input, when
@@ -911,7 +1303,10 @@ fn encode(
     Ok(out)
 }
 
-/// `writeobject`, for `obj` as it is to be written.
+/// `writeobject`, for `obj` as it is to be written. Object streams are
+/// left out unless the writer packs objects itself, and xref streams when
+/// `skip_xrefs`.
+#[allow(clippy::too_many_arguments)]
 fn write_object(
     objects: &mut Objects,
     st: &mut State,
@@ -920,6 +1315,7 @@ fn write_object(
     generation: i32,
     unenc: bool,
     obj: Option<Object>,
+    skip_xrefs: bool,
 ) -> Result<(), WriteError> {
     let doc = objects.doc;
     let dict = match &obj {
@@ -929,7 +1325,9 @@ fn write_object(
     };
     if let Some(d) = dict {
         let ty = d.get(b"Type");
-        if ty.is_some_and(|t| t.is_name(b"ObjStm") || t.is_name(b"XRef")) {
+        if ty.is_some_and(|t| {
+            (t.is_name(b"ObjStm") && !options.objstms) || (skip_xrefs && t.is_name(b"XRef"))
+        }) {
             st.use_list[num] = false;
             return Ok(());
         }
@@ -958,15 +1356,21 @@ fn write_object(
             // pdf_copy_dict: the same entries, and the same values.
             let mut dict: Dict = s.dict.clone();
             let source = objects.data(num as usize).unwrap_or(s);
+            let buffer = objects.buffers.get(&(num as usize)).cloned();
             let mut data = if expand {
                 // expandstream: decoded as pdf_load_stream_number reads it.
                 // MuPDF decodes the dictionary after garbage collection;
                 // the input's, which leads to the same objects, is used.
+                // A stream the writer made has no filter, so its data is
+                // used as it is.
                 dict.remove(b"Filter");
                 dict.remove(b"DecodeParms");
-                let data = doc.stream_data(source).map_err(|e| WriteError {
-                    message: e.report(),
-                })?;
+                let data = match buffer {
+                    Some(data) => data,
+                    None => doc.stream_data(source).map_err(|e| WriteError {
+                        message: e.report(),
+                    })?,
+                };
                 if deflate {
                     encode(objects, &mut dict, data, options.effort, false)?
                 } else {
@@ -974,10 +1378,13 @@ fn write_object(
                 }
             } else {
                 // copystream: the raw data.
-                let mut data = doc
-                    .raw_stream_data(source)
-                    .map_err(|message| WriteError { message })?
-                    .into_owned();
+                let mut data = match buffer {
+                    Some(data) => data,
+                    None => doc
+                        .raw_stream_data(source)
+                        .map_err(|message| WriteError { message })?
+                        .into_owned(),
+                };
                 if deflate && strip_hex_filter(objects, &mut dict)? {
                     let mut hex = Dict::new();
                     hex.put(b"Filter", Object::name(b"ASCIIHexDecode"));
@@ -1579,5 +1986,94 @@ trailer\n<</Size 2>>\nstartxref\n34\n%%EOF\n",
         assert!(at(100) <= at(0));
         assert_eq!(at(-5), at(0));
         assert_eq!(at(1000), at(100));
+    }
+
+    fn objstms(garbage: u8) -> WriteOptions {
+        WriteOptions {
+            objstms: true,
+            garbage,
+            ..Default::default()
+        }
+    }
+
+    const PACK: &[u8] = include_bytes!("../../../corpus/smoke/objstm-pack.pdf");
+
+    #[test]
+    fn objstms_pack_what_can_be_packed() {
+        let doc = open(PACK);
+        let out = save(&doc, &objstms(0)).unwrap_or_default();
+        let again = open(&out);
+        let kind = |num| again.xref_entry(num).kind;
+        // Left out: the catalog, /Info, an integer, a bare reference, an
+        // object of generation 1, and the content stream.
+        for num in [1, 6, 7, 8, 14, 4] {
+            assert_eq!(kind(num), Kind::InFile, "{num}");
+        }
+        for num in [2, 3, 5, 9, 10, 11, 12, 13, 15, 314, 315] {
+            assert_eq!(kind(num), Kind::InStream, "{num}");
+        }
+        // 256 to a stream: two new ones after the input's 316 objects, then
+        // the xref stream.
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("316 0 obj\n<</Type/ObjStm/First"));
+        assert!(text.contains("/N 256/Length"));
+        assert!(text.contains("317 0 obj\n<</Type/ObjStm/First 413/N 53/Length"));
+        assert!(text.contains(
+            "318 0 obj\n<</Type/XRef/Info 6 0 R/Root 1 0 R/Size 319/W[1 4 1]/Index[0 319]"
+        ));
+        assert!(!text.contains("\ntrailer\n"));
+        // The catalog's /Version is raised with the header.
+        assert!(text.starts_with("%PDF-1.5\n"));
+        assert!(text.contains("/Version/1.5"));
+        // Packed with nothing between them; each reads back from its own
+        // range of the stream.
+        assert!(text.contains("truenull.5/Name"));
+        assert!(verify(&doc, &out, None, &objstms(0)).verified());
+        assert_eq!(save(&doc, &objstms(0)).ok(), Some(out), "deterministic");
+    }
+
+    #[test]
+    fn objstm_output_reads_back() {
+        for fixture in [
+            &include_bytes!("../../../corpus/smoke/multipage-inherit.pdf")[..],
+            include_bytes!("../../../corpus/smoke/encrypted-rc4-128.pdf"),
+            include_bytes!("../../../corpus/smoke/xref-stream.pdf"),
+        ] {
+            let doc = open(fixture);
+            for garbage in [0, 1, 2, 4] {
+                let out = save(&doc, &objstms(garbage)).unwrap_or_default();
+                let v = verify(&doc, &out, None, &objstms(garbage));
+                assert!(v.verified(), "garbage {garbage}: {v:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_gap_in_the_only_section_fails_the_save() {
+        let doc = open(include_bytes!("../../../corpus/smoke/objstm-gap.pdf"));
+        assert_eq!(
+            save(&doc, &objstms(0)).err().map(|e| e.message),
+            Some("format error: cannot find object in xref (6 0 R)".into())
+        );
+        // Past the oldest section's size, the lookup finds nothing.
+        let doc = open(include_bytes!(
+            "../../../corpus/smoke/objstm-gap-update.pdf"
+        ));
+        assert!(save(&doc, &objstms(0)).is_ok());
+    }
+
+    #[test]
+    fn an_empty_collection_leaves_the_xref_stream_unlisted() {
+        let doc = open(
+            b"%PDF-1.5\n1 0 obj\n<</A 1>>\nendobj\n\
+xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n\
+trailer\n<</Size 2>>\nstartxref\n34\n%%EOF\n",
+        );
+        let out = save(&doc, &objstms(2)).unwrap_or_default();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("1 0 obj\n<</Type/XRef/Size 1/W[1 4 1]/Index[0 1]"),
+            "{text}"
+        );
     }
 }
