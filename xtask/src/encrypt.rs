@@ -36,6 +36,8 @@ pub struct Spec {
     pub user: &'static str,
     pub owner: &'static str,
     pub encrypt_metadata: bool,
+    /// The /P permission bits.
+    pub permissions: i32,
 }
 
 pub struct Handler {
@@ -53,7 +55,7 @@ pub struct Handler {
 impl Handler {
     pub fn new(spec: Spec, seed: &str) -> Handler {
         let id: [u8; 16] = Md5::digest(format!("id {seed}")).into();
-        let p: i32 = -4;
+        let p = spec.permissions;
         let mut h = Handler {
             spec,
             id,

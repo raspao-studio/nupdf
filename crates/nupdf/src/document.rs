@@ -525,6 +525,31 @@ impl Document {
         Ok(access)
     }
 
+    /// `pdf_has_permission`: everything is allowed without a security
+    /// handler or with the owner password; otherwise /P decides. The
+    /// permissions are MuPDF's names: print, edit, copy, annotate, form,
+    /// accessibility, assemble, print-hq.
+    pub fn has_permission(&self, permission: &str) -> bool {
+        let Some(crypt) = self.crypt() else {
+            return true;
+        };
+        if crypt.access() & 4 != 0 {
+            return true;
+        }
+        let bit = match permission {
+            "print" => 1 << 2,
+            "edit" => 1 << 3,
+            "copy" => 1 << 4,
+            "annotate" => 1 << 5,
+            "form" => 1 << 8,
+            "accessibility" => 1 << 9,
+            "assemble" => 1 << 10,
+            "print-hq" => 1 << 11,
+            _ => return true,
+        };
+        crypt.permissions() & bit != 0
+    }
+
     /// MuPDF's encryption description, such as "Standard V4 R4 128-bit
     /// AES", or "None".
     pub fn encryption(&self) -> String {

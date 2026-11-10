@@ -25,6 +25,9 @@ if (doc.isPDF()) {
   report.repaired = doc.wasRepaired();
   report.revisions = doc.countVersions();
 }
+var perms = ["print", "edit", "copy", "annotate", "form", "accessibility", "assemble", "print-hq"];
+report.permissions = {};
+for (var p = 0; p < perms.length; p++) report.permissions[perms[p]] = doc.hasPermission(perms[p]);
 var keys = ["Title", "Author", "Subject", "Keywords", "Creator", "Producer", "CreationDate", "ModDate"];
 report.metadata = {};
 for (var i = 0; i < keys.length; i++) {

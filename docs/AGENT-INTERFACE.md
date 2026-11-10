@@ -29,7 +29,7 @@ The contract that agents program against. The CLI and the MCP server (M8) expose
 
 ## Encrypted documents
 
-Every command takes `--password`, tried as both the user and the owner password. Without it, nupdf tries the empty password, as MuPDF does, and opens the file either way: `info` reports `"needs_password": true` and leaves `page_count` null when the empty password does not work, and objects then decrypt to the same unreadable bytes MuPDF shows. A password that opens neither way fails with exit 3 and `input.wrong_password`. `info.encryption` is MuPDF's description, such as `"Standard V5 R6 256-bit AES"`, or `"None"`. A security handler nupdf does not support (anything but `/Standard`) fails to open with `input.encryption`.
+Every command takes `--password`, tried as both the user and the owner password. Without it, nupdf tries the empty password, as MuPDF does, and opens the file either way: `info` reports `"needs_password": true` and leaves `page_count` null when the empty password does not work, and objects then decrypt to the same unreadable bytes MuPDF shows. A password that opens neither way fails with exit 3 and `input.wrong_password`. `info.permissions` says what the document allows (`print`, `edit`, `copy`, `annotate`, `form`, `accessibility`, `assemble`, `print-hq`): everything, unless it is encrypted and was not opened with the owner password. `info.encryption` is MuPDF's description, such as `"Standard V5 R6 256-bit AES"`, or `"None"`. A security handler nupdf does not support (anything but `/Standard`) fails to open with `input.encryption`.
 
 ## Addressing content
 

@@ -370,3 +370,24 @@ fn streams_report_decoded_lengths_and_hashes() {
     assert_eq!(content["len"], data.len());
     assert_eq!(content["blake3"], blake3::hash(data).to_hex().to_string());
 }
+
+#[test]
+fn permissions_follow_p_unless_the_owner_password_opened_it() {
+    let path = smoke("encrypted-restricted.pdf");
+    let file = path.to_str().unwrap();
+    let user = run_json(&["info", file]);
+    assert_eq!(user["permissions"]["print"], true);
+    assert_eq!(user["permissions"]["accessibility"], true);
+    for denied in ["edit", "copy", "annotate", "form", "assemble", "print-hq"] {
+        assert_eq!(user["permissions"][denied], false, "{denied}");
+    }
+    let owner = run_json(&["--password", "owner", "info", file]);
+    assert!(
+        owner["permissions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|v| v == true)
+    );
+    assert!(info("minimal.pdf")["permissions"]["copy"] == true);
+}

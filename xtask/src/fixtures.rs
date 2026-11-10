@@ -232,6 +232,7 @@ fn encrypted_fixtures() -> Vec<Fixture> {
         user: "",
         owner: "owner",
         encrypt_metadata: true,
+        permissions: -4,
     };
     let cases: [(&'static str, &'static str, Spec); 8] = [
         (
@@ -290,6 +291,20 @@ fn encrypted_fixtures() -> Vec<Fixture> {
             bytes: encrypted(spec, name),
         })
         .collect();
+    out.push(Fixture {
+        name: "encrypted-restricted.pdf",
+        about: "AES-128 opened with the empty user password, allowing printing and accessibility only",
+        needs_repair: false,
+        bytes: encrypted(
+            Spec {
+                // Every bit set except 1-2, edit, copy, annotate, form,
+                // assemble and high-quality print.
+                permissions: 0xffff_f2c4_u32 as i32,
+                ..spec(4, 4, 128, Method::AesV2, true)
+            },
+            "encrypted-restricted.pdf",
+        ),
+    });
     out.push(Fixture {
         name: "encrypted-rc4-user-password.pdf",
         about: "RC4 128-bit with user password \"user\": decrypted with the wrong key",

@@ -134,7 +134,7 @@ MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filte
 - [x] ASCIIHex, ASCII85, RunLength (with MuPDF's guard against stacked decoders), LZW with EarlyChange (a port of MuPDF's decoder, its tolerances included), Flate (zlib-rs) with MuPDF's handling of corrupt data, PNG and TIFF predictors
 - [ ] CCITTFax (`fax` or hayro-ccitt), DCT (zune-jpeg, with raw passthrough), JPX (hayro-jpeg2000), JBIG2 with globals (hayro-jbig2)
 - [x] Brotli (brotli-decompressor), which fixed the last `info` mismatch
-- [ ] Permissions (`pdf_has_permission`) reported by `info`
+- [x] Permissions (`pdf_has_permission`) reported by `info` under MuPDF's names, compared by the `info` check; a fixture restricts them
 - [x] `nupdf streams`: every stream's decoded length and BLAKE3 hash, as MuPDF's `pdf_load_stream` reads it; `show <ref> --data` decodes one
 - [x] Oracle and `streams` check: `streams.js` writes each decoded stream to a scratch directory and the harness hashes it, since mutool's JavaScript cannot. Streams with an image filter are listed on both sides but not compared; their pixels get their own check. First measurement: 98.7% (5,054 / 5,123); with the stream model, LZW and Brotli, 100% (5,123 / 5,123)
 - [x] Fixtures: every non-image filter, a chain, a PNG predictor, and damaged or truncated Flate, LZW and ASCIIHex whose recovery depends on MuPDF's buffer sizes (52 smoke fixtures, all matching MuPDF on every check)
