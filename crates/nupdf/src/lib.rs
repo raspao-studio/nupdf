@@ -8,6 +8,7 @@
 
 pub mod crypt;
 pub mod dct;
+pub mod deflate;
 pub mod diag;
 mod doc_id;
 pub mod document;
