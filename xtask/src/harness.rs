@@ -25,7 +25,8 @@ pub struct Check {
     pub about: &'static str,
     /// Script under oracle/js, run as `mutool run <script> <file>`.
     pub oracle_script: &'static str,
-    /// `nupdf` arguments; the file path is appended.
+    /// `nupdf` arguments; the file path is appended, or takes the place of
+    /// each `{file}` among them.
     pub nupdf_args: &'static [&'static str],
     pub compare: Compare,
     /// The oracle takes a scratch directory as a second argument and names
@@ -322,6 +323,21 @@ pub const CHECKS: &[Check] = &[
         ],
         &["pages=N-1,rotate=-90@1"],
     ),
+    merge(
+        "merge",
+        &["merge", "--dry-run", "--no-verify", "{file}"],
+        &[],
+    ),
+    merge(
+        "merge-twice",
+        &["merge", "--dry-run", "--no-verify", "{file}", "{file}"],
+        &["twice"],
+    ),
+    merge(
+        "merge-reverse",
+        &["merge", "--dry-run", "--no-verify", "{file}", "N-1"],
+        &["pages=N-1"],
+    ),
     Check {
         name: "roundtrip-gggg",
         about: "the `clean -gggg` output of each side as MuPDF reads it back: objects, raw stream data, repair, warnings",
@@ -359,6 +375,20 @@ const fn edit(
 ) -> Check {
     Check {
         about: "the document edited as `meta` or `pages` edit it (pdf_set_metadata, removing /Info and XMP, page /Rotate), then written as `mutool clean` writes it: BLAKE3 of the output",
+        ..clean_gc(name, nupdf_args, oracle_args)
+    }
+}
+
+/// `merge` into a new document, against the same pages grafted through
+/// MuPDF's script interface as `mutool merge` grafts them.
+const fn merge(
+    name: &'static str,
+    nupdf_args: &'static [&'static str],
+    oracle_args: &'static [&'static str],
+) -> Check {
+    Check {
+        about: "the pages merged into a new document as `mutool merge` merges them (pdf_create_document, a graft map per input, pdf_graft_mapped_page), without links or outlines yet: BLAKE3 of the output",
+        oracle_script: "oracle/js/merge.js",
         ..clean_gc(name, nupdf_args, oracle_args)
     }
 }
@@ -646,10 +676,24 @@ fn run_sides(
     {
         hash_written_files(json, dir, check.oracle_file_fixup);
     }
-    let mut args: Vec<&std::ffi::OsStr> =
-        check.nupdf_args.iter().map(std::ffi::OsStr::new).collect();
-    args.push(file.as_os_str());
+    let args = nupdf_argv(check, file);
     (oracle, side(nupdf, &args, timeout))
+}
+
+/// The check's `nupdf` arguments with the file in them.
+fn nupdf_argv<'a>(check: &'a Check, file: &'a Path) -> Vec<&'a std::ffi::OsStr> {
+    let mut args: Vec<&std::ffi::OsStr> = check
+        .nupdf_args
+        .iter()
+        .map(|a| match *a {
+            "{file}" => file.as_os_str(),
+            a => std::ffi::OsStr::new(a),
+        })
+        .collect();
+    if !check.nupdf_args.contains(&"{file}") {
+        args.push(file.as_os_str());
+    }
+    args
 }
 
 struct Reread<'a> {
@@ -715,9 +759,8 @@ fn reread_sides(
     );
 
     let written = dir.join("nupdf.pdf");
-    let mut args: Vec<&std::ffi::OsStr> =
-        check.nupdf_args.iter().map(std::ffi::OsStr::new).collect();
-    args.extend([file.as_os_str(), "-o".as_ref(), written.as_os_str()]);
+    let mut args = nupdf_argv(check, file);
+    args.extend(["-o".as_ref(), written.as_os_str()]);
     let ours = side(nupdf, &args, run.timeout);
     let ours = run.after(ours, &written, &dir.join("nupdf-read"));
     (oracle, ours)

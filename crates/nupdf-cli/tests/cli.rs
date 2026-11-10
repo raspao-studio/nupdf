@@ -929,3 +929,76 @@ fn encrypt_and_decrypt_round_trip() {
     ]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn merge_grafts_each_inputs_pages_into_a_new_document() {
+    let a = smoke("minimal.pdf");
+    let b = smoke("multipage-inherit.pdf");
+    let output = scratch("merge.pdf");
+    let report = run_json(&[
+        "merge",
+        "-o",
+        output.to_str().unwrap(),
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "3-2",
+    ]);
+    assert_eq!(report["schema"], "nupdf.merge/v0");
+    assert_eq!(report["doc_id"], info("minimal.pdf")["doc_id"]);
+    assert_eq!(report["page_count"], 3);
+    assert_eq!(report["inputs"][0]["pages"], serde_json::json!([1]));
+    assert_eq!(report["inputs"][1]["pages"], serde_json::json!([3, 2]));
+    assert_eq!(report["inputs"][1]["error"], Value::Null);
+    assert_eq!(report["verification"]["verified"], true);
+    let merged = pages_at(&output);
+    let boxes: Vec<_> = merged["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["MediaBox"][2].as_i64().unwrap())
+        .collect();
+    assert_eq!(boxes, [612, 300, 595]);
+    // A new document names its producer in the catalog, as MuPDF's do.
+    let written = std::fs::read(&output).unwrap();
+    assert!(
+        written
+            .windows(25)
+            .any(|w| w == b"/Info<</Producer(nupdf)>>")
+    );
+}
+
+#[test]
+fn merge_skips_an_input_that_fails_and_keeps_what_it_gave() {
+    // Page 1 refers past the xref, which fails it; page 2 merges first.
+    let graft = smoke("merge-graft.pdf");
+    let locked = smoke("encrypted-user-password.pdf");
+    let report = run_json(&[
+        "merge",
+        "--dry-run",
+        graft.to_str().unwrap(),
+        "N-1",
+        locked.to_str().unwrap(),
+    ]);
+    assert_eq!(report["applied"], false);
+    assert_eq!(report["page_count"], 1);
+    assert_eq!(report["inputs"][0]["pages"], serde_json::json!([2]));
+    assert_eq!(
+        report["inputs"][0]["error"]["message"],
+        "source object number out of range"
+    );
+    assert_eq!(report["inputs"][1]["error"]["code"], "input.needs_password");
+    let codes: Vec<_> = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes, ["merge.input_failed", "merge.input_failed"]);
+
+    // With no input that opens, nothing is written.
+    let missing = scratch("no-such-input.pdf");
+    let out = nupdf(&["merge", "--dry-run", missing.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(3));
+    let out = nupdf(&["merge", graft.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+}

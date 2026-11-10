@@ -101,6 +101,16 @@ enum Command {
         #[arg(long)]
         no_verify: bool,
     },
+    /// Merge the pages of several documents into a new one, as `mutool
+    /// merge` does (links and outlines are not copied yet).
+    Merge {
+        /// Input files, each followed by its pages if not all of them
+        /// (`1-3,5`, `N`, `N-1`), as `mutool merge` takes them.
+        #[arg(required = true, allow_negative_numbers = true)]
+        inputs: Vec<String>,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
     /// Encrypt with a new security handler, as `clean -E`.
     Encrypt {
         file: PathBuf,
@@ -350,6 +360,7 @@ fn main() -> ExitCode {
             *no_verify,
             password,
         ),
+        Command::Merge { inputs, write } => commands::merge(inputs, &open, write, password),
         Command::Encrypt {
             file,
             method,
