@@ -105,7 +105,118 @@ pub fn all() -> Vec<Fixture> {
     .into_iter()
     .chain(edge_cases())
     .chain(encrypted_fixtures())
+    .chain(filter_fixtures())
     .collect()
+}
+
+/// Sample data for the filter fixtures: text with runs, repeats and enough
+/// length for LZW to widen its codes and Flate to fill several buffers.
+fn sample_data() -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..400u32 {
+        out.extend_from_slice(
+            format!("line {i:03}: the quick brown fox {} ", i * 7919 % 1000).as_bytes(),
+        );
+        out.extend(std::iter::repeat_n(b'.', (i % 9) as usize));
+        out.push(b'\n');
+    }
+    out
+}
+
+/// The minimal document plus stream 6, `data` encoded with the filters
+/// in `dict` (the stream's dictionary entries, without /Length).
+fn with_filtered_stream(dict: &str, encoded: &[u8]) -> Vec<u8> {
+    let mut pdf = hello(Pdf::new("1.7"), "Filters", false);
+    pdf.stream(6, dict, encoded);
+    pdf.finish_with_xref("")
+}
+
+/// One fixture per decoder, a chain, a predictor, and damaged data whose
+/// recovery depends on MuPDF's buffer sizes.
+fn filter_fixtures() -> Vec<Fixture> {
+    use crate::encode;
+    let data = sample_data();
+    let fx = |name, about, bytes| Fixture {
+        name,
+        about,
+        needs_repair: false,
+        bytes,
+    };
+    let damaged = encode::flate_broken_after(&data[..14000], 3500);
+    let mut truncated_lzw = encode::lzw(&data, true);
+    truncated_lzw.truncate(truncated_lzw.len() * 2 / 3);
+    let mut bad_hex = encode::ascii_hex(&data);
+    let at = bad_hex.len() * 3 / 4;
+    bad_hex[at] = b'G';
+    let rows: Vec<u8> = (0..64u32)
+        .flat_map(|i| [(i * 3) as u8, (i * 5) as u8, 200, (i & 7) as u8])
+        .collect();
+    vec![
+        fx(
+            "filter-lzw.pdf",
+            "LZWDecode with the default EarlyChange 1",
+            with_filtered_stream("/Filter/LZWDecode", &encode::lzw(&data, true)),
+        ),
+        fx(
+            "filter-lzw-early-change-0.pdf",
+            "LZWDecode with EarlyChange 0",
+            with_filtered_stream(
+                "/Filter/LZWDecode/DecodeParms<</EarlyChange 0>>",
+                &encode::lzw(&data, false),
+            ),
+        ),
+        fx(
+            "filter-lzw-truncated.pdf",
+            "LZWDecode cut off two thirds in",
+            with_filtered_stream("/Filter/LZW", &truncated_lzw),
+        ),
+        fx(
+            "filter-runlength.pdf",
+            "RunLengthDecode",
+            with_filtered_stream("/Filter/RunLengthDecode", &encode::run_length(&data)),
+        ),
+        fx(
+            "filter-asciihex.pdf",
+            "ASCIIHexDecode",
+            with_filtered_stream("/Filter/ASCIIHexDecode", &encode::ascii_hex(&data)),
+        ),
+        fx(
+            "filter-asciihex-bad-byte.pdf",
+            "ASCIIHexDecode with a bad byte three quarters in",
+            with_filtered_stream("/Filter/AHx", &bad_hex),
+        ),
+        fx(
+            "filter-ascii85.pdf",
+            "ASCII85Decode",
+            with_filtered_stream("/Filter/ASCII85Decode", &encode::ascii85(&data)),
+        ),
+        fx(
+            "filter-brotli.pdf",
+            "BrotliDecode",
+            with_filtered_stream("/Filter/BrotliDecode", &encode::brotli(&data)),
+        ),
+        fx(
+            "filter-chain.pdf",
+            "ASCII85Decode then FlateDecode",
+            with_filtered_stream(
+                "/Filter[/A85/FlateDecode]",
+                &encode::ascii85(&encode::flate(&data)),
+            ),
+        ),
+        fx(
+            "filter-png-predictor.pdf",
+            "FlateDecode with PNG Paeth prediction, 4 columns",
+            with_filtered_stream(
+                "/Filter/FlateDecode/DecodeParms<</Predictor 14/Columns 4>>",
+                &encode::flate(&encode::png_predict(&rows, 4, 4)),
+            ),
+        ),
+        fx(
+            "filter-flate-damaged.pdf",
+            "FlateDecode with a corrupt byte near the end",
+            with_filtered_stream("/Filter/FlateDecode", &damaged),
+        ),
+    ]
 }
 
 /// One file per security handler revision and method, plus files that need
