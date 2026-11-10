@@ -1157,7 +1157,7 @@ fn read_new_xref(
         other => other.clone(),
     };
     let decoded =
-        filter::decode(&trailer, raw, &direct_only, diag, limits).map_err(|e| e.report())?;
+        filter::decode(&trailer, raw, &direct_only, diag, limits, None).map_err(|e| e.report())?;
 
     // A present but non-array /Index reads nothing, as in MuPDF.
     let ranges: Vec<(i32, i32)> = match trailer.get(b"Index") {
@@ -1238,6 +1238,7 @@ fn read_new_xref(
         Object::Stream(Arc::new(Stream {
             dict: trailer.clone(),
             data_start,
+            num,
         })),
     );
     Ok(trailer)

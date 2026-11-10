@@ -161,6 +161,14 @@ impl Dict {
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], &Object)> {
         self.entries.iter().map(|(k, v)| (k.as_ref(), v))
     }
+
+    /// Replaces every value with `f(key, value)`, keeping the order.
+    pub fn map_values(&mut self, mut f: impl FnMut(&[u8], Object) -> Object) {
+        for (k, v) in &mut self.entries {
+            let value = std::mem::replace(v, Object::Null);
+            *v = f(k, value);
+        }
+    }
 }
 
 /// A stream object: its dictionary and where its data starts in the file.
@@ -169,6 +177,9 @@ pub struct Stream {
     pub dict: Dict,
     /// Absolute file offset of the first data byte.
     pub data_start: usize,
+    /// The object number it was loaded as. Its xref entry seeds the
+    /// decryption key, as in MuPDF's `pdf_open_raw_filter`.
+    pub num: i32,
 }
 
 #[cfg(test)]

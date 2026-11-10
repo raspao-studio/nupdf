@@ -13,7 +13,7 @@ fuzz_target!(|data: &[u8]| {
     let n = doc.xref_len().min(4096);
     for num in 1..n {
         if let Some(Object::Stream(s)) = doc.object(num as i32) {
-            let _ = doc.raw_stream_data(&s);
+            let _ = doc.raw_stream_data(&s).map(|raw| raw.len());
             let _ = doc.stream_data(&s);
         }
     }

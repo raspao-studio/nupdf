@@ -315,7 +315,10 @@ fn show(
     );
     if let Some(nupdf::Object::Stream(stream)) = &value {
         let mut info = serde_json::Map::new();
-        info.insert("raw_len".into(), doc.raw_stream_data(stream).len().into());
+        match doc.raw_stream_data(stream) {
+            Ok(raw) => info.insert("raw_len".into(), raw.len().into()),
+            Err(e) => info.insert("raw_error".into(), e.into()),
+        };
         match doc.stream_data(stream) {
             Ok(decoded) => {
                 info.insert("decoded_len".into(), decoded.len().into());
