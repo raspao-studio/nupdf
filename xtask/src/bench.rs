@@ -19,18 +19,27 @@ use crate::{corpus, oracle, proc};
 pub struct Pair {
     pub name: &'static str,
     pub about: &'static str,
-    /// Arguments to `mutool`; `{file}` is replaced by the input path.
+    /// Arguments to `mutool`; `{file}` is replaced by the input path and
+    /// `{out}` by a scratch output path.
     pub oracle: &'static [&'static str],
-    /// Arguments to `nupdf`; `{file}` is replaced by the input path.
+    /// Arguments to `nupdf`, expanded the same way.
     pub nupdf: &'static [&'static str],
 }
 
-pub const PAIRS: &[Pair] = &[Pair {
-    name: "info",
-    about: "open, read the effective version, count pages and xref slots (JS overhead included on the MuPDF side)",
-    oracle: &["run", "oracle/js/info.js", "{file}"],
-    nupdf: &["info", "{file}"],
-}];
+pub const PAIRS: &[Pair] = &[
+    Pair {
+        name: "info",
+        about: "open, read the effective version, count pages and xref slots (JS overhead included on the MuPDF side)",
+        oracle: &["run", "oracle/js/info.js", "{file}"],
+        nupdf: &["info", "{file}"],
+    },
+    Pair {
+        name: "clean",
+        about: "rewrite the document with `clean`'s defaults; nupdf also reads its output back to verify it",
+        oracle: &["clean", "{file}", "{out}"],
+        nupdf: &["clean", "{file}", "-o", "{out}"],
+    },
+];
 
 #[derive(Debug, Serialize)]
 struct Row {
@@ -69,6 +78,7 @@ pub fn run(
     let out_dir = root.join("target/bench").join(tier);
     std::fs::create_dir_all(&out_dir)?;
 
+    let scratch = out_dir.join("scratch.pdf");
     for pair in pairs {
         let mut rows = Vec::new();
         for file in &files {
@@ -76,6 +86,7 @@ pub fn run(
                 args.iter()
                     .map(|a| match *a {
                         "{file}" => file.path.clone().into_os_string(),
+                        "{out}" => scratch.clone().into_os_string(),
                         a if a.starts_with("oracle/") => root.join(a).into_os_string(),
                         a => OsString::from(a),
                     })
