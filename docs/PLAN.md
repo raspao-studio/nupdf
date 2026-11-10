@@ -161,8 +161,10 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 - [x] Serializer, full rewrite (DECISIONS D18): `pdf_save_document` with default options, byte for byte. MuPDF's object printer (`print`), its dictionary sorting and two lookup paths, 16-bit generations and the free list, object streams and xref streams unpacked, streams copied raw, the security handler kept, with AES initialization vectors derived from the content instead of random
 - [ ] Serializer options: garbage collection levels matching `mutool clean -g` through `-gggg`; stream compression and decompression; object streams and xref streams on write; incremental append
 - [ ] Encryption on write: adding, changing and removing the security handler
-- [ ] Deterministic output: `/ID` derived from content, no timestamps unless asked; atomic file replacement
-- [ ] Commands: `merge`, `split`, `pages` (select, reorder, delete, rotate), `meta` (get, set, strip), `clean`, `encrypt`, `decrypt`
+- [x] Atomic file replacement: written beside the target, then renamed
+- [ ] Deterministic output: `/ID` derived from content, no timestamps unless asked
+- [x] `clean` with MuPDF's defaults: `-o` or `--dry-run`, and a read-back check that refuses output that does not open, needs a repair, or reads back differently (exit 4, `--no-verify` to skip)
+- [ ] Commands: `merge`, `split`, `pages` (select, reorder, delete, rotate), `meta` (get, set, strip), `encrypt`, `decrypt`, and `clean`'s options
 - [ ] Output validation: `qpdf --check`, selected Arlington PDF Model rules, and MuPDF reopening the output with identical content
 - [x] Fixtures: a 120-key dictionary, every string, real and name form the printer distinguishes, a signature, null values and trailer entries, free generations past 16 bits, a null object stream member, and an empty key name MuPDF writes lossily (82 smoke fixtures)
 

@@ -13,7 +13,11 @@ pub struct DocId([u8; 16]);
 
 impl DocId {
     pub fn of(bytes: &[u8]) -> Self {
-        let hash = blake3::hash(bytes);
+        Self::from_hash(&blake3::hash(bytes))
+    }
+
+    /// The id of the bytes `hash` is the BLAKE3 hash of.
+    pub fn from_hash(hash: &blake3::Hash) -> Self {
         let mut id = [0u8; 16];
         id.copy_from_slice(&hash.as_bytes()[..16]);
         DocId(id)

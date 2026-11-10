@@ -31,6 +31,20 @@ The contract that agents program against. The CLI and the MCP server (M8) expose
 
 Every command takes `--password`, tried as both the user and the owner password. Without it, nupdf tries the empty password, as MuPDF does, and opens the file either way: `info` reports `"needs_password": true` and leaves `page_count` null when the empty password does not work, and objects then decrypt to the same unreadable bytes MuPDF shows. A password that opens neither way fails with exit 3 and `input.wrong_password`. `info.permissions` says what the document allows (`print`, `edit`, `copy`, `annotate`, `form`, `accessibility`, `assemble`, `print-hq`): everything, unless it is encrypted and was not opened with the owner password. `info.encryption` is MuPDF's description, such as `"Standard V5 R6 256-bit AES"`, or `"None"`. A security handler nupdf does not support (anything but `/Standard`) fails to open with `input.encryption`.
 
+## Writing documents
+
+`clean <file> -o <out>` rewrites the whole document as `mutool clean` does with no options: every object in number order in a classic xref table, object streams and xref streams unpacked, streams copied raw, the encryption and `/ID` kept. The bytes are MuPDF's, except for the comment line naming the writer and the AES initialization vectors (DECISIONS D18). `--dry-run` does everything but write; `-o` or `--dry-run` is required.
+
+Before writing, nupdf opens the output (with `--password`, if given) and compares every object it has in use with the input's: the syntax, apart from the stream `/Length` it recomputes, and each stream's raw data. If the output does not open, needs a repair, or reads back differently, `clean` writes nothing and fails with exit 4 and `verify.failed`, naming the objects. MuPDF's writer is lossy in a few cases, such as an empty key name before a number, a stream under an Identity crypt filter, or a document opened without its password. `--no-verify` skips the check and writes MuPDF's output anyway.
+
+```json
+{"schema":"nupdf.clean/v0","doc_id":"b3:...","applied":true,
+ "output":{"path":"out.pdf","doc_id":"b3:...","len":1574,"blake3":"..."},
+ "verification":{"verified":true,"objects":7},"diagnostics":[]}
+```
+
+`verification` is null with `--no-verify`. An object that cannot be loaded while writing fails with `input.unloadable_object`; an output path that cannot be written fails with exit 3 and `output.unwritable`. The output is written to a temporary file beside it and renamed into place.
+
 ## Addressing content
 
 - **Pages** are 1-based. Selections use MuPDF's syntax: `1-3,7`, `N` for the last page, `5-N`, `N-1` for reverse order.
