@@ -280,3 +280,76 @@ fn lazy_repairs_report_the_error_that_caused_them() {
     );
     assert!(messages.contains(&"repairing PDF document"), "{messages:?}");
 }
+
+#[test]
+fn unencrypted_files_report_no_encryption() {
+    let report = info("minimal.pdf");
+    assert_eq!(report["encryption"], "None");
+    assert_eq!(report["needs_password"], false);
+}
+
+#[test]
+fn every_handler_revision_decrypts_with_the_empty_password() {
+    for (name, encryption) in [
+        ("encrypted-rc4-40.pdf", "Standard V1 R2 40-bit RC4"),
+        ("encrypted-rc4-128.pdf", "Standard V2 R3 128-bit RC4"),
+        ("encrypted-rc4-crypt-filter.pdf", "Standard V4 R4 128-bit RC4"),
+        ("encrypted-aes-128.pdf", "Standard V4 R4 128-bit AES"),
+        ("encrypted-aes-128-clear-metadata.pdf", "Standard V4 R4 128-bit AES"),
+        ("encrypted-aes-256-r5.pdf", "Standard V5 R5 256-bit AES"),
+        ("encrypted-aes-256.pdf", "Standard V5 R6 256-bit AES"),
+    ] {
+        let report = info(name);
+        assert_eq!(report["encryption"], encryption, "{name}");
+        assert_eq!(report["needs_password"], false, "{name}");
+        assert_eq!(report["page_count"], 1, "{name}");
+        assert_eq!(report["metadata"]["Title"], format!("Encrypted: {name}"));
+        assert_eq!(report["metadata"]["Producer"], "nupdf fixtures");
+
+        // The content stream decrypts, then inflates.
+        let path = smoke(name);
+        let shown = run_json(&["show", path.to_str().unwrap(), "4", "--data"]);
+        let data = shown["stream"]["data"].as_str().unwrap();
+        assert!(data.contains("(Encrypted) Tj"), "{name}: {data}");
+    }
+}
+
+#[test]
+fn a_user_password_opens_what_the_empty_one_does_not() {
+    let path = smoke("encrypted-user-password.pdf");
+    let file = path.to_str().unwrap();
+
+    // Like MuPDF, nupdf still opens the file; pages are not counted.
+    let locked = run_json(&["info", file]);
+    assert_eq!(locked["needs_password"], true);
+    assert_eq!(locked["page_count"], Value::Null);
+
+    for password in ["user", "owner"] {
+        let report = run_json(&["--password", password, "info", file]);
+        assert_eq!(report["needs_password"], true);
+        assert_eq!(report["page_count"], 1, "{password}");
+        assert_eq!(
+            report["metadata"]["Title"],
+            "Encrypted: encrypted-user-password.pdf"
+        );
+    }
+
+    let out = nupdf(&["--password", "wrong", "info", file]);
+    assert_eq!(out.status.code(), Some(3));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "input.wrong_password");
+}
+
+#[test]
+fn objects_report_decrypted_strings() {
+    let path = smoke("encrypted-rc4-128.pdf");
+    let report = run_json(&["objects", path.to_str().unwrap()]);
+    let title = report["objects"]["6"]["d"]["Title"]["s"].as_str().unwrap();
+    let expected: String = b"Encrypted: encrypted-rc4-128.pdf"
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(title, expected);
+    // The /Encrypt dictionary itself is never decrypted.
+    assert!(report["objects"]["7"]["d"]["O"]["s"].is_string());
+}

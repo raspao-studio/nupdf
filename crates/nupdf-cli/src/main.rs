@@ -31,6 +31,9 @@ struct Cli {
     /// Largest cross-reference table a document may have, in object slots.
     #[arg(long, global = true, default_value_t = nupdf::Limits::default().max_xref_entries)]
     max_xref_entries: usize,
+    /// Password for an encrypted document (user or owner).
+    #[arg(long, global = true)]
+    password: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -84,6 +87,11 @@ struct InfoReport {
     header_version: String,
     /// Bytes of junk before the header, or null when there is no header.
     header_offset: Option<usize>,
+    /// MuPDF's description of the security handler, or "None".
+    encryption: String,
+    /// The empty password does not open the document. Pages are not
+    /// counted then, unless --password opened it.
+    needs_password: bool,
     page_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     page_count_error: Option<String>,
@@ -125,9 +133,12 @@ fn main() -> ExitCode {
         max_xref_entries: cli.max_xref_entries,
         ..nupdf::Limits::default()
     };
-    let open = |file: &Path| open(file, limits);
+    let password = cli.password.as_deref();
+    let open = |file: &Path| open(file, limits, password);
     let result = match &cli.command {
-        Command::Info { file } => open(file).and_then(info).and_then(to_json),
+        Command::Info { file } => open(file)
+            .and_then(|opened| info(opened, password.is_some()))
+            .and_then(to_json),
         Command::Objects { file } => match open(file) {
             Ok((doc, facts)) => return stream_objects(&doc, &facts, cli.pretty),
             Err(failure) => Err(failure),
@@ -221,7 +232,11 @@ struct FileFacts {
     file_size: usize,
 }
 
-fn open(path: &Path, limits: nupdf::Limits) -> Result<(Document, FileFacts), Failure> {
+fn open(
+    path: &Path,
+    limits: nupdf::Limits,
+    password: Option<&str>,
+) -> Result<(Document, FileFacts), Failure> {
     let data = std::fs::read(path).map_err(|e| Failure {
         exit: Exit::Input,
         code: "input.unreadable",
@@ -245,6 +260,20 @@ fn open(path: &Path, limits: nupdf::Limits) -> Result<(Document, FileFacts), Fai
         },
         message: e.message,
     })?;
+    if let Some(password) = password {
+        let access = doc.authenticate(password).map_err(|e| Failure {
+            exit: Exit::Input,
+            code: "input.encryption",
+            message: nupdf::diag::report::strip(&e).to_string(),
+        })?;
+        if access == 0 {
+            return Err(Failure {
+                exit: Exit::Input,
+                code: "input.wrong_password",
+                message: "the password opens the document neither as user nor as owner".into(),
+            });
+        }
+    }
     Ok((doc, facts))
 }
 
@@ -340,7 +369,7 @@ fn show(
     Ok(report("nupdf.show/v0", &facts, &doc, body.into()))
 }
 
-fn info((doc, facts): (Document, FileFacts)) -> Result<InfoReport, Failure> {
+fn info((doc, facts): (Document, FileFacts), authenticated: bool) -> Result<InfoReport, Failure> {
     let FileFacts {
         header,
         doc_id,
@@ -350,9 +379,15 @@ fn info((doc, facts): (Document, FileFacts)) -> Result<InfoReport, Failure> {
     // Same order as oracle/js/info.js: a repair triggered by one call is
     // visible to the next.
     let pdf_version = doc.version().to_string();
-    let (page_count, page_count_error) = match doc.page_count() {
-        Ok(n) => (Some(n), None),
-        Err(e) => (None, Some(e.0)),
+    let encryption = doc.encryption();
+    let needs_password = doc.needs_password();
+    let (page_count, page_count_error) = if needs_password && !authenticated {
+        (None, None)
+    } else {
+        match doc.page_count() {
+            Ok(n) => (Some(n), None),
+            Err(e) => (None, Some(e.0)),
+        }
     };
     let object_count = doc.xref_len();
     let repaired = doc.repaired();
@@ -393,6 +428,8 @@ fn info((doc, facts): (Document, FileFacts)) -> Result<InfoReport, Failure> {
         pdf_version,
         header_version: doc.header_version().to_string(),
         header_offset: header.map(|h| h.offset),
+        encryption,
+        needs_password,
         page_count,
         page_count_error,
         object_count,
