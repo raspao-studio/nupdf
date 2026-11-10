@@ -1432,6 +1432,26 @@ mod tests {
     }
 
     #[test]
+    fn passwords_grant_access_like_mupdf() {
+        let d = doc(include_bytes!("../../../corpus/smoke/encrypted-user-password.pdf"));
+        assert!(d.needs_password());
+        assert_eq!(d.encryption(), "Standard V5 R6 256-bit AES");
+        assert_eq!(d.authenticate("wrong"), Ok(0));
+        assert_eq!(d.authenticate("user"), Ok(2));
+        assert_eq!(d.authenticate("owner"), Ok(4));
+        // Loaded after a successful attempt, strings decrypt.
+        assert_eq!(
+            d.metadata("Title").as_deref(),
+            Some("Encrypted: encrypted-user-password.pdf")
+        );
+
+        let plain = doc(SIMPLE);
+        assert!(!plain.needs_password());
+        assert_eq!(plain.encryption(), "None");
+        assert_eq!(plain.authenticate("anything"), Ok(1));
+    }
+
+    #[test]
     fn unknown_security_handlers_fail_to_open() {
         let file = b"%PDF-1.4\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\ntrailer <</Root 1 0 R/Encrypt<</Filter/Adobe.PubSec/V 4>>>>\n";
         let e = Document::open(file.to_vec()).unwrap_err();
