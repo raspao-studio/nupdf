@@ -158,11 +158,13 @@ Exit status: met. Image streams match MuPDF exactly, not just within a level.
 MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` (insert and delete), `pdf-crypt.c`, `pdf-outline.c`.
 
 - [ ] Edit overlay: copy-on-write over the parsed document; new and deleted objects; grafting between documents with a dedup map
-- [ ] Serializer: canonical output; full rewrite; garbage collection levels matching `mutool clean -g` through `-gggg`; stream compression; object streams and xref streams; incremental append
-- [ ] Encryption on write
+- [x] Serializer, full rewrite (DECISIONS D18): `pdf_save_document` with default options, byte for byte. MuPDF's object printer (`print`), its dictionary sorting and two lookup paths, 16-bit generations and the free list, object streams and xref streams unpacked, streams copied raw, the security handler kept, with AES initialization vectors derived from the content instead of random
+- [ ] Serializer options: garbage collection levels matching `mutool clean -g` through `-gggg`; stream compression and decompression; object streams and xref streams on write; incremental append
+- [ ] Encryption on write: adding, changing and removing the security handler
 - [ ] Deterministic output: `/ID` derived from content, no timestamps unless asked; atomic file replacement
 - [ ] Commands: `merge`, `split`, `pages` (select, reorder, delete, rotate), `meta` (get, set, strip), `clean`, `encrypt`, `decrypt`
 - [ ] Output validation: `qpdf --check`, selected Arlington PDF Model rules, and MuPDF reopening the output with identical content
+- [x] Fixtures: a 120-key dictionary, every string, real and name form the printer distinguishes, a signature, null values and trailer entries, free generations past 16 bits, a null object stream member, and an empty key name MuPDF writes lossily (82 smoke fixtures)
 
 Exit: ≥99.5% round-trip parity on the standard tier: MuPDF reads our output with the same object graph (modulo renumbering) and the same text. `merge`, `split` and `clean` are at least as fast as mutool.
 

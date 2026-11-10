@@ -107,6 +107,7 @@ pub fn all() -> Vec<Fixture> {
     .chain(encrypted_fixtures())
     .chain(filter_fixtures())
     .chain(image_fixtures())
+    .chain(writer_fixtures())
     .collect()
 }
 
@@ -553,6 +554,159 @@ fn image_fixtures() -> Vec<Fixture> {
             ),
         ),
     ]
+}
+
+/// Inputs whose rewrite depends on MuPDF's writing rules: dictionary
+/// order, literal or hex strings, real formatting, null values, object
+/// stream members and free entry generations.
+fn writer_fixtures() -> Vec<Fixture> {
+    let fx = |name, about, bytes| Fixture {
+        name,
+        about,
+        needs_repair: false,
+        bytes,
+    };
+
+    // 120 keys inserted in reverse order: MuPDF sorts a dictionary once it
+    // grows past 100 entries.
+    let mut big = String::from("<<");
+    for i in (0..120).rev() {
+        let _ = write!(big, "/K{i:03} {i}");
+    }
+    big.push_str("/Type/Example/Subtype/Big>>");
+
+    let strings = "[(plain) (with \\(parens\\) and \\\\) (tab\\tnew\\nline) <00010203> \
+        <FEFF00410042> (caf\\351) (\\000\\001) () <> (\\(\\(\\)\\))]";
+    let reals = "[0.5 -0.25 .001 0.0000001 1.0 -0.0 3.4 123456789.0 99999.5 \
+        2147483648.0 1e5 0.30000001 612.123]";
+    let names = "[/A#20B /Hash#23 /Paren#28 /Slash#2F /caf#E9 /NUL#00x /x]";
+    let mut doc = hello(Pdf::new("1.6"), "Writer", false);
+    doc.obj(6, &big);
+    doc.obj(7, strings);
+    doc.obj(8, reals);
+    doc.obj(9, names);
+    doc.obj(
+        10,
+        "<</Type/Sig/Filter/Adobe.PPKLite/ByteRange[0 0 0 0]/Contents<00FF>>>",
+    );
+    doc.obj(
+        11,
+        "<</Type null/Subtype/X/Empty null/List[null true false]>>",
+    );
+    let syntax = doc.finish_with_xref("");
+
+    // /ID and /Info null in the trailer, which MuPDF leaves out.
+    let null_trailer =
+        hello(Pdf::new("1.4"), "Null trailer", false).finish_with_xref("/ID null/Info null");
+
+    // Free entries with generations 7, 65535 and 65536 (an unsigned short
+    // in MuPDF, so 0).
+    let mut pdf = hello(Pdf::new("1.4"), "Free entries", false);
+    let start = pdf.out.len();
+    pdf.line("xref");
+    pdf.line("0 9");
+    pdf.out.extend_from_slice(b"0000000000 65535 f \n");
+    for num in 1..6 {
+        let entry = format!("{:010} 00000 n \n", pdf.offsets[&num]);
+        pdf.out.extend_from_slice(entry.as_bytes());
+    }
+    for generation in ["00007", "65535", "65536"] {
+        pdf.out
+            .extend_from_slice(format!("0000000000 {generation} f \n").as_bytes());
+    }
+    pdf.line("trailer");
+    pdf.line("<</Size 9/Root 1 0 R>>");
+    pdf.line("startxref");
+    pdf.line(&start.to_string());
+    pdf.line("%%EOF");
+    let free = pdf.out;
+
+    // An empty name as a key, before a number: MuPDF writes `/7 0 R`
+    // without a space, which reads back as the key /7. `clean`'s
+    // verification fails on it.
+    let mut doc = hello(Pdf::new("1.4"), "Lossy", false);
+    doc.obj(6, "<</ 7 0 R/Next 7 0 R>>");
+    doc.obj(7, "(target)");
+    let lossy = doc.finish_with_xref("");
+
+    vec![
+        fx(
+            "write-syntax.pdf",
+            "Writer: a 120-key dictionary, strings, reals, names, a signature, nulls",
+            syntax,
+        ),
+        fx(
+            "write-lossy-name.pdf",
+            "Writer: an empty key name MuPDF writes so that it reads back as another",
+            lossy,
+        ),
+        fx(
+            "write-null-trailer.pdf",
+            "Writer: /ID and /Info null in the trailer",
+            null_trailer,
+        ),
+        fx(
+            "write-free-generations.pdf",
+            "Writer: free entries with generations 7, 65535 and 65536",
+            free,
+        ),
+        fx(
+            "write-objstm-null.pdf",
+            "Writer: an object stream member that is null",
+            objstm_with_null(),
+        ),
+    ]
+}
+
+/// `xref_stream`'s document with a fourth object stream member, `null`.
+fn objstm_with_null() -> Vec<u8> {
+    let mut pdf = Pdf::new("1.5");
+    let content = text_content("Null member");
+    pdf.stream(4, "", &content);
+    pdf.obj(5, FONT);
+    let objects = [
+        (1, "<</Type/Catalog/Pages 2 0 R>>"),
+        (2, "<</Type/Pages/Kids[3 0 R]/Count 1>>"),
+        (
+            3,
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
+        ),
+        (8, "null"),
+    ];
+    let mut index = String::new();
+    let mut body = String::new();
+    for (num, text) in objects {
+        let _ = write!(index, "{num} {} ", body.len());
+        body.push_str(text);
+        body.push('\n');
+    }
+    let data = format!("{index}{body}");
+    pdf.stream(
+        6,
+        &format!("/Type/ObjStm/N {}/First {}", objects.len(), index.len()),
+        data.as_bytes(),
+    );
+    let xref_offset = pdf.out.len();
+    let mut rows = Vec::new();
+    let mut row = |kind: u8, field2: u32, field3: u16| {
+        rows.push(kind);
+        rows.extend_from_slice(&field2.to_be_bytes());
+        rows.extend_from_slice(&field3.to_be_bytes());
+    };
+    row(0, 0, 65535);
+    for i in 0..3u16 {
+        row(2, 6, i);
+    }
+    for num in [4, 5, 6] {
+        row(1, u32::try_from(pdf.offsets[&num]).unwrap_or(0), 0);
+    }
+    row(1, u32::try_from(xref_offset).unwrap_or(0), 0);
+    row(2, 6, 3);
+    pdf.stream(7, "/Type/XRef/Size 9/W[1 4 2]/Root 1 0 R", &rows);
+    pdf.line("startxref");
+    pdf.line(&xref_offset.to_string());
+    pdf.line("%%EOF");
+    pdf.out
 }
 
 /// One file per security handler revision and method, plus files that need

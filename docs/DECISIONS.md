@@ -77,7 +77,7 @@ MuPDF stores reals as `float`, and its `fz_strtof` is not correctly rounded: it 
 
 *2026-11-09. Settles PLAN open question 2 for now.*
 
-A `Vec` of key/value pairs with linear lookup, where re-inserting a key replaces its value in place (`pdf_dict_put`'s behavior, so the last duplicate wins). Real dictionaries are small. MuPDF sorts dictionaries over 100 entries; nupdf will add an index if profiles show large dictionaries matter.
+A `Vec` of key/value pairs with linear lookup, where re-inserting a key replaces its value in place (`pdf_dict_put`'s behavior, so the last duplicate wins). Real dictionaries are small. MuPDF sorts dictionaries over 100 entries; nupdf will add an index if profiles show large dictionaries matter. Revised by D18: the order is what gets written, so nupdf sorts them too.
 
 ## D12. Small filters move from M2 into M1
 
@@ -137,3 +137,21 @@ JBIG2 uses hayro-jbig2. Porting jbig2dec (17,000 lines) was not needed: on valid
 JPX passes through undecoded in `pdf_load_stream`, as in MuPDF; decoding it belongs to image loading (M4).
 
 The fuzzer found two loops in hayro-jbig2's symbol dictionary decoding that never end on damaged data, because its arithmetic decoder keeps returning values past the end: endless empty export runs, and endless empty height classes. jbig2dec stops the first after 1000 empty runs. nupdf vendors hayro-jbig2 0.4.0 with that guard and the same one for height classes (`vendor/hayro-jbig2/NUPDF.md`), until upstream has an equivalent. Decoding time also follows the symbol sizes a dictionary declares, and a 600-byte stream can declare tens of thousands of large symbols: MuPDF took more than five minutes on one the fuzzer found. The vendored copy caps a dictionary at 2^28 pixels of symbols, far more than real dictionaries hold.
+
+## D18. The writer matches `mutool clean` byte for byte
+
+*2026-11-10*
+
+`nupdf clean` writes what `pdf_save_document` writes with default options, and the `clean` check compares the two files' BLAKE3 hashes. Matching bytes needs MuPDF's printer exactly: `/Type` and `/Subtype` first in tight mode, a space only between two regular characters, its choice between literal and hex strings, `#XX` names cut at a NUL, and reals through `fmtfloat` with its port of Grisu2 (`print`). It also needs these behaviors of MuPDF's model:
+
+- **Dictionary order.** A put into a dictionary of more than 100 entries sorts it by key, and later keys go into their sorted place (`pdf_dict_get_put`); a delete moves the last entry into the gap and unsorts it. This revises D11, since the order is what gets written. Lookups take one of two paths. A name MuPDF interns as a constant (608 of them, `names`) goes through `pdf_dict_find`, which in a sorted dictionary reports the last key as absent when it is the key sought. Any other name goes through `pdf_dict_finds`, which does not. So a sorted dictionary whose last key is `/Type` does not get `/Type` moved to the front.
+- **Null is absent.** MuPDF's null object is the null pointer, so a null `/Type`, `/ID` or `/Info` counts as missing wherever it checks for an object.
+- **Generations are 16 bits.** Xref generations are `unsigned short`, so 65536 reads as 0, and the free list then counts up from what was read.
+- **Objects that cannot be loaded.** Object stream members that parse as null, or fail to load, are written as free entries, with MuPDF's generations.
+
+MuPDF uses random AES initialization vectors. nupdf derives each one from the key, the object and the data (the first 16 bytes of SHA-256 over them), so its output is deterministic (AGENT-INTERFACE rule 10). AES-encrypted files therefore differ from MuPDF's in those 16 bytes per string and stream, and the `clean` check counts them as mismatches. The comment after the header names nupdf instead of MuPDF (same length; the harness swaps it before hashing).
+
+The `roundtrip` check covers what bytes cannot. Each side writes its file, MuPDF reads each one back, and the harness compares the object graph, the raw stream data, whether a repair was needed, and MuPDF's warnings. Its remaining mismatches also come from random IVs, where MuPDF's own output does not read back exactly: AES streams of a document opened without its password, which MuPDF writes empty with a 32-byte `/Length`, and streams under an Identity crypt filter, which it encrypts anyway. On `issue20453.pdf`, MuPDF's save fails after a repair because it parses an object stream's number as a file offset; nupdf writes the file.
+
+`clean` then reads its own output back and refuses to write one that differs from the input (exit 4), as AGENT-INTERFACE requires of mutations. That rejects some of MuPDF's lossy cases (an empty key name before a number, Identity crypt filters, documents opened without their password: 27 standard files). `--no-verify` writes MuPDF's output regardless, and the harness uses it.
+
