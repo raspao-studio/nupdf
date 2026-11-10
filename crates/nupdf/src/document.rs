@@ -1037,7 +1037,7 @@ impl Document {
             // MuPDF reads stream data from the entry's offset, which tracks the
             // latest definition, even when it keeps an older cached object.
             if let Some(obj) = fixed.remove(&item.num) {
-                fixed.insert(item.num, with_data_start(obj, item.stm_ofs));
+                fixed.insert(item.num, with_data_start(obj, item.num, item.stm_ofs));
             }
             // Correct stream lengths measured by the scan (unencrypted only).
             // MuPDF patches the object it has cached for this number, even if
@@ -1333,19 +1333,25 @@ fn crypt_error(e: &str) -> OpenError {
     }
 }
 
-/// Re-point a cached stream at new data, or demote it to a plain dictionary
-/// when the entry no longer has stream data.
-fn with_data_start(obj: Object, stm_ofs: i64) -> Object {
-    match obj {
-        Object::Stream(s) => match usize::try_from(stm_ofs) {
-            Ok(start) if start > 0 => {
-                let mut s = Arc::unwrap_or_clone(s);
-                s.data_start = start;
-                Object::Stream(Arc::new(s))
-            }
-            _ => Object::Dict(Arc::new(Arc::unwrap_or_clone(s).dict)),
-        },
-        other => other,
+/// Re-point a cached object at the entry's stream data. In MuPDF an object
+/// is a stream when its entry has stream data, whatever was cached, so a
+/// cached dictionary becomes a stream again when a later definition of the
+/// number has data, and a stream becomes a dictionary when it has none.
+fn with_data_start(obj: Object, num: i32, stm_ofs: i64) -> Object {
+    let start = usize::try_from(stm_ofs).ok().filter(|&s| s > 0);
+    match (obj, start) {
+        (Object::Stream(s), Some(start)) => {
+            let mut s = Arc::unwrap_or_clone(s);
+            s.data_start = start;
+            Object::Stream(Arc::new(s))
+        }
+        (Object::Stream(s), None) => Object::Dict(Arc::new(Arc::unwrap_or_clone(s).dict)),
+        (Object::Dict(d), Some(start)) => Object::Stream(Arc::new(Stream {
+            dict: Arc::unwrap_or_clone(d),
+            data_start: start,
+            num,
+        })),
+        (other, _) => other,
     }
 }
 
