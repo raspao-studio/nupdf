@@ -215,3 +215,67 @@ pub fn flate_broken_after(data: &[u8], block: usize) -> Vec<u8> {
     out.extend_from_slice(b"trailing bytes after the bad block");
     out
 }
+
+/// CCITT Group 4 (T.6) coding of `rows` (true for black), ending with
+/// EOFB, padded to a byte.
+pub fn g4(width: usize, rows: &[Vec<bool>]) -> Vec<u8> {
+    use fax::{Color, VecWriter, encoder::Encoder};
+    let mut enc = Encoder::new(VecWriter::new());
+    for row in rows {
+        let pels = row
+            .iter()
+            .map(|&black| if black { Color::Black } else { Color::White });
+        let Ok(()) = enc.encode_line(pels, width as u32);
+    }
+    let Ok(writer) = enc.finish();
+    writer.finish()
+}
+
+/// A JBIG2 segment (7.2): no referred-to segments, page 1.
+pub fn jbig2_segment(number: u32, kind: u8, data: &[u8]) -> Vec<u8> {
+    let mut s = number.to_be_bytes().to_vec();
+    s.extend([kind, 0, 1]);
+    s.extend((data.len() as u32).to_be_bytes());
+    s.extend_from_slice(data);
+    s
+}
+
+/// The segments of a one-page JBIG2 image in the embedded organization:
+/// page information, one MMR-coded generic region of type `region` (38 for
+/// immediate, 36 for intermediate), end of page.
+pub fn jbig2_mmr_page(width: usize, rows: &[Vec<bool>], region: u8) -> Vec<u8> {
+    let (w, h) = (width as u32, rows.len() as u32);
+    let mut info = Vec::new();
+    info.extend(w.to_be_bytes());
+    info.extend(h.to_be_bytes());
+    info.extend([0; 8]);
+    info.extend([0, 0, 0]);
+    let mut generic = Vec::new();
+    generic.extend(w.to_be_bytes());
+    generic.extend(h.to_be_bytes());
+    generic.extend([0; 8]);
+    // Region flags (OR), then generic region flags: MMR.
+    generic.extend([0, 1]);
+    generic.extend(g4(width, rows));
+    let mut out = jbig2_segment(0, 48, &info);
+    out.extend(jbig2_segment(1, region, &generic));
+    out.extend(jbig2_segment(2, 49, &[]));
+    out
+}
+
+/// A JBIG2 pattern dictionary (7.4.4) of `count` patterns, each
+/// `size` x `size`, MMR coded: something for a globals stream to hold.
+pub fn jbig2_pattern_dict(number: u32, size: usize, count: usize) -> Vec<u8> {
+    let width = size * count;
+    let rows: Vec<Vec<bool>> = (0..size)
+        .map(|y| {
+            (0..width)
+                .map(|x| (x / size + y).is_multiple_of(2))
+                .collect()
+        })
+        .collect();
+    let mut data = vec![1, size as u8, size as u8];
+    data.extend((count as u32 - 1).to_be_bytes());
+    data.extend(g4(width, &rows));
+    jbig2_segment(number, 16, &data)
+}

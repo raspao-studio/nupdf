@@ -106,6 +106,7 @@ pub fn all() -> Vec<Fixture> {
     .chain(edge_cases())
     .chain(encrypted_fixtures())
     .chain(filter_fixtures())
+    .chain(image_fixtures())
     .collect()
 }
 
@@ -215,6 +216,341 @@ fn filter_fixtures() -> Vec<Fixture> {
             "filter-flate-damaged.pdf",
             "FlateDecode with a corrupt byte near the end",
             with_filtered_stream("/Filter/FlateDecode", &damaged),
+        ),
+    ]
+}
+
+/// The minimal document plus image XObject 6, `data` encoded with the
+/// filters in `dict`.
+fn with_image(width: usize, height: usize, cs: &str, bpc: u8, dict: &str, data: &[u8]) -> Vec<u8> {
+    with_filtered_stream(
+        &format!(
+            "/Type/XObject/Subtype/Image/Width {width}/Height {height}/ColorSpace/{cs}\
+             /BitsPerComponent {bpc}{dict}"
+        ),
+        data,
+    )
+}
+
+/// Sample values with gradients, an edge and a disk, different per component.
+fn image_sample(c: usize, x: usize, y: usize) -> u8 {
+    let (dx, dy) = (x as i64 - 30, y as i64 - 20);
+    if dx * dx + dy * dy < 180 {
+        return (230 - c * 45) as u8;
+    }
+    let edge = if (x + 2 * y) % 23 < 4 { 90 } else { 0 };
+    ((x * 3 + y * 5 + c * 70 + edge) % 256) as u8
+}
+
+/// A bilevel pattern (true is black): stripes, a checker corner and a disk.
+fn bilevel(width: usize, height: usize) -> Vec<Vec<bool>> {
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| {
+                    let (dx, dy) = (x as i64 - 40, y as i64 - 30);
+                    (x / 7 + y / 5) % 3 == 0
+                        || dx * dx + dy * dy < 150
+                        || (x < 16 && y < 16 && (x / 4 + y / 4) % 2 == 0)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// One fixture per image filter and the decoder paths that differ between
+/// decoders: every chroma subsampling libjpeg scales in the IDCT, color
+/// transforms, restarts, progressive scans (complete and partial), damaged
+/// data; CCITT Group 4; JBIG2 MMR pages, globals and what jbig2dec rejects.
+fn image_fixtures() -> Vec<Fixture> {
+    use crate::encode;
+    use crate::jpeg::{self, Component, Scan, Spec};
+    let fx = |name, about, bytes| Fixture {
+        name,
+        about,
+        needs_repair: false,
+        bytes,
+    };
+    let comps = |f: &[(u8, usize, usize)]| -> Vec<Component> {
+        f.iter().map(|&(id, h, v)| Component { id, h, v }).collect()
+    };
+    let spec = |width, height, components, jfif, adobe| Spec {
+        width,
+        height,
+        components,
+        sample: image_sample,
+        jfif,
+        adobe,
+        restart_interval: 0,
+        progressive: None,
+    };
+    let ycc = |h: usize, v: usize| comps(&[(1, h, v), (2, 1, 1), (3, 1, 1)]);
+    let (w, h) = (75, 51);
+    let dct = |cs: &str, s: &Spec, extra: &str| {
+        with_image(
+            s.width,
+            s.height,
+            cs,
+            8,
+            &format!("/Filter/DCTDecode{extra}"),
+            &jpeg::encode(s),
+        )
+    };
+    let scan = |comps: &[usize], ss, se, ah, al| Scan {
+        comps: comps.to_vec(),
+        ss,
+        se,
+        ah,
+        al,
+    };
+    let progressive = vec![
+        scan(&[0, 1, 2], 0, 0, 0, 1),
+        scan(&[0], 1, 5, 0, 0),
+        scan(&[0], 6, 63, 0, 0),
+        scan(&[1], 1, 63, 0, 0),
+        scan(&[2], 1, 63, 0, 0),
+        scan(&[0, 1, 2], 0, 0, 1, 0),
+    ];
+    let mut truncated = jpeg::encode(&spec(w, h, ycc(2, 2), true, None));
+    truncated.truncate(truncated.len() * 3 / 5);
+    let mut whitespace = b"\r\n \n".to_vec();
+    whitespace.extend(jpeg::encode(&spec(61, 37, comps(&[(1, 1, 1)]), true, None)));
+
+    let (bw, bh) = (97, 60);
+    let rows = bilevel(bw, bh);
+    let g4 = encode::g4(bw, &rows);
+    let ccitt = |dict: &str, data: &[u8]| {
+        with_image(
+            bw,
+            bh,
+            "DeviceGray",
+            1,
+            &format!("/Filter/CCITTFaxDecode{dict}"),
+            data,
+        )
+    };
+    let jbig2 = |dict: &str, data: &[u8]| {
+        with_image(
+            bw,
+            bh,
+            "DeviceGray",
+            1,
+            &format!("/Filter/JBIG2Decode{dict}"),
+            data,
+        )
+    };
+    let mut jbig2_file = vec![0x97, 0x4a, 0x42, 0x32, 0x0d, 0x0a, 0x1a, 0x0a, 0x01];
+    jbig2_file.extend(1u32.to_be_bytes());
+    jbig2_file.extend(encode::jbig2_mmr_page(bw, &rows, 38));
+    let jbig2_globals = {
+        let mut pdf = hello(Pdf::new("1.7"), "Filters", false);
+        pdf.stream(
+            6,
+            &format!(
+                "/Type/XObject/Subtype/Image/Width {bw}/Height {bh}/ColorSpace/DeviceGray\
+                 /BitsPerComponent 1/Filter/JBIG2Decode/DecodeParms<</JBIG2Globals 7 0 R>>"
+            ),
+            &encode::jbig2_mmr_page(bw, &rows, 38),
+        );
+        pdf.stream(7, "", &encode::jbig2_pattern_dict(3, 4, 2));
+        pdf.finish_with_xref("")
+    };
+
+    vec![
+        fx(
+            "filter-dct-gray.pdf",
+            "DCTDecode: baseline grayscale, odd size",
+            dct(
+                "DeviceGray",
+                &spec(61, 37, comps(&[(1, 1, 1)]), true, None),
+                "",
+            ),
+        ),
+        fx(
+            "filter-dct-420.pdf",
+            "DCTDecode: YCbCr 4:2:0 (16x16 chroma IDCT)",
+            dct("DeviceRGB", &spec(w, h, ycc(2, 2), true, None), ""),
+        ),
+        fx(
+            "filter-dct-422.pdf",
+            "DCTDecode: YCbCr 4:2:2 (16x8 chroma IDCT)",
+            dct("DeviceRGB", &spec(w, h, ycc(2, 1), true, None), ""),
+        ),
+        fx(
+            "filter-dct-440.pdf",
+            "DCTDecode: YCbCr 4:4:0 (8x16 chroma IDCT)",
+            dct("DeviceRGB", &spec(w, h, ycc(1, 2), true, None), ""),
+        ),
+        fx(
+            "filter-dct-411.pdf",
+            "DCTDecode: YCbCr 4:1:1 (16x8 chroma IDCT, then upsampled)",
+            dct("DeviceRGB", &spec(w, h, ycc(4, 1), true, None), ""),
+        ),
+        fx(
+            "filter-dct-rgb.pdf",
+            "DCTDecode: three components, Adobe marker with transform 0",
+            dct("DeviceRGB", &spec(w, h, ycc(1, 1), false, Some(0)), ""),
+        ),
+        fx(
+            "filter-dct-colortransform-0.pdf",
+            "DCTDecode: no markers, /ColorTransform 0 (data left untransformed)",
+            dct(
+                "DeviceRGB",
+                &spec(w, h, ycc(1, 1), false, None),
+                "/DecodeParms<</ColorTransform 0>>",
+            ),
+        ),
+        fx(
+            "filter-dct-cmyk.pdf",
+            "DCTDecode: CMYK, Adobe transform 0",
+            dct(
+                "DeviceCMYK",
+                &spec(
+                    w,
+                    h,
+                    comps(&[(1, 1, 1), (2, 1, 1), (3, 1, 1), (4, 1, 1)]),
+                    false,
+                    Some(0),
+                ),
+                "",
+            ),
+        ),
+        fx(
+            "filter-dct-ycck.pdf",
+            "DCTDecode: YCCK, Adobe transform 2, 4:2:0 with full-size K",
+            dct(
+                "DeviceCMYK",
+                &spec(
+                    w,
+                    h,
+                    comps(&[(1, 2, 2), (2, 1, 1), (3, 1, 1), (4, 2, 2)]),
+                    false,
+                    Some(2),
+                ),
+                "",
+            ),
+        ),
+        fx(
+            "filter-dct-restart.pdf",
+            "DCTDecode: 4:2:0 with a restart marker every two MCUs",
+            dct(
+                "DeviceRGB",
+                &Spec {
+                    restart_interval: 2,
+                    ..spec(w, h, ycc(2, 2), true, None)
+                },
+                "",
+            ),
+        ),
+        fx(
+            "filter-dct-progressive.pdf",
+            "DCTDecode: progressive 4:2:0, spectral selection and DC refinement",
+            dct(
+                "DeviceRGB",
+                &Spec {
+                    progressive: Some(progressive.clone()),
+                    ..spec(w, h, ycc(2, 2), true, None)
+                },
+                "",
+            ),
+        ),
+        fx(
+            "filter-dct-progressive-partial.pdf",
+            "DCTDecode: progressive with only the first two scans (block smoothing)",
+            dct(
+                "DeviceRGB",
+                &Spec {
+                    progressive: Some(progressive[..2].to_vec()),
+                    ..spec(w, h, ycc(2, 2), true, None)
+                },
+                "",
+            ),
+        ),
+        fx(
+            "filter-dct-truncated.pdf",
+            "DCTDecode: baseline 4:2:0 cut off three fifths in",
+            with_image(w, h, "DeviceRGB", 8, "/Filter/DCTDecode", &truncated),
+        ),
+        fx(
+            "filter-dct-whitespace.pdf",
+            "DCTDecode: whitespace before the SOI marker",
+            with_image(61, 37, "DeviceGray", 8, "/Filter/DCTDecode", &whitespace),
+        ),
+        fx(
+            "filter-dct-flate.pdf",
+            "FlateDecode then DCTDecode",
+            with_image(
+                w,
+                h,
+                "DeviceRGB",
+                8,
+                "/Filter[/FlateDecode/DCTDecode]",
+                &encode::flate(&jpeg::encode(&spec(w, h, ycc(2, 2), true, None))),
+            ),
+        ),
+        fx(
+            "filter-ccitt-g4.pdf",
+            "CCITTFaxDecode: Group 4",
+            ccitt(
+                &format!("/DecodeParms<</K -1/Columns {bw}/Rows {bh}>>"),
+                &g4,
+            ),
+        ),
+        fx(
+            "filter-ccitt-g4-blackis1.pdf",
+            "CCITTFaxDecode: Group 4 with /BlackIs1",
+            ccitt(
+                &format!("/DecodeParms<</K -1/Columns {bw}/Rows {bh}/BlackIs1 true>>"),
+                &g4,
+            ),
+        ),
+        fx(
+            "filter-ccitt-g4-truncated.pdf",
+            "CCITTFaxDecode: Group 4 cut off halfway",
+            ccitt(
+                &format!("/DecodeParms<</K -1/Columns {bw}/Rows {bh}>>"),
+                &g4[..g4.len() / 2],
+            ),
+        ),
+        fx(
+            "filter-jbig2-mmr.pdf",
+            "JBIG2Decode: one page, an MMR-coded generic region",
+            jbig2("", &encode::jbig2_mmr_page(bw, &rows, 38)),
+        ),
+        fx(
+            "filter-jbig2-globals.pdf",
+            "JBIG2Decode with /JBIG2Globals (a pattern dictionary)",
+            jbig2_globals,
+        ),
+        fx(
+            "filter-jbig2-globals-not-stream.pdf",
+            "JBIG2Decode whose /JBIG2Globals is not a stream",
+            jbig2(
+                "/DecodeParms<</JBIG2Globals<<>>>>",
+                &encode::jbig2_mmr_page(bw, &rows, 38),
+            ),
+        ),
+        fx(
+            "filter-jbig2-intermediate.pdf",
+            "JBIG2Decode: an intermediate generic region, which jbig2dec rejects",
+            jbig2("", &encode::jbig2_mmr_page(bw, &rows, 36)),
+        ),
+        fx(
+            "filter-jbig2-file-header.pdf",
+            "JBIG2Decode: a JBIG2 file header where none belongs",
+            jbig2("", &jbig2_file),
+        ),
+        fx(
+            "filter-jpx.pdf",
+            "JPXDecode: passed through undecoded",
+            with_image(
+                8,
+                8,
+                "DeviceGray",
+                8,
+                "/Filter/JPXDecode",
+                &sample_data()[..256],
+            ),
         ),
     ]
 }
