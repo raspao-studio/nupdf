@@ -221,3 +221,20 @@ On the standard tier the three checks match MuPDF on every file except AES ones 
 - **Streams under a crypt filter of their own** (`/Filter /Crypt`, as embedded files and some metadata use) are copied with their data still encrypted under the old key, then encrypted again under the new one, as in MuPDF. They no longer decrypt; the check refuses them (10 standard files).
 
 Passwords are cut at 127 bytes, as MuPDF's write options store them, and converted to PDFDocEncoding for revisions 2 to 4.
+
+## D23. Edits are an overlay on the document, and page selection follows `pdf_rearrange_pages`
+
+*2026-11-10*
+
+MuPDF edits a document by changing its objects in memory. nupdf's `Document` keeps the parsed file as it was and records edits beside it: objects replaced, changed or added, a new trailer, the data of new streams. Every lookup consults the edits first, so page lookup, inheritance, name trees, the writer and the read-back check all see the edited document without knowing about edits. The page map is built again after each edit, as MuPDF drops its own. The /Count rewrite MuPDF makes when a page tree is short becomes an edit too.
+
+MuPDF moves an edited object's xref entry into an incremental section, and the writer uses that entry. Two cases differ, and both show in the output. An object replaced with `pdf_update_object` gets a fresh entry, so it is written with generation 0. One changed in place keeps its generation, except one from an object stream, whose generation becomes 0. The overlay records which happened (`update_object`, `alter_object`).
+
+`clean --pages` is `mutool clean`'s page arguments: `pdf_check_document` first, so that a repair cannot lose the edits, then `pdf_rearrange_pages` with the structure tree dropped, then the save. Matching its output needs its in-place changes, quirks included:
+
+- The catalog is replaced by one with only /Type, /Pages, /Outlines, /OCProperties and the named destinations that lead to a kept page; /AcroForm, /Metadata, /Lang and the rest are gone. A direct /Pages or /Outlines is shared between the old catalog and the new one, so changes to it show in both.
+- Name tree keys may be strings or names. A link or outline item whose /Dest is a name, not a string or an array, counts as leading nowhere and is removed.
+- Form fields are found from widgets whose /Subtype is a direct /Widget, then trimmed from the top of their /Parent chain. In a malformed file whose widget has the page tree as /Parent, that empties /Kids, in both tools.
+- A page or /Pages that is not a dictionary fails the command, as `pdf_dict_put` does.
+
+The harness's `clean-pages-reverse`, `clean-pages-first` and `clean-pages-rest` checks compare the output's BLAKE3 with MuPDF's for `N-1`, `1` and `2-N`. MuPDF's script interface has no `pdf_check_document`, so the oracle loads every object itself before rearranging, as `mutool clean` does. On the standard tier the checks match on every file but 25 AES ones. Both tools fail on 66 to 71 more files than `clean` does, whose page trees cannot be counted or walked.

@@ -115,6 +115,10 @@ enum Command {
         /// Permission flags for -E, as /P (-1 grants everything).
         #[arg(short = 'P', default_value_t = -1, allow_negative_numbers = true)]
         permissions: i32,
+        /// Keep only these pages, in this order, as `mutool clean`'s page
+        /// arguments: `1-3,5`, `N` for the last page, `5-1` backwards.
+        #[arg(long)]
+        pages: Option<String>,
         /// Report what would be written, and write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -250,6 +254,7 @@ fn main() -> ExitCode {
             owner_password,
             user_password,
             permissions,
+            pages,
             dry_run,
             no_verify,
         } => clean_options(&CleanFlags {
@@ -277,12 +282,17 @@ fn main() -> ExitCode {
         })
         .and_then(|options| open(file).map(|opened| (options, opened)))
         .and_then(|(options, (doc, facts))| {
+            let kept = match pages {
+                Some(spec) => Some(keep_pages(&doc, spec)?),
+                None => None,
+            };
             let plan = Clean {
                 options,
                 output: output.as_deref(),
                 apply: !dry_run,
                 verify: !no_verify,
                 password,
+                pages: kept,
             };
             clean(&doc, &facts, &plan)
         }),
@@ -491,12 +501,30 @@ fn clean_options(f: &CleanFlags) -> Result<nupdf::write::WriteOptions, Failure> 
     })
 }
 
+/// `pdf_clean_file`'s page subset: every object loaded first, so a repair
+/// cannot lose the edits, then the pages kept, as 0-based indices.
+fn keep_pages(doc: &Document, spec: &str) -> Result<Vec<i32>, Failure> {
+    let fail = |message: String| Failure {
+        exit: Exit::Input,
+        code: "input.page_tree",
+        message,
+    };
+    nupdf::write::check_document(doc);
+    let count = doc.page_count().map_err(|e| fail(e.0))?;
+    let pages = nupdf::rearrange::parse_page_ranges(spec, count, doc);
+    nupdf::rearrange::rearrange_pages(doc, &pages)
+        .map_err(|e| fail(nupdf::diag::report::strip(&e.0).to_string()))?;
+    Ok(pages)
+}
+
 struct Clean<'a> {
     options: nupdf::write::WriteOptions,
     output: Option<&'a Path>,
     apply: bool,
     verify: bool,
     password: Option<&'a str>,
+    /// The pages kept, when only some are.
+    pages: Option<Vec<i32>>,
 }
 
 fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::Value, Failure> {
@@ -542,6 +570,7 @@ fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::
         },
         "syntax": if plan.options.pretty { "pretty" } else { "compact" },
         "objstms": plan.options.objstms,
+        "pages": plan.pages.as_ref().map(|p| p.iter().map(|i| i + 1).collect::<Vec<_>>()),
         "encryption": match &plan.options.encrypt {
             nupdf::write::Encrypt::Keep => serde_json::json!("keep"),
             nupdf::write::Encrypt::Remove => serde_json::json!("none"),
