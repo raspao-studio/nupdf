@@ -156,3 +156,18 @@ The `roundtrip` check covers what bytes cannot. Each side writes its file, MuPDF
 
 `clean` then reads its own output back and refuses to write one that differs from the input (exit 4), as AGENT-INTERFACE requires of mutations. That rejects some of MuPDF's lossy cases (an empty key name before a number, Identity crypt filters, documents opened without their password: 27 standard files). `--no-verify` writes MuPDF's output regardless, and the harness uses it.
 
+
+## D19. Garbage collection keeps MuPDF's quirks, and its read-back follows references
+
+*2026-11-10*
+
+`clean -g` through `-gggg` run MuPDF's `do_garbage` on the writer's copy of the objects (`garbage`), and the `clean-g` to `clean-gggg` checks compare the output's BLAKE3 with MuPDF's at each level. Matching it means doing what MuPDF does, including where that loses data:
+
+- **Marking.** Only what the trailer reaches is written. A reference to a missing, free or null object becomes null where it appears, and so does a reference to a reference to nothing, because `pdf_is_null` follows the chain. An indirect stream `/Length` becomes its number first, so the object that held it is dropped.
+- **Duplicates** (`-ggg`) are found by zlib's CRC-32 over each object as MuPDF holds it in memory: null, true, false and interned names hash as their small pointer values, integers as 64 bits, reals as 32. Objects with the same hash are then compared with `pdf_objcmp`. Two dictionaries with the same entries in another order hash differently, so they are not merged, although the comparison would call them equal. Pages are never merged, and streams only when `-gggg` compares their data. Merging repeats until nothing changes, since renumbering can make more objects equal.
+- **Renumbering** (`-gg`) gives every object a new number from 1 and generation 0, and encrypts it again under the new number. Each changed reference goes back into its dictionary with `pdf_dict_put`, by key. A dictionary of 101 entries is sorted by that put, so its key order changes, and an entry the sort moves past the loop's position is renumbered a second time, ending up pointing at another object. In a sorted dictionary whose last key is an interned name, the put appends a duplicate key with the new number and leaves the old one in place (D18's lookup quirk).
+- **Truncation.** When nothing is reachable, because the trailer has no `/Root`, `-gg` writes an empty xref that neither tool can open.
+
+On the standard tier all four levels match MuPDF on every file except the 33 AES files `clean` differs on (random IVs, D18). Collecting also lets both tools write 37 files that fail without it, because the objects that cannot be loaded are ones nothing reaches. `roundtrip-gggg` covers the AES files, as `roundtrip` does for `clean`.
+
+With garbage collection, objects can be renumbered or merged, so `clean`'s read-back check cannot compare them by number. It walks both documents from the trailer's `/Root`, `/Info`, `/ID` and `/Encrypt`, pairing objects where the same reference leads, and fails if an object pairs two ways or reads back differently. Merged objects may share a partner, and a reference that reads as null in the input may be null in the output. The check refuses the renumbering quirks above and the empty outputs: 20 standard files at `-g` (all also refused without `-g`) and 53 at `-gggg`, 33 of them empty.

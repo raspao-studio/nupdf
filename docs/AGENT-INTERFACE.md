@@ -33,12 +33,14 @@ Every command takes `--password`, tried as both the user and the owner password.
 
 ## Writing documents
 
-`clean <file> -o <out>` rewrites the whole document as `mutool clean` does with no options: every object in number order in a classic xref table, object streams and xref streams unpacked, streams copied raw, the encryption and `/ID` kept. The bytes are MuPDF's, except for the comment line naming the writer and the AES initialization vectors (DECISIONS D18). `--dry-run` does everything but write; `-o` or `--dry-run` is required.
+`clean <file> -o <out>` rewrites the whole document as `mutool clean` does: every object in number order in a classic xref table, object streams and xref streams unpacked, streams copied raw, the encryption and `/ID` kept. The bytes are MuPDF's, except for the comment line naming the writer and the AES initialization vectors (DECISIONS D18). `--dry-run` does everything but write; `-o` or `--dry-run` is required.
 
-Before writing, nupdf opens the output (with `--password`, if given) and compares every object it has in use with the input's: the syntax, apart from the stream `/Length` it recomputes, and each stream's raw data. If the output does not open, needs a repair, or reads back differently, `clean` writes nothing and fails with exit 4 and `verify.failed`, naming the objects. MuPDF's writer is lossy in a few cases, such as an empty key name before a number, a stream under an Identity crypt filter, or a document opened without its password. `--no-verify` skips the check and writes MuPDF's output anyway.
+`-g` collects garbage as `mutool clean -g` does, and repeating it goes further (DECISIONS D19). `-g` writes only what the trailer reaches and turns references to nothing into null. `-gg` also renumbers the objects from 1, `-ggg` also merges duplicate objects, and `-gggg` also merges streams with the same data. The report's `garbage` gives the level, 0 to 4.
+
+Before writing, nupdf opens the output (with `--password`, if given) and compares it with the input: the syntax of each object, apart from the stream `/Length` it recomputes, and each stream's raw data. Without `-g`, every object the output has in use is compared with the input's of the same number. With `-g`, objects are paired by following references from the trailer, since they may be renumbered or merged, and `objects` counts the pairs. If the output does not open, needs a repair, or reads back differently, `clean` writes nothing and fails with exit 4 and `verify.failed`, naming the input's objects. MuPDF's writer is lossy in a few cases, such as an empty key name before a number, a stream under an Identity crypt filter, a document opened without its password, a reference renumbered in a dictionary of more than 100 entries, or, with `-gg`, a document whose trailer has no `/Root`. `--no-verify` skips the check and writes MuPDF's output anyway.
 
 ```json
-{"schema":"nupdf.clean/v0","doc_id":"b3:...","applied":true,
+{"schema":"nupdf.clean/v0","doc_id":"b3:...","applied":true,"garbage":0,
  "output":{"path":"out.pdf","doc_id":"b3:...","len":1574,"blake3":"..."},
  "verification":{"verified":true,"objects":7},"diagnostics":[]}
 ```

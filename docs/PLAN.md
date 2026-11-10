@@ -159,7 +159,8 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 
 - [ ] Edit overlay: copy-on-write over the parsed document; new and deleted objects; grafting between documents with a dedup map
 - [x] Serializer, full rewrite (DECISIONS D18): `pdf_save_document` with default options, byte for byte. MuPDF's object printer (`print`), its dictionary sorting and two lookup paths, 16-bit generations and the free list, object streams and xref streams unpacked, streams copied raw, the security handler kept, with AES initialization vectors derived from the content instead of random
-- [ ] Serializer options: garbage collection levels matching `mutool clean -g` through `-gggg`; stream compression and decompression; object streams and xref streams on write; incremental append
+- [x] Garbage collection (DECISIONS D19): `clean -g` through `-gggg` as MuPDF's `do_garbage` (`garbage`). Marking from the trailer, with references to nothing made null and indirect stream lengths baked; merging duplicates by its CRC-32 of the in-memory object and `pdf_objcmp`, until nothing changes; renumbering by key, quirks included; objects encrypted again under their new numbers
+- [ ] Serializer options: stream compression and decompression; object streams and xref streams on write; incremental append
 - [ ] Encryption on write: adding, changing and removing the security handler
 - [x] Atomic file replacement: written beside the target, then renamed
 - [ ] Deterministic output: `/ID` derived from content, no timestamps unless asked
@@ -169,7 +170,7 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 - [x] `roundtrip` check: each side's `clean` output read back by MuPDF (`objects.js` with a scratch directory), comparing the object graph, raw stream data, repairs and warnings
 - [ ] Output validation: `qpdf --check` and selected Arlington PDF Model rules
 - [x] Fixtures: a 120-key dictionary, every string, real and name form the printer distinguishes, a signature, null values and trailer entries, free generations past 16 bits, a null object stream member, and an empty key name MuPDF writes lossily; for garbage collection, unreachable objects and references to nothing, duplicates that merge only once others have, the renumbering quirks, and an RC4 document renumbered (86 smoke fixtures)
-- [x] Fuzz: `open_walk` also writes the document, checks that writing is deterministic, and reads the output back. 15 minutes (22K runs), nothing found
+- [x] Fuzz: `open_walk` also writes the document, at a garbage collection level the input picks, checks that writing is deterministic, and reads the output back. 15 minutes at the default level (22K runs), then 15 across all levels (7K runs), nothing found
 
 **Status** (standard tier, 5,142 files, of which 56 neither tool writes):
 

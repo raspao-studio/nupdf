@@ -54,6 +54,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `names` (the names MuPDF interns, which take their own dictionary lookup path) | `include/mupdf/pdf/name-table.h` | M3 |
 | `print` (object syntax as MuPDF writes it) | `pdf/pdf-object.c` (`pdf_print_obj`), `fitz/printf.c` (`fmtfloat`), `fitz/ftoa.c` (`fz_grisu`) | M3 |
 | `write` (full save, and the read-back check) | `pdf/pdf-write.c` | M3 |
+| `garbage` (garbage collection on save: marking, merging duplicates, renumbering) | `pdf/pdf-write.c`, `pdf/pdf-object.c` (`pdf_objcmp`, `pdf_hash_obj`) | M3 |
 | `edit`, `graft` | `pdf/pdf-graft.c`, `pdf/pdf-clean-file.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |

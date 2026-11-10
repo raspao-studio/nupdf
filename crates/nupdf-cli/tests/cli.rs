@@ -503,6 +503,45 @@ fn clean_refuses_output_that_reads_back_differently() {
 }
 
 #[test]
+fn clean_collects_garbage_at_the_level_given() {
+    let input = smoke("gc-reach.pdf");
+    let output = scratch("clean-gc.pdf");
+    let report = run_json(&[
+        "clean",
+        "-gg",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(report["garbage"], 2);
+    assert_eq!(report["verification"]["verified"], true);
+    assert_eq!(report["verification"]["objects"], 5);
+    let written = std::fs::read(&output).unwrap();
+    assert!(String::from_utf8_lossy(&written).contains("xref\n0 6\n"));
+
+    // Levels past -gggg are -gggg.
+    let report = run_json(&["clean", "-ggggg", "--dry-run", input.to_str().unwrap()]);
+    assert_eq!(report["garbage"], 4);
+    let report = run_json(&["clean", "--dry-run", input.to_str().unwrap()]);
+    assert_eq!(report["garbage"], 0);
+}
+
+#[test]
+fn clean_refuses_what_renumbering_breaks() {
+    let input = smoke("gc-renumber.pdf");
+    let out = nupdf(&["clean", "-gg", "--dry-run", input.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "verify.failed");
+    assert_eq!(
+        err["error"]["message"],
+        "2 of 10 objects read back differently from the input: 8, 12"
+    );
+    let report = run_json(&["clean", "-g", "--dry-run", input.to_str().unwrap()]);
+    assert_eq!(report["verification"]["verified"], true);
+}
+
+#[test]
 fn clean_keeps_encryption_and_the_password_reopens_it() {
     let input = smoke("encrypted-user-password.pdf");
     let output = scratch("clean-user-password.pdf");

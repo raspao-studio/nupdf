@@ -13,6 +13,7 @@ mod doc_id;
 pub mod document;
 pub mod fax;
 pub mod filter;
+mod garbage;
 pub mod header;
 pub mod jbig2;
 pub mod jpeg;
