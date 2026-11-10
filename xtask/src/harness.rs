@@ -28,6 +28,10 @@ pub struct Check {
     /// `nupdf` arguments; the file path is appended.
     pub nupdf_args: &'static [&'static str],
     pub compare: Compare,
+    /// The oracle takes a scratch directory as a second argument and names
+    /// files it wrote there in `"file"` fields. The harness replaces each
+    /// with `"blake3"`, the hash of that file, before comparing.
+    pub oracle_writes_files: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +65,7 @@ pub const CHECKS: &[Check] = &[
             "/revisions",
             "/metadata",
         ]),
+        oracle_writes_files: false,
     },
     Check {
         name: "objects",
@@ -71,6 +76,7 @@ pub const CHECKS: &[Check] = &[
             counts: &["/object_count"],
             items: "objects",
         },
+        oracle_writes_files: false,
     },
     Check {
         name: "pages",
@@ -81,6 +87,7 @@ pub const CHECKS: &[Check] = &[
             counts: &["/page_count", "/page_count_after"],
             items: "pages",
         },
+        oracle_writes_files: false,
     },
     Check {
         name: "warnings",
@@ -88,6 +95,18 @@ pub const CHECKS: &[Check] = &[
         oracle_script: "oracle/js/info.js",
         nupdf_args: &["info"],
         compare: Compare::Warnings,
+        oracle_writes_files: false,
+    },
+    Check {
+        name: "streams",
+        about: "every stream decoded for non-image use: length and BLAKE3 of the data, or the error",
+        oracle_script: "oracle/js/streams.js",
+        nupdf_args: &["streams"],
+        compare: Compare::Collection {
+            counts: &["/object_count"],
+            items: "streams",
+        },
+        oracle_writes_files: true,
     },
 ];
 
@@ -241,22 +260,35 @@ fn run_check(
     timeout: Duration,
 ) -> Vec<FileResult> {
     let script = root.join(check.oracle_script);
+    let scratch = root.join("target/harness/scratch").join(check.name);
     let next = AtomicUsize::new(0);
     let results = Mutex::new(Vec::with_capacity(files.len()));
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
-                while let Some(file) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let oracle = side(
-                        mutool,
-                        &[
-                            std::ffi::OsStr::new("run"),
-                            script.as_os_str(),
-                            file.path.as_os_str(),
-                        ],
-                        timeout,
-                    );
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(file) = files.get(index) else {
+                        break;
+                    };
+                    let dir = scratch.join(index.to_string());
+                    let mut oracle_args = vec![
+                        std::ffi::OsStr::new("run"),
+                        script.as_os_str(),
+                        file.path.as_os_str(),
+                    ];
+                    if check.oracle_writes_files {
+                        let _ = std::fs::create_dir_all(&dir);
+                        oracle_args.push(dir.as_os_str());
+                    }
+                    let mut oracle = side(mutool, &oracle_args, timeout);
+                    if check.oracle_writes_files {
+                        if let Some(json) = &mut oracle.json {
+                            hash_written_files(json, &dir);
+                        }
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
                     let mut args: Vec<&std::ffi::OsStr> =
                         check.nupdf_args.iter().map(std::ffi::OsStr::new).collect();
                     args.push(file.path.as_os_str());
@@ -355,6 +387,24 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
         result.detail = Some(details.join("; "));
     }
     result
+}
+
+/// Replaces every `"file": name` with `"blake3": <hash of dir/name>`, or
+/// with `"blake3": null` when the file is missing.
+pub fn hash_written_files(value: &mut Value, dir: &Path) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(name)) = map.remove("file") {
+                let hash = std::fs::read(dir.join(&name))
+                    .ok()
+                    .map(|data| blake3::hash(&data).to_hex().to_string());
+                map.insert("blake3".into(), hash.map_or(Value::Null, Value::from));
+            }
+            map.values_mut().for_each(|v| hash_written_files(v, dir));
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| hash_written_files(v, dir)),
+        _ => {}
+    }
 }
 
 pub fn compare(fields: &[&str], oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
@@ -627,6 +677,24 @@ mod tests {
         );
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].nupdf, Value::Null);
+    }
+
+    #[test]
+    fn written_files_become_hashes() {
+        let dir = std::env::temp_dir().join(format!("nupdf-harness-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("4"), b"abc").unwrap();
+        let mut v =
+            serde_json::json!({"streams": {"4": {"len": 3, "file": "4"}, "5": {"file": "5"}}});
+        hash_written_files(&mut v, &dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"streams": {
+                "4": {"len": 3, "blake3": blake3::hash(b"abc").to_hex().to_string()},
+                "5": {"blake3": null},
+            }})
+        );
     }
 
     #[test]

@@ -134,8 +134,8 @@ MuPDF reference: `fitz/filter-basic.c`, `filter-flate.c`, `filter-lzw.c`, `filte
 - [ ] CCITTFax (`fax` or hayro-ccitt), DCT (zune-jpeg, with raw passthrough), JPX (hayro-jpeg2000), JBIG2 with globals (hayro-jbig2)
 - [ ] Brotli (MuPDF 1.28 decodes `BrotliDecode`; the last `info` mismatch)
 - [ ] Permissions (`pdf_has_permission`) reported by `info`
-- [ ] `nupdf streams` (list streams, decode one)
-- [ ] Oracle: `streams.js` (BLAKE3 of each decoded stream)
+- [x] `nupdf streams`: every stream's decoded length and BLAKE3 hash, as MuPDF's `pdf_load_stream` reads it; `show <ref> --data` decodes one
+- [x] Oracle and `streams` check: `streams.js` writes each decoded stream to a scratch directory and the harness hashes it, since mutool's JavaScript cannot. Streams with an image filter are listed on both sides but not compared; their pixels get their own check. First measurement: 98.7% (5,054 / 5,123); the rest are filter errors that MuPDF turns into the end of the data, LZW and Brotli
 - [ ] Fixtures: every filter
 - [ ] Fuzz targets per decoder
 

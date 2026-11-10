@@ -46,6 +46,8 @@ enum Command {
     Objects { file: PathBuf },
     /// List pages with their inherited MediaBox, CropBox, Rotate and Resources.
     Pages { file: PathBuf },
+    /// Decode every stream (for non-image use): length and BLAKE3 of the data.
+    Streams { file: PathBuf },
     /// Show one object (`12`, `12 0 R`) or the trailer (`trailer`).
     Show {
         file: PathBuf,
@@ -145,6 +147,8 @@ fn main() -> ExitCode {
         },
         Command::Pages { file } => open(file)
             .map(|(doc, facts)| report("nupdf.pages/v0", &facts, &doc, objects::pages(&doc))),
+        Command::Streams { file } => open(file)
+            .map(|(doc, facts)| report("nupdf.streams/v0", &facts, &doc, objects::streams(&doc))),
         Command::Show {
             file,
             target,
