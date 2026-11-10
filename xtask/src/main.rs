@@ -9,6 +9,7 @@ mod encode;
 mod encrypt;
 mod fixtures;
 mod harness;
+mod jpeg;
 mod oracle;
 mod proc;
 

@@ -372,6 +372,20 @@ fn streams_report_decoded_lengths_and_hashes() {
 }
 
 #[test]
+fn image_streams_are_decoded_only_with_images() {
+    let path = smoke("filter-dct-gray.pdf");
+    let file = path.to_str().unwrap();
+    let all = run_json(&["streams", file]);
+    assert_eq!(all["streams"]["6"], serde_json::json!({ "image": true }));
+    assert!(all["streams"]["4"]["len"].is_number());
+    let images = run_json(&["streams", "--images", file]);
+    let streams = images["streams"].as_object().unwrap();
+    assert_eq!(streams.keys().collect::<Vec<_>>(), ["6"]);
+    // 61 x 37 grayscale samples.
+    assert_eq!(streams["6"]["len"], 61 * 37);
+}
+
+#[test]
 fn permissions_follow_p_unless_the_owner_password_opened_it() {
     let path = smoke("encrypted-restricted.pdf");
     let file = path.to_str().unwrap();
