@@ -91,6 +91,16 @@ impl Object {
         matches!(self, Object::Int(_) | Object::Real(_))
     }
 
+    /// MuPDF's `pdf_to_real` on an already resolved object: numbers as
+    /// floats, everything else 0.
+    pub fn to_real(&self) -> f32 {
+        match self {
+            Object::Int(i) => *i as f32,
+            Object::Real(f) => *f,
+            _ => 0.0,
+        }
+    }
+
     /// MuPDF's `pdf_to_int` on an already resolved object: ints truncate to
     /// 32 bits, reals round half up, everything else is 0.
     pub fn to_int(&self) -> i32 {

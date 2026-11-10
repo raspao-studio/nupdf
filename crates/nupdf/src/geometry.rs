@@ -1,0 +1,305 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hum
+// Derived from MuPDF source/fitz/geometry.c,
+// Copyright (C) 2004-2026 Artifex Software, Inc.
+
+//! Points, rectangles and matrices, in single precision as MuPDF computes
+//! them, so that coordinates written back into a document match its.
+
+/// `FZ_MIN_INF_RECT` and `FZ_MAX_INF_RECT`: the corners of the infinite
+/// rectangle, as floats.
+const MIN_INF: f32 = -2_147_483_648.0;
+const MAX_INF: f32 = 2_147_483_520.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+/// `fz_matrix`: `[a b c d e f]`, mapping `(x, y)` to
+/// `(x a + y c + e, x b + y d + f)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Matrix {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
+    pub e: f32,
+    pub f: f32,
+}
+
+impl Rect {
+    /// `fz_empty_rect`.
+    pub const EMPTY: Rect = Rect {
+        x0: MAX_INF,
+        y0: MAX_INF,
+        x1: MIN_INF,
+        y1: MIN_INF,
+    };
+    /// `fz_unit_rect`.
+    pub const UNIT: Rect = Rect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 1.0,
+        y1: 1.0,
+    };
+
+    pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    /// `fz_is_empty_rect`.
+    pub fn is_empty(&self) -> bool {
+        self.x0 >= self.x1 || self.y0 >= self.y1
+    }
+
+    /// `fz_is_infinite_rect`.
+    pub fn is_infinite(&self) -> bool {
+        self.x0 == MIN_INF && self.x1 == MAX_INF && self.y0 == MIN_INF && self.y1 == MAX_INF
+    }
+
+    /// `fz_intersect_rect`.
+    pub fn intersect(self, b: Rect) -> Rect {
+        if b.is_infinite() {
+            return self;
+        }
+        if self.is_infinite() {
+            return b;
+        }
+        let mut a = self;
+        if a.x0 < b.x0 {
+            a.x0 = b.x0;
+        }
+        if a.y0 < b.y0 {
+            a.y0 = b.y0;
+        }
+        if a.x1 > b.x1 {
+            a.x1 = b.x1;
+        }
+        if a.y1 > b.y1 {
+            a.y1 = b.y1;
+        }
+        a
+    }
+
+    /// `fz_transform_rect`: the bounding box of the transformed corners,
+    /// an invalid rectangle staying invalid.
+    pub fn transform(self, m: Matrix) -> Rect {
+        let mut r = self;
+        if r.is_infinite() {
+            return r;
+        }
+        if m.b.abs() < f32::EPSILON && m.c.abs() < f32::EPSILON {
+            if m.a < 0.0 {
+                std::mem::swap(&mut r.x0, &mut r.x1);
+            }
+            if m.d < 0.0 {
+                std::mem::swap(&mut r.y0, &mut r.y1);
+            }
+            let s = m.transform_xy(r.x0, r.y0);
+            let t = m.transform_xy(r.x1, r.y1);
+            return Rect::new(s.x, s.y, t.x, t.y);
+        }
+        if m.a.abs() < f32::EPSILON && m.d.abs() < f32::EPSILON {
+            if m.b < 0.0 {
+                std::mem::swap(&mut r.x0, &mut r.x1);
+            }
+            if m.c < 0.0 {
+                std::mem::swap(&mut r.y0, &mut r.y1);
+            }
+            let s = m.transform_xy(r.x0, r.y0);
+            let t = m.transform_xy(r.x1, r.y1);
+            return Rect::new(s.x, s.y, t.x, t.y);
+        }
+        let invalid = r.x0 > r.x1 || r.y0 > r.y1;
+        let corners = [
+            m.transform_xy(r.x0, r.y0),
+            m.transform_xy(r.x0, r.y1),
+            m.transform_xy(r.x1, r.y1),
+            m.transform_xy(r.x1, r.y0),
+        ];
+        let min = |f: fn(&Point) -> f32| corners.iter().map(f).fold(f32::INFINITY, min4);
+        let max = |f: fn(&Point) -> f32| corners.iter().map(f).fold(f32::NEG_INFINITY, max4);
+        let mut out = Rect::new(min(|p| p.x), min(|p| p.y), max(|p| p.x), max(|p| p.y));
+        if invalid {
+            std::mem::swap(&mut out.x0, &mut out.x1);
+            std::mem::swap(&mut out.y0, &mut out.y1);
+        }
+        out
+    }
+}
+
+/// One step of MIN4, as `fz_min`'s comparisons pick.
+fn min4(acc: f32, v: f32) -> f32 {
+    if v < acc { v } else { acc }
+}
+
+fn max4(acc: f32, v: f32) -> f32 {
+    if v > acc { v } else { acc }
+}
+
+impl Matrix {
+    pub const IDENTITY: Matrix = Matrix {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    /// `fz_scale`.
+    pub fn scale(sx: f32, sy: f32) -> Matrix {
+        Matrix {
+            a: sx,
+            d: sy,
+            ..Matrix::ZERO
+        }
+    }
+
+    /// `fz_translate`.
+    pub fn translate(tx: f32, ty: f32) -> Matrix {
+        Matrix {
+            e: tx,
+            f: ty,
+            ..Matrix::IDENTITY
+        }
+    }
+
+    const ZERO: Matrix = Matrix {
+        a: 0.0,
+        b: 0.0,
+        c: 0.0,
+        d: 0.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    /// `fz_pre_rotate`: exact for multiples of 90 degrees.
+    pub fn pre_rotate(self, theta: f32) -> Matrix {
+        let mut theta = (f64::from(theta) % 360.0) as f32;
+        if theta < 0.0 {
+            theta += 360.0;
+        }
+        let mut m = self;
+        if (0.0 - theta).abs() < f32::EPSILON {
+        } else if (90.0 - theta).abs() < f32::EPSILON {
+            let (a, b) = (m.a, m.b);
+            m.a = m.c;
+            m.b = m.d;
+            m.c = -a;
+            m.d = -b;
+        } else if (180.0 - theta).abs() < f32::EPSILON {
+            m.a = -m.a;
+            m.b = -m.b;
+            m.c = -m.c;
+            m.d = -m.d;
+        } else if (270.0 - theta).abs() < f32::EPSILON {
+            let (a, b) = (m.a, m.b);
+            m.a = -m.c;
+            m.b = -m.d;
+            m.c = a;
+            m.d = b;
+        } else {
+            let s = (theta * std::f32::consts::PI / 180.0).sin();
+            let c = (theta * std::f32::consts::PI / 180.0).cos();
+            let (a, b) = (m.a, m.b);
+            m.a = c * a + s * m.c;
+            m.b = c * b + s * m.d;
+            m.c = -s * a + c * m.c;
+            m.d = -s * b + c * m.d;
+        }
+        m
+    }
+
+    /// `fz_concat`: `self`, then `two`.
+    pub fn concat(self, two: Matrix) -> Matrix {
+        let one = self;
+        Matrix {
+            a: one.a * two.a + one.b * two.c,
+            b: one.a * two.b + one.b * two.d,
+            c: one.c * two.a + one.d * two.c,
+            d: one.c * two.b + one.d * two.d,
+            e: one.e * two.a + one.f * two.c + two.e,
+            f: one.e * two.b + one.f * two.d + two.f,
+        }
+    }
+
+    /// `fz_invert_matrix`, in double precision; a matrix that cannot be
+    /// inverted gives all zeros.
+    pub fn invert(self) -> Matrix {
+        let (sa, sb, sc, sd) = (
+            f64::from(self.a),
+            f64::from(self.b),
+            f64::from(self.c),
+            f64::from(self.d),
+        );
+        let det = sa * sd - sb * sc;
+        if (-f64::EPSILON..=f64::EPSILON).contains(&det) {
+            return Matrix::ZERO;
+        }
+        let det = 1.0 / det;
+        let da = sd * det;
+        let db = -sb * det;
+        let dc = -sc * det;
+        let dd = sa * det;
+        let (se, sf) = (f64::from(self.e), f64::from(self.f));
+        let de = -se * da - sf * dc;
+        let df = -se * db - sf * dd;
+        Matrix {
+            a: da as f32,
+            b: db as f32,
+            c: dc as f32,
+            d: dd as f32,
+            e: de as f32,
+            f: df as f32,
+        }
+    }
+
+    /// `fz_transform_point_xy`.
+    pub fn transform_xy(self, x: f32, y: f32) -> Point {
+        Point {
+            x: x * self.a + y * self.c + self.e,
+            y: x * self.b + y * self.d + self.f,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rotated_page_maps_back_and_forth() {
+        // A 200 by 100 page turned 90 degrees, as pdf_page_transform makes
+        // it: flip, rotate, then move the crop box's corner to the origin.
+        let m = Matrix::scale(1.0, -1.0).pre_rotate(-90.0);
+        let corner = Rect::new(0.0, 0.0, 200.0, 100.0).transform(m);
+        let m = m.concat(Matrix::translate(-corner.x0, -corner.y0));
+        let r = Rect::new(10.0, 20.0, 30.0, 40.0).transform(m);
+        assert_eq!(r, Rect::new(20.0, 10.0, 40.0, 30.0));
+        assert_eq!(r.transform(m.invert()), Rect::new(10.0, 20.0, 30.0, 40.0));
+        assert_eq!(Matrix::scale(0.0, 1.0).invert(), Matrix::ZERO);
+    }
+
+    #[test]
+    fn rects_intersect_unless_infinite() {
+        let a = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(
+            a.intersect(Rect::new(5.0, -5.0, 20.0, 5.0)),
+            Rect::new(5.0, 0.0, 10.0, 5.0)
+        );
+        let inf = Rect::new(MIN_INF, MIN_INF, MAX_INF, MAX_INF);
+        assert_eq!(a.intersect(inf), a);
+        assert!(Rect::EMPTY.is_empty());
+    }
+}

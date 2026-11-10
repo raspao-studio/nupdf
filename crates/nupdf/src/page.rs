@@ -17,7 +17,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::document::Document;
+use crate::geometry::{Matrix, Rect};
 use crate::object::Object;
+
+/// A page box as `pdf_page_obj_transform_box` settles it: Letter when
+/// empty, corners ordered, the unit square when under a point wide.
+fn normalized(r: Rect) -> Rect {
+    let mut r = if r.is_empty() {
+        Rect::new(0.0, 0.0, 612.0, 792.0)
+    } else {
+        r
+    };
+    r.x0 = r.x0.min(r.x1);
+    r.y0 = r.y0.min(r.y1);
+    r.x1 = r.x0.max(r.x1);
+    r.y1 = r.y0.max(r.y1);
+    if r.x1 - r.x0 < 1.0 || r.y1 - r.y0 < 1.0 {
+        Rect::UNIT
+    } else {
+        r
+    }
+}
 
 /// Ancestor chains longer than this count as cycles (MAX_CYCLE_STACK_DEPTH).
 const MAX_TREE_DEPTH: usize = 256;
@@ -68,6 +88,63 @@ impl Document {
             return self.find_path(&pages, target, &mut seen, &mut Vec::new());
         }
         self.lookup_page_slow(index).ok().map(|(_, path)| path)
+    }
+
+    /// `pdf_to_rect`: four numbers as a rectangle, corners ordered; empty
+    /// for anything but an array.
+    pub fn to_rect(&self, value: Option<&Object>) -> Rect {
+        let Some(Object::Array(a)) = value.map(|v| self.resolve(v)) else {
+            return Rect::EMPTY;
+        };
+        let n = |i: usize| a.get(i).map_or(0.0, |v| self.resolve(v).to_real());
+        let (a, b, c, d) = (n(0), n(1), n(2), n(3));
+        Rect::new(a.min(c), b.min(d), a.max(c), b.max(d))
+    }
+
+    /// `pdf_page_obj_transform`: the page's crop box, and the matrix from
+    /// PDF user space to MuPDF's page space (origin at the top left of the
+    /// crop box, y down, rotation applied).
+    pub fn page_transform(&self, page: &Object) -> Result<(Rect, Matrix), PageError> {
+        let userunit = self
+            .lookup(page, b"UserUnit")
+            .map(|v| self.resolve(&v))
+            .filter(Object::is_number)
+            .map_or(1.0, |v| v.to_real());
+        let mediabox = self.to_rect(self.inherited(page, b"MediaBox")?.as_ref());
+        let cropbox_value = self.inherited(page, b"CropBox")?;
+        let usedbox = match &cropbox_value {
+            Some(c) => mediabox.intersect(self.to_rect(Some(c))),
+            None => mediabox,
+        };
+        let usedbox = normalized(usedbox);
+
+        // Snap the rotation to 0, 90, 180 or 270.
+        let mut rotate = self
+            .inherited(page, b"Rotate")?
+            .map_or(0, |r| self.resolve(&r).to_int());
+        if rotate < 0 {
+            rotate = 360 - (rotate.wrapping_neg() % 360);
+        }
+        if rotate >= 360 {
+            rotate %= 360;
+        }
+        rotate = 90 * ((rotate + 45) / 90);
+        if rotate >= 360 {
+            rotate = 0;
+        }
+
+        let ctm = Matrix::scale(userunit, -userunit).pre_rotate(-(rotate as f32));
+        // The crop box sets the origin, the media box when it is not an
+        // array.
+        let origin = match &cropbox_value {
+            Some(c) if matches!(self.resolve(c), Object::Array(_)) => self.to_rect(Some(c)),
+            _ => mediabox,
+        };
+        let origin = normalized(origin.intersect(mediabox)).transform(ctm);
+        Ok((
+            usedbox,
+            ctm.concat(Matrix::translate(-origin.x0, -origin.y0)),
+        ))
     }
 
     /// `pdf_lookup_page_loc`: the path the slow descent takes to page
