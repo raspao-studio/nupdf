@@ -21,3 +21,8 @@ Changes from the original files: the C code was rewritten in Rust and reorganize
 The deflate encoder in [crates/nupdf/src/deflate.rs](crates/nupdf/src/deflate.rs) is a translation into Rust of part of zlib 1.3.2 (the copy bundled with MuPDF 1.28.6), so that streams `clean` compresses are the same bytes MuPDF writes. zlib is Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler; its license notice is kept, unaltered, at the top of that file.
 
 Changes from the original files: the C code was rewritten in Rust and reduced to what `compress2` reaches when MuPDF deflates a stream: one call with all of the input, `Z_FINISH`, an output buffer of `compressBound` bytes, a 32K window, memory level 8 and the default strategy. Streaming input, other flush modes, preset dictionaries, the gzip wrapper, `deflateParams`, the Huffman-only, RLE, filtered and fixed strategies, and the debugging code were left out. The symbol buffer is kept apart from the pending output instead of sharing its memory. This is not the original zlib and should not be taken for it.
+
+## Arlington PDF Model
+
+The files in [xtask/data/arlington](xtask/data/arlington) are definitions from the PDF Association's Arlington PDF Model (<https://github.com/pdf-association/arlington-pdf-model>), unmodified, used by the test harness only. They are licensed under the Apache License 2.0, whose text is in [xtask/data/arlington/LICENSE](xtask/data/arlington/LICENSE); the commit they come from is in that directory's README.
+
