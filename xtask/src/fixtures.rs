@@ -108,7 +108,154 @@ pub fn all() -> Vec<Fixture> {
     .chain(filter_fixtures())
     .chain(image_fixtures())
     .chain(writer_fixtures())
+    .chain(garbage_fixtures())
     .collect()
+}
+
+/// Cases for `clean -g` to `-gggg`.
+fn garbage_fixtures() -> Vec<Fixture> {
+    let fx = |name, about, bytes| Fixture {
+        name,
+        about,
+        needs_repair: false,
+        bytes,
+    };
+    let page = |contents: &str, resources: &str| {
+        format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources {resources}/Contents {contents}>>"
+        )
+    };
+
+    // The page reaches a missing object, a free one, a null one, and one
+    // whose value is a reference to a free object; the catalog reaches that
+    // last one too, but after the page. The content stream's /Length is
+    // indirect, and objects 6 to 8 are reached from nothing.
+    let mut pdf = Pdf::new("1.4");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R/Later 11 0 R>>");
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+    pdf.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>\
+         /Contents 4 0 R/Missing 99 0 R/Free 9 0 R/Null 10 0 R/Chain 11 0 R>>",
+    );
+    let content = text_content("Reachable");
+    pdf.stream_as_is(4, "<</Length 13 0 R>>", &content);
+    pdf.obj(5, FONT);
+    pdf.obj(6, "<</Unused 7 0 R>>");
+    pdf.stream(7, "", b"unreachable");
+    pdf.obj(8, "<</Also 6 0 R>>");
+    pdf.obj(10, "null");
+    pdf.obj(11, "12 0 R");
+    pdf.obj(13, &content.len().to_string());
+    let reach = pdf.finish_with_xref("");
+
+    // Two pages alike but for their resources and contents. The contents
+    // have the same data (merged by -gggg only); the resources differ only
+    // in their font, and the fonts are alike, so the resources merge once
+    // the fonts have. Two dictionaries equal in another order are not
+    // merged, and neither are the pages.
+    let mut pdf = Pdf::new("1.4");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R/Orders[11 0 R 12 0 R]>>");
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>");
+    pdf.obj(3, &page("5 0 R", "7 0 R"));
+    pdf.obj(4, &page("6 0 R", "8 0 R"));
+    let content = text_content("Same");
+    pdf.stream(5, "", &content);
+    pdf.stream(6, "", &content);
+    pdf.obj(7, "<</Font<</F1 9 0 R>>>>");
+    pdf.obj(8, "<</Font<</F1 10 0 R>>>>");
+    pdf.obj(9, FONT);
+    pdf.obj(10, FONT);
+    pdf.obj(11, "<</A 1/B 2>>");
+    pdf.obj(12, "<</B 2/A 1>>");
+    let duplicates = pdf.finish_with_xref("");
+
+    // Renumbering puts a changed reference back by key. Object 7 has 101
+    // entries, so the put sorts it. Object 9 is the same with its reference
+    // first: the sort moves it last, where it is renumbered a second time.
+    // Object 8 is sorted, and its last key is a name MuPDF interns, so the
+    // put appends a second /ca. Object 6 is unreachable, so everything
+    // after it moves down.
+    let mut pdf = hello(Pdf::new("1.4"), "Renumber", false);
+    pdf.obj(
+        1,
+        "<</Type/Catalog/Pages 2 0 R/Unsorted 7 0 R/Sorted 8 0 R/First 9 0 R>>",
+    );
+    pdf.obj(6, "<</Unused true>>");
+    let ints = |range: &mut dyn Iterator<Item = u32>| {
+        range.map(|i| format!("/K{i:03} {i}")).collect::<String>()
+    };
+    pdf.obj(7, &format!("<<{}/A 10 0 R>>", ints(&mut (0..100).rev())));
+    pdf.obj(8, &format!("<<{}/ca 11 0 R>>", ints(&mut (0..101))));
+    pdf.obj(9, &format!("<</Z 12 0 R{}>>", ints(&mut (0..100))));
+    pdf.obj(10, "(A target)");
+    pdf.obj(11, "(ca target)");
+    pdf.obj(12, "(Z target)");
+    let renumber = pdf.finish_with_xref("");
+
+    vec![
+        fx(
+            "gc-reach.pdf",
+            "Garbage: unreachable objects, an indirect /Length, references to missing, free and null objects, and to a reference to nothing",
+            reach,
+        ),
+        fx(
+            "gc-duplicates.pdf",
+            "Garbage: duplicate fonts, streams and pages, objects alike once others merge, and dictionaries alike in another order",
+            duplicates,
+        ),
+        fx(
+            "gc-renumber.pdf",
+            "Garbage: references renumbered in a 101-entry dictionary and in a sorted one whose last key is interned",
+            renumber,
+        ),
+        fx(
+            "gc-encrypted.pdf",
+            "Garbage: an RC4 document whose strings and streams are encrypted again under new numbers",
+            encrypted_with_garbage(),
+        ),
+    ]
+}
+
+/// `encrypted`'s document, RC4 128-bit, with an unreachable string at
+/// object 2, so renumbering moves every encrypted object.
+fn encrypted_with_garbage() -> Vec<u8> {
+    use crate::encrypt::{Handler, Method, Spec};
+    let handler = Handler::new(
+        Spec {
+            v: 2,
+            r: 3,
+            bits: 128,
+            method: Method::Rc4,
+            crypt_filter: false,
+            user: "",
+            owner: "owner",
+            encrypt_metadata: true,
+            permissions: -4,
+        },
+        "gc",
+    );
+    let string = |num: u32, text: &str| {
+        format!(
+            "<{}>",
+            crate::encrypt::hex(&handler.encrypt(num, text.as_bytes()))
+        )
+    };
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(1, "<</Type/Catalog/Pages 3 0 R>>");
+    pdf.obj(2, &string(2, "unreachable"));
+    pdf.obj(3, "<</Type/Pages/Kids[4 0 R]/Count 1>>");
+    pdf.obj(
+        4,
+        "<</Type/Page/Parent 3 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 6 0 R>>>>/Contents 5 0 R>>",
+    );
+    let content = miniz_oxide::deflate::compress_to_vec_zlib(&text_content("Encrypted"), 6);
+    pdf.stream(5, "/Filter/FlateDecode", &handler.encrypt(5, &content));
+    pdf.obj(6, FONT);
+    pdf.obj(7, &format!("<</Title {}>>", string(7, "Renumbered")));
+    pdf.obj(8, &handler.dict());
+    let id = crate::encrypt::hex(&handler.id);
+    pdf.finish_with_xref(&format!("/Info 7 0 R/Encrypt 8 0 R/ID[<{id}><{id}>]"))
 }
 
 /// Sample data for the filter fixtures: text with runs, repeats and enough
