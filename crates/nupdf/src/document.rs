@@ -1433,7 +1433,9 @@ mod tests {
 
     #[test]
     fn passwords_grant_access_like_mupdf() {
-        let d = doc(include_bytes!("../../../corpus/smoke/encrypted-user-password.pdf"));
+        let d = doc(include_bytes!(
+            "../../../corpus/smoke/encrypted-user-password.pdf"
+        ));
         assert!(d.needs_password());
         assert_eq!(d.encryption(), "Standard V5 R6 256-bit AES");
         assert_eq!(d.authenticate("wrong"), Ok(0));
