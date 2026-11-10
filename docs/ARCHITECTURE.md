@@ -61,6 +61,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `fax_encode` (CCITT G4 encoder, for 1-bit images `clean -z` writes) | `fitz/encode-fax.c`, `fitz/buffer.c` (`fz_append_bits`) | M3 |
 | `graft` (copying objects and pages between documents) | `pdf/pdf-graft.c` | M3 |
 | `insert` (putting a page into the page tree, page labels shifted) | `pdf/pdf-page.c` (`pdf_insert_page`, `pdf_adjust_page_labels`), `pdf/pdf-repair.c` (`pdf_walk_parent`) | M3 |
+| `geometry` (points, rectangles, matrices in single precision) | `fitz/geometry.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |
 | `resources`, `xobject`, `pattern`, `shade`, `function`, `colorspace`, `image` | `pdf/pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c`, `pdf-shade.c`, `pdf-function.c`, `pdf-colorspace.c`, `pdf-image.c` | M4 |
