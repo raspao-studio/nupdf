@@ -41,7 +41,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `slots` (sparse xref storage) | new; MuPDF allocates every declared slot | M1 |
 | `crypt` (standard security handler) | `pdf/pdf-crypt.c`, `fitz/crypt-arc4.c`, `fitz/filter-basic.c` (RC4 and AES filters) | M1 |
 | `repair` (scanner) | `pdf/pdf-repair.c` | M1 |
-| `document` (state, loading, object streams, repair rebuild, version, page count) | `pdf/pdf-xref.c`, `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1 |
+| `document` (state, loading, object streams, repair rebuild, version, page count; the edit overlay) | `pdf/pdf-xref.c` (also `pdf_update_object`, `pdf_xref_ensure_incremental_object`), `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1, M3 |
 | `diag` | MuPDF's `fz_warn` calls, as data | M1 |
 | `text_string` | `pdf/pdf-parse.c` (`pdf_new_utf8_from_pdf_string`), `fitz/string.c` (`fz_runetochar`), `fitz/encodings.h` (PDFDocEncoding) | M1 |
 | `stream` (MuPDF's stream model, the endstream filter) | `include/mupdf/fitz/stream.h`, `fitz/stream-read.c`, `fitz/stream-open.c`, `fitz/filter-basic.c` | M2 |

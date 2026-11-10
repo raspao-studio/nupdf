@@ -1008,8 +1008,9 @@ fn rows_padded(mut data: Vec<u8>, written: &Dict) -> Vec<u8> {
 }
 
 /// `pdf_check_document`: loads every object, so repairs happen before
-/// anything is written, reporting what fails.
-fn check_document(doc: &Document) {
+/// anything is written, reporting what fails. Edits come after it, as a
+/// repair would lose them.
+pub fn check_document(doc: &Document) {
     let mut num = 1;
     while num < doc.xref_len() as i32 {
         if matches!(doc.xref_entry(num).kind, Kind::InFile | Kind::InStream)

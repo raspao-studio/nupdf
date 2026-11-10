@@ -240,6 +240,30 @@ pub struct Document {
     crypt: RwLock<Option<Arc<Crypt>>>,
     /// Whether the empty password failed (`pdf_needs_password`).
     needs_password: AtomicBool,
+    /// Objects changed or added since opening (MuPDF changes its in-memory
+    /// objects in place); see `edit`.
+    edits: RwLock<Edits>,
+    /// Whether `edits` holds anything, checked before every load.
+    edited: AtomicBool,
+}
+
+/// The copy-on-write layer over the parsed document.
+#[derive(Debug, Default)]
+pub(crate) struct Edits {
+    /// Replaced and new objects by number.
+    pub(crate) objects: HashMap<i32, Object>,
+    /// The trailer, once changed.
+    pub(crate) trailer: Option<Dict>,
+    /// The xref length with new objects (`pdf_xref_len`).
+    pub(crate) len: usize,
+    /// The data of streams the edits made, by object number.
+    pub(crate) data: HashMap<i32, Vec<u8>>,
+    /// The generation of each edited object's entry in MuPDF's incremental
+    /// section: kept when an object is changed in place, 0 when it is
+    /// replaced or added.
+    pub(crate) gens: HashMap<i32, i32>,
+    /// The page map, built again after each edit as MuPDF drops it.
+    pub(crate) page_map: Option<Option<crate::page::PageMap>>,
 }
 
 /// Marks a repair error that came from the security handler.
@@ -318,6 +342,8 @@ impl Document {
             repair_lock: Mutex::new(()),
             crypt: RwLock::new(None),
             needs_password: AtomicBool::new(false),
+            edits: RwLock::new(Edits::default()),
+            edited: AtomicBool::new(false),
         };
 
         let loaded = if broken.is_none() && !is_fdf {
@@ -394,6 +420,9 @@ impl Document {
     /// chain does that, and read whole, so a damaged stream ends where
     /// MuPDF's read ends.
     pub fn raw_stream_data(&self, stream: &Stream) -> Result<Cow<'_, [u8]>, String> {
+        if let Some(data) = self.edited_data(stream) {
+            return Ok(Cow::Owned(data));
+        }
         let st = self.current();
         let length = self.stream_length(&st, stream, true);
         let mut raw = self.raw_stream_in(&st, stream, length)?;
@@ -583,12 +612,179 @@ impl Document {
     }
 
     pub fn trailer(&self) -> Dict {
+        if let Some(t) = self.with_edits(|e| e.trailer.clone()).flatten() {
+            return t;
+        }
         self.current().trailer.clone()
     }
 
     /// Number of slots in the xref (MuPDF's `pdf_xref_len`).
     pub fn xref_len(&self) -> usize {
-        self.current().xref_len()
+        let len = self.current().xref_len();
+        self.with_edits(|e| e.len.max(len)).unwrap_or(len)
+    }
+
+    /// `f` on the edits, when there are any.
+    pub(crate) fn with_edits<T>(&self, f: impl FnOnce(&Edits) -> T) -> Option<T> {
+        if !self.edited.load(Ordering::Acquire) {
+            return None;
+        }
+        self.edits.read().ok().map(|e| f(&e))
+    }
+
+    fn edit_mut<T>(&self, f: impl FnOnce(&mut Edits) -> T) -> Option<T> {
+        let first = !self.edited.load(Ordering::Acquire);
+        // MuPDF rewrote /Count in the object when the page tree had fewer
+        // pages; from now on objects say so themselves.
+        let count = if first {
+            self.current()
+                .page_count_override
+                .get()
+                .copied()
+                .and_then(|n| self.pages_with_count(n))
+        } else {
+            None
+        };
+        let mut e = self.edits.write().ok()?;
+        if e.len == 0 {
+            e.len = self.current().xref_len();
+        }
+        if let Some((num, pages, generation)) = count {
+            e.objects.insert(num, pages);
+            e.gens.entry(num).or_insert(generation);
+        }
+        // MuPDF drops its page map when an object changes.
+        e.page_map = None;
+        let out = f(&mut e);
+        self.edited.store(true, Ordering::Release);
+        Some(out)
+    }
+
+    /// `pdf_update_object`: object `num` is `obj` from now on, in a new
+    /// xref entry of generation 0 (unless an earlier change in place moved
+    /// the entry already).
+    pub fn update_object(&self, num: i32, obj: Object) {
+        self.edit_mut(|e| {
+            e.objects.insert(num, obj);
+            e.gens.entry(num).or_insert(0);
+            if let Ok(n) = usize::try_from(num) {
+                e.len = e.len.max(n + 1);
+            }
+        });
+    }
+
+    /// Object `num` changed in place, as `pdf_dict_put` and its kin change
+    /// it: its xref entry keeps its generation, but for an object from an
+    /// object stream, whose generation becomes 0.
+    pub fn alter_object(&self, num: i32, obj: Object) {
+        let entry = self.xref_entry(num);
+        let generation = match entry.kind {
+            Kind::InStream => 0,
+            _ => entry.generation,
+        };
+        self.edit_mut(|e| {
+            e.objects.insert(num, obj);
+            e.gens.entry(num).or_insert(generation);
+            if let Ok(n) = usize::try_from(num) {
+                e.len = e.len.max(n + 1);
+            }
+        });
+    }
+
+    /// `pdf_add_object`: `obj` as a new object after the others, returning
+    /// its number.
+    pub fn add_object(&self, obj: Object) -> i32 {
+        self.edit_mut(|e| {
+            let num = e.len as i32;
+            e.objects.insert(num, obj);
+            e.gens.insert(num, 0);
+            e.len += 1;
+            num
+        })
+        .unwrap_or(0)
+    }
+
+    /// A new stream object with `dict` and `data`, returning its number.
+    pub fn add_stream(&self, dict: Dict, data: Vec<u8>) -> i32 {
+        self.edit_mut(|e| {
+            let num = e.len as i32;
+            let stream = Stream {
+                dict,
+                data_start: 0,
+                num,
+            };
+            e.objects.insert(num, Object::Stream(Arc::new(stream)));
+            e.gens.insert(num, 0);
+            e.data.insert(num, data);
+            e.len += 1;
+            num
+        })
+        .unwrap_or(0)
+    }
+
+    /// Replaces the trailer.
+    pub fn set_trailer(&self, trailer: Dict) {
+        self.edit_mut(|e| e.trailer = Some(trailer));
+    }
+
+    /// The object holding /Root/Pages, what it is with /Count `n`, and its
+    /// generation.
+    fn pages_with_count(&self, n: i32) -> Option<(i32, Object, i32)> {
+        let root = self.trailer().get(b"Root").cloned()?;
+        let Some(Object::Ref(r)) = self.dict_get_raw(&root, b"Pages") else {
+            return None;
+        };
+        let Object::Dict(d) = self.resolve(&Object::Ref(r)) else {
+            return None;
+        };
+        let mut d = (*d).clone();
+        d.put(b"Count", Object::Int(i64::from(n)));
+        let entry = self.xref_entry(r.num);
+        let generation = if entry.kind == Kind::InStream {
+            0
+        } else {
+            entry.generation
+        };
+        Some((r.num, Object::Dict(Arc::new(d)), generation))
+    }
+
+    /// The value of `key` in the dictionary `obj` leads to, not resolved.
+    fn dict_get_raw(&self, obj: &Object, key: &[u8]) -> Option<Object> {
+        match self.resolve(obj) {
+            Object::Dict(d) => d.get(key).cloned(),
+            Object::Stream(s) => s.dict.get(key).cloned(),
+            _ => None,
+        }
+    }
+
+    /// MuPDF's /Count rewrite while editing: the object changes.
+    pub(crate) fn rewrite_page_count(&self, n: i32) {
+        if let Some((num, pages, _)) = self.pages_with_count(n) {
+            self.alter_object(num, pages);
+        }
+    }
+
+    /// Keeps the page map until the next edit.
+    pub(crate) fn cache_page_map(&self, map: Option<crate::page::PageMap>) {
+        if let Ok(mut e) = self.edits.write() {
+            e.page_map = Some(map);
+        }
+    }
+
+    /// Whether anything was changed since opening.
+    pub fn is_edited(&self) -> bool {
+        self.edited.load(Ordering::Acquire)
+    }
+
+    /// The replaced or new object `num`, if the edits have one.
+    fn edited_object(&self, num: i32) -> Option<Object> {
+        self.with_edits(|e| e.objects.get(&num).cloned()).flatten()
+    }
+
+    /// The data of a stream the edits made.
+    fn edited_data(&self, stream: &Stream) -> Option<Vec<u8>> {
+        self.with_edits(|e| e.data.get(&stream.num).cloned())
+            .flatten()
     }
 
     /// Whether the xref had to be rebuilt by scanning the file.
@@ -709,6 +905,14 @@ impl Document {
 
     /// Entry `num` of the current xref.
     pub(crate) fn xref_entry(&self, num: i32) -> xref::Entry {
+        // An edited object's entry is in MuPDF's incremental section.
+        if let Some(generation) = self.with_edits(|e| e.gens.get(&num).copied()).flatten() {
+            return xref::Entry {
+                kind: Kind::InFile,
+                generation,
+                ofs: 0,
+            };
+        }
         let st = self.current();
         if num >= 0 && (num as usize) < st.xref_len() {
             st.entries.get(num)
@@ -765,8 +969,9 @@ impl Document {
             return Ok(0);
         }
         let count = match self.current().page_count_override.get() {
-            Some(&n) => n,
-            None => {
+            // Edits carry the rewritten /Count in the object.
+            Some(&n) if !self.is_edited() => n,
+            _ => {
                 let root = self.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
                 let pages = self.dict_get(&root, b"Pages");
                 self.dict_get(&pages, b"Count").to_int()
@@ -824,6 +1029,11 @@ impl Document {
         stream: &Stream,
         may_repair: bool,
     ) -> Result<Vec<u8>, DecodeError> {
+        // A stream the edits made: its data in memory, through its filters.
+        if let Some(data) = self.edited_data(stream) {
+            let resolve = |o: &Object| self.resolve_in(st, o);
+            return filter::decode(&stream.dict, &data, &resolve, &self.diag, &self.limits);
+        }
         let length = self.stream_length(st, stream, may_repair);
         let mut s = self.open_decoded(st, stream, length)?;
         let resolve = |o: &Object| self.resolve_in(st, o);
@@ -842,6 +1052,11 @@ impl Document {
 
     /// `pdf_cache_object` against one state.
     fn load_in(&self, st: &State, num: i32, allow_repair: bool) -> Loaded {
+        if num > 0
+            && let Some(obj) = self.edited_object(num)
+        {
+            return Loaded::Obj(obj);
+        }
         if num <= 0 || num as usize >= st.xref_len() {
             return Loaded::Missing;
         }
@@ -1632,5 +1847,58 @@ mod tests {
     fn document_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Document>();
+    }
+
+    #[test]
+    fn edits_are_seen_by_every_lookup() {
+        let doc =
+            Document::open(&include_bytes!("../../../corpus/smoke/multipage-inherit.pdf")[..])
+                .unwrap_or_else(|e| panic!("{e:?}"));
+        let len = doc.xref_len();
+        assert!(!doc.is_edited());
+        // A new object goes after the others, with generation 0.
+        let num = doc.add_object(Object::Int(7));
+        assert_eq!(num as usize, len);
+        assert_eq!(doc.xref_len(), len + 1);
+        assert_eq!(doc.object(num), Some(Object::Int(7)));
+        assert_eq!(doc.xref_entry(num).generation, 0);
+        // A replaced object is resolved through references too.
+        doc.update_object(1, Object::Int(42));
+        assert_eq!(
+            doc.resolve(&Object::Ref(ObjRef::new(1, 0))),
+            Object::Int(42)
+        );
+        // The trailer can change.
+        let mut t = doc.trailer();
+        t.put(b"Extra", Object::Bool(true));
+        doc.set_trailer(t);
+        assert_eq!(doc.trailer().get(b"Extra"), Some(&Object::Bool(true)));
+        // A new stream's data is in memory.
+        let s = doc.add_stream(Dict::new(), b"data".to_vec());
+        let Some(Object::Stream(stream)) = doc.object(s) else {
+            panic!("not a stream");
+        };
+        assert_eq!(
+            doc.raw_stream_data(&stream).ok().as_deref(),
+            Some(&b"data"[..])
+        );
+        assert_eq!(doc.stream_data(&stream).ok(), Some(b"data".to_vec()));
+        assert!(doc.is_edited());
+    }
+
+    #[test]
+    fn replacing_resets_the_generation_and_changing_in_place_keeps_it() {
+        let data = b"%PDF-1.4\n1 3 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n\
+2 5 obj\n<</Type/Pages/Kids[]/Count 0>>\nendobj\n\
+xref\n0 3\n0000000000 65535 f \n0000000009 00003 n \n0000000056 00005 n \n\
+trailer\n<</Size 3/Root 1 3 R>>\nstartxref\n104\n%%EOF\n";
+        let doc = Document::open(&data[..]).unwrap_or_else(|e| panic!("{e:?}"));
+        doc.update_object(1, Object::Null);
+        doc.alter_object(2, Object::Null);
+        assert_eq!(doc.xref_entry(1).generation, 0);
+        assert_eq!(doc.xref_entry(2).generation, 5);
+        // Once moved, an entry keeps what it got.
+        doc.update_object(2, Object::Int(1));
+        assert_eq!(doc.xref_entry(2).generation, 5);
     }
 }

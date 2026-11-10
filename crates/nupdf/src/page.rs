@@ -158,6 +158,15 @@ impl Document {
     /// it failed and lookups use the slow path.
     fn page_map(&self) -> Option<PageMap> {
         let state = self.current();
+        if self.is_edited() {
+            // Built again after each edit, as MuPDF drops its map.
+            if let Some(map) = self.with_edits(|e| e.page_map.clone()).flatten() {
+                return map;
+            }
+            let map = self.build_page_map(&state);
+            self.cache_page_map(map.clone());
+            return map;
+        }
         state
             .page_map
             .get_or_init(|| self.build_page_map(&state))
@@ -191,7 +200,11 @@ impl Document {
                     out.len()
                 ),
             );
-            let _ = state.page_count_override.set(out.len() as i32);
+            if self.is_edited() {
+                self.rewrite_page_count(out.len() as i32);
+            } else {
+                let _ = state.page_count_override.set(out.len() as i32);
+            }
         }
         Some(Arc::new(out))
     }
