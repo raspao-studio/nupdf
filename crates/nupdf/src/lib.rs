@@ -12,6 +12,7 @@ pub mod deflate;
 pub mod diag;
 mod doc_id;
 pub mod document;
+pub mod edit;
 pub mod fax;
 pub mod fax_encode;
 pub mod filter;
