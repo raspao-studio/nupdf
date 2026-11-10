@@ -168,6 +168,7 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 - [ ] Commands: `merge`, `split`, `pages` (select, reorder, delete, rotate), `meta` (get, set, strip), `encrypt`, `decrypt`, and `clean`'s options
 - [x] `clean` check: BLAKE3 of the output against MuPDF's in reproducible mode, the comment line naming the writer swapped first
 - [x] `roundtrip` check: each side's `clean` output read back by MuPDF (`objects.js` with a scratch directory), comparing the object graph, raw stream data, repairs and warnings
+- [x] `clean-g` through `clean-gggg` checks, `clean` at each garbage collection level, and `roundtrip-gggg`
 - [ ] Output validation: `qpdf --check` and selected Arlington PDF Model rules
 - [x] Fixtures: a 120-key dictionary, every string, real and name form the printer distinguishes, a signature, null values and trailer entries, free generations past 16 bits, a null object stream member, and an empty key name MuPDF writes lossily; for garbage collection, unreachable objects and references to nothing, duplicates that merge only once others have, the renumbering quirks, and an RC4 document renumbered (86 smoke fixtures)
 - [x] Fuzz: `open_walk` also writes the document, at a garbage collection level the input picks, checks that writing is deterministic, and reads the output back. 15 minutes at the default level (22K runs), then 15 across all levels (7K runs), nothing found
@@ -178,8 +179,10 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 |---|---|---|
 | `clean` (output bytes) | 99.4% (5,052 / 5,085) | AES files only (D18): random initialization vectors in MuPDF's output. Besides those, MuPDF fails to save `issue20453.pdf` after its repair; nupdf writes it |
 | `roundtrip` (MuPDF reads each output back) | 99.7% (5,070 / 5,084) | Random IVs again, where MuPDF's own output does not read back exactly: AES documents opened without their password, and streams under an Identity crypt filter. One more file times out on both sides |
+| `clean-g` to `clean-gggg` (output bytes at each level) | 99.4% (5,090 / 5,123) each | The same 33 AES files as `clean`. Collecting lets both tools write 37 files they cannot write without it, whose unloadable objects nothing reaches, and `issue20453.pdf` |
+| `roundtrip-gggg` | 99.9% (5,082 / 5,089) | Random IVs, on files where `roundtrip` also differs. For 33 more files MuPDF cannot open either output: their trailer has no /Root, so nothing is reachable and the xref is empty |
 
-`clean` reads its output back by default and refuses 27 standard files, all cases where MuPDF's output loses something (D18). On a 300-file sample, `nupdf clean` takes 614 ms in total against `mutool clean`'s 900 ms (geometric-mean speedup 1.50x), with that check included. It is slower on files of a megabyte or more, where hashing the input and the output for their `doc_id` costs more than MuPDF's whole save.
+`clean` reads its output back by default and refuses 27 standard files, all cases where MuPDF's output loses something (D18). With `-g` it refuses 20 of them, the other 7 having lost only objects nothing reaches; with `-gggg` it also refuses the 33 empty outputs (D19). On a 300-file sample, `nupdf clean` takes 614 ms in total against `mutool clean`'s 900 ms (geometric-mean speedup 1.50x), with that check included. It is slower on files of a megabyte or more, where hashing the input and the output for their `doc_id` costs more than MuPDF's whole save.
 
 Exit: ≥99.5% round-trip parity on the standard tier: MuPDF reads our output with the same object graph (modulo renumbering) and the same text. `merge`, `split` and `clean` are at least as fast as mutool.
 
