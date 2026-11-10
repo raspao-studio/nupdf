@@ -41,6 +41,22 @@ impl std::fmt::Display for RearrangeError {
 /// Invalid parts are skipped with MuPDF's warning.
 pub fn parse_page_ranges(spec: &str, count: i32, doc: &Document) -> Vec<i32> {
     let mut pages = Vec::new();
+    for (a, b) in parse_page_range_pairs(spec, count, Some(doc)) {
+        if a <= b {
+            pages.extend(a..=b);
+        } else {
+            pages.extend((b..=a).rev());
+        }
+    }
+    pages.iter_mut().for_each(|p| *p -= 1);
+    pages
+}
+
+/// Each range `fz_parse_page_range` reads, as its first and last page
+/// (1-based, clamped to the document). With `doc`, an invalid part gets
+/// MuPDF's warning.
+pub fn parse_page_range_pairs(spec: &str, count: i32, doc: Option<&Document>) -> Vec<(i32, i32)> {
+    let mut pairs = Vec::new();
     let mut s = spec.as_bytes();
     loop {
         if s.is_empty() {
@@ -115,17 +131,15 @@ pub fn parse_page_ranges(spec: &str, count: i32, doc: &Document) -> Vec<i32> {
         };
         let (a, b) = (clamp(a), clamp(b));
         if s.len() == orig {
-            doc.diagnostics()
-                .warn("pages.invalid_range", "skipping invalid page range");
+            if let Some(doc) = doc {
+                doc.diagnostics()
+                    .warn("pages.invalid_range", "skipping invalid page range");
+            }
             break;
         }
-        if a <= b {
-            pages.extend((a..=b).map(|p| (p - 1) as i32));
-        } else {
-            pages.extend((b..=a).rev().map(|p| (p - 1) as i32));
-        }
+        pairs.push((a as i32, b as i32));
     }
-    pages
+    pairs
 }
 
 /// `pdf_rearrange_pages(doc, pages, PDF_CLEAN_STRUCTURE_DROP)`.
