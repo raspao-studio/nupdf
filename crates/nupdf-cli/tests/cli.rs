@@ -1002,3 +1002,36 @@ fn merge_skips_an_input_that_fails_and_keeps_what_it_gave() {
     let out = nupdf(&["merge", graft.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn merge_copies_external_links_and_the_outline() {
+    let input = smoke("merge-links.pdf");
+    let output = scratch("merge-links.pdf");
+    let report = run_json(&[
+        "merge",
+        "-o",
+        output.to_str().unwrap(),
+        input.to_str().unwrap(),
+    ]);
+    assert_eq!(report["verification"]["verified"], true);
+    let written = String::from_utf8_lossy(&std::fs::read(&output).unwrap()).into_owned();
+    // Six external links on page 1 and one on page 2; the link to page 2
+    // stays behind, as in MuPDF.
+    assert_eq!(written.matches("/Subtype/Link").count(), 7);
+    assert!(written.contains("/URI(https://example.com/docs/rel/page.html)"));
+    assert!(written.contains("/S/GoToR/D[2/FitH 500]"));
+    assert!(!written.contains("/Dest[4 0 R/Fit]"));
+    // Every outline item leads to a merged page or has a child that does.
+    for title in [
+        "One",
+        "One, child",
+        "Two",
+        "Three",
+        "Three, last",
+        "Four",
+        "Five",
+    ] {
+        assert!(written.contains(&format!("/Title({title})")), "{title}");
+    }
+    assert!(written.contains("/Type/Outlines/Count -7"));
+}

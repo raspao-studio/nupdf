@@ -101,8 +101,8 @@ enum Command {
         #[arg(long)]
         no_verify: bool,
     },
-    /// Merge the pages of several documents into a new one, as `mutool
-    /// merge` does (links and outlines are not copied yet).
+    /// Merge the pages of several documents into a new one, with their
+    /// external links and outline items, as `mutool merge` does.
     Merge {
         /// Input files, each followed by its pages if not all of them
         /// (`1-3,5`, `N`, `N-1`), as `mutool merge` takes them.

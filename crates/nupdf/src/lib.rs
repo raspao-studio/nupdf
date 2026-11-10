@@ -26,6 +26,7 @@ pub mod jpeg;
 pub mod lex;
 pub mod limits;
 pub mod link;
+pub mod merge;
 mod names;
 pub mod object;
 pub mod outline;

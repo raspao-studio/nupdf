@@ -304,6 +304,7 @@ pub fn merge(
         code: "internal.create",
         message: e.message,
     })?;
+    let mut merger = nupdf::merge::Merger::new(&dst);
     let mut first: Option<FileFacts> = None;
     let mut first_failure: Option<Failure> = None;
     let mut reports = Vec::new();
@@ -311,7 +312,7 @@ pub fn merge(
         let mut merged = Vec::new();
         let mut diagnostics = serde_json::Value::Array(Vec::new());
         let outcome = merge_one(
-            &dst,
+            &mut merger,
             path,
             range,
             open,
@@ -369,7 +370,7 @@ pub fn merge(
 /// in `merged` (0-based), whether or not it failed partway, and what was
 /// noticed reading it in `diagnostics`.
 fn merge_one(
-    dst: &Document,
+    merger: &mut nupdf::merge::Merger,
     path: &Path,
     range: &str,
     open: &dyn Fn(&Path) -> Opened,
@@ -378,7 +379,7 @@ fn merge_one(
     diagnostics: &mut serde_json::Value,
 ) -> Result<FileFacts, (Option<FileFacts>, Failure)> {
     let (src, facts) = open(path).map_err(|f| (None, f))?;
-    let result = graft_input(dst, &src, range, password, merged);
+    let result = graft_input(merger, &src, range, password, merged);
     *diagnostics = super::diagnostics(&src);
     match result {
         Ok(()) => Ok(facts),
@@ -387,7 +388,7 @@ fn merge_one(
 }
 
 fn graft_input(
-    dst: &Document,
+    merger: &mut nupdf::merge::Merger,
     src: &Document,
     range: &str,
     password: Option<&str>,
@@ -400,13 +401,13 @@ fn graft_input(
             message: "the empty password does not open the document: pass --password".into(),
         });
     }
-    let tree = |e: String| input_failure("input.page_tree", e);
-    let count = src.page_count().map_err(|e| tree(e.0))?;
-    let mut map = nupdf::graft::GraftMap::new(dst);
-    for page in nupdf::rearrange::parse_page_ranges(range, count, src) {
-        map.graft_page(src, page, -1)
-            .map_err(|e| tree(nupdf::diag::report::strip(&e).to_string()))?;
-        merged.push(page);
+    let outcome = merger.merge_range(src, range);
+    *merged = outcome.pages;
+    match outcome.error {
+        None => Ok(()),
+        Some(e) => Err(input_failure(
+            "input.page_tree",
+            nupdf::diag::report::strip(&e).to_string(),
+        )),
     }
-    Ok(())
 }
