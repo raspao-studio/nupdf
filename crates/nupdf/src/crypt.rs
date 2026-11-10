@@ -640,6 +640,64 @@ impl Crypt {
         digest[..(key_len + 5).min(16)].to_vec()
     }
 
+    /// `pdf_encrypt_data`: `data` encrypted for object (num, generation)
+    /// with the string filter's method, which MuPDF uses for strings and
+    /// streams alike when it writes. AES needs an IV, which MuPDF draws at
+    /// random; nupdf derives it from the key, the object and the data, so
+    /// the same document always writes the same bytes.
+    pub fn encrypt_data(&self, num: i32, generation: i32, data: &[u8]) -> Vec<u8> {
+        let key = self.object_key(&self.strf, num, generation);
+        match self.strf.method {
+            Method::Rc4 => {
+                let mut out = data.to_vec();
+                Arc4::new(&key).apply(&mut out);
+                out
+            }
+            Method::AesV2 | Method::AesV3 => {
+                if data.is_empty() {
+                    return Vec::new();
+                }
+                let Some(aes) = Aes::new(&key, key.len() as i32 * 8) else {
+                    return data.to_vec();
+                };
+                let mut h = Sha256::new();
+                h.update(&key);
+                h.update(num.to_le_bytes());
+                h.update(generation.to_le_bytes());
+                h.update(data);
+                let digest = h.finalize();
+                let mut iv = [0u8; 16];
+                iv.copy_from_slice(&digest[..16]);
+                // PKCS#7: a full block of padding when the data fills its
+                // last block, as MuPDF writes.
+                let pad = 16 - data.len() % 16;
+                let mut body = data.to_vec();
+                body.extend(std::iter::repeat_n(pad as u8, pad));
+                let mut out = iv.to_vec();
+                aes.cbc_encrypt(&mut iv, &mut body);
+                out.extend(body);
+                out
+            }
+            _ => data.to_vec(),
+        }
+    }
+
+    /// `pdf_encrypted_len`: the length `encrypt_data` gives `len` bytes,
+    /// as MuPDF writes it into /Length (an empty stream still counts its IV
+    /// and padding, though no bytes are written).
+    pub fn encrypted_len(&self, len: usize) -> usize {
+        match self.strf.method {
+            Method::AesV2 | Method::AesV3 => {
+                let mut len = len + 16;
+                if len & 15 == 0 {
+                    len += 16;
+                }
+                (len + 15) & !15
+            }
+            _ => len,
+        }
+    }
+
     /// `pdf_crypt_obj`: decrypts every string in `obj` (not following
     /// references, and skipping signature /Contents). On an AES key error
     /// the strings decrypted so far stay decrypted, as in MuPDF, and the

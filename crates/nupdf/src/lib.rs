@@ -22,11 +22,13 @@ mod names;
 pub mod object;
 pub mod page;
 pub mod parse;
+pub mod print;
 pub mod repair;
 pub mod slots;
 pub mod stream;
 pub mod strtof;
 pub mod text_string;
+pub mod write;
 pub mod xref;
 
 pub use diag::{Diagnostic, Diagnostics};

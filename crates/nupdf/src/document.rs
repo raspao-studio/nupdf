@@ -662,6 +662,45 @@ impl Document {
         }
     }
 
+    /// `pdf_load_object` for the writer: `Err` where MuPDF throws (the
+    /// cause), `Ok(None)` where it loads nothing without an error.
+    pub(crate) fn load_object(&self, num: i32) -> Result<Option<Object>, String> {
+        loop {
+            let state = self.current();
+            match self.load_in(&state, num, true) {
+                Loaded::Obj(o) => return Ok(Some(demote_if_failed(&state, num, o))),
+                Loaded::Missing => return Ok(None),
+                Loaded::Failed(cause) => return Err(cause),
+                Loaded::NeedsRepair(cause) => {
+                    self.report(&cause);
+                    if !self.repair_on_demand(&state) {
+                        return Err(report::format(&format!("cannot load object ({num} 0 R)")));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Entry `num` of the current xref.
+    pub(crate) fn xref_entry(&self, num: i32) -> xref::Entry {
+        let st = self.current();
+        if num >= 0 && (num as usize) < st.xref_len() {
+            st.entries.get(num)
+        } else {
+            xref::Entry::NONE
+        }
+    }
+
+    /// `doc->repair_attempted`.
+    pub(crate) fn repair_attempted(&self) -> bool {
+        self.attempted()
+    }
+
+    /// The limits it was opened with.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// Resolves references (one level, as MuPDF's RESOLVE does); other
     /// objects come back unchanged. Unloadable references become null.
     pub fn resolve(&self, obj: &Object) -> Object {
@@ -1101,6 +1140,19 @@ impl Document {
             }
         }
         entries.set(0, Entry::free(65535));
+        // MuPDF then chains the free entries, bumping each generation.
+        for i in 0..len as i32 {
+            let e = entries.get(i);
+            if e.kind == Kind::Free && e.generation < 65535 {
+                entries.set(
+                    i,
+                    Entry {
+                        generation: e.generation + 1,
+                        ..e
+                    },
+                );
+            }
+        }
 
         let mut trailer = Dict::new();
         trailer.put(b"Size", Object::Int(i64::from(scan.maxnum) + 1));
@@ -1425,6 +1477,21 @@ mod tests {
     }
 
     const SIMPLE: &[u8] = b"%PDF-1.4\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\ntrailer <</Root 1 0 R>>\n";
+
+    #[test]
+    fn repair_keeps_generations_as_mupdf_does() {
+        // No xref, so the file is repaired: object 2 is missing and object 3
+        // has a generation past 16 bits.
+        let d = doc(b"%PDF-1.4\n1 0 obj <</Type/Catalog>> endobj\n\
+3 65537 obj (x) endobj\ntrailer <</Root 1 0 R>>\n");
+        assert!(d.repair_attempted());
+        let e = |num| d.xref_entry(num);
+        assert_eq!((e(0).kind, e(0).generation), (Kind::Free, 65535));
+        // Free entries are chained, which bumps their generation.
+        assert_eq!((e(2).kind, e(2).generation), (Kind::Free, 1));
+        // The scanner clamps generations (an xref table wraps them).
+        assert_eq!((e(3).kind, e(3).generation), (Kind::InFile, 65535));
+    }
 
     #[test]
     fn missing_xref_is_repaired() {
