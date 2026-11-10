@@ -2,6 +2,7 @@
 // Copyright (C) 2026 hum
 #![no_main]
 use libfuzzer_sys::fuzz_target;
+use nupdf::write::{WriteOptions, save, verify};
 use nupdf::{Document, Object};
 
 fuzz_target!(|data: &[u8]| {
@@ -16,5 +17,13 @@ fuzz_target!(|data: &[u8]| {
             let _ = doc.raw_stream_data(&s).map(|raw| raw.len());
             let _ = doc.stream_data(&s);
         }
+    }
+    // Write it, as `clean` does, and read the output back.
+    if doc.xref_len() <= 4096
+        && let Ok(out) = save(&doc, &WriteOptions::default())
+    {
+        let _ = verify(&doc, &out, None);
+        let again = save(&doc, &WriteOptions::default()).ok();
+        assert_eq!(again.as_deref(), Some(out.as_slice()), "writing is deterministic");
     }
 });

@@ -169,6 +169,7 @@ MuPDF reference: `pdf-write.c`, `pdf-graft.c`, `pdf-clean-file.c`, `pdf-page.c` 
 - [x] `roundtrip` check: each side's `clean` output read back by MuPDF (`objects.js` with a scratch directory), comparing the object graph, raw stream data, repairs and warnings
 - [ ] Output validation: `qpdf --check` and selected Arlington PDF Model rules
 - [x] Fixtures: a 120-key dictionary, every string, real and name form the printer distinguishes, a signature, null values and trailer entries, free generations past 16 bits, a null object stream member, and an empty key name MuPDF writes lossily (82 smoke fixtures)
+- [x] Fuzz: `open_walk` also writes the document, checks that writing is deterministic, and reads the output back. 15 minutes (22K runs), nothing found
 
 **Status** (standard tier, 5,142 files, of which 56 neither tool writes):
 
