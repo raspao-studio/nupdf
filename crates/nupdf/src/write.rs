@@ -70,6 +70,9 @@ pub struct WriteOptions {
     pub objstms: bool,
     /// The security handler to write with.
     pub encrypt: Encrypt,
+    /// Only the changes, appended to the file as a new revision
+    /// (`do_incremental`).
+    pub incremental: bool,
 }
 
 impl WriteOptions {
@@ -130,6 +133,9 @@ struct State {
 
 /// `pdf_save_document` with `options`, returning the bytes.
 pub fn save(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteError> {
+    if options.incremental {
+        return save_incremental(doc, options);
+    }
     check_document(doc);
     let mut trailer = doc.trailer();
     let crypt = match &options.encrypt {
@@ -431,6 +437,204 @@ fn finish(
     } else {
         write_xref(&mut st, &trailer, crypt_obj.as_ref(), xref_len, startxref);
     }
+    Ok(st.out)
+}
+
+/// `pdf_save_document` with `do_incremental`: the file as it was, then the
+/// objects MuPDF's incremental section holds, and an xref for them, in the
+/// style of the last xref read, whose trailer points back with /Prev. The
+/// /ID is kept, as the rest of nupdf's writes keep it.
+fn save_incremental(doc: &Document, options: &WriteOptions) -> Result<Vec<u8>, WriteError> {
+    let refuse = |message: &str| {
+        Err(WriteError {
+            message: message.into(),
+        })
+    };
+    if doc.is_new() {
+        return refuse("Can't do incremental writes on a new document");
+    }
+    if doc.repair_attempted() {
+        return refuse("Can't do incremental writes on a repaired file");
+    }
+    if options.garbage > 0 {
+        return refuse("Can't do incremental writes with garbage collection");
+    }
+    if !matches!(options.encrypt, Encrypt::Keep) {
+        return refuse("Can't do incremental writes when changing encryption");
+    }
+    if options.objstms {
+        return refuse("incremental writes with object streams are not supported");
+    }
+    let data = doc.data();
+    let mut out = data[..doc.file_size().min(data.len())].to_vec();
+    let entries = doc.incremental_entries();
+    // pdf_has_unsaved_changes: nothing more to write.
+    if entries.is_empty() {
+        return Ok(out);
+    }
+    out.push(b'\n');
+    // writeobjects names the writer here too.
+    out.extend_from_slice(WRITER_COMMENT);
+
+    let trailer = doc.trailer();
+    let crypt = doc.crypt();
+    let crypt_object_number = match (&crypt, trailer.get(b"Encrypt")) {
+        (Some(_), Some(Object::Ref(r))) => r.num,
+        _ => 0,
+    };
+    let xref_len = doc.xref_len();
+    let n = xref_len + 2;
+    let mut st = State {
+        out,
+        tight: !options.pretty,
+        ascii: options.ascii,
+        use_list: vec![true; n],
+        ofs_list: vec![0; n],
+        gen_list: vec![0; n],
+        crypt_object_number,
+        crypt,
+    };
+    let mut objects = Objects {
+        doc,
+        slots: None,
+        changed: HashMap::new(),
+        buffers: HashMap::new(),
+    };
+    let incremental: Vec<bool> = {
+        let mut v = vec![false; n];
+        for &(num, _, _) in &entries {
+            if let Some(slot) = usize::try_from(num).ok().filter(|&i| i < n) {
+                v[slot] = true;
+            }
+        }
+        v
+    };
+    for &(num, filled, generation) in &entries {
+        let Some(i) = usize::try_from(num).ok().filter(|&i| i < xref_len) else {
+            continue;
+        };
+        st.gen_list[i] = generation;
+        if filled {
+            st.ofs_list[i] = st.out.len() as i64;
+            let unenc = num == st.crypt_object_number;
+            let obj = objects.get(i).map_err(|message| WriteError { message })?;
+            write_object(
+                &mut objects,
+                &mut st,
+                options,
+                i,
+                generation,
+                unenc,
+                obj,
+                true,
+            )?;
+        } else {
+            st.use_list[i] = false;
+        }
+    }
+    // Free entries in the increment cannot be reused.
+    for (i, &inc) in incremental.iter().enumerate().take(xref_len) {
+        if inc && !st.use_list[i] {
+            st.gen_list[i] = 65535;
+            st.ofs_list[i] = 0;
+        }
+    }
+
+    let bias = doc.bias() as i64;
+    let startxref = st.out.len();
+    let runs = |len: usize, inc: &dyn Fn(usize) -> bool| -> Vec<(usize, usize)> {
+        let mut runs = Vec::new();
+        let mut from = 0;
+        while from < len {
+            while from < len && !inc(from) {
+                from += 1;
+            }
+            let mut to = from;
+            while to < len && inc(to) {
+                to += 1;
+            }
+            if from < to {
+                runs.push((from, to));
+            }
+            from = to;
+        }
+        runs
+    };
+    let prev = Object::Int(doc.startxref());
+    if doc.last_xref_was_table() {
+        st.out.extend_from_slice(b"xref\n");
+        for (from, to) in runs(xref_len, &|i| incremental[i]) {
+            st.out
+                .extend_from_slice(format!("{from} {}\n", to - from).as_bytes());
+            for i in from..to {
+                let kind = if st.use_list[i] { 'n' } else { 'f' };
+                st.out.extend_from_slice(
+                    format!(
+                        "{:010} {:05} {kind} \n",
+                        st.ofs_list[i] - bias,
+                        st.gen_list[i]
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+        st.out.push(b'\n');
+        let mut t = trailer;
+        t.put(b"Size", Object::Int(xref_len as i64));
+        t.put(b"Prev", prev);
+        t.remove(b"XRefStm");
+        st.out.extend_from_slice(b"trailer\n");
+        print::print(&Object::Dict(Arc::new(t)), options_of(&st), &mut st.out);
+        st.out.push(b'\n');
+    } else {
+        // writexrefstream: a new object, in the increment too.
+        let num = xref_len;
+        st.use_list[num] = true;
+        st.ofs_list[num] = startxref as i64;
+        st.gen_list[num] = 0;
+        let size = xref_len + 1;
+        let mut dict = Dict::new();
+        for key in [&b"Info"[..], b"Root", b"ID"] {
+            if let Some(v) = present(trailer.get(key)) {
+                dict.put(key, v.clone());
+            }
+        }
+        match present(trailer.get(b"Encrypt")) {
+            Some(Object::Ref(_)) => dict.put(
+                b"Encrypt",
+                Object::Ref(ObjRef::new(st.crypt_object_number, 0)),
+            ),
+            Some(o) => dict.put(b"Encrypt", o.clone()),
+            None => {}
+        }
+        dict.put(b"Size", Object::Int(size as i64));
+        dict.put(b"Prev", prev);
+        dict.put(b"Type", Object::name(b"XRef"));
+        let ints = |v: &[i64]| Object::Array(Arc::new(v.iter().map(|&i| Object::Int(i)).collect()));
+        dict.put(b"W", ints(&[1, 4, 1]));
+        let mut index = Vec::new();
+        let mut rows = Vec::new();
+        for (from, to) in runs(size, &|i| i == num || incremental[i]) {
+            index.extend([from as i64, (to - from) as i64]);
+            for i in from..to {
+                let (kind, ofs): (u8, i64) = if st.use_list[i] {
+                    (1, st.ofs_list[i] - bias)
+                } else {
+                    (0, st.ofs_list[i])
+                };
+                rows.push(kind);
+                rows.extend_from_slice(&(ofs as i32).to_be_bytes());
+                rows.push(st.gen_list[i] as u8);
+            }
+        }
+        dict.put(b"Index", ints(&index));
+        dict.put(b"Length", Object::Int(rows.len() as i64));
+        objects.add_stream(num, dict, rows);
+        let obj = objects.get(num).map_err(|message| WriteError { message })?;
+        write_object(&mut objects, &mut st, options, num, 0, true, obj, false)?;
+    }
+    st.out
+        .extend_from_slice(format!("startxref\n{}\n%%EOF\n", startxref as i64 - bias).as_bytes());
     Ok(st.out)
 }
 
@@ -1601,6 +1805,84 @@ mod tests {
 xref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n\
 0000000115 00000 n \n0000000207 00000 n \n\
 trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n258\n%%EOF\n";
+
+    fn incremental() -> WriteOptions {
+        WriteOptions {
+            incremental: true,
+            ..Default::default()
+        }
+    }
+
+    const VALID: &[u8] = include_bytes!("../../../corpus/smoke/minimal.pdf");
+
+    #[test]
+    fn an_incremental_save_appends_the_changes() {
+        let doc = open(VALID);
+        crate::edit::set_metadata(&doc, "Title", "inc");
+        let out = save(&doc, &incremental()).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(&out[..VALID.len()], VALID);
+        // What MuPDF's incremental save appends, with nupdf named.
+        assert_eq!(
+            String::from_utf8_lossy(&out[VALID.len()..]),
+            "\n% Written by nupdf\n\n6 0 obj\n<</Title(inc)>>\nendobj\n\n\
+             xref\n6 1\n0000000578 00000 n \n\n\
+             trailer\n<</Root 1 0 R/Size 7/Info 6 0 R/Prev 377>>\nstartxref\n610\n%%EOF\n"
+        );
+        let again = open(&out);
+        assert_eq!(again.revisions(), 2);
+        assert_eq!(again.metadata("Title").as_deref(), Some("inc"));
+    }
+
+    #[test]
+    fn an_unchanged_document_saves_as_it_was() {
+        let out = save(&open(VALID), &incremental()).unwrap_or_default();
+        assert_eq!(out, VALID);
+    }
+
+    #[test]
+    fn an_xref_stream_file_gets_an_xref_stream_increment() {
+        let doc = open(include_bytes!("../../../corpus/smoke/xref-stream.pdf"));
+        crate::edit::set_metadata(&doc, "Title", "inc");
+        let out = save(&doc, &incremental()).unwrap_or_else(|e| panic!("{e:?}"));
+        let tail = String::from_utf8_lossy(&out);
+        assert!(tail.contains(
+            "<</Type/XRef/Info 8 0 R/Root 1 0 R/Size 10/Prev 422/W[1 4 1]/Index[8 2]/Length 12>>"
+        ));
+        assert_eq!(open(&out).metadata("Title").as_deref(), Some("inc"));
+    }
+
+    #[test]
+    fn incremental_saves_refuse_what_mupdf_refuses() {
+        let fail =
+            |doc: &Document, options: WriteOptions| save(doc, &options).err().map(|e| e.message);
+        let new = Document::create().unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            fail(&new, incremental()).as_deref(),
+            Some("Can't do incremental writes on a new document")
+        );
+        let repaired = open(b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n");
+        assert_eq!(
+            fail(&repaired, incremental()).as_deref(),
+            Some("Can't do incremental writes on a repaired file")
+        );
+        let doc = open(VALID);
+        let gc = WriteOptions {
+            garbage: 1,
+            ..incremental()
+        };
+        assert_eq!(
+            fail(&doc, gc).as_deref(),
+            Some("Can't do incremental writes with garbage collection")
+        );
+        let decrypt = WriteOptions {
+            encrypt: Encrypt::Remove,
+            ..incremental()
+        };
+        assert_eq!(
+            fail(&doc, decrypt).as_deref(),
+            Some("Can't do incremental writes when changing encryption")
+        );
+    }
 
     #[test]
     fn writes_objects_xref_and_trailer_like_mupdf() {

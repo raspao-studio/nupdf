@@ -211,6 +211,14 @@ pub struct Section {
     own: Option<(i32, Entry)>,
     pub num_objects: i32,
     pub trailer: Option<Dict>,
+    /// `doc->last_xref_was_old_style` after this section: whether the last
+    /// xref read for it was a table (a hybrid file's stream comes last).
+    pub old_style: Option<bool>,
+    /// The xref stream whose dictionary is this section's trailer, when
+    /// the section is a stream: MuPDF's trailer then belongs to it.
+    pub trailer_owner: Option<i32>,
+    /// The number of the last xref stream read.
+    stream_num: Option<i32>,
     /// Objects MuPDF caches while loading (the xref streams themselves).
     pub cached: HashMap<i32, Object>,
 }
@@ -498,6 +506,13 @@ pub struct Loaded {
     /// The size of the oldest section, below which MuPDF's entry lookup
     /// falls back to the newest section for a number no section defines.
     pub oldest_size: i32,
+    /// `doc->last_xref_was_old_style`: whether the last xref MuPDF read
+    /// while loading, the oldest section's, was a table. An incremental
+    /// save writes its xref in that style.
+    pub last_xref_was_old_style: bool,
+    /// The object whose dictionary the trailer is: the newest section's
+    /// xref stream, when it is one.
+    pub trailer_owner: Option<i32>,
 }
 
 pub type XrefError = String;
@@ -616,6 +631,8 @@ pub fn load(
         revisions: sections.len(),
         section_offsets: seen,
         oldest_size: sections.last().map_or(0, |s| s.num_objects),
+        last_xref_was_old_style: sections.last().and_then(|s| s.old_style).unwrap_or(false),
+        trailer_owner: sections.first().and_then(|s| s.trailer_owner),
     })
 }
 
@@ -792,6 +809,9 @@ fn read_xref_section(
 ) -> Result<i64, XrefError> {
     let trailer = read_xref(data, bias, ofs, section, diag, limits)?;
     section.trailer = Some(trailer.clone());
+    if section.old_style == Some(false) {
+        section.trailer_owner = section.stream_num;
+    }
 
     let xrefstm = trailer.get(b"XRefStm").map_or(0, Object::to_int64);
     if xrefstm != 0 {
@@ -828,11 +848,13 @@ fn read_xref(
     while lx.peek_byte().is_some_and(is_white) {
         lx.read_byte();
     }
-    match lx.peek_byte() {
-        Some(b'x') => read_old_xref(&mut lx, section, diag),
-        Some(b'0'..=b'9') => read_new_xref(&mut lx, bias, section, diag, limits),
-        _ => Err("cannot recognize xref format".into()),
-    }
+    let (trailer, old_style) = match lx.peek_byte() {
+        Some(b'x') => (read_old_xref(&mut lx, section, diag)?, true),
+        Some(b'0'..=b'9') => (read_new_xref(&mut lx, bias, section, diag, limits)?, false),
+        _ => return Err("cannot recognize xref format".into()),
+    };
+    section.old_style = Some(old_style);
+    Ok(trailer)
 }
 
 /// `fz_skip_space`: anything at or below 0x20.
@@ -1124,6 +1146,7 @@ fn read_new_xref(
         return Err("Trailer object number cannot be 0\n".into());
     }
     let num = ind.num;
+    section.stream_num = Some(num);
     let mut trailer = ind.obj.as_dict().cloned().unwrap_or_default();
 
     let Some(size) = trailer.get(b"Size") else {

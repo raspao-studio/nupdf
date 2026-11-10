@@ -67,8 +67,16 @@ pub fn set_metadata(doc: &Document, key: &str, value: &str) {
 }
 
 /// Removes the trailer's /Info and the catalog's /Metadata, as
-/// `pdf_dict_del` removes them.
+/// `pdf_dict_del` removes them. Each changes its object even with nothing
+/// to remove, as MuPDF's does, which shows in an incremental save: the
+/// catalog, and an xref stream whose dictionary is the trailer, which
+/// MuPDF's first edit to the trailer moves into the new section.
 pub fn strip_metadata(doc: &Document) {
+    if let Some(owner) = doc.trailer_owner()
+        && let Some(obj) = doc.object(owner)
+    {
+        doc.alter_object(owner, obj);
+    }
     let mut trailer = doc.trailer();
     if trailer.get(b"Info").is_some() {
         trailer.remove(b"Info");
@@ -76,9 +84,7 @@ pub fn strip_metadata(doc: &Document) {
     }
     match trailer.get(b"Root").cloned() {
         Some(Object::Ref(r)) => {
-            if let Object::Dict(d) = doc.resolve(&Object::Ref(r))
-                && d.get(b"Metadata").is_some()
-            {
+            if let Object::Dict(d) = doc.resolve(&Object::Ref(r)) {
                 let mut d = (*d).clone();
                 d.remove(b"Metadata");
                 doc.alter_object(r.num, Object::Dict(Arc::new(d)));
