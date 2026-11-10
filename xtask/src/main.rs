@@ -3,6 +3,7 @@
 
 //! `cargo xtask <command>`: everything that compares nupdf against MuPDF.
 
+mod arlington;
 mod bench;
 mod corpus;
 mod encode;
@@ -65,6 +66,9 @@ enum Cmd {
         #[arg(long)]
         sample: Option<usize>,
     },
+    /// Check files against the Arlington rules the harness applies, and
+    /// print each one's violations.
+    Arlington { files: Vec<std::path::PathBuf> },
     /// List or fetch public corpora.
     Corpus {
         #[command(subcommand)]
@@ -97,6 +101,7 @@ fn main() -> Result<()> {
             }
         },
         Cmd::Fixtures { check } => fixtures::run(&root, check),
+        Cmd::Arlington { files } => arlington::report(&files),
         Cmd::Harness {
             tier,
             check,

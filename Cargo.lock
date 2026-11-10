@@ -653,6 +653,7 @@ dependencies = [
  "libc",
  "md-5",
  "miniz_oxide",
+ "nupdf",
  "serde",
  "serde_json",
  "sha2",
