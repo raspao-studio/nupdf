@@ -6,10 +6,14 @@
 //! These are MuPDF's `fz_warn` calls with stable codes. The message text
 //! follows MuPDF's wording so the harness can line the two up.
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 
-/// Keep memory bounded on pathological files that warn per byte.
+/// Keep memory bounded on pathological files that warn per byte: every
+/// diagnostic up to this many,
 const MAX_DIAGNOSTICS: usize = 1000;
+/// then only ones not seen before, up to this many in all.
+const MAX_DISTINCT: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -21,6 +25,8 @@ pub struct Diagnostic {
 #[derive(Debug, Default)]
 pub struct Diagnostics {
     items: Mutex<Vec<Diagnostic>>,
+    /// The messages stored, to tell new ones from repeats past the cap.
+    seen: Mutex<HashSet<String>>,
     dropped: Mutex<usize>,
 }
 
@@ -30,14 +36,16 @@ impl Diagnostics {
     }
 
     pub fn warn(&self, code: &'static str, message: impl Into<String>) {
-        let Ok(mut items) = self.items.lock() else {
+        let (Ok(mut items), Ok(mut seen)) = (self.items.lock(), self.seen.lock()) else {
             return;
         };
-        if items.len() < MAX_DIAGNOSTICS {
-            items.push(Diagnostic {
-                code,
-                message: message.into(),
-            });
+        let message = message.into();
+        let fresh = !seen.contains(&message);
+        if items.len() < MAX_DIAGNOSTICS || (fresh && items.len() < MAX_DISTINCT) {
+            if fresh {
+                seen.insert(message.clone());
+            }
+            items.push(Diagnostic { code, message });
         } else if let Ok(mut dropped) = self.dropped.lock() {
             *dropped += 1;
         }
@@ -111,7 +119,21 @@ pub mod report {
 
 #[cfg(test)]
 mod tests {
-    use super::report;
+    use super::{Diagnostics, MAX_DIAGNOSTICS, report};
+
+    #[test]
+    fn past_the_cap_only_new_messages_are_kept() {
+        let d = Diagnostics::new();
+        for _ in 0..MAX_DIAGNOSTICS + 5 {
+            d.warn("t.repeat", "same");
+        }
+        d.warn("t.new", "different");
+        d.warn("t.repeat", "same");
+        let all = d.snapshot();
+        assert_eq!(all.len(), MAX_DIAGNOSTICS + 1);
+        assert_eq!(all.last().map(|x| x.message.as_str()), Some("different"));
+        assert_eq!(d.dropped(), 6);
+    }
 
     #[test]
     fn report_lines_carry_mupdf_error_kinds() {
