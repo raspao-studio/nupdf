@@ -853,6 +853,12 @@ mod tests {
         assert_eq!(c.lookup_full(1), vec![0x66, 0x66, 0x69]);
         assert_eq!(c.lookup(1), -1);
         assert_eq!(c.lookup_full(2), vec![0x1f600]);
+        // Into a buffer, which each lookup clears.
+        let mut buf = vec![7, 7, 7, 7];
+        c.lookup_full_into(1, &mut buf);
+        assert_eq!(buf, [0x66, 0x66, 0x69]);
+        c.lookup_full_into(9, &mut buf);
+        assert!(buf.is_empty());
     }
 
     #[test]
