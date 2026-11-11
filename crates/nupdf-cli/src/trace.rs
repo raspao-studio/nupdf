@@ -13,6 +13,7 @@ use nupdf::geometry::{Matrix, Rect};
 use nupdf::image::Image;
 use nupdf::path::{Path, StrokeState, Walker};
 use nupdf::shade::Shade;
+use nupdf::text::{Text, language_to_string};
 use serde_json::{Map, Value, json};
 
 /// Each page's calls, with its error if the run failed.
@@ -192,6 +193,33 @@ fn script_string(bytes: &[u8]) -> String {
     out
 }
 
+/// Text as the script walks it: per span, the font's name, the matrix
+/// without its translation, the writing mode, bidi level, markup
+/// direction and language, then each glyph's id, Unicode and position.
+fn text(t: &Text) -> Value {
+    Value::Array(
+        t.spans
+            .iter()
+            .map(|span| {
+                let glyphs: Vec<Value> = span
+                    .items
+                    .iter()
+                    .map(|g| json!([g.gid, g.ucs, number(g.x), number(g.y)]))
+                    .collect();
+                json!([
+                    script_string(&span.font.name),
+                    numbers(&[span.trm.a, span.trm.b, span.trm.c, span.trm.d]),
+                    span.wmode,
+                    span.bidi_level,
+                    span.markup_dir,
+                    language_to_string(span.language),
+                    glyphs
+                ])
+            })
+            .collect(),
+    )
+}
+
 impl Recorder<'_> {
     fn push(&mut self, v: Value) {
         self.events.push(v);
@@ -295,8 +323,58 @@ impl Device for Recorder<'_> {
         self.push(json!(["clip_image_mask", image(img), matrix(ctm)]));
     }
 
-    fn clip_text(&mut self, _ctm: Matrix) {
-        self.push(json!(["clip_text"]));
+    fn fill_text(
+        &mut self,
+        t: &Text,
+        ctm: Matrix,
+        cs: &ColorSpace,
+        c: &[f32],
+        alpha: f32,
+        pr: ColorParams,
+    ) {
+        self.push(json!([
+            "fill_text",
+            text(t),
+            matrix(ctm),
+            colorspace(Some(cs)),
+            color(Some(cs), c),
+            number(alpha),
+            params(pr)
+        ]));
+    }
+
+    fn stroke_text(
+        &mut self,
+        t: &Text,
+        s: &StrokeState,
+        ctm: Matrix,
+        cs: &ColorSpace,
+        c: &[f32],
+        alpha: f32,
+        pr: ColorParams,
+    ) {
+        self.push(json!([
+            "stroke_text",
+            text(t),
+            stroke(s),
+            matrix(ctm),
+            colorspace(Some(cs)),
+            color(Some(cs), c),
+            number(alpha),
+            params(pr)
+        ]));
+    }
+
+    fn clip_text(&mut self, t: &Text, ctm: Matrix, _scissor: Rect) {
+        self.push(json!(["clip_text", text(t), matrix(ctm)]));
+    }
+
+    fn clip_stroke_text(&mut self, t: &Text, s: &StrokeState, ctm: Matrix, _scissor: Rect) {
+        self.push(json!(["clip_stroke_text", text(t), stroke(s), matrix(ctm)]));
+    }
+
+    fn ignore_text(&mut self, t: &Text, ctm: Matrix) {
+        self.push(json!(["ignore_text", text(t), matrix(ctm)]));
     }
 
     fn pop_clip(&mut self) {

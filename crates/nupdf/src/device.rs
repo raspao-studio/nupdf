@@ -5,9 +5,6 @@
 
 //! What the interpreter draws to: `fz_device`, as a trait whose methods
 //! default to doing nothing, the way a device leaves a callback unset.
-//!
-//! Text is not drawn yet: the interpreter tracks text state but shows no
-//! glyphs until fonts are loaded, except for the clips text makes.
 
 use crate::colorspace::ColorSpace;
 use crate::function::Function;
@@ -15,6 +12,7 @@ use crate::geometry::{Matrix, Rect};
 use crate::image::Image;
 use crate::path::{Path, StrokeState};
 use crate::shade::Shade;
+use crate::text::Text;
 
 /// `fz_color_params`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,9 +160,35 @@ pub trait Device {
 
     fn clip_image_mask(&mut self, image: &Image, ctm: Matrix, scissor: Rect) {}
 
-    /// A text clip (render modes 4 to 7) ends at `ET`. Its glyphs are not
-    /// given until fonts are loaded; it is popped like any clip.
-    fn clip_text(&mut self, ctm: Matrix) {}
+    fn fill_text(
+        &mut self,
+        text: &Text,
+        ctm: Matrix,
+        cs: &ColorSpace,
+        color: &[f32],
+        alpha: f32,
+        params: ColorParams,
+    ) {
+    }
+
+    fn stroke_text(
+        &mut self,
+        text: &Text,
+        stroke: &StrokeState,
+        ctm: Matrix,
+        cs: &ColorSpace,
+        color: &[f32],
+        alpha: f32,
+        params: ColorParams,
+    ) {
+    }
+
+    fn clip_text(&mut self, text: &Text, ctm: Matrix, scissor: Rect) {}
+
+    fn clip_stroke_text(&mut self, text: &Text, stroke: &StrokeState, ctm: Matrix, scissor: Rect) {}
+
+    /// Text in render mode 3: there for extraction, not drawn.
+    fn ignore_text(&mut self, text: &Text, ctm: Matrix) {}
 
     fn pop_clip(&mut self) {}
 

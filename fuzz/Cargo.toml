@@ -91,3 +91,17 @@ name = "run"
 path = "fuzz_targets/run.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "font"
+path = "fuzz_targets/font.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cmap"
+path = "fuzz_targets/cmap.rs"
+test = false
+doc = false
+bench = false
