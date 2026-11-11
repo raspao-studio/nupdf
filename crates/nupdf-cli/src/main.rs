@@ -141,6 +141,15 @@ enum Command {
         #[arg(long)]
         images: bool,
     },
+    /// List each page's content-stream operators with their operands, as
+    /// MuPDF's interpreter hands them to a processor.
+    Operators {
+        file: PathBuf,
+        /// Process each page with empty resources, so that the result
+        /// depends on its content streams alone.
+        #[arg(long)]
+        no_resources: bool,
+    },
     /// Rewrite the whole document as `mutool clean` does: every object in a
     /// plain xref table, object and xref streams unpacked, encryption kept.
     /// The output is read back and compared object by object before it is
@@ -395,6 +404,14 @@ fn main() -> ExitCode {
                 &facts,
                 &doc,
                 objects::streams(&doc, *images),
+            )
+        }),
+        Command::Operators { file, no_resources } => open(file).map(|(doc, facts)| {
+            report(
+                "nupdf.operators/v0",
+                &facts,
+                &doc,
+                objects::operators(&doc, *no_resources),
             )
         }),
         Command::Clean {

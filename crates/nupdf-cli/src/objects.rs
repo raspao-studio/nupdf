@@ -236,8 +236,353 @@ fn hex(bytes: &[u8]) -> String {
         })
 }
 
+/// Each page's operators, as MuPDF's interpreter hands them to a
+/// processor, in oracle/js/operators.js's format. With `bare`, each page
+/// is processed with empty resources and only its content streams count.
+pub fn operators(doc: &Document, bare: bool) -> Value {
+    let mut out = Map::new();
+    let count = doc.page_count();
+    out.insert(
+        "page_count".into(),
+        count.as_ref().map_or(Value::Null, |n| json!(n)),
+    );
+    let mut pages = Vec::new();
+    for index in 0..count.unwrap_or(0) {
+        let entry = doc.page(index).map_err(|e| e.0).and_then(|page| {
+            let Some(dict) = doc.resolve(&page).as_dict().cloned() else {
+                return Err("page object is not a dictionary".to_string());
+            };
+            let resources = if bare {
+                Some(Object::Dict(std::sync::Arc::new(nupdf::Dict::new())))
+            } else {
+                doc.inherited(&page, b"Resources").map_err(|e| e.0)?
+            };
+            // Loading the page looks up /Group/S for transparency, which
+            // loads what it refers to.
+            let _ = doc.dict_get(&doc.dict_get(&page, b"Group"), b"S");
+            let contents = dict
+                .get(b"Contents")
+                .filter(|c| !matches!(c, Object::Null))
+                .cloned();
+            let mut rec = Recorder {
+                doc,
+                ops: Vec::new(),
+                in_extgstate: false,
+            };
+            let result = nupdf::content::process_contents(
+                doc,
+                resources.as_ref(),
+                contents.as_ref(),
+                &mut rec,
+            );
+            let mut entry = json!({ "ops": rec.ops });
+            if let Err(line) = result {
+                entry["error"] = json!(nupdf::diag::report::strip(&line));
+                // The processor was never closed (PDFPage.process).
+                doc.diagnostics().warn(
+                    "content.processor_unclosed",
+                    "dropping unclosed PDF processor",
+                );
+            }
+            Ok(entry)
+        });
+        pages.push(entry.unwrap_or_else(|e| json!({ "error": e })));
+    }
+    out.insert("pages".into(), Value::Array(pages));
+    Value::Object(out)
+}
+
+/// Records operators the way MuPDF's script processor reports them: one
+/// array per operator, its name then its operands. Its glue has quirks,
+/// which this follows:
+///
+/// - Inside a `gs`, the ExtGState's line width, joins, caps, miter limit,
+///   intent, flatness and font are not reported (its dash is), and neither
+///   are the entries the script processor does not take.
+/// - `"` is not reported: the glue passes it the wrong arguments.
+/// - `BI` is not reported: for an image without a /CS name the glue hands
+///   the script engine a null string, which crashes it, so the oracle
+///   cannot take the call. What follows the image shows where it ended.
+/// - ASCII text of `Tj` and `'` is read as a C string, so a short string
+///   runs on into what longer ones left in MuPDF's buffer, and the script
+///   engine reads that as UTF-8 (`script_text`).
+struct Recorder<'a> {
+    doc: &'a Document,
+    ops: Vec<Value>,
+    in_extgstate: bool,
+}
+
+fn number(v: f32) -> Value {
+    if v.is_finite() {
+        json!(f64::from(v))
+    } else {
+        Value::Null
+    }
+}
+
+fn numbers(v: &[f32]) -> Value {
+    Value::Array(v.iter().copied().map(number).collect())
+}
+
+fn name(n: &[u8]) -> Value {
+    json!(escape_name(n))
+}
+
+/// Shown text as oracle/js/operators.js prints it. The script glue's
+/// `push_byte_string` pushes ASCII text (no NUL, nothing above 127) as a C
+/// string, which mujs reads as UTF-8, and the script prints the UTF-16
+/// units `charCodeAt` gives, each in hex; other text is pushed byte by
+/// byte.
+fn script_text(text: &[u8], c_string: &[u8]) -> String {
+    if !text.iter().all(|&b| b != 0 && b <= 127) {
+        return hex(text);
+    }
+    let mut out = String::new();
+    let mut s = c_string;
+    while let Some(&c) = s.first() {
+        let (rune, len) = if c < 0x80 {
+            (u32::from(c), 1)
+        } else {
+            chartorune(s)
+        };
+        s = &s[len.min(s.len())..];
+        let units = if rune >= 0x10000 {
+            vec![
+                0xd800 + ((rune - 0x10000) >> 10),
+                0xdc00 + ((rune - 0x10000) & 0x3ff),
+            ]
+        } else {
+            vec![rune]
+        };
+        for u in units {
+            out.push_str(&format!("{u:02x}"));
+        }
+    }
+    out
+}
+
+/// mujs's `chartorune` (Plan 9's): one character of UTF-8, U+FFFD and one
+/// byte for anything that does not decode. Past the end reads as the NUL
+/// that ends the C string.
+fn chartorune(s: &[u8]) -> (u32, usize) {
+    const BAD: (u32, usize) = (0xfffd, 1);
+    let at = |i: usize| u32::from(s.get(i).copied().unwrap_or(0));
+    let c = at(0);
+    if c == 0xc0 && at(1) == 0x80 {
+        return (0, 2);
+    }
+    let c1 = at(1) ^ 0x80;
+    if c1 & 0xc0 != 0 {
+        return BAD;
+    }
+    if c < 0xe0 {
+        let l = ((c << 6) | c1) & 0x7ff;
+        return if c < 0xc0 || l <= 0x7f { BAD } else { (l, 2) };
+    }
+    let c2 = at(2) ^ 0x80;
+    if c2 & 0xc0 != 0 {
+        return BAD;
+    }
+    if c < 0xf0 {
+        let l = ((((c << 6) | c1) << 6) | c2) & 0xffff;
+        return if l <= 0x7ff { BAD } else { (l, 3) };
+    }
+    let c3 = at(3) ^ 0x80;
+    if c3 & 0xc0 != 0 {
+        return BAD;
+    }
+    if c < 0xf8 {
+        let l = ((((((c << 6) | c1) << 6) | c2) << 6) | c3) & 0x1f_ffff;
+        return if l <= 0xffff || l > 0x10_ffff {
+            BAD
+        } else {
+            (l, 4)
+        };
+    }
+    BAD
+}
+
+impl Recorder<'_> {
+    /// Items of a `TJ` or `d` array: numbers as reals, the rest through
+    /// `string` (None for `d`, which reads everything as a number).
+    fn items(&self, obj: Option<&Object>, text: bool) -> Value {
+        let Some(Object::Array(items)) = obj.map(|o| self.doc.resolve(o)) else {
+            return json!([]);
+        };
+        let doc = self.doc;
+        Value::Array(
+            items
+                .iter()
+                .map(|item| match doc.resolve(item) {
+                    v if v.is_number() || !text => number(v.to_real()),
+                    Object::String(s) => json!(hex(&s)),
+                    _ => json!(""),
+                })
+                .collect(),
+        )
+    }
+}
+
+impl nupdf::content::Processor for Recorder<'_> {
+    fn wants_soft_mask(&self) -> bool {
+        false
+    }
+
+    fn op(&mut self, op: nupdf::content::Op<'_>) -> Result<(), String> {
+        use nupdf::content::Op;
+        let hidden = self.in_extgstate;
+        let entry: Vec<Value> = match op {
+            Op::LineWidth(_)
+            | Op::LineJoin(_)
+            | Op::LineCap(_)
+            | Op::MiterLimit(_)
+            | Op::Intent(_)
+            | Op::Flatness(_)
+            | Op::Font { .. }
+                if hidden =>
+            {
+                return Ok(());
+            }
+            Op::LineWidth(v) => vec![json!("w"), number(v)],
+            Op::LineJoin(v) => vec![json!("j"), json!(v)],
+            Op::LineCap(v) => vec![json!("J"), json!(v)],
+            Op::MiterLimit(v) => vec![json!("M"), number(v)],
+            Op::Dash { array, phase } => vec![json!("d"), self.items(array, false), number(phase)],
+            Op::Intent(n) => vec![json!("ri"), name(n)],
+            Op::Flatness(v) => vec![json!("i"), number(v)],
+            Op::GsBegin { name: n, .. } => {
+                self.in_extgstate = true;
+                vec![json!("gs"), name(n)]
+            }
+            Op::GsEnd => {
+                self.in_extgstate = false;
+                return Ok(());
+            }
+            Op::GsBlendMode(_)
+            | Op::GsStrokeAlpha(_)
+            | Op::GsFillAlpha(_)
+            | Op::GsSoftMask(_)
+            | Op::GsOverprintStroke(_)
+            | Op::GsOverprintFill(_)
+            | Op::GsOverprintMode(_)
+            | Op::GsBlackPointCompensation(_)
+            | Op::NextLineShowSpaced { .. }
+            | Op::InlineImage { .. }
+            | Op::EndOfData
+            | Op::End => return Ok(()),
+            Op::Save => vec![json!("q")],
+            Op::Restore => vec![json!("Q")],
+            Op::Transform(m) => [vec![json!("cm")], m.map(number).to_vec()].concat(),
+            Op::MoveTo(x, y) => vec![json!("m"), number(x), number(y)],
+            Op::LineTo(x, y) => vec![json!("l"), number(x), number(y)],
+            Op::CurveTo(c) => [vec![json!("c")], c.map(number).to_vec()].concat(),
+            Op::CurveToV(c) => [vec![json!("v")], c.map(number).to_vec()].concat(),
+            Op::CurveToY(c) => [vec![json!("y")], c.map(number).to_vec()].concat(),
+            Op::ClosePath => vec![json!("h")],
+            Op::Rect(r) => [vec![json!("re")], r.map(number).to_vec()].concat(),
+            Op::Stroke => vec![json!("S")],
+            Op::CloseStroke => vec![json!("s")],
+            Op::FillCompat => vec![json!("F")],
+            Op::Fill => vec![json!("f")],
+            Op::FillEvenOdd => vec![json!("fstar")],
+            Op::FillStroke => vec![json!("B")],
+            Op::FillStrokeEvenOdd => vec![json!("Bstar")],
+            Op::CloseFillStroke => vec![json!("b")],
+            Op::CloseFillStrokeEvenOdd => vec![json!("bstar")],
+            Op::EndPath => vec![json!("n")],
+            Op::Clip => vec![json!("W")],
+            Op::ClipEvenOdd => vec![json!("Wstar")],
+            Op::BeginText => vec![json!("BT")],
+            Op::EndText => vec![json!("ET")],
+            Op::CharSpacing(v) => vec![json!("Tc"), number(v)],
+            Op::WordSpacing(v) => vec![json!("Tw"), number(v)],
+            Op::HorizontalScaling(v) => vec![json!("Tz"), number(v)],
+            Op::Leading(v) => vec![json!("TL"), number(v)],
+            Op::Font { name: n, size, .. } => vec![json!("Tf"), name(n), number(size)],
+            Op::RenderMode(v) => vec![json!("Tr"), json!(v)],
+            Op::Rise(v) => vec![json!("Ts"), number(v)],
+            Op::TextMove(x, y) => vec![json!("Td"), number(x), number(y)],
+            Op::TextMoveSetLeading(x, y) => vec![json!("TD"), number(x), number(y)],
+            Op::TextMatrix(m) => [vec![json!("Tm")], m.map(number).to_vec()].concat(),
+            Op::NextLine => vec![json!("Tstar")],
+            Op::ShowArray(a) => vec![json!("TJ"), self.items(a, true)],
+            Op::Show { text, c_string } => vec![json!("Tj"), json!(script_text(text, c_string))],
+            Op::NextLineShow { text, c_string } => {
+                vec![json!("squote"), json!(script_text(text, c_string))]
+            }
+            Op::Type3Width(x, y) => vec![json!("d0"), number(x), number(y)],
+            Op::Type3Bbox(b) => [vec![json!("d1")], b.map(number).to_vec()].concat(),
+            Op::ColorSpace {
+                stroke, name: n, ..
+            } => {
+                vec![json!(if stroke { "CS" } else { "cs" }), name(n)]
+            }
+            Op::ColorPattern {
+                stroke,
+                name: n,
+                color,
+                ..
+            } => vec![
+                json!(if stroke { "SC_pattern" } else { "sc_pattern" }),
+                name(n),
+                numbers(color),
+            ],
+            Op::ColorShade {
+                stroke, name: n, ..
+            } => {
+                vec![json!(if stroke { "SC_shade" } else { "sc_shade" }), name(n)]
+            }
+            Op::Color { stroke, color } => {
+                vec![
+                    json!(if stroke { "SC_color" } else { "sc_color" }),
+                    numbers(color),
+                ]
+            }
+            Op::Gray { stroke, gray } => vec![json!(if stroke { "G" } else { "g" }), number(gray)],
+            Op::Rgb { stroke, rgb } => [
+                vec![json!(if stroke { "RG" } else { "rg" })],
+                rgb.map(number).to_vec(),
+            ]
+            .concat(),
+            Op::Cmyk { stroke, cmyk } => [
+                vec![json!(if stroke { "K" } else { "k" })],
+                cmyk.map(number).to_vec(),
+            ]
+            .concat(),
+            Op::Shade { name: n, .. } => vec![json!("sh"), name(n)],
+            Op::DrawImage { name: n, .. } => vec![json!("Do_image"), name(n)],
+            Op::DrawForm { name: n, .. } => vec![json!("Do_form"), name(n)],
+            Op::MarkedPoint(t) => vec![json!("MP"), name(t)],
+            Op::MarkedPointProperties { tag, raw } => {
+                vec![json!("DP"), name(tag), raw.map_or(Value::Null, encode)]
+            }
+            Op::BeginMarked(t) => vec![json!("BMC"), name(t)],
+            Op::BeginMarkedProperties { tag, raw } => {
+                vec![json!("BDC"), name(tag), raw.map_or(Value::Null, encode)]
+            }
+            Op::EndMarked => vec![json!("EMC")],
+            Op::BeginCompatibility => vec![json!("BX")],
+            Op::EndCompatibility => vec![json!("EX")],
+        };
+        self.ops.push(Value::Array(entry));
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shown_text_reads_as_the_script_engine_reads_it() {
+        // ASCII text is read on into the buffer, as UTF-8 by mujs.
+        assert_eq!(super::script_text(b"AB", b"AB\xc2\x03"), "4142fffd03");
+        assert_eq!(super::script_text(b"a", b"a\xc3\xa9"), "61e9");
+        assert_eq!(super::script_text(b"a", b"a\xf0\x9f\x98\x80"), "61d83dde00");
+        assert_eq!(super::script_text(b"a", b"a\xc0\x80b"), "610062");
+        // Anything else is taken byte by byte.
+        assert_eq!(super::script_text(b"\xc3\xa9", b"\xc3\xa9"), "c3a9");
+    }
+
     use super::*;
 
     #[test]

@@ -112,7 +112,249 @@ pub fn all() -> Vec<Fixture> {
     .chain(stream_fixtures())
     .chain(objstm_fixtures())
     .chain(rearrange_fixtures())
+    .chain(content_fixtures())
     .collect()
+}
+
+/// One page per content stream, objects 1 and 2 for the catalog and page
+/// tree, then a page and its content for each, and `extra` objects after.
+fn pages_with_contents(contents: &[(&str, Vec<u8>)], extra: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    let kids: Vec<String> = (0..contents.len())
+        .map(|i| format!("{} 0 R", 3 + 2 * i))
+        .collect();
+    pdf.obj(
+        2,
+        &format!(
+            "<</Type/Pages/Kids[{}]/Count {}/MediaBox[0 0 200 200]>>",
+            kids.join(" "),
+            contents.len()
+        ),
+    );
+    for (i, (filter, data)) in contents.iter().enumerate() {
+        let page = 3 + 2 * i as u32;
+        pdf.obj(
+            page,
+            &format!(
+                "<</Type/Page/Parent 2 0 R/Resources<</Font<</F1 {} 0 R>>>>/Contents {} 0 R>>",
+                3 + 2 * contents.len(),
+                page + 1
+            ),
+        );
+        pdf.stream(page + 1, filter, data);
+    }
+    pdf.obj(3 + 2 * contents.len() as u32, FONT);
+    for (num, body) in extra {
+        pdf.obj_bytes(*num, body);
+    }
+    pdf.finish_with_xref("")
+}
+
+/// Content streams for the `operators` checks.
+fn content_fixtures() -> Vec<Fixture> {
+    use crate::encode;
+    let fx = |name, about, bytes| Fixture {
+        name,
+        about,
+        needs_repair: false,
+        bytes,
+    };
+    let plain = |text: &str| ("", text.as_bytes().to_vec());
+
+    let operators = [
+        // Every operator, with too few and too many operands too.
+        plain(
+            "q 1 0 0 1 10 20 cm 0.5 w 1 J 2 j 7 J -3 j 4 M [3 2] 1 d [] 0 d /Perceptual ri 50 i \
+             10 10 m 20 20 l 1 2 3 4 5 6 c 1 2 3 4 v 1 2 3 4 y h 0 0 10 10 re S s F f f* B B* b \
+             b* n W n W* n 5 m 1 2 3 4 5 6 7 8 9 l 1 g .5 G 1 0 0 rg 0 1 0 RG 0 0 0 1 k \
+             1 1 1 0 K /DeviceGray cs 0.3 sc /DeviceRGB CS 1 2 3 SC /Pattern cs 0.1 0.2 scn \
+             /DeviceCMYK CS 1 2 3 4 SCN Q",
+        ),
+        plain(
+            "BT /F1 12 Tf 1 Tc 2 Tw 90 Tz 14 TL 1 Tr 3 Ts 10 20 Td 5 6 TD 1 0 0 1 72 700 Tm T* \
+             (Hello) Tj (World) ' 1 2 (quoted) \" [(A) -50 (B) 3 Tw (C) 2 Tc 4 Tc] TJ \
+             [1 (x)] TJ [] TJ (\\101\\102) Tj <414243> Tj () Tj ET \
+             10 0 d0 10 0 0 0 10 10 d1 /Tag MP /Tag <</K 1>> DP /Tag BMC EMC \
+             /Span <</ActualText (x) /MCID 3>> BDC EMC /OC /oc1 BDC EMC /X [1 /Y (z)] BDC EMC",
+        ),
+        // Operands outside text, and the operand slots: a second name, a
+        // long string, an empty first name.
+        plain(&format!(
+            "[1 2 /N (s) [3]] 4 d <</A 1>> [(a)] TJ /A /B BDC EMC / /C ri ({long}) Tj \
+             ({long}) () Tj (short) <</D 1>> Tj /{name} ri 1e3 w -.5 w 5. w --3 w 1-2 w",
+            long = "L".repeat(300),
+            name = "N".repeat(300),
+        )),
+        // Syntax errors are reported and lexing goes on; BX/EX quiets
+        // unknown operators.
+        plain(
+            "1 w foo 2 w BX bar baz EX qux nan Infinity inf NaN true 3 w false null ) 4 w } \
+             5 w R 6 w obj 7 w endobj 8 w xref 9 w trailer 10 w stream 11 w EX EX zz 12 w \
+             BX BX EX yy 13 w",
+        ),
+        // A TJ array takes only numbers and strings, and Tw or Tc after a
+        // number.
+        plain(
+            "BT [(a) /Name (b)] TJ 1 w [(a) Tw] TJ 2 w [(a) 5 Tz] TJ 3 w [(a) [1] (b)] TJ \
+             4 w [(a) <</K 1>> (b)] TJ 5 w [1 2 3 4 5 6 7 8 Tw] TJ ET",
+        ),
+        // The operand stack holds 32 numbers.
+        plain(&format!(
+            "{} m 1 w {} l 2 w",
+            (1..=32)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            (1..=40)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )),
+        // endstream ends the content.
+        plain("1 w endstream 2 w"),
+        // Unbalanced q are closed at the end; extra Q are passed on.
+        plain("q q q 1 w Q Q Q Q 2 w q"),
+        // After 100 syntax errors the rest of the page is ignored.
+        plain(&format!("{} 1 w", "bad ".repeat(120))),
+        // The content of a page, compressed.
+        (
+            "/Filter/FlateDecode",
+            encode::flate(b"BT /F1 9 Tf (deflated) Tj ET 0 0 5 5 re f"),
+        ),
+    ];
+
+    // A contents array: tokens cannot run across a join, strings and
+    // arrays can; a part that is missing, not a stream, or fails to decode.
+    let mut parts = Pdf::new("1.7");
+    parts.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    parts.obj(2, "<</Type/Pages/Kids[3 0 R 20 0 R 30 0 R]/Count 3>>");
+    parts.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents[4 0 R 5 0 R 99 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R]>>",
+    );
+    parts.stream(4, "", b"1 0 0 1 10 10");
+    parts.stream(5, "", b"cm 1 w BT (abc");
+    parts.obj(6, "<</NotAStream true>>");
+    parts.stream(7, "", b"def) Tj [1 (a)");
+    parts.stream(8, "", b"(b)] TJ ET 2 w");
+    parts.stream(
+        9,
+        "/Filter/FlateDecode",
+        &encode::flate_broken_after(&b"3 w 4 w ".repeat(2000), 3500),
+    );
+    parts.stream(10, "", b"5 w");
+    parts.obj(20, "<</Type/Page/Parent 2 0 R/Contents 21 0 R>>");
+    parts.obj(21, "<</NotAStream true>>");
+    parts.obj(
+        30,
+        "<</Type/Page/Parent 2 0 R/Contents[31 0 R 32 0 R]/Resources<<>>>>",
+    );
+    parts.stream(31, "/Filter/DCTDecode", b"1 w");
+    parts.stream(32, "/Filter/Unknown", b"2 w");
+    let parts = parts.finish_with_xref("");
+
+    vec![
+        fx(
+            "content-operators.pdf",
+            "Every content operator with its operands, too few and too many of them, the operand slots, syntax errors, TJ arrays, the stack limit, endstream, unbalanced q, the error limit",
+            pages_with_contents(&operators, &[]),
+        ),
+        fx(
+            "content-array.pdf",
+            "A contents array whose parts split a cm and a string, with a missing part, a part that is not a stream, one that fails to decode; a page whose contents is not a stream; parts with image and unknown filters",
+            parts,
+        ),
+        fx(
+            "content-inline-images.pdf",
+            "Inline images: unfiltered at each depth and colorspace, every filter, data containing EI, a filter chain, truncated data, and the errors MuPDF reports for them",
+            pages_with_contents(&inline_images(), &[]),
+        ),
+    ]
+}
+
+/// One inline image per page, each followed by an operator, so that what
+/// comes after the image shows where MuPDF resumed.
+fn inline_images() -> Vec<(&'static str, Vec<u8>)> {
+    use crate::encode;
+    use crate::jpeg::{self, Component, Spec};
+    let image = |dict: &str, data: &[u8]| {
+        let mut out = format!("q 1 w BI {dict} ID ").into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b" EI 2 w Q");
+        ("", out)
+    };
+    let gray: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37)).collect();
+    let jpeg = jpeg::encode(&Spec {
+        width: 8,
+        height: 8,
+        components: vec![Component { id: 1, h: 1, v: 1 }],
+        sample: |_, x, y| (x * 30 + y * 3) as u8,
+        jfif: true,
+        adobe: None,
+        restart_interval: 0,
+        progressive: None,
+    });
+    let rows: Vec<Vec<bool>> = (0..4)
+        .map(|y| (0..16).map(|x| (x + y) % 3 == 0).collect())
+        .collect();
+    let mut flated_ei = encode::flate(&b"EI EI EI ".repeat(4));
+    flated_ei.extend_from_slice(b"EI\0trailing");
+    let mut crlf = b"q BI /W 2 /H 1 /CS /G ID\r\n".to_vec();
+    crlf.extend_from_slice(b"\r\n EI 3 w Q");
+    vec![
+        // Data that reads as "EI " is skipped by size.
+        image("/W 4 /H 1 /CS /G /BPC 8", b"EI E"),
+        image("/W 2 /H 1 /CS /RGB", b"abcdef"),
+        image(
+            "/Width 1 /Height 1 /ColorSpace /DeviceCMYK /D [1 0 1 0 1 0 1 0] /I true",
+            b"wxyz",
+        ),
+        image("/W 8 /H 2 /IM true", b"\xff\x00"),
+        image("/W 8 /H 1 /BPC 1 /CS [/I /RGB 1 <ff000000ff00>]", b"\xaa"),
+        image("/W 3 /H 2 /BPC 4 /CS /G", b"\x12\x34\x56\x78"),
+        image(
+            "/W 2 /H 2 /BPC 16 /CS /G",
+            b"\x00\x01\x00\x02\x00\x03\x00\x04",
+        ),
+        image("/W 1 /H 1 /CS [/CalRGB <</WhitePoint [1 1 1]>>]", b"rgb"),
+        // Filters: each ends where its decoder stops reading.
+        image("/W 8 /H 8 /CS /G /F /AHx", &encode::ascii_hex(&gray)),
+        image("/W 8 /H 8 /CS /G /F /A85", &encode::ascii85(&gray)),
+        image("/W 8 /H 8 /CS /G /F /Fl", &encode::flate(&gray)),
+        image("/W 9 /H 4 /CS /G /F /Fl", &flated_ei),
+        image("/W 8 /H 8 /CS /G /F /LZW", &encode::lzw(&gray, true)),
+        image("/W 8 /H 8 /CS /G /F /RL", &encode::run_length(&gray)),
+        image("/W 8 /H 8 /CS /G /F /DCT", &jpeg),
+        image(
+            "/W 16 /H 4 /IM true /F /CCF /DP <</K -1 /Columns 16 /Rows 4>>",
+            &encode::g4(16, &rows),
+        ),
+        image(
+            "/W 8 /H 8 /CS /G /F [/AHx /Fl]",
+            &encode::ascii_hex(&encode::flate(&gray)),
+        ),
+        image(
+            "/W 8 /H 8 /CS /G /F /Fl /DP <</Predictor 12 /Columns 8>>",
+            &encode::flate(&encode::png_predict(&gray, 8, 2)),
+        ),
+        // Too little data: padded, with a warning.
+        image("/W 8 /H 8 /CS /G /F /AHx", b"0102>"),
+        ("", crlf),
+        // Errors MuPDF reports, and what it lexes after them.
+        image("/W 0 /H 1 /CS /G", b"x"),
+        image("/W 1 /H -2 /CS /G", b"x"),
+        image("/W 1 /H 1 /BPC 32 /CS /G", b"x"),
+        image("/W 1 /H 1 /CS /Foo", b"x"),
+        image("/W 1 /H 1 /CS /Indexed", b"x"),
+        image("/W 1 /H 1 /Filter /JPXDecode", b"x"),
+        image("/W 1 /H 1 /CS /G /SMask <</W 1>>", b"x"),
+        image("/W 1 /H 1 /CS /RGB /Mask [0 1 2 3 x]", b"xyz"),
+        image("/W 1 /H 1 /CS /G /F /Foo", b"x"),
+        image("/W 1 /H 1 (key) ID", b"x"),
+        image("/W 100000 /H 100000 /CS /CMYK /BPC 16", b"x"),
+        ("", b"BI /W 4 /H 4 /CS /G ID abc".to_vec()),
+    ]
 }
 
 /// Cases for `clean -g` to `-gggg`.
