@@ -244,6 +244,7 @@ fn block_value(block: &Block, id: &str, f: &Fields) -> Value {
         Block::Image(i) => ("image", i.bbox),
         Block::Vector(v) => ("vector", v.bbox),
         Block::Struct(s) => ("struct", s.bbox),
+        Block::Grid(g) => ("grid", g.bbox),
     };
     if f.has("type") {
         m.insert("type".into(), kind.into());

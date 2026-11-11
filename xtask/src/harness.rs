@@ -397,6 +397,34 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["segment,paragraph-break"],
     },
     Check {
+        name: "stext-table",
+        about: "structured text with tables found and transcribed into Table, TR and TD structures",
+        oracle_script: "oracle/js/stext.js",
+        nupdf_args: &["stext", "--options", "table-hunt"],
+        compare: Compare::Stext,
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["table-hunt"],
+    },
+    Check {
+        name: "stext-table-full",
+        about: "structured text segmented, broken into paragraphs and hunted for tables, with the vectors their rules come from",
+        oracle_script: "oracle/js/stext.js",
+        nupdf_args: &[
+            "stext",
+            "--options",
+            "vectors,segment,paragraph-break,table-hunt",
+        ],
+        compare: Compare::Stext,
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["vectors,segment,paragraph-break,table-hunt"],
+    },
+    Check {
         name: "stext-raw",
         about: "structured text with no spaces added, CIDs for unknown Unicode, ActualText ignored, no clipping, and boxes from glyph outlines",
         oracle_script: "oracle/js/stext.js",
@@ -2046,11 +2074,7 @@ fn diff_blocks(at: &str, bx: &[Value], by: &[Value]) -> Option<FieldDiff> {
                     return Some(diff(format!("{at}/{key}"), &p[key], &q[key]));
                 }
             }
-            if let Some(d) = diff_blocks(
-                &format!("{at}/blocks"),
-                &list(p, "blocks"),
-                &list(q, "blocks"),
-            ) {
+            if let Some(d) = diff_blocks(&at, &list(p, "blocks"), &list(q, "blocks")) {
                 return Some(d);
             }
             continue;

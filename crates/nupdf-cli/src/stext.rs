@@ -201,8 +201,10 @@ struct Blocks<'a>(&'a [Block]);
 
 impl Serialize for Blocks<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut seq = s.serialize_seq(Some(self.0.len()))?;
-        for b in self.0 {
+        // The glue's walk passes over grid blocks.
+        let shown = self.0.iter().filter(|b| !matches!(b, Block::Grid(_)));
+        let mut seq = s.serialize_seq(Some(shown.clone().count()))?;
+        for b in shown {
             match b {
                 Block::Text(t) => seq.serialize_element(&TextJson {
                     bbox: rect(t.bbox),
@@ -221,6 +223,7 @@ impl Serialize for Blocks<'_> {
                     flags: v.flags,
                 })?,
                 Block::Struct(st) => seq.serialize_element(&StructJson(st))?,
+                Block::Grid(_) => {}
             }
         }
         seq.end()

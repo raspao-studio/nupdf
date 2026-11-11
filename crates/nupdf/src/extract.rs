@@ -85,7 +85,7 @@ pub fn block_len(block: &Block) -> usize {
     match block {
         Block::Text(t) => t.lines.iter().map(|l| l.chars.len()).sum(),
         Block::Struct(s) => s.blocks.iter().map(block_len).sum(),
-        Block::Image(_) | Block::Vector(_) => 0,
+        Block::Image(_) | Block::Vector(_) | Block::Grid(_) => 0,
     }
 }
 
@@ -95,7 +95,7 @@ pub fn text_blocks<'a>(blocks: &[&'a Block]) -> Vec<&'a TextBlock> {
         match b {
             Block::Text(t) => out.push(t),
             Block::Struct(s) => s.blocks.iter().for_each(|c| walk(c, out)),
-            Block::Image(_) | Block::Vector(_) => {}
+            Block::Image(_) | Block::Vector(_) | Block::Grid(_) => {}
         }
     }
     let mut out = Vec::new();
@@ -405,7 +405,7 @@ mod tests {
             .iter()
             .filter_map(|b| match b {
                 Block::Text(t) => Some(t.lines.iter()),
-                Block::Image(_) | Block::Vector(_) | Block::Struct(_) => None,
+                Block::Image(_) | Block::Vector(_) | Block::Struct(_) | Block::Grid(_) => None,
             })
             .flatten()
             .collect()
