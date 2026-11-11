@@ -38,6 +38,7 @@ pub mod parse;
 pub mod print;
 pub mod rearrange;
 pub mod repair;
+pub mod shade;
 pub mod slots;
 pub mod stream;
 pub mod strtof;
