@@ -53,6 +53,71 @@ impl Token {
     }
 }
 
+/// A token whose bytes, for a name, string or keyword, are in the buffer
+/// given to [`Lexer::next_raw`]: content streams lex many tokens, and a
+/// buffer kept across them saves an allocation each.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RawToken {
+    Error,
+    Eof,
+    OpenArray,
+    CloseArray,
+    OpenDict,
+    CloseDict,
+    OpenBrace,
+    CloseBrace,
+    Name,
+    Int(i64),
+    Real(f32),
+    String,
+    Keyword,
+    R,
+    True,
+    False,
+    Null,
+    Obj,
+    EndObj,
+    Stream,
+    EndStream,
+    Xref,
+    Trailer,
+    StartXref,
+    NewObj,
+}
+
+impl RawToken {
+    /// The token, with its bytes from `buf`.
+    fn into_token(self, buf: Vec<u8>) -> Token {
+        match self {
+            RawToken::Error => Token::Error,
+            RawToken::Eof => Token::Eof,
+            RawToken::OpenArray => Token::OpenArray,
+            RawToken::CloseArray => Token::CloseArray,
+            RawToken::OpenDict => Token::OpenDict,
+            RawToken::CloseDict => Token::CloseDict,
+            RawToken::OpenBrace => Token::OpenBrace,
+            RawToken::CloseBrace => Token::CloseBrace,
+            RawToken::Name => Token::Name(buf),
+            RawToken::Int(i) => Token::Int(i),
+            RawToken::Real(f) => Token::Real(f),
+            RawToken::String => Token::String(buf),
+            RawToken::Keyword => Token::Keyword(buf),
+            RawToken::R => Token::R,
+            RawToken::True => Token::True,
+            RawToken::False => Token::False,
+            RawToken::Null => Token::Null,
+            RawToken::Obj => Token::Obj,
+            RawToken::EndObj => Token::EndObj,
+            RawToken::Stream => Token::Stream,
+            RawToken::EndStream => Token::EndStream,
+            RawToken::Xref => Token::Xref,
+            RawToken::Trailer => Token::Trailer,
+            RawToken::StartXref => Token::StartXref,
+            RawToken::NewObj => Token::NewObj,
+        }
+    }
+}
+
 /// PDF whitespace, including NUL.
 pub fn is_white(b: u8) -> bool {
     matches!(b, 0x00 | 0x09 | 0x0a | 0x0c | 0x0d | 0x20)
@@ -138,56 +203,69 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next_token(&mut self) -> Token {
-        self.lex(true)
+        let mut buf = Vec::new();
+        self.lex(true, &mut buf).into_token(buf)
+    }
+
+    /// [`Lexer::next_token`] with a name's, string's or keyword's bytes
+    /// written into `buf`, which is cleared first.
+    pub fn next_raw(&mut self, buf: &mut Vec<u8>) -> RawToken {
+        buf.clear();
+        self.lex(true, buf)
     }
 
     /// Like `next_token`, but strings are errors (MuPDF's `pdf_lex_no_string`,
     /// used by the repair scanner so that stray parentheses cannot swallow
     /// the rest of the file).
     pub fn next_token_no_string(&mut self) -> Token {
-        self.lex(false)
+        let mut buf = Vec::new();
+        self.lex(false, &mut buf).into_token(buf)
     }
 
-    fn lex(&mut self, strings: bool) -> Token {
+    /// Lexes a token into `out`, which starts empty.
+    fn lex(&mut self, strings: bool, out: &mut Vec<u8>) -> RawToken {
         loop {
             let Some(c) = self.read_byte() else {
-                return Token::Eof;
+                return RawToken::Eof;
             };
             match c {
                 c if is_white(c) => self.skip_white(),
                 b'%' => self.skip_comment(),
-                b'/' => return Token::Name(self.lex_name()),
-                b'(' if strings => return self.lex_string(),
-                b'(' | b')' => return Token::Error,
+                b'/' => {
+                    self.lex_name(out);
+                    return RawToken::Name;
+                }
+                b'(' if strings => return self.lex_string(out),
+                b'(' | b')' => return RawToken::Error,
                 b'<' => {
                     match self.read_byte() {
-                        Some(b'<') => return Token::OpenDict,
+                        Some(b'<') => return RawToken::OpenDict,
                         Some(_) => self.unread(),
                         None => {}
                     }
                     return if strings {
-                        self.lex_hex_string()
+                        self.lex_hex_string(out)
                     } else {
-                        Token::Error
+                        RawToken::Error
                     };
                 }
                 b'>' => {
                     match self.read_byte() {
-                        Some(b'>') => return Token::CloseDict,
+                        Some(b'>') => return RawToken::CloseDict,
                         Some(_) => self.unread(),
                         None => {}
                     }
-                    return Token::Error;
+                    return RawToken::Error;
                 }
-                b'[' => return Token::OpenArray,
-                b']' => return Token::CloseArray,
-                b'{' => return Token::OpenBrace,
-                b'}' => return Token::CloseBrace,
-                b'+' | b'-' | b'.' | b'0'..=b'9' => return self.lex_number(c),
+                b'[' => return RawToken::OpenArray,
+                b']' => return RawToken::CloseArray,
+                b'{' => return RawToken::OpenBrace,
+                b'}' => return RawToken::CloseBrace,
+                b'+' | b'-' | b'.' | b'0'..=b'9' => return self.lex_number(c, out),
                 _ => {
                     self.unread();
-                    let word = self.lex_name();
-                    return keyword(word);
+                    self.lex_name(out);
+                    return keyword(out);
                 }
             }
         }
@@ -210,11 +288,11 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_number(&mut self, first: u8) -> Token {
+    /// Lexes a number in `buf`, which starts empty.
+    fn lex_number(&mut self, first: u8, buf: &mut Vec<u8>) -> RawToken {
         // MuPDF builds the number in a scratch buffer, writing NUL where a
         // stray '-' appears; parsing then stops at that NUL. Mirror the
         // buffer exactly so odd inputs give the same values.
-        let mut buf: Vec<u8> = Vec::with_capacity(16);
         let mut real_at: Option<usize> = (first == b'.').then_some(0);
         let neg = first == b'-';
         let mut bad = false;
@@ -254,7 +332,7 @@ impl<'a> Lexer<'a> {
         // When the buffer fills, MuPDF drops the byte it just read.
 
         if bad {
-            return Token::Keyword(buf);
+            return RawToken::Keyword;
         }
         let text = match buf.iter().position(|&b| b == 0) {
             Some(nul) => &buf[..nul],
@@ -269,14 +347,13 @@ impl<'a> Lexer<'a> {
                 } else {
                     fz_atof(text)
                 };
-                Token::Real(value)
+                RawToken::Real(value)
             }
-            None => Token::Int(fast_atoi(text)),
+            None => RawToken::Int(fast_atoi(text)),
         }
     }
 
-    fn lex_name(&mut self) -> Vec<u8> {
-        let mut out = Vec::new();
+    fn lex_name(&mut self, out: &mut Vec<u8>) {
         let mut truncated = false;
         loop {
             if out.len() == MAX_NAME_LENGTH && !truncated {
@@ -289,14 +366,14 @@ impl<'a> Lexer<'a> {
                 }
             };
             let Some(c) = self.read_byte() else {
-                return out;
+                return;
             };
             if is_white(c) || is_delim(c) {
                 self.unread();
-                return out;
+                return;
             }
             if c != b'#' {
-                push(&mut out, c);
+                push(out, c);
                 continue;
             }
             // '#xx' escape. "#00" and malformed escapes keep the '#'.
@@ -339,19 +416,18 @@ impl<'a> Lexer<'a> {
                 }
             }
             if ok {
-                push(&mut out, (hex[0] << 4) + hex[1]);
+                push(out, (hex[0] << 4) + hex[1]);
             } else {
-                push(&mut out, b'#');
+                push(out, b'#');
             }
         }
     }
 
-    fn lex_string(&mut self) -> Token {
-        let mut out = Vec::new();
+    fn lex_string(&mut self, out: &mut Vec<u8>) -> RawToken {
         let mut balance = 1;
         loop {
             let Some(c) = self.read_byte() else {
-                return Token::Error;
+                return RawToken::Error;
             };
             match c {
                 b'(' => {
@@ -361,13 +437,13 @@ impl<'a> Lexer<'a> {
                 b')' => {
                     balance -= 1;
                     if balance == 0 {
-                        return Token::String(out);
+                        return RawToken::String;
                     }
                     out.push(c);
                 }
                 b'\\' => {
                     let Some(e) = self.read_byte() else {
-                        return Token::Error;
+                        return RawToken::Error;
                     };
                     match e {
                         b'n' => out.push(b'\n'),
@@ -416,12 +492,11 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_hex_string(&mut self) -> Token {
-        let mut out = Vec::new();
+    fn lex_hex_string(&mut self, out: &mut Vec<u8>) -> RawToken {
         let mut high: Option<u8> = None;
         loop {
             let Some(c) = self.read_byte() else {
-                return Token::Error;
+                return RawToken::Error;
             };
             match c {
                 c if is_white(c) => {}
@@ -430,7 +505,7 @@ impl<'a> Lexer<'a> {
                     if let Some(h) = high {
                         out.push(h * 16);
                     }
-                    return Token::String(out);
+                    return RawToken::String;
                 }
                 c => {
                     if !c.is_ascii_hexdigit() {
@@ -448,22 +523,22 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn keyword(word: Vec<u8>) -> Token {
-    match word.as_slice() {
-        b"R" => Token::R,
-        b"true" => Token::True,
-        b"trailer" => Token::Trailer,
-        b"false" => Token::False,
-        b"null" => Token::Null,
-        b"newobj" => Token::NewObj,
-        b"obj" => Token::Obj,
-        b"endobj" => Token::EndObj,
-        b"endstream" => Token::EndStream,
-        b"stream" => Token::Stream,
-        b"startxref" => Token::StartXref,
-        b"xref" => Token::Xref,
-        w if w.iter().all(|&b| (b' '..=b'~').contains(&b)) => Token::Keyword(word),
-        _ => Token::Error,
+fn keyword(word: &[u8]) -> RawToken {
+    match word {
+        b"R" => RawToken::R,
+        b"true" => RawToken::True,
+        b"trailer" => RawToken::Trailer,
+        b"false" => RawToken::False,
+        b"null" => RawToken::Null,
+        b"newobj" => RawToken::NewObj,
+        b"obj" => RawToken::Obj,
+        b"endobj" => RawToken::EndObj,
+        b"endstream" => RawToken::EndStream,
+        b"stream" => RawToken::Stream,
+        b"startxref" => RawToken::StartXref,
+        b"xref" => RawToken::Xref,
+        w if w.iter().all(|&b| (b' '..=b'~').contains(&b)) => RawToken::Keyword,
+        _ => RawToken::Error,
     }
 }
 
