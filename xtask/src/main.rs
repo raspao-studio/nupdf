@@ -13,6 +13,7 @@ mod harness;
 mod jpeg;
 mod oracle;
 mod proc;
+mod tables;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,6 +38,13 @@ enum Cmd {
     },
     /// Regenerate corpus/smoke, or verify it is up to date with --check.
     Fixtures {
+        #[arg(long)]
+        check: bool,
+    },
+    /// Regenerate the tables taken from the oracle's sources (the glyph
+    /// list, encodings, CMaps, FreeType's name tables, bidi classes), or
+    /// verify they are up to date with --check.
+    Tables {
         #[arg(long)]
         check: bool,
     },
@@ -101,6 +109,7 @@ fn main() -> Result<()> {
             }
         },
         Cmd::Fixtures { check } => fixtures::run(&root, check),
+        Cmd::Tables { check } => tables::run(&root, check),
         Cmd::Arlington { files } => arlington::report(&files),
         Cmd::Harness {
             tier,

@@ -26,3 +26,12 @@ Changes from the original files: the C code was rewritten in Rust and reduced to
 
 The files in [xtask/data/arlington](xtask/data/arlington) are definitions from the PDF Association's Arlington PDF Model (<https://github.com/pdf-association/arlington-pdf-model>), unmodified, used by the test harness only. They are licensed under the Apache License 2.0, whose text is in [xtask/data/arlington/LICENSE](xtask/data/arlington/LICENSE); the commit they come from is in that directory's README.
 
+## FreeType
+
+The font readers in [crates/nupdf/src/font](crates/nupdf/src/font) follow FreeType 2 (the copy bundled with MuPDF 1.28.6), so that fonts open, fail, map characters and report widths as they do in MuPDF. Portions of this software are copyright (C) 1996-2025 The FreeType Project (https://freetype.org). All rights reserved. FreeType is used under the FreeType License, whose text is included unaltered as [FTL.TXT](crates/nupdf/src/font/FTL.TXT). The PostScript name tables and CFF's standard encodings in [names.rs](crates/nupdf/src/font/names.rs) are generated from FreeType's sources by `cargo xtask tables`.
+
+Changes from the original files: the C code was rewritten in Rust and reduced to what MuPDF asks of FreeType when it loads a PDF's fonts: opening a face (the TrueType, Type 1 and CFF drivers, in MuPDF's order), its charmaps with their validation, glyph names and advance widths. Outlines, hinting, rasterizing, bitmap and color fonts, and the other drivers were left out. This is not FreeType and should not be taken for it.
+
+## UCDN
+
+The bidi classes in [crates/nupdf/src/tables.rs](crates/nupdf/src/tables.rs) are generated from MuPDF's copy of UCDN's Unicode database (source/fitz/ucdn_db.h, Unicode 16.0.0). UCDN is Copyright (C) 2012 Grigori Goronzy and is used under the ISC license: permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies. The data comes from the Unicode Character Database, Copyright (C) 1991-2024 Unicode, Inc., under the Unicode License.
