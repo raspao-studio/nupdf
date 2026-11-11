@@ -71,7 +71,8 @@ Third-party PDFs are never committed; `corpus/manifest.toml` records each source
 | `roundtrip-E40`, `roundtrip-E128`, `roundtrip-Eaes128`, `roundtrip-Eaes256` | MuPDF reading back each side's output encrypted with a new handler (owner password only): objects decrypted, raw stream data, repair, warnings. Bytes differ by design: MuPDF's new /ID and AES secrets are random | exact | M3 |
 | `roundtrip`, `roundtrip-gggg` | MuPDF reading back each side's `clean` (or `clean -gggg`) output: objects, raw stream data, repair, warnings | exact | M3 |
 | `trace` | Device calls per page, against `mutool trace` | matrices within 1e-3 | M4 |
-| `stext` | Characters, bboxes and fonts, against MuPDF's stext JSON | IoU ≥ 0.98 | M5 |
+| `stext` | Each page's blocks, lines and characters (text, font, flags, bidi level, origin, size, quad) against `Page.toStructuredText` walked by oracle/js/stext.js, with default options; the summary adds the M5 measures (pages with MuPDF's text, characters with box IoU ≥ 0.98) | same structure and text, IoU ≥ 0.98 | M5 |
+| `stext-preserve`, `stext-raw` | The same with ligatures, whitespace and spans kept, images and shadings as blocks and hyphens joined; and with no added spaces, CIDs for unknown Unicode, ActualText ignored, no clipping and outline boxes | same structure and text, IoU ≥ 0.98 | M5 |
 | `redact` | Remaining text against MuPDF's redaction; zero targets for nupdf, MuPDF and pdftotext | exact | M6 |
 | `render` | Pixels against `mutool draw` at 72 and 150 dpi | threshold per page | M7 |
 
@@ -112,7 +113,7 @@ cargo +nightly fuzz run -O open_walk -- -max_total_time=3600   # one CPU-hour
 cargo +nightly fuzz run -O lex                                  # until stopped
 ```
 
-Targets live in `fuzz/fuzz_targets`: `lex`, `parse_object`, `filters`, `crypt`, `images`, `encode` (the deflate and CCITT G4 encoders `clean` writes with, each output decoded back) and `open_walk` (open a document, compute its version and page count, load every object, decode every stream, and write it as `clean` does with options the input picks). Seed `fuzz/corpus/open_walk/` with the smoke fixtures and small standard-tier files; corpora and crash artifacts are not committed.
+Targets live in `fuzz/fuzz_targets`: `lex`, `parse_object`, `filters`, `crypt`, `images`, `stext` (pages gathered into structured text with options the first byte picks), `encode` (the deflate and CCITT G4 encoders `clean` writes with, each output decoded back) and `open_walk` (open a document, compute its version and page count, load every object, decode every stream, and write it as `clean` does with options the input picks). Seed `fuzz/corpus/open_walk/` with the smoke fixtures and small standard-tier files; corpora and crash artifacts are not committed.
 
 - cargo-fuzz targets per parser surface: `lex`, `parse_object`, `open_walk`, one per decoder, the content parser and the font parsers.
 - Seeds come from the smoke and standard tiers.

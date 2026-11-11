@@ -112,3 +112,9 @@ path = "fuzz_targets/pixmap.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "stext"
+path = "fuzz_targets/stext.rs"
+test = false
+doc = false

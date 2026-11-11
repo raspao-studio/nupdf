@@ -286,11 +286,32 @@ fn bidi_classes(db: &str, out: &mut String) -> Result<()> {
         let offset = code & ((1 << shift2) - 1);
         get(&bidi, get(&index2, index + offset)?)
     };
+    let category = |code: u32| -> Result<u32> {
+        let get = |v: &[u32], i: u32| {
+            v.get(i as usize)
+                .copied()
+                .context("ucdn index out of range")
+        };
+        let index = get(&index0, code >> (shift1 + shift2))? << shift1;
+        let offset = (code >> shift2) & ((1 << shift1) - 1);
+        let index = get(&index1, index + offset)? << shift2;
+        let offset = code & ((1 << shift2) - 1);
+        let record = get(&index2, index + offset)? as usize;
+        records
+            .get(record * 6)
+            .copied()
+            .context("ucdn record out of range")
+    };
     let mut runs: Vec<(u32, u32)> = Vec::new();
+    let mut categories: Vec<(u32, u32)> = Vec::new();
     for code in 0..0x110000u32 {
         let c = class(code)?;
         if runs.last().is_none_or(|&(_, last)| last != c) {
             runs.push((code, c));
+        }
+        let g = category(code)?;
+        if categories.last().is_none_or(|&(_, last)| last != g) {
+            categories.push((code, g));
         }
     }
     let _ = writeln!(
@@ -313,6 +334,86 @@ fn bidi_classes(db: &str, out: &mut String) -> Result<()> {
             .map(|(s, c)| format!("(0x{s:x}, {c})"))
             .collect();
         let _ = writeln!(out, "    {},", line.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// `ucdn_get_general_category` as runs of code points, as `BIDI_CLASS`."
+    );
+    let _ = writeln!(
+        out,
+        "pub static GENERAL_CATEGORY: [(u32, u8); {}] = [",
+        categories.len()
+    );
+    for chunk in categories.chunks(6) {
+        let line: Vec<String> = chunk
+            .iter()
+            .map(|(s, c)| format!("(0x{s:x}, {c})"))
+            .collect();
+        let _ = writeln!(out, "    {},", line.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    compat_decompositions(db, out)
+}
+
+/// `ucdn_compat_decompose` for the presentation forms structured text
+/// takes apart (U+FB00 to U+FDFF and U+FE70 to U+FEFC).
+fn compat_decompositions(db: &str, out: &mut String) -> Result<()> {
+    let data = numbers(array(db, "decomp_data")?)?;
+    let index0 = numbers(array(db, "decomp_index0")?)?;
+    let index1 = numbers(array(db, "decomp_index1")?)?;
+    let index2 = numbers(array(db, "decomp_index2")?)?;
+    let (shift1, shift2) = (6u32, 4u32);
+    for (name, want) in [("DECOMP_SHIFT1", shift1), ("DECOMP_SHIFT2", shift2)] {
+        if !db.contains(&format!("#define {name} {want}\n")) {
+            bail!("ucdn_db.h changed {name}");
+        }
+    }
+    let get = |v: &[u32], i: u32| {
+        v.get(i as usize)
+            .copied()
+            .context("ucdn decomposition index out of range")
+    };
+    let mut entries: Vec<(u32, Vec<u32>)> = Vec::new();
+    for code in (0xFB00..=0xFDFFu32).chain(0xFE70..=0xFEFC) {
+        let index = get(&index0, code >> (shift1 + shift2))? << shift1;
+        let offset = (code >> shift2) & ((1 << shift1) - 1);
+        let index = get(&index1, index + offset)? << shift2;
+        let offset = code & ((1 << shift2) - 1);
+        let mut at = get(&index2, index + offset)?;
+        let len = get(&data, at)? >> 8;
+        if len == 0 {
+            continue;
+        }
+        at += 1;
+        let mut runes = Vec::new();
+        for _ in 0..len {
+            let u = get(&data, at)?;
+            // decode_utf16, with its test as written.
+            if !(0xd800..=0xdc00).contains(&u) {
+                runes.push(u);
+                at += 1;
+            } else {
+                let lo = get(&data, at + 1)?;
+                runes.push(0x10000 + lo.wrapping_sub(0xdc00) + ((u - 0xd800) << 10));
+                at += 2;
+            }
+        }
+        entries.push((code, runes));
+    }
+    let _ = writeln!(
+        out,
+        "/// `ucdn_compat_decompose` of the presentation forms (U+FB00 to U+FDFF,\n\
+         /// U+FE70 to U+FEFC) that have a decomposition."
+    );
+    let _ = writeln!(
+        out,
+        "pub static COMPAT_DECOMPOSITION: [(u32, &[u32]); {}] = [",
+        entries.len()
+    );
+    for (code, runes) in &entries {
+        let list: Vec<String> = runes.iter().map(|r| format!("0x{r:x}")).collect();
+        let _ = writeln!(out, "    (0x{code:x}, &[{}]),", list.join(", "));
     }
     let _ = writeln!(out, "];\n");
     Ok(())
