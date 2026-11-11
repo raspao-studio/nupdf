@@ -24,7 +24,15 @@ jobs:
         with:
           path: target/oracle/mupdf-${{ steps.oracle.outputs.version }}/build/release/mutool
           key: mupdf-${{ runner.os }}-${{ steps.oracle.outputs.version }}
-      - run: sudo apt-get install -y qpdf
+      # The runner's mirrors sometimes fail to resolve: refresh the index
+      # and retry rather than fail the check.
+      - name: Install qpdf
+        run: |
+          for attempt in 1 2 3; do
+            sudo apt-get update -o Acquire::Retries=3 && sudo apt-get install -y -o Acquire::Retries=3 qpdf && exit 0
+            sleep $((attempt * 15))
+          done
+          exit 1
       - run: cargo xtask oracle build
       - run: cargo test --workspace -- --ignored
       - run: cargo xtask harness --tier smoke
