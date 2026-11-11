@@ -275,7 +275,132 @@ fn content_fixtures() -> Vec<Fixture> {
             "Colorspaces with tint transforms of each function type, shadings of each type, tiling and shading patterns, inline images in named colorspaces and XObjects of each subtype, loaded or failing as MuPDF loads them",
             content_resources(),
         ),
+        fx(
+            "content-run.pdf",
+            "Pages a run processor draws: clips, transparency groups and soft masks, tiling patterns drawn as tiles and cell by cell, shading fills, images with masks, optional content layers, a tagged structure tree with a missing parent, text clips, a crop box and default colorspaces",
+            content_run(),
+        ),
     ]
+}
+
+/// What the run processor turns into device calls, page by page.
+fn content_run() -> Vec<u8> {
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(
+        1,
+        "<</Type/Catalog/Pages 2 0 R/StructTreeRoot 60 0 R\
+         /OCProperties<</OCGs[50 0 R 51 0 R]/D<</OFF[51 0 R]>>>>>>",
+    );
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R 6 0 R 7 0 R]/Count 5/MediaBox[0 0 200 200]/Resources 8 0 R>>");
+    let contents = [
+        // Paths, clips, colors, a gstate underflow and a lone stroke.
+        "1 0 0 rg 0.5 G 3 w [2 1] 0 d 1 J 2 j 10 10 50 50 re B q 0 0 100 100 re W n \
+         0 0 1 1 k 20 20 m 40 60 l 80 20 l h f* Q Q Q 0.25 g /CS0 cs 0.6 scn 5 5 10 10 re f \
+         /Lab CS 50 0 0 SC 1 1 m 2 2 l S 2 0 0 rg 300 0 0 1 0 0 cm 0 0 1 1 re f",
+        // Forms, groups and soft masks.
+        "/GA gs /Fm1 Do /GM gs 0 0 20 20 re f /GN gs /GB gs 0 0 30 30 re B /Fm2 Do",
+        // Patterns and shadings.
+        "/Pattern cs /P1 scn 0 0 100 100 re f /P1 scn 0 0 3 3 re f /Pattern CS /P2 SCN 4 w \
+         10 10 m 90 90 l S /Sh1 sh /GA gs /Pattern cs /P1 scn 0 0 50 50 re f",
+        // Images.
+        "q 50 0 0 50 0 0 cm /Im1 Do /Im2 Do 1 0 0 rg /Im3 Do /Pattern cs /P1 scn /Im3 Do Q \
+         BI /W 2 /H 1 /CS /RGB /BPC 8 /D [1 0 1 0 1 0] ID abcdef EI",
+        // Optional content, structure and text clips.
+        "/OC /oc1 BDC 0 0 5 5 re f EMC /OC /oc2 BDC 0 0 6 6 re f EMC /OC /md BDC 0 0 7 7 re f EMC \
+         /Layer <</Title (L)>> BDC 1 1 1 1 re f EMC \
+         /P <</MCID 0>> BDC 0 0 8 8 re f EMC /Span <</MCID 1 /ActualText (A)>> BDC 9 9 1 1 re f EMC \
+         /Artifact <</MCID 2>> BDC 2 2 2 2 re f EMC \
+         q /OC /oc1 BDC BT /F1 12 Tf 7 Tr 10 10 Td (clip) Tj ET 0 0 50 50 re f EMC Q 0 0 1 1 re f",
+    ];
+    for (i, c) in contents.iter().enumerate() {
+        let page = 3 + i as u32;
+        let extra = match i {
+            0 => "/CropBox[10 10 190 190]",
+            1 => "/Group<</S/Transparency/CS/DeviceRGB/I true>>",
+            4 => "/StructParents 0",
+            _ => "",
+        };
+        pdf.obj(
+            page,
+            &format!(
+                "<</Type/Page/Parent 2 0 R/Contents {} 0 R{extra}>>",
+                40 + page
+            ),
+        );
+        pdf.stream(40 + page, "", c.as_bytes());
+    }
+    pdf.obj(
+        8,
+        "<</ColorSpace<</CS0[/Separation/Spot/DeviceCMYK<</FunctionType 2/Domain[0 1]/C0[0 0 0 0]/C1[0 0 0 1]/N 1>>]\
+         /Lab[/Lab<</WhitePoint[0.9505 1 1.089]>>]/DefaultRGB[/CalRGB<</WhitePoint[1 1 1]>>]>>\
+         /ExtGState<</GA<</ca 0.5/CA 0.5>>/GB<</BM/Multiply>>/GN<</SMask/None/BM/Normal>>\
+         /GM<</SMask<</S/Luminosity/G 21 0 R/BC[0.5]/TR/Identity>>>>>>\
+         /XObject<</Fm1 20 0 R/Fm2 22 0 R/Im1 23 0 R/Im2 24 0 R/Im3 25 0 R>>\
+         /Pattern<</P1 26 0 R/P2<</PatternType 2/Shading 27 0 R>>>>/Shading<</Sh1 27 0 R>>\
+         /Properties<</oc1 50 0 R/oc2 51 0 R/md<</Type/OCMD/OCGs[50 0 R 51 0 R]>>>>\
+         /Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>>>>>",
+    );
+    pdf.stream(
+        20,
+        "/Subtype/Form/BBox[0 0 50 50]/Matrix[1 0 0 1 10 10]/Group<</S/Transparency/I true/K true/CS/DeviceCMYK>>\
+         /Resources<</ColorSpace<</DefaultGray[/CalGray<</WhitePoint[1 1 1]>>]>>>>",
+        b"0 0 1 rg 0 0 20 20 re f /Fm2 Do",
+    );
+    pdf.stream(
+        21,
+        "/Subtype/Form/BBox[0 0 20 20]/Group<</S/Transparency/CS/DeviceGray>>",
+        b"1 g 0 0 10 10 re f",
+    );
+    pdf.stream(
+        22,
+        "/Subtype/Form/BBox[0 0 5 5]/OC 50 0 R",
+        b"0 0 2 2 re f /Fm1 Do",
+    );
+    pdf.stream(
+        23,
+        "/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceRGB/BitsPerComponent 8/SMask 28 0 R/Interpolate true",
+        &[0u8; 12],
+    );
+    pdf.stream(
+        24,
+        "/Subtype/Image/Width 1/Height 1/ColorSpace[/Indexed/DeviceRGB 1<ff000000ff00>]/BitsPerComponent 4/Mask[0 0]",
+        &[0u8; 1],
+    );
+    pdf.stream(
+        25,
+        "/Subtype/Image/Width 8/Height 1/ImageMask true/Decode[1 0]",
+        &[0x55u8],
+    );
+    pdf.stream(
+        26,
+        "/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 10 10]/XStep 10/YStep 10/Resources<<>>",
+        b"0 1 0 rg 0 0 5 5 re f",
+    );
+    pdf.obj(
+        27,
+        "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 100 0]/Extend[true true]\
+         /Function<</FunctionType 2/Domain[0 1]/C0[1 0 0]/C1[0 0 1]/N 1>>>>",
+    );
+    pdf.stream(
+        28,
+        "/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceGray/BitsPerComponent 8/Matte[0]",
+        &[0u8; 4],
+    );
+    pdf.obj(50, "<</Type/OCG/Name(Shown)>>");
+    pdf.obj(
+        51,
+        "<</Type/OCG/Name(Hidden)/Usage<</View<</ViewState/OFF>>>>>>",
+    );
+    pdf.obj(
+        60,
+        "<</Type/StructTreeRoot/K 61 0 R/ParentTree<</Nums[0[62 0 R 63 0 R 64 0 R]]>>/RoleMap<</Artifact/P>>>>",
+    );
+    pdf.obj(61, "<</Type/StructElem/S/Document/P 60 0 R/K[62 0 R]>>");
+    pdf.obj(62, "<</Type/StructElem/S/P/P 61 0 R/K[0 63 0 R]>>");
+    pdf.obj(63, "<</Type/StructElem/S/Span/P 62 0 R/K 1/Alt(alt)>>");
+    // No parent: MuPDF repairs it when it is first reached.
+    pdf.obj(64, "<</Type/StructElem/S/Artifact/K 2>>");
+    pdf.finish_with_xref("")
 }
 
 /// Pages naming resources that load, and that fail to, as MuPDF loads

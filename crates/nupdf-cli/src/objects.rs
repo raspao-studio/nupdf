@@ -366,7 +366,7 @@ fn script_text(text: &[u8], c_string: &[u8]) -> String {
 /// mujs's `chartorune` (Plan 9's): one character of UTF-8, U+FFFD and one
 /// byte for anything that does not decode. Past the end reads as the NUL
 /// that ends the C string.
-fn chartorune(s: &[u8]) -> (u32, usize) {
+pub(crate) fn chartorune(s: &[u8]) -> (u32, usize) {
     const BAD: (u32, usize) = (0xfffd, 1);
     let at = |i: usize| u32::from(s.get(i).copied().unwrap_or(0));
     let c = at(0);

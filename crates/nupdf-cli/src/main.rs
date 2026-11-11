@@ -6,6 +6,7 @@
 
 mod commands;
 mod objects;
+mod trace;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -150,6 +151,9 @@ enum Command {
         #[arg(long)]
         no_resources: bool,
     },
+    /// List each page's device calls, as MuPDF's run processor makes them
+    /// for a page's contents (text is not drawn yet).
+    Trace { file: PathBuf },
     /// Rewrite the whole document as `mutool clean` does: every object in a
     /// plain xref table, object and xref streams unpacked, encryption kept.
     /// The output is read back and compared object by object before it is
@@ -306,8 +310,25 @@ struct Failure {
     message: String,
 }
 
+/// The stack commands run on. Content streams nest as deep as MuPDF's
+/// graphics state stack lets them (about a thousand forms), and each level
+/// is several frames of the interpreter; the pages are only touched as
+/// they are used.
+const STACK_SIZE: usize = 1 << 30;
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    match std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || run(cli))
+        .map(std::thread::JoinHandle::join)
+    {
+        Ok(Ok(code)) => code,
+        _ => ExitCode::FAILURE,
+    }
+}
+
+fn run(cli: Cli) -> ExitCode {
     let limits = nupdf::Limits {
         max_decoded_bytes: cli.max_decoded_bytes,
         max_xref_entries: cli.max_xref_entries,
@@ -414,6 +435,8 @@ fn main() -> ExitCode {
                 objects::operators(&doc, *no_resources),
             )
         }),
+        Command::Trace { file } => open(file)
+            .map(|(doc, facts)| report("nupdf.trace/v0", &facts, &doc, trace::trace(&doc))),
         Command::Clean {
             file,
             output,

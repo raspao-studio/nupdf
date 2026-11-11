@@ -66,14 +66,13 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `outline` (MuPDF's outline iterator, repair pass included) | `pdf/pdf-outline.c` | M3 |
 | `merge` (`mutool merge`: pages, external links, outline items) | `tools/pdfmerge.c` | M3 |
 | `content` (content streams lexed and handed to a processor: the operand stack, ExtGState entries, inline images, contents arrays) | `pdf/pdf-interpret.c` (`pdf_process_stream`, `pdf_process_keyword`, `pdf_process_extgstate`), `pdf/pdf-image.c` (inline images), `pdf/pdf-stream.c` (`pdf_open_contents_stream`, `pdf_open_object_array`, `pdf_load_compressed_inline_image`), `fitz/filter-basic.c` (`fz_open_concat`), `fitz/filter-leech.c`, `fitz/image.c` (`fz_decomp_image_from_stream`) | M4 |
-| `colorspace` (colorspace definitions: families, components, indexed and separation bases) | `pdf/pdf-colorspace.c`, `fitz/colorspace.c` (`fz_new_indexed_colorspace`) | M4 |
-| `interpret` (the run processor) | `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
-| `device` | `fitz/device.c` | M4 |
-| `function` (functions of types 0, 2, 3 and 4, loaded and evaluated) | `pdf/pdf-function.c`, `fitz/device.c` (`fz_eval_function`) | M4 |
-| `shade` (shadings loaded, their functions sampled) | `pdf/pdf-shade.c` | M4 |
-| `resources`, `xobject`, `pattern` | `pdf/pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c` | M4 |
+| `colorspace` (colorspace definitions: families, components, indexed and separation bases; ICC profiles judged by their header as lcms opens it) | `pdf/pdf-colorspace.c`, `fitz/colorspace.c` (`fz_new_indexed_colorspace`, `fz_new_icc_colorspace`), `thirdparty/lcms2/src/cmsio0.c` (`_cmsReadHeader`), `cmspcs.c` (`cmsChannelsOf`) | M4 |
+| `run` (the run processor: gstates, clips, groups and soft masks, patterns, shadings, images, forms, layers, structure, metatext; a page run; the transparency scan) | `pdf/pdf-op-run.c`, `pdf/pdf-run.c` (`pdf_run_page_contents`, `pdf_structure_type`), `pdf/pdf-page.c` (`pdf_resources_use_blending`, `pdf_load_default_colorspaces`), `pdf/pdf-pattern.c`, `pdf/pdf-xobject.c`, `pdf/pdf-struct.c` (`pdf_check_structure_tree`), `pdf/pdf-nametree.c` (`pdf_lookup_number`), `pdf/pdf-interpret.c` (soft masks in `pdf_process_extgstate`) | M4 |
+| `device` (what the interpreter draws to) | `include/mupdf/fitz/device.h`, `fitz/device.c` | M4 |
 | `path` (paths built and bounded as MuPDF builds them) | `fitz/path.c` | M4 |
 | `image` (images as `pdf_load_image` loads them, JPEG 2000 judged by its header as openjpeg reads it) | `pdf/pdf-image.c`, `fitz/image.c` (`fz_new_image_of_size`), `fitz/load-jpx.c`, `thirdparty/openjpeg/src/lib/openjp2/jp2.c` (`opj_jp2_read_header`) | M4 |
+| `function` (functions of types 0, 2, 3 and 4, loaded and evaluated) | `pdf/pdf-function.c`, `fitz/device.c` (`fz_eval_function`) | M4 |
+| `shade` (shadings loaded, their functions sampled) | `pdf/pdf-shade.c` | M4 |
 | `font`, `cmap`, `encoding` | `pdf/pdf-font.c`, `pdf-type3.c`, `pdf-cmap*.c`, `pdf-unicode.c`, `pdf-metrics.c`, `fitz/font.c` | M4 |
 | `layer` (optional content: the default configuration's states and whether a group or membership dictionary hides content) | `pdf/pdf-layer.c` (`pdf_read_ocg`, `pdf_select_layer_config`, `pdf_is_ocg_hidden`) | M4 |
 | `text` (stext) | `fitz/stext-device.c`, `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` | M5 |

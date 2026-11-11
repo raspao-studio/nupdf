@@ -323,6 +323,10 @@ pub struct Store {
     /// times.
     shades: HashMap<i32, Result<Arc<Shade>, String>>,
     pub images: HashMap<i32, Result<Arc<Image>, String>>,
+    pub patterns: HashMap<i32, Arc<crate::run::Pattern>>,
+    /// The structure tree's repaired parents, by element number, once it
+    /// has been checked (MuPDF writes them into the document).
+    pub struct_parents: Option<HashMap<i32, Object>>,
     ocg: Option<Rc<layer::Descriptor>>,
 }
 

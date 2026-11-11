@@ -72,6 +72,11 @@ pub enum Compare {
     /// The distinct warnings and reported errors on MuPDF's stderr must
     /// equal the distinct `/diagnostics/*/message` values.
     Warnings,
+    /// Each page's device calls (`/pages/*/events`) and error must match,
+    /// with text left out on both sides (`without_text`), and numbers
+    /// within a few float steps: MuPDF's build fuses multiply-adds, so a
+    /// matrix or a bounding box can differ in its last bits.
+    Trace,
 }
 
 pub const CHECKS: &[Check] = &[
@@ -201,6 +206,17 @@ pub const CHECKS: &[Check] = &[
         oracle_file_fixup: None,
         reread: None,
         oracle_args: &["resources"],
+    },
+    Check {
+        name: "trace",
+        about: "each page's device calls as MuPDF's run processor makes them for the page's contents (paths, clips, colors, images, shadings, groups, masks, layers, structure), with text left out on both sides until fonts are loaded",
+        oracle_script: "oracle/js/trace.js",
+        nupdf_args: &["trace"],
+        compare: Compare::Trace,
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "clean",
@@ -1146,6 +1162,7 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
                         compare_collection(counts, items, a, b)
                     }
                     Compare::Warnings => compare_warnings(&oracle.stderr, b),
+                    Compare::Trace => compare_trace(a, b),
                 };
                 if result.diffs.is_empty() {
                     Outcome::Match
@@ -1328,6 +1345,197 @@ pub fn compare_collection(
     diffs
 }
 
+/// `Compare::Trace`: the page count, then each page's error and calls; a
+/// page that differs is reported at its first differing call.
+pub fn compare_trace(oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
+    const MAX_REPORTED: usize = 5;
+    let mut diffs = compare(&["/page_count"], oracle, ours);
+    let pages = |v: &Value| {
+        v.get("pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (a, b) = (pages(oracle), pages(ours));
+    let mut differing = 0;
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).unwrap_or(&Value::Null);
+        let y = b.get(i).unwrap_or(&Value::Null);
+        let events = |v: &Value| {
+            without_text(
+                v.get("events")
+                    .and_then(Value::as_array)
+                    .map_or(&[][..], |e| e),
+            )
+        };
+        let (ex, ey) = (events(x), events(y));
+        let error = |v: &Value| v.get("error").cloned().unwrap_or(Value::Null);
+        let diff = if !json_eq(&error(x), &error(y)) {
+            Some(FieldDiff {
+                field: format!("/pages/{i}/error"),
+                oracle: error(x),
+                nupdf: error(y),
+            })
+        } else {
+            (0..ex.len().max(ey.len()))
+                .find(|&k| match (ex.get(k), ey.get(k)) {
+                    (Some(p), Some(q)) => !json_close(p, q),
+                    _ => true,
+                })
+                .map(|k| FieldDiff {
+                    field: format!("/pages/{i}/events/{k} (of {} and {})", ex.len(), ey.len()),
+                    oracle: truncate(ex.get(k).unwrap_or(&Value::Null)),
+                    nupdf: truncate(ey.get(k).unwrap_or(&Value::Null)),
+                })
+        };
+        if let Some(d) = diff {
+            differing += 1;
+            if diffs.len() < MAX_REPORTED {
+                diffs.push(d);
+            }
+        }
+    }
+    if differing > MAX_REPORTED {
+        diffs.push(FieldDiff {
+            field: "/pages (more)".into(),
+            oracle: Value::Null,
+            nupdf: Value::from(format!("{differing} pages differ in total")),
+        });
+    }
+    diffs
+}
+
+/// `json_eq`, with numbers equal within 1e-4 of the larger (or of 1).
+pub fn json_close(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            let (Some(p), Some(q)) = (x.as_f64(), y.as_f64()) else {
+                return false;
+            };
+            p == q || (p - q).abs() <= 1e-4 * p.abs().max(q.abs()).max(1.0)
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| json_close(p, q))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| json_close(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
+/// A trace with text left out: the calls that show text, the clips text
+/// opens (their content stays), and the groups and masks that hold
+/// nothing once text is gone, which is what MuPDF puts around text. Calls
+/// nest as devices see them: a clip until its pop, a group until its end,
+/// a mask until its end and then what it masks until the pop.
+pub fn without_text(events: &[Value]) -> Vec<Value> {
+    #[derive(Default)]
+    struct Node {
+        open: Option<Value>,
+        mask: Vec<Value>,
+        mask_end: Option<Value>,
+        body: Vec<Value>,
+        close: Option<Value>,
+    }
+    fn name(v: &Value) -> &str {
+        v.get(0).and_then(Value::as_str).unwrap_or("")
+    }
+    fn flush(node: Node, out: &mut Vec<Value>) {
+        let Some(open) = node.open else {
+            out.extend(node.body);
+            return;
+        };
+        match name(&open) {
+            "clip_text" | "clip_stroke_text" => out.extend(node.body),
+            "begin_group" | "begin_mask" if node.body.is_empty() => {}
+            _ => {
+                out.push(open);
+                out.extend(node.mask);
+                out.extend(node.mask_end);
+                out.extend(node.body);
+                out.extend(node.close);
+            }
+        }
+    }
+    let mut stack: Vec<Node> = vec![Node::default()];
+    for ev in events {
+        let n = name(ev);
+        let top_open = stack.last().and_then(|t| t.open.as_ref()).map(name);
+        match n {
+            "fill_text" | "stroke_text" | "ignore_text" => {}
+            "clip_path" | "clip_stroke_path" | "clip_image_mask" | "clip_text"
+            | "clip_stroke_text" | "begin_group" | "begin_mask" => stack.push(Node {
+                open: Some(ev.clone()),
+                ..Node::default()
+            }),
+            "end_mask" if top_open == Some("begin_mask") => {
+                if let Some(top) = stack.last_mut()
+                    && top.mask_end.is_none()
+                {
+                    top.mask = std::mem::take(&mut top.body);
+                    top.mask_end = Some(ev.clone());
+                }
+            }
+            "end_group" if top_open == Some("begin_group") => {
+                if let Some(mut top) = stack.pop() {
+                    top.close = Some(ev.clone());
+                    let parent = stack.last_mut().map(|p| &mut p.body);
+                    if let Some(body) = parent {
+                        flush(top, body);
+                    }
+                }
+            }
+            "pop_clip"
+                if top_open.is_some_and(|o| o != "begin_group")
+                    && stack.last().is_some_and(|t| {
+                        name(t.open.as_ref().unwrap_or(&Value::Null)) != "begin_mask"
+                            || t.mask_end.is_some()
+                    }) =>
+            {
+                if let Some(mut top) = stack.pop() {
+                    top.close = Some(ev.clone());
+                    if let Some(parent) = stack.last_mut() {
+                        flush(top, &mut parent.body);
+                    }
+                }
+            }
+            _ => {
+                if let Some(top) = stack.last_mut() {
+                    top.body.push(ev.clone());
+                }
+            }
+        }
+    }
+    // What is left open stays open.
+    while stack.len() > 1 {
+        if let Some(top) = stack.pop()
+            && let Some(parent) = stack.last_mut()
+        {
+            let mut tmp = Vec::new();
+            let keep_open = Node { close: None, ..top };
+            flush_open(keep_open, &mut tmp);
+            parent.body.extend(tmp);
+        }
+    }
+    fn flush_open(node: Node, out: &mut Vec<Value>) {
+        // An unclosed group or mask with nothing in it is still kept, as
+        // its end never came.
+        match node.open.as_ref().map(name) {
+            Some("clip_text" | "clip_stroke_text") | None => out.extend(node.body),
+            _ => {
+                out.extend(node.open);
+                out.extend(node.mask);
+                out.extend(node.mask_end);
+                out.extend(node.body);
+            }
+        }
+    }
+    stack.pop().map(|n| n.body).unwrap_or_default()
+}
+
 fn truncate(v: &Value) -> Value {
     let text = v.to_string();
     if text.len() <= 400 {
@@ -1454,6 +1662,49 @@ pub fn ratchet(baseline: &Baseline, current: &Baseline) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn traces_lose_text_and_what_holds_only_text() {
+        let ev = |v: Value| v.as_array().cloned().unwrap_or_default();
+        let events = ev(json!([
+            ["set_default_colorspaces"],
+            ["begin_group", "blend"],
+            ["fill_text"],
+            ["end_group"],
+            ["begin_mask", "m"],
+            ["fill_path", "in the mask"],
+            ["end_mask"],
+            ["stroke_text"],
+            ["pop_clip"],
+            ["clip_text"],
+            ["fill_path", "clipped by text"],
+            ["pop_clip"],
+            ["clip_path", "c"],
+            ["begin_group", "form"],
+            ["fill_path", "p"],
+            ["end_group"],
+            ["pop_clip"],
+            ["clip_path", "left open"]
+        ]));
+        assert_eq!(
+            without_text(&events),
+            ev(json!([
+                ["set_default_colorspaces"],
+                ["fill_path", "clipped by text"],
+                ["clip_path", "c"],
+                ["begin_group", "form"],
+                ["fill_path", "p"],
+                ["end_group"],
+                ["pop_clip"],
+                ["clip_path", "left open"]
+            ]))
+        );
+        assert!(json_close(
+            &json!([1.0, 612.0]),
+            &json!([1.000_000_1, 612.000_01])
+        ));
+        assert!(!json_close(&json!(1.0), &json!(1.01)));
+    }
 
     fn side(status: Status, json: Option<Value>) -> Side {
         Side {
