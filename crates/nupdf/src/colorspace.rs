@@ -7,14 +7,14 @@
 //! Colorspace definitions, as `pdf_load_colorspace` reads them.
 //!
 //! This is the shape of a colorspace: its family, its number of
-//! components, the base of an indexed or separation space, and the
-//! failures MuPDF throws while reading one. Two parts are not loaded yet:
-//! a separation's tint transform is kept as the object (functions come
-//! with the function item), and an ICC profile is judged by the component
-//! count its header declares, without the profile being parsed.
+//! components, the base of an indexed or separation space with a
+//! separation's tint transform, and the failures MuPDF throws while
+//! reading one. An ICC profile is judged by the component count its header
+//! declares; the profile itself is not parsed.
 
 use crate::diag::report;
 use crate::document::Document;
+use crate::function::{self, Function};
 use crate::object::Object;
 
 /// MuPDF's FZ_MAX_COLORS.
@@ -40,7 +40,7 @@ pub enum ColorSpace {
     Separation {
         n: usize,
         base: Box<ColorSpace>,
-        tint: Object,
+        tint: Box<Function>,
     },
 }
 
@@ -263,10 +263,11 @@ fn load_devicen(doc: &Document, items: &[Object], cycle: &mut Cycle) -> Result<C
         _ => 1,
     };
     let base = load_imp(doc, &get(2), cycle)?;
+    let tint = function::load(doc, &get(3), n, base.n())?;
     Ok(ColorSpace::Separation {
         n,
         base: Box::new(base),
-        tint: get(3),
+        tint: Box::new(tint),
     })
 }
 
@@ -295,8 +296,15 @@ trailer<</Root 1 0 R/Size 3>>\n"[..],
         assert_eq!(n("/RGB"), Ok(3));
         assert_eq!(n("/Pattern"), Ok(1));
         assert_eq!(n("[/CalRGB <<>>]"), Ok(3));
-        assert_eq!(n("[/DeviceN [/A /B] /CMYK null]"), Ok(2));
-        assert_eq!(n("[/Separation /Spot /RGB null]"), Ok(1));
+        let tint = "<</FunctionType 2/Domain[0 1]/N 1>>";
+        assert_eq!(n(&format!("[/DeviceN [/A /B] /CMYK {tint}]")), Ok(2));
+        assert_eq!(n(&format!("[/Separation /Spot /RGB {tint}]")), Ok(1));
+        // A missing tint transform reads as a sample function with no
+        // sizes.
+        assert_eq!(
+            n("[/Separation /Spot /RGB null]"),
+            Err("syntax error: too few sample function dimension sizes".into())
+        );
         assert_eq!(n("[/I /RGB 1 <ff0000>]"), Ok(1));
         assert_eq!(
             n("/Indexed"),
