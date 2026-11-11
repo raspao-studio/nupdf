@@ -72,6 +72,31 @@ pub struct Mesh {
     pub data: Vec<u8>,
 }
 
+impl Shade {
+    /// `fz_bound_shade`: axial and radial shadings by their /BBox, the
+    /// others by their domain or mesh decode range within it.
+    pub fn bound(&self, ctm: Matrix) -> Rect {
+        let ctm = self.matrix.concat(ctm);
+        let mesh = match &self.data {
+            ShadeData::Function { matrix, domain, .. } => {
+                Rect::new(domain[0][0], domain[0][1], domain[1][0], domain[1][1]).transform(*matrix)
+            }
+            ShadeData::Mesh(m) => {
+                let min = |a: f32, b: f32| if a < b { a } else { b };
+                let max = |a: f32, b: f32| if a > b { a } else { b };
+                Rect::new(
+                    min(m.x[0], m.x[1]),
+                    min(m.y[0], m.y[1]),
+                    max(m.x[0], m.x[1]),
+                    max(m.y[0], m.y[1]),
+                )
+            }
+            ShadeData::Axial { .. } => return self.bbox.transform(ctm),
+        };
+        mesh.intersect(self.bbox).transform(ctm)
+    }
+}
+
 /// `pdf_to_matrix`: identity unless it is an array.
 fn to_matrix(doc: &Document, v: &Object) -> Matrix {
     let Object::Array(a) = doc.resolve(v) else {
