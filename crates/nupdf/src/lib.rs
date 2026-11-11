@@ -48,8 +48,10 @@ pub mod path;
 pub mod pixmap;
 pub mod print;
 pub mod rearrange;
+pub mod regexp;
 pub mod repair;
 pub mod run;
+pub mod search;
 pub mod shade;
 pub mod slots;
 pub mod stext;
@@ -60,6 +62,7 @@ pub mod strtof;
 pub mod tables;
 pub mod text;
 pub mod text_string;
+pub mod unicode;
 pub mod write;
 pub mod xref;
 

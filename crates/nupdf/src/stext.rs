@@ -23,6 +23,7 @@ use crate::object::Object;
 use crate::path::{Path, StrokeState};
 use crate::shade::Shade;
 use crate::text::{Text, TextItem, TextSpan};
+use crate::unicode::{CATEGORY_MN, compat_decompose, general_category, is_hyphen};
 
 /// `fz_stext_options` flags.
 pub mod flags {
@@ -73,9 +74,6 @@ const FAKE_BOLD_MAX_DIST: f32 = 0.1;
 
 const NON_ACCURATE_GLYPH_ADDED_SPACE: i32 = -2;
 const NON_ACCURATE_GLYPH: i32 = -1;
-
-/// `UCDN_GENERAL_CATEGORY_MN`: non-spacing marks.
-const CATEGORY_MN: u8 = 12;
 
 /// `fz_stext_options`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -316,32 +314,6 @@ fn rune_index(s: &[u8], idx: usize) -> i32 {
         }
         idx -= 1;
     }
-}
-
-/// `ucdn_get_general_category`.
-pub fn general_category(c: i32) -> u8 {
-    let table = &crate::tables::GENERAL_CATEGORY;
-    let Some(c) = u32::try_from(c).ok().filter(|&c| c < 0x110000) else {
-        // ucdn's record 0.
-        return 2;
-    };
-    let i = table.partition_point(|&(start, _)| start <= c);
-    table[i.saturating_sub(1)].1
-}
-
-/// `ucdn_compat_decompose` of a presentation form.
-fn compat_decompose(c: i32) -> Option<&'static [u32]> {
-    let c = u32::try_from(c).ok()?;
-    let table = &crate::tables::COMPAT_DECOMPOSITION;
-    table
-        .binary_search_by_key(&c, |&(k, _)| k)
-        .ok()
-        .map(|i| table[i].1)
-}
-
-/// `fz_is_unicode_hyphen`.
-fn is_hyphen(c: i32) -> bool {
-    c == '-' as i32 || c == 0xAD || c == 0x2010 || c == 0x2011
 }
 
 /// `may_add_space`.
@@ -1460,12 +1432,5 @@ mod tests {
         let o = Options::parse("clip-rect=0:0:10:20").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(o.clip, Rect::new(0.0, 0.0, 10.0, 20.0));
         assert!(Options::parse("bogus").is_err());
-    }
-
-    #[test]
-    fn categories_and_decompositions_come_from_ucdn() {
-        assert_eq!(general_category(0x0301), CATEGORY_MN);
-        assert_ne!(general_category(0x41), CATEGORY_MN);
-        assert_eq!(compat_decompose(0xFB01), Some(&[0x66u32, 0x69][..]));
     }
 }

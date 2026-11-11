@@ -9,6 +9,7 @@ mod extract;
 mod inventory;
 mod md5;
 mod objects;
+mod search;
 mod stext;
 mod trace;
 
@@ -201,6 +202,26 @@ enum Command {
         /// chars by default.
         #[arg(long)]
         fields: Option<String>,
+    },
+    /// Find a needle in the pages' text, as MuPDF searches: each hit with
+    /// its quads, its text and the content ids of its characters.
+    Search {
+        file: PathBuf,
+        needle: String,
+        /// MuPDF's search options, comma-separated: exact, ignore-case,
+        /// ignore-diacritics, regexp, keep-lines, keep-paragraphs,
+        /// keep-hyphens.
+        #[arg(long, default_value = "")]
+        options: String,
+        /// MuPDF's stext options, as for `stext`.
+        #[arg(long, default_value = "")]
+        stext_options: String,
+        /// The pages, in MuPDF's syntax (`1-3,7`, `N` for the last).
+        #[arg(long)]
+        pages: Option<String>,
+        /// Stop after this many hits.
+        #[arg(long)]
+        max_items: Option<usize>,
     },
     /// List the fonts the pages use, as `mutool info` finds them, with
     /// what each loads as; --extract writes the embedded font programs as
@@ -547,6 +568,40 @@ fn run(cli: Cli) -> ExitCode {
                 Err(e) => return fail(usage(e), cli.pretty),
             };
             return emit_extracted(extracted, &facts, &doc, cli.pretty);
+        }
+        Command::Search {
+            file,
+            needle,
+            options,
+            stext_options,
+            pages,
+            max_items,
+        } => {
+            let usage = |message: String| Failure {
+                exit: Exit::Usage,
+                code: "usage.bad_option",
+                message,
+            };
+            nupdf::search::parse_options(options)
+                .map_err(usage)
+                .and_then(|o| {
+                    nupdf::stext::Options::parse(stext_options)
+                        .map_err(usage)
+                        .map(|s| (o, s))
+                })
+                .and_then(|(o, s)| open(file).map(|(doc, facts)| (o, s, doc, facts)))
+                .and_then(|(o, s, doc, facts)| {
+                    let args = search::Args {
+                        needle,
+                        options: o,
+                        stext: s,
+                        pages: pages.as_deref(),
+                        max_items: *max_items,
+                    };
+                    search::search(&doc, &args)
+                        .map_err(usage)
+                        .map(|body| report("nupdf.search/v0", &facts, &doc, body))
+                })
         }
         Command::Stext { file, options } => nupdf::stext::Options::parse(options)
             .map_err(|message| Failure {

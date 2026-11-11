@@ -395,3 +395,16 @@ The output item adds `nupdf extract`. Its structure is the stext device's (D34) 
 - **Markdown is a reading of the blocks**, not MuPDF's. A block whose largest characters are 1.2, 1.4 or 1.8 times the page's body size (the size most characters have, to half a point) is a heading of level 3, 2 or 1, and neighbouring heading blocks of one size are one heading; a line that starts with a bullet starts a list item, which the lines indented to its text continue; other lines join into a paragraph with spaces, or without one after a joined hyphen. Bold and italic runs that hold a letter or digit are marked. Markdown's syntax characters are escaped. Each page starts with `<!-- p3 -->`, and image blocks are left out.
 - **JSON lines** give a `nupdf.extract.page/v0` object per page, each with `doc_id`, then the report without pages. Text and Markdown go to stdout and the report to stderr, so a pipe gets only the text.
 
+## D36. Search is MuPDF's, from its text transforms to its regular expressions
+
+*2026-11-11*
+
+The search item adds `nupdf search`, a port of `fz_match_stext_page_cb`. The checks `search`, `search-icase` and `search-regexp` compare each page's hits, quad by quad, with `StructuredText.search` (oracle/js/search.js).
+
+- **The haystack is the page flattened as MuPDF flattens it**: lines joined by a space, blocks by a space, a soft hyphen or a line `dehyphenate` joined dropped with its line break (unless `keep-hyphens`), line and paragraph breaks kept as newlines with `keep-lines` and `keep-paragraphs`; each character knows where it came from, and added spaces come from nowhere.
+- **Haystack and needle are transformed alike**: compatibility decomposition, then the composition of marks after their sorting by combining class, full-width ASCII made ASCII, hyphens made `-`, spaces folded into one, and with the options upper case (`fz_toupper`) and non-spacing marks dropped. So `é` finds `é` and `fi` finds the ligature. The UCDN data (categories, combining classes, decompositions, compositions) and MuPDF's case tables are generated from the oracle by `cargo xtask tables` into `unicode`.
+- **Regular expressions are MuPDF's** (`regexp.c`, from MuJS): JavaScript's syntax with captures, back-references, lookahead, classes and counted repeats, compiled per needle and run by backtracking with MuPDF's limits (4096 levels, 2^20 steps for a search, 32K instructions); a pattern that does not compile fails each page with MuPDF's message (`regcomp failure: ...`). Case-insensitive classes give MuPDF's answers but find them from the case tables instead of trying every rune of each range, which MuPDF does and which can take minutes on `[\W]`.
+- **A hit's quads** are its characters' quads, a character merged into the quad before it where it continues it (within half a size along the line and a tenth across, as MuPDF measures it). Hits made only of added spaces are skipped, as in MuPDF.
+- **Hits carry content ids** (D35): `id` for a hit within one span (`p3.b2.l4.s1:5-12`, from 0, the end excluded), otherwise `begin` and `end`, and their text.
+- **An empty needle finds nothing.** MuPDF returns no hits for an empty needle; one that becomes empty when transformed (only marks, with `ignore-diacritics`) would match everywhere without moving on in MuPDF, and finds nothing here.
+
