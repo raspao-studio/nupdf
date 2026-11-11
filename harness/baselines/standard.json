@@ -237028,7 +237028,7 @@
       "pdfjs/test/pdfs/GHOSTSCRIPT-698804-1-fuzzed.pdf": "match",
       "pdfjs/test/pdfs/IdentityToUnicodeMap_charCodeOf.pdf": "match",
       "pdfjs/test/pdfs/IndexedCS_negative_and_high.pdf": "match",
-      "pdfjs/test/pdfs/PDFBOX-3148-2-fuzzed.pdf": "mismatch",
+      "pdfjs/test/pdfs/PDFBOX-3148-2-fuzzed.pdf": "match",
       "pdfjs/test/pdfs/PDFBOX-4352-0.pdf": "match",
       "pdfjs/test/pdfs/PDFJS-7562-reduced.pdf": "match",
       "pdfjs/test/pdfs/PDFJS-9279-reduced.pdf": "match",

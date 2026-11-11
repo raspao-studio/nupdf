@@ -325,8 +325,10 @@ impl Document {
     }
 
     fn build_page_map(&self, state: &crate::document::State) -> Option<PageMap> {
+        // MuPDF reports the caught error (a format error) before warning.
         let fail = |e: String| {
-            self.diagnostics().warn("page.tree", e);
+            self.diagnostics()
+                .warn("page.tree", crate::diag::report::line(&e));
             self.diagnostics().warn(
                 "page.tree_fallback",
                 "page tree load failed; falling back to slow lookup",

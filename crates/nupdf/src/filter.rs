@@ -823,6 +823,16 @@ impl Source for Lzw<'_> {
 
 // ---- ASCIIHex, ASCII85, RunLength ---------------------------------------
 
+/// "bad data in <filter>: '%c'" as MuPDF prints it: a NUL ends the line
+/// there, and a byte above 127 is not text, so it reads back as U+FFFD.
+fn bad_data(filter: &str, c: u8) -> String {
+    match c {
+        0 => format!("bad data in {filter}: '"),
+        0x80.. => format!("bad data in {filter}: '\u{FFFD}'"),
+        _ => format!("bad data in {filter}: '{}'", c as char),
+    }
+}
+
 /// MuPDF's whitespace for these filters.
 fn is_white(c: u8) -> bool {
     matches!(c, b'\n' | b'\r' | b'\t' | b' ' | 0 | 0x0c | 0x08 | 0x7f)
@@ -858,10 +868,7 @@ impl Source for AsciiHex<'_> {
                 self.eod = true;
                 break;
             } else if !is_white(c) {
-                return Err(report::format(&format!(
-                    "bad data in ahxd: '{}'",
-                    c as char
-                )));
+                return Err(report::format(&bad_data("ahxd", c)));
             }
         }
         Ok(if out.is_empty() {
@@ -919,10 +926,7 @@ impl Source for Ascii85<'_> {
                 self.eod = true;
                 break;
             } else if !is_white(c) {
-                return Err(report::format(&format!(
-                    "bad data in a85d: '{}'",
-                    c as char
-                )));
+                return Err(report::format(&bad_data("a85d", c)));
             }
         }
         Ok(if out.is_empty() {
@@ -1271,6 +1275,13 @@ fn put_component(buf: &mut [u8], x: usize, bpc: usize, value: u32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bad_data_reads_as_mupdf_prints_it() {
+        assert_eq!(bad_data("a85d", b'x'), "bad data in a85d: 'x'");
+        assert_eq!(bad_data("a85d", 0xb1), "bad data in a85d: '\u{FFFD}'");
+        assert_eq!(bad_data("ahxd", 0), "bad data in ahxd: '");
+    }
+
     use super::*;
     use std::io::Write;
 
