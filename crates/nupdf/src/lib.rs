@@ -41,6 +41,7 @@ pub mod link;
 pub mod merge;
 mod names;
 pub mod object;
+pub mod order;
 pub mod outline;
 pub mod page;
 pub mod para;

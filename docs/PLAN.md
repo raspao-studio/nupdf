@@ -254,7 +254,7 @@ MuPDF reference: `fitz/stext-device.c`, `stext-output.c`, `stext-search.c`, `ste
 - [x] Search: literal and regex, case- and diacritic-insensitive, across hyphenation and line breaks; hits carry quads and span ids
 - [x] Paragraph, column and table segmentation (`stext-para`, `stext-boxer`, `stext-table`), at parity first
 - [x] Page-parallel extraction with output identical at every thread count
-- [ ] Opt-in improved reading order, scored against hand-labeled ground truth rather than MuPDF
+- [x] Opt-in improved reading order, scored against hand-labeled ground truth rather than MuPDF
 - [x] Bench pairs: against `mutool draw -F stext.json`, plus, for context, PyMuPDF, pypdf, pdfplumber, pdfminer.six, pdftotext and pdf_oxide
 - [x] `roundtrip-text` check: MuPDF's text of each side's `clean` output, the same on both (moved from M3's exit)
 

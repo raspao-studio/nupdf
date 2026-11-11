@@ -170,7 +170,7 @@ enum Command {
         /// x0:y0:x1:y1, use-cid-for-unknown-unicode,
         /// use-gid-for-unknown-unicode, ignore-actualtext, vectors,
         /// lazy-vectors, fuzzy-vectors, segment, paragraph-break,
-        /// table-hunt.
+        /// table-hunt; and nupdf's own reading-order (DECISIONS D38).
         #[arg(long, default_value = "")]
         options: String,
         /// Work on this many threads, a page per thread at a time; the

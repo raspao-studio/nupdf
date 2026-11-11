@@ -49,6 +49,9 @@ pub mod flags {
     pub const ACCURATE_SIDE_BEARINGS: u32 = 1 << 19;
     pub const LAZY_VECTORS: u32 = 1 << 20;
     pub const FUZZY_VECTORS: u32 = 1 << 21;
+    /// nupdf's own: blocks put in reading order (DECISIONS D38). MuPDF
+    /// has no such option.
+    pub const READING_ORDER: u32 = 1 << 30;
 }
 
 /// Vector block flags (`FZ_STEXT_VECTOR_IS_STROKED` and the rest).
@@ -145,6 +148,7 @@ impl Options {
                 "segment" => flags::SEGMENT,
                 "paragraph-break" => flags::PARAGRAPH_BREAK,
                 "table-hunt" => flags::TABLE_HUNT,
+                "reading-order" => flags::READING_ORDER,
                 _ => return Err(format!("unknown stext option: {key}")),
             };
             if on {
@@ -574,6 +578,9 @@ impl<'a> StextDevice<'a> {
         }
         if self.flags & flags::TABLE_HUNT != 0 {
             crate::table::table_hunt(&mut self.page);
+        }
+        if self.flags & flags::READING_ORDER != 0 {
+            crate::order::reading_order(&mut self.page);
         }
         self.page
     }

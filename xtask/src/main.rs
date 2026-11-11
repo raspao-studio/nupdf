@@ -13,6 +13,7 @@ mod harness;
 mod jpeg;
 mod oracle;
 mod proc;
+mod reading_order;
 mod tables;
 
 use std::path::{Path, PathBuf};
@@ -77,6 +78,9 @@ enum Cmd {
     /// Check files against the Arlington rules the harness applies, and
     /// print each one's violations.
     Arlington { files: Vec<std::path::PathBuf> },
+    /// Score nupdf's reading order, MuPDF's and the `reading-order`
+    /// option's, against the hand-labeled pages in corpus/reading-order.
+    ReadingOrder,
     /// List or fetch public corpora.
     Corpus {
         #[command(subcommand)]
@@ -129,6 +133,7 @@ fn main() -> Result<()> {
             runs,
             sample,
         } => bench::run(&root, &tier, pair.as_deref(), runs, sample),
+        Cmd::ReadingOrder => reading_order::run(&root),
         Cmd::Corpus { action } => match action {
             CorpusCmd::List => corpus::list(&root),
             CorpusCmd::Fetch { name } => corpus::fetch(&root, &name),

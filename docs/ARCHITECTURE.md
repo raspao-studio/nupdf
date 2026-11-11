@@ -87,6 +87,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `para` (paragraph breaking: titles by underline or bold font, indents, line-height changes, trailing gaps, justified text, list items) | `fitz/stext-para.c` | M5 |
 | `table` (table hunting: candidate areas from rafts of rectangles and from segments, grids from the gaps in content and the lines drawn, cells merged and scored, Table/TR/TD structures with a grid block) | `fitz/stext-table.c`, `fitz/stext-raft.c` (the flotilla) | M5 |
 | `stext_tree` (the page as MuPDF's linked lists of blocks while the passes rework it, and its block iterators) | `fitz/stext-iterator.c`; the list handling of `stext-boxer.c` and `stext-table.c` | M5 |
+| `order` (opt-in reading order: a recursive XY-cut of the blocks, D38) | nupdf's own | M5 |
 | `segment` (page segmentation: the boxer's empty rectangles, splits at the widest gaps, `Div` structure blocks; page fills dropped) | `fitz/stext-boxer.c` | M5 |
 | `extract` (content ids, spans, the text of each level, Markdown) | nupdf's own; the text follows `fitz/stext-output.c` (`do_as_text`, in `stext`) | M5 |
 | `search` (search in structured text: flattening, text transforms, finders, quads) | `fitz/stext-search.c`, `fitz/util.c` (`fz_new_buffer_from_flattened_stext_page`) | M5 |
