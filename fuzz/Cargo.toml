@@ -105,3 +105,10 @@ path = "fuzz_targets/cmap.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pixmap"
+path = "fuzz_targets/pixmap.rs"
+test = false
+doc = false
+bench = false

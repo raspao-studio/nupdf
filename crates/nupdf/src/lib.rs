@@ -43,6 +43,7 @@ pub mod outline;
 pub mod page;
 pub mod parse;
 pub mod path;
+pub mod pixmap;
 pub mod print;
 pub mod rearrange;
 pub mod repair;
