@@ -243,12 +243,25 @@ fn block_value(block: &Block, id: &str, f: &Fields) -> Value {
         Block::Text(t) => ("text", t.bbox),
         Block::Image(i) => ("image", i.bbox),
         Block::Vector(v) => ("vector", v.bbox),
+        Block::Struct(s) => ("struct", s.bbox),
     };
     if f.has("type") {
         m.insert("type".into(), kind.into());
     }
     if f.has("bbox") {
         m.insert("bbox".into(), rect(bbox));
+    }
+    if let Block::Struct(s) = block {
+        if f.has("type") {
+            m.insert("standard".into(), s.standard.into());
+        }
+        let blocks: Vec<Value> = s
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| block_value(b, &format!("{id}.b{}", i + 1), f))
+            .collect();
+        m.insert("blocks".into(), blocks.into());
     }
     if let Block::Text(t) = block {
         if f.depth == 1 && f.has("text") {
@@ -271,10 +284,7 @@ fn block_value(block: &Block, id: &str, f: &Fields) -> Value {
 fn blocks_text(blocks: &[&Block]) -> String {
     let mut out = String::new();
     for b in blocks {
-        if let Block::Text(t) = b {
-            stext::block_text(t, &mut out);
-            out.push('\n');
-        }
+        stext::blocks_text(std::slice::from_ref(*b), &mut out);
     }
     out
 }

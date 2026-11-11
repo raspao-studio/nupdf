@@ -7,7 +7,7 @@
 use nupdf::Document;
 use nupdf::geometry::{Point, Quad, Rect};
 use nupdf::parallel::PageResult;
-use nupdf::stext::{Block, Options, StextChar, StextLine, StextPage};
+use nupdf::stext::{Block, Options, StextChar, StextLine, StructBlock};
 use serde::ser::{SerializeMap, SerializeSeq, SerializeTuple};
 use serde::{Serialize, Serializer};
 
@@ -141,7 +141,7 @@ impl Serialize for PageJson<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut map = s.serialize_map(Some(1))?;
         match self.0 {
-            Ok(page) => map.serialize_entry("blocks", &Blocks(page))?,
+            Ok(page) => map.serialize_entry("blocks", &Blocks(&page.blocks))?,
             Err(e) => map.serialize_entry("error", e)?,
         }
         map.end()
@@ -197,12 +197,12 @@ fn char_text(c: i32) -> char {
         .unwrap_or('\u{fffd}')
 }
 
-struct Blocks<'a>(&'a StextPage);
+struct Blocks<'a>(&'a [Block]);
 
 impl Serialize for Blocks<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut seq = s.serialize_seq(Some(self.0.blocks.len()))?;
-        for b in &self.0.blocks {
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for b in self.0 {
             match b {
                 Block::Text(t) => seq.serialize_element(&TextJson {
                     bbox: rect(t.bbox),
@@ -220,6 +220,7 @@ impl Serialize for Blocks<'_> {
                     bbox: rect(v.bbox),
                     flags: v.flags,
                 })?,
+                Block::Struct(st) => seq.serialize_element(&StructJson(st))?,
             }
         }
         seq.end()
@@ -272,6 +273,23 @@ impl Serialize for VectorJson {
         map.serialize_entry("type", "vector")?;
         map.serialize_entry("bbox", &self.bbox)?;
         map.serialize_entry("flags", &self.flags)?;
+        map.end()
+    }
+}
+
+/// A structure block as the glue's `beginStruct` gives it: its standard
+/// and raw types and its index, with the blocks within it.
+struct StructJson<'a>(&'a StructBlock);
+
+impl Serialize for StructJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let st = self.0;
+        let mut map = s.serialize_map(Some(5))?;
+        map.serialize_entry("type", "struct")?;
+        map.serialize_entry("standard", st.standard)?;
+        map.serialize_entry("raw", &st.raw)?;
+        map.serialize_entry("index", &st.index)?;
+        map.serialize_entry("blocks", &Blocks(&st.blocks))?;
         map.end()
     }
 }

@@ -349,6 +349,30 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["vectors,lazy-vectors,fuzzy-vectors"],
     },
     Check {
+        name: "stext-segment",
+        about: "structured text split into parts at the page's widest gaps, each part's blocks in a Div structure, as MuPDF's boxer splits it",
+        oracle_script: "oracle/js/stext.js",
+        nupdf_args: &["stext", "--options", "segment"],
+        compare: Compare::Stext,
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["segment"],
+    },
+    Check {
+        name: "stext-segment-vectors",
+        about: "segmented structured text with vector blocks, whose boxes are content the split must go around",
+        oracle_script: "oracle/js/stext.js",
+        nupdf_args: &["stext", "--options", "vectors,segment"],
+        compare: Compare::Stext,
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["vectors,segment"],
+    },
+    Check {
         name: "stext-raw",
         about: "structured text with no spaces added, CIDs for unknown Unicode, ActualText ignored, no clipping, and boxes from glyph outlines",
         oracle_script: "oracle/js/stext.js",
@@ -1805,14 +1829,12 @@ pub fn stext_metrics(oracle: &Value, ours: &Value) -> StextMetrics {
             .unwrap_or_default()
     };
     let (a, b) = (pages(oracle), pages(ours));
-    let chars = |p: &Value| -> Vec<Value> {
-        let mut out = Vec::new();
-        for block in p
-            .get("blocks")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
+    fn block_chars(blocks: Option<&Value>, out: &mut Vec<Value>) {
+        for block in blocks.and_then(Value::as_array).into_iter().flatten() {
+            if block["type"] == "struct" {
+                block_chars(block.get("blocks"), out);
+                continue;
+            }
             for line in block
                 .get("lines")
                 .and_then(Value::as_array)
@@ -1828,6 +1850,10 @@ pub fn stext_metrics(oracle: &Value, ours: &Value) -> StextMetrics {
                 );
             }
         }
+    }
+    let chars = |p: &Value| -> Vec<Value> {
+        let mut out = Vec::new();
+        block_chars(p.get("blocks"), &mut out);
         out
     };
     for (i, x) in a.iter().enumerate() {
@@ -1855,12 +1881,18 @@ pub fn stext_metrics(oracle: &Value, ours: &Value) -> StextMetrics {
 /// line, an empty line after each block.
 pub fn stext_page_text(page: &Value) -> String {
     let mut out = String::new();
-    for block in page
-        .get("blocks")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    blocks_text(page.get("blocks"), &mut out);
+    out
+}
+
+/// The text of a list of stext blocks, the blocks within structures in
+/// place.
+fn blocks_text(blocks: Option<&Value>, out: &mut String) {
+    for block in blocks.and_then(Value::as_array).into_iter().flatten() {
+        if block["type"] == "struct" {
+            blocks_text(block.get("blocks"), out);
+            continue;
+        }
         let Some(lines) = block.get("lines").and_then(Value::as_array) else {
             continue;
         };
@@ -1877,7 +1909,6 @@ pub fn stext_page_text(page: &Value) -> String {
         }
         out.push('\n');
     }
-    out
 }
 
 /// Intersection over union of two `[x0, y0, x1, y1]` boxes; boxes with no
@@ -1954,7 +1985,23 @@ fn stext_page_diff(at: &str, x: &Value, y: &Value) -> Option<FieldDiff> {
             .cloned()
             .unwrap_or_default()
     };
-    let (bx, by) = (list(x, "blocks"), list(y, "blocks"));
+    diff_blocks(at, &list(x, "blocks"), &list(y, "blocks"))
+}
+
+/// The first difference between two lists of stext blocks, structure
+/// blocks compared by their types and index and the blocks within them.
+fn diff_blocks(at: &str, bx: &[Value], by: &[Value]) -> Option<FieldDiff> {
+    let diff = |field: String, o: &Value, n: &Value| FieldDiff {
+        field,
+        oracle: truncate(o),
+        nupdf: truncate(n),
+    };
+    let list = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
     if bx.len() != by.len() {
         return Some(diff(
             format!("{at}/blocks (count)"),
@@ -1962,12 +2009,27 @@ fn stext_page_diff(at: &str, x: &Value, y: &Value) -> Option<FieldDiff> {
             &json!(by.len()),
         ));
     }
-    for (bi, (p, q)) in bx.iter().zip(&by).enumerate() {
+    for (bi, (p, q)) in bx.iter().zip(by).enumerate() {
         let at = format!("{at}/blocks/{bi}");
         for key in ["type", "flags"] {
             if !json_eq(&p[key], &q[key]) {
                 return Some(diff(format!("{at}/{key}"), &p[key], &q[key]));
             }
+        }
+        if p["type"] == "struct" {
+            for key in ["standard", "raw", "index"] {
+                if !json_eq(&p[key], &q[key]) {
+                    return Some(diff(format!("{at}/{key}"), &p[key], &q[key]));
+                }
+            }
+            if let Some(d) = diff_blocks(
+                &format!("{at}/blocks"),
+                &list(p, "blocks"),
+                &list(q, "blocks"),
+            ) {
+                return Some(d);
+            }
+            continue;
         }
         if box_iou(&p["bbox"], &q["bbox"]) < 0.98 {
             return Some(diff(format!("{at}/bbox"), &p["bbox"], &q["bbox"]));
