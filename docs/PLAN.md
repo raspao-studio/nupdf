@@ -12,7 +12,7 @@ Related docs: [ARCHITECTURE](ARCHITECTURE.md) · [AGENT-INTERFACE](AGENT-INTERFA
 | M1 | Syntax, xref, repair, page tree | ~25k lines | done |
 | M2 | Filters and encryption | ~15k | done |
 | M3 | Writer and structural editing | ~10k | done |
-| M4 | Content streams, resources, fonts | ~25k | |
+| M4 | Content streams, resources, fonts | ~25k | in progress |
 | M5 | Text extraction and search | ~15k | |
 | M6 | Redaction and verification | ~5k plus verifier | |
 | M7 | Rendering | ~30k | |
@@ -115,7 +115,7 @@ MuPDF reference: `pdf-lex.c`, `pdf-parse.c`, `pdf-object.c`, `pdf-xref.c`, `pdf-
 | `pages` (page lookup, inherited attributes) | 100% (5,123 / 5,123) | |
 | `objects` (every object, raw stream lengths) | 99.98% (5,122 / 5,123) | 1 oracle timeout (`base64image.pdf`) |
 | `streams` (every non-image stream, decoded; M2) | 100% (5,123 / 5,123) | |
-| `warnings` (distinct warnings and reported errors) | 99.5% (5,095 / 5,123) | Errors MuPDF reports from code paths nupdf does not run yet, mostly `invalid key in dict` and syntax errors in objects that only rendering touches |
+| `warnings` (distinct warnings and reported errors) | 99.5% (5,096 / 5,123) | Errors MuPDF reports from code paths nupdf does not run yet, mostly `invalid key in dict` and syntax errors in objects that only rendering touches |
 
 There are no crashes, and no files that MuPDF opens but nupdf cannot. On a 300-file sample run sequentially, `nupdf info` takes 529 ms in total against MuPDF's 1,308 ms (geometric-mean speedup 2.47x, process start included; the MuPDF side also pays for its JavaScript runtime).
 
@@ -222,13 +222,20 @@ Exit status: met for the object graph (`roundtrip` 99.96%) and for speed. The sa
 
 MuPDF reference: `pdf-interpret.c`, `pdf-op-run.c`, `pdf-op-buffer.c`, `pdf-run.c`, `pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c`, `pdf-shade.c`, `pdf-function.c`, `pdf-colorspace.c`, `pdf-image.c`, `pdf-layer.c`, `pdf-font.c`, `pdf-type3.c`, `pdf-cmap*.c`, `pdf-unicode.c`, `pdf-metrics.c`; `fitz/font.c`, `fitz/device.c`.
 
-- [ ] Content lexer and parser, including inline images with MuPDF's `EI` detection
+- [x] Content lexer and parser, including inline images with MuPDF's `EI` detection (DECISIONS D29): `pdf_process_stream` and `pdf_process_keyword` with MuPDF's operand stack and recovery, ExtGState entries, contents arrays joined as `fz_open_concat` joins them, and inline images decoded through a leech to find their end (`content`, with colorspace definitions in `colorspace`); the `operators` command
 - [ ] Interpreter: graphics and text state, CTM, `q`/`Q`, `BT`/`ET`, marked content, Form XObjects with recursion limits, shadings, patterns, inline images, optional-content visibility, Type3 glyph procedures
 - [ ] `Device` trait mirroring `fz_device`, plus a trace device whose output lines up with `mutool trace`
 - [ ] Functions (types 0, 2, 3 and 4) and color-space definitions (conversion arrives in M7)
 - [ ] Fonts: simple and composite; embedded Type1 (own parser, or hayro-font), CFF, OpenType and TrueType (skrifa/read-fonts); standard-14 metrics and MuPDF's substitute fonts; encodings, `/Differences`, the Adobe Glyph List, ToUnicode, predefined CMaps (generated from MuPDF's tables), `/W` widths, vertical writing
 - [ ] Commands: `trace`, `fonts`, `images` (list and extract)
-- [ ] Fuzz targets: content parser, font parsers
+- [ ] Fuzz targets: content parser, font parsers. `content` processes any input as a page's contents, with resources of each kind and without: 15 minutes (839K runs), nothing found
+
+**Status** (standard tier, 5,142 files, of which 19 neither tool opens):
+
+| Check | Parity | Remaining mismatches |
+|---|---|---|
+| `operators` (each page's operators and operands, its resources and annotations taken away) | 100% (5,123 / 5,123) | |
+| `operators-warnings` (distinct warnings and reported errors while doing so) | 99.5% (5,096 / 5,123) | 24 files that differ when they are opened, as in `warnings`. 2 where the oracle's own edits, made on a repaired document, make MuPDF's page tree map fail to load, and 1 where nupdf's inflate names a different zlib error |
 
 Exit: ≥99% page-trace parity on the standard tier: same operations, matrices within 1e-3, same glyph ids and Unicode.
 

@@ -99,6 +99,7 @@ Each editing command makes one edit, then writes the document as `clean` writes 
 | `streams` | Every stream's decoded length and BLAKE3 hash (image filters listed, not decoded; `--images` decodes only those); `show <ref> --data` decodes one | M2 |
 | `decrypt`, `encrypt` | Remove or add encryption | M2, M3 |
 | `merge`, `split`, `pages`, `meta`, `clean` | Structural editing | M3 |
+| `operators` | Each page's content-stream operators with their operands, as MuPDF's interpreter dispatches them; `--no-resources` processes the content streams alone | M4 |
 | `trace`, `fonts`, `images` | Device-call trace, font inventory, image list and extraction | M4 |
 | `extract` | Text as JSON (ids, bboxes, fonts), plain, Markdown or JSONL | M5 |
 | `search` | Literal or regex hits with quads and ids | M5 |
