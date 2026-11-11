@@ -68,6 +68,9 @@ pub enum Reader {
 pub enum Compare {
     /// These JSON pointers must be equal.
     Fields(&'static [&'static str]),
+    /// These JSON pointers must be equal, numbers within a few float steps
+    /// (as `Trace`).
+    FieldsClose(&'static [&'static str]),
     /// The `counts` must be equal, then every entry of the `items`
     /// collection (an object or an array), reported item by item.
     Collection {
@@ -362,6 +365,48 @@ pub const CHECKS: &[Check] = &[
         nupdf_fixup: None,
         reread: None,
         oracle_args: &["dehyphenate"],
+    },
+    Check {
+        name: "search",
+        about: "each page's hits of \"the\", as MuPDF's StructuredText.search finds them: the quads of each hit",
+        oracle_script: "oracle/js/search.js",
+        nupdf_args: &["search", "{file}", "the", "--options", ""],
+        compare: Compare::FieldsClose(&["/page_count", "/pages"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: Some(search_pages),
+        reread: None,
+        oracle_args: &["the", ""],
+    },
+    Check {
+        name: "search-icase",
+        about: "the same for \"THE\", ignoring case and diacritics",
+        oracle_script: "oracle/js/search.js",
+        nupdf_args: &[
+            "search",
+            "{file}",
+            "THE",
+            "--options",
+            "ignore-case,ignore-diacritics",
+        ],
+        compare: Compare::FieldsClose(&["/page_count", "/pages"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: Some(search_pages),
+        reread: None,
+        oracle_args: &["THE", "ignore-case,ignore-diacritics"],
+    },
+    Check {
+        name: "search-regexp",
+        about: "the same for the regular expression [0-9]+",
+        oracle_script: "oracle/js/search.js",
+        nupdf_args: &["search", "{file}", "[0-9]+", "--options", "regexp"],
+        compare: Compare::FieldsClose(&["/page_count", "/pages"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: Some(search_pages),
+        reread: None,
+        oracle_args: &["[0-9]+", "regexp"],
     },
     Check {
         name: "clean",
@@ -1377,6 +1422,18 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
             (Some(a), Some(b)) => {
                 result.diffs = match check.compare {
                     Compare::Fields(fields) => compare(fields, a, b),
+                    Compare::FieldsClose(fields) => fields
+                        .iter()
+                        .filter_map(|&field| {
+                            let x = a.pointer(field).cloned().unwrap_or(Value::Null);
+                            let y = b.pointer(field).cloned().unwrap_or(Value::Null);
+                            (!json_close(&x, &y)).then(|| FieldDiff {
+                                field: field.to_string(),
+                                oracle: truncate(&x),
+                                nupdf: truncate(&y),
+                            })
+                        })
+                        .collect(),
                     Compare::Collection { counts, items } => {
                         compare_collection(counts, items, a, b)
                     }
@@ -1424,6 +1481,39 @@ pub fn hash_written_files(value: &mut Value, dir: &Path, fixup: Option<fn(&mut [
             .for_each(|v| hash_written_files(v, dir, fixup)),
         _ => {}
     }
+}
+
+/// `search`'s hits regrouped as oracle/js/search.js gives them: a page
+/// per page, each its error or its hits' quads.
+fn search_pages(json: &mut Value) {
+    let count = json.get("page_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let mut pages: Vec<Value> = (1..=count)
+        .map(|n| json!({ "id": format!("p{n}"), "hits": [] }))
+        .collect();
+    let page_of = |v: &Value| v.get("page").and_then(Value::as_u64).map(|p| p as usize);
+    for e in json
+        .get("page_errors")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        if let Some(p) = page_of(&e).filter(|&p| p >= 1 && p <= count) {
+            pages[p - 1] = json!({ "id": format!("p{p}"), "error": e["error"] });
+        }
+    }
+    for h in json
+        .get("hits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        if let Some(p) = page_of(&h).filter(|&p| p >= 1 && p <= count)
+            && let Some(Value::Array(hits)) = pages[p - 1].get_mut("hits")
+        {
+            hits.push(h["quads"].clone());
+        }
+    }
+    json["pages"] = Value::Array(pages);
 }
 
 /// The `fonts` report's `load` facts: what nupdf loaded each font as,

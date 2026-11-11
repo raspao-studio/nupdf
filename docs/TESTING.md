@@ -73,6 +73,7 @@ Third-party PDFs are never committed; `corpus/manifest.toml` records each source
 | `trace` | Device calls per page, against `mutool trace` | matrices within 1e-3 | M4 |
 | `stext` | Each page's blocks, lines and characters (text, font, flags, bidi level, origin, size, quad) against `Page.toStructuredText` walked by oracle/js/stext.js, with default options; the summary adds the M5 measures (pages with MuPDF's text, characters with box IoU ≥ 0.98) | same structure and text, IoU ≥ 0.98 | M5 |
 | `text`, `text-dehyphenate` | Each page's text from `extract --fields text` against `asText()` (`fz_print_stext_page_as_text`), with default options and with `dehyphenate` | exact | M5 |
+| `search`, `search-icase`, `search-regexp` | Each page's hits of `the`; of `THE` ignoring case and diacritics; of `[0-9]+` as a regular expression; against `StructuredText.search` (oracle/js/search.js), each hit's quads | numbers within a few float steps | M5 |
 | `stext-preserve`, `stext-raw` | The same with ligatures, whitespace and spans kept, images and shadings as blocks and hyphens joined; and with no added spaces, CIDs for unknown Unicode, ActualText ignored, no clipping and outline boxes | same structure and text, IoU ≥ 0.98 | M5 |
 | `redact` | Remaining text against MuPDF's redaction; zero targets for nupdf, MuPDF and pdftotext | exact | M6 |
 | `render` | Pixels against `mutool draw` at 72 and 150 dpi | threshold per page | M7 |

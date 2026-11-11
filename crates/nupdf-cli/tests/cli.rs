@@ -1396,3 +1396,51 @@ fn extract_writes_text_jsonl_and_markdown() {
     assert!(md.contains("\n- a bullet indented after it\n"));
     assert!(md.contains("<!-- p2 -->"));
 }
+
+#[test]
+fn search_finds_hits_with_quads_and_ids() {
+    let path = smoke("stext.pdf");
+    let file = path.to_str().unwrap();
+    let report = run_json(&["search", file, "world"]);
+    assert_eq!(report["schema"], "nupdf.search/v0");
+    let hits = report["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["page"], 1);
+    assert_eq!(hits[0]["id"], "p1.b1.l1.s1:6-11");
+    assert_eq!(hits[0]["text"], "world");
+    assert_eq!(hits[0]["quads"][0].as_array().unwrap().len(), 8);
+    // Case and diacritics, and ligatures read as their letters.
+    let hits = |needle: &str, options: &str| {
+        run_json(&["search", file, needle, "--options", options])["hit_count"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(hits("HELLO", ""), 0);
+    assert_eq!(hits("HELLO", "ignore-case"), 1);
+    assert_eq!(hits("e combined", "ignore-diacritics"), 1);
+    assert_eq!(hits("fl", ""), 1);
+    // Across a hyphen at a line end, joined by dehyphenate.
+    let joined = run_json(&[
+        "search",
+        file,
+        "hyphenated",
+        "--stext-options",
+        "dehyphenate",
+    ]);
+    let hit = &joined["hits"][0];
+    assert_eq!(hit["begin"], "p1.b1.l2.s1:22");
+    assert_eq!(hit["quads"].as_array().unwrap().len(), 2);
+    // Regular expressions, and their errors per page.
+    assert_eq!(hits("w[a-z]+d", "regexp"), 2);
+    let bad = run_json(&["search", file, "(", "--options", "regexp"]);
+    assert_eq!(
+        bad["page_errors"][0]["error"],
+        "regcomp failure: unmatched '('"
+    );
+    assert_eq!(
+        nupdf(&["search", file, "x", "--options", "fuzzy"])
+            .status
+            .code(),
+        Some(2)
+    );
+}
