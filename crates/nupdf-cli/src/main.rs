@@ -171,6 +171,10 @@ enum Command {
         /// use-gid-for-unknown-unicode, ignore-actualtext.
         #[arg(long, default_value = "")]
         options: String,
+        /// Work on this many threads, a page per thread at a time; the
+        /// output is the same at every count (DECISIONS D37).
+        #[arg(long)]
+        threads: Option<usize>,
     },
     /// Extract the pages' text with content ids (p3, p3.b2, p3.b2.l4,
     /// p3.b2.l4.s1): as JSON with blocks, lines and spans and their boxes
@@ -202,6 +206,10 @@ enum Command {
         /// chars by default.
         #[arg(long)]
         fields: Option<String>,
+        /// Work on this many threads, a page per thread at a time; the
+        /// output is the same at every count (DECISIONS D37).
+        #[arg(long)]
+        threads: Option<usize>,
     },
     /// Find a needle in the pages' text, as MuPDF searches: each hit with
     /// its quads, its text and the content ids of its characters.
@@ -222,6 +230,10 @@ enum Command {
         /// Stop after this many hits.
         #[arg(long)]
         max_items: Option<usize>,
+        /// Work on this many threads, a page per thread at a time; the
+        /// output is the same at every count (DECISIONS D37).
+        #[arg(long)]
+        threads: Option<usize>,
     },
     /// List the fonts the pages use, as `mutool info` finds them, with
     /// what each loads as; --extract writes the embedded font programs as
@@ -540,6 +552,7 @@ fn run(cli: Cli) -> ExitCode {
             max_items,
             cursor,
             fields,
+            threads,
         } => {
             let usage = |message: String| Failure {
                 exit: Exit::Usage,
@@ -562,6 +575,7 @@ fn run(cli: Cli) -> ExitCode {
                 max_items: *max_items,
                 cursor: cursor.as_deref(),
                 fields: fields.as_deref(),
+                threads: *threads,
             };
             let extracted = match extract::extract(&doc, &facts.doc_id, &args) {
                 Ok(e) => e,
@@ -576,6 +590,7 @@ fn run(cli: Cli) -> ExitCode {
             stext_options,
             pages,
             max_items,
+            threads,
         } => {
             let usage = |message: String| Failure {
                 exit: Exit::Usage,
@@ -597,13 +612,18 @@ fn run(cli: Cli) -> ExitCode {
                         stext: s,
                         pages: pages.as_deref(),
                         max_items: *max_items,
+                        threads: *threads,
                     };
                     search::search(&doc, &args)
                         .map_err(usage)
                         .map(|body| report("nupdf.search/v0", &facts, &doc, body))
                 })
         }
-        Command::Stext { file, options } => nupdf::stext::Options::parse(options)
+        Command::Stext {
+            file,
+            options,
+            threads,
+        } => nupdf::stext::Options::parse(options)
             .map_err(|message| Failure {
                 exit: Exit::Usage,
                 code: "usage.bad_option",
@@ -611,7 +631,12 @@ fn run(cli: Cli) -> ExitCode {
             })
             .and_then(|opts| open(file).map(|(doc, facts)| (opts, doc, facts)))
             .map(|(opts, doc, facts)| {
-                report("nupdf.stext/v0", &facts, &doc, stext::stext(&doc, opts))
+                report(
+                    "nupdf.stext/v0",
+                    &facts,
+                    &doc,
+                    stext::stext(&doc, opts, *threads),
+                )
             }),
         Command::Fonts { file, extract } => open(file).and_then(|(doc, facts)| {
             let dir = extract.as_deref().map(output_dir).transpose()?;

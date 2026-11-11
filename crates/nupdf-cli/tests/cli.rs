@@ -1444,3 +1444,54 @@ fn search_finds_hits_with_quads_and_ids() {
         Some(2)
     );
 }
+
+#[test]
+fn threads_do_not_change_the_output() {
+    let files = [
+        "stext.pdf",
+        "multipage-inherit.pdf",
+        "pages-rearrange.pdf",
+        "broken-xref-offsets.pdf",
+        // Repairs while a page runs.
+        "wrong-object-at-offset.pdf",
+        "fonts-images.pdf",
+    ];
+    let commands: [&[&str]; 5] = [
+        &["stext"],
+        &["extract"],
+        &["extract", "--format", "markdown", "--max-chars", "40"],
+        &[
+            "extract",
+            "--format",
+            "jsonl",
+            "--fields",
+            "blocks,lines,spans,chars",
+        ],
+        &["search", "e"],
+    ];
+    for name in files {
+        let path = smoke(name);
+        let file = path.to_str().unwrap();
+        for command in commands {
+            let at = |threads: Option<&str>| {
+                let mut args: Vec<&str> = command.to_vec();
+                args.insert(1, file);
+                if let Some(t) = threads {
+                    args.extend(["--threads", t]);
+                }
+                let out = nupdf(&args);
+                assert!(out.status.success(), "{name} {command:?}");
+                (out.stdout, out.stderr)
+            };
+            let one = at(Some("1"));
+            for t in ["2", "8"] {
+                assert!(at(Some(t)) == one, "{name} {command:?} --threads {t}");
+            }
+            // The pages are MuPDF's, as without threads.
+            if command == ["stext"] {
+                let pages = |b: &[u8]| serde_json::from_slice::<Value>(b).unwrap()["pages"].clone();
+                assert_eq!(pages(&one.0), pages(&at(None).0), "{name}");
+            }
+        }
+    }
+}
