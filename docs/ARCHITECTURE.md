@@ -84,6 +84,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `pixmap` (an image decoded to 8-bit samples; PAM and PNG writers) | `fitz/image.c` (`fz_decomp_image_from_stream`, `fz_mask_color_key`, `fz_unblend_masked_tile`, the JPEG height patch of `compressed_image_get_pixmap`), `fitz/draw-unpack.c`, `fitz/pixmap.c` (`fz_convert_indexed_pixmap_to_base`), `fitz/output-pnm.c`, `fitz/output-png.c` | M4 |
 | `layer` (optional content: the default configuration's states and whether a group or membership dictionary hides content) | `pdf/pdf-layer.c` (`pdf_read_ocg`, `pdf_select_layer_config`, `pdf_is_ocg_hidden`) | M4 |
 | `stext` (structured text: the stext device and its options, with the device's container stack and scissors) | `fitz/stext-device.c`, `fitz/device.c` (the container stack), `fitz/glyphbox.c`, `fitz/string.c` (`fz_chartorune`, `fz_utflen`), `fitz/util.c` (`fz_new_stext_page_from_page`); later `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` | M5 |
+| `extract` (content ids, spans, the text of each level, Markdown) | nupdf's own; the text follows `fitz/stext-output.c` (`do_as_text`, in `stext`) | M5 |
 | `search` | `fitz/stext-search.c` | M5 |
 | `redact`, `content::filter` | `pdf/pdf-clean.c`, `pdf/pdf-op-filter.c`, `pdf/pdf-image-rewriter.c`, `pdf/pdf-annot.c` | M6 |
 | `verify` | new | M6 |

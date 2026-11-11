@@ -5,6 +5,7 @@
 //! codes. The contract is specified in docs/AGENT-INTERFACE.md.
 
 mod commands;
+mod extract;
 mod inventory;
 mod md5;
 mod objects;
@@ -169,6 +170,37 @@ enum Command {
         /// use-gid-for-unknown-unicode, ignore-actualtext.
         #[arg(long, default_value = "")]
         options: String,
+    },
+    /// Extract the pages' text with content ids (p3, p3.b2, p3.b2.l4,
+    /// p3.b2.l4.s1): as JSON with blocks, lines and spans and their boxes
+    /// and fonts, as JSON lines (a page per line), as plain text (as
+    /// `mutool draw -F txt` writes it) or as Markdown.
+    Extract {
+        file: PathBuf,
+        #[arg(long, value_enum, default_value = "json")]
+        format: extract::Format,
+        /// The pages, in MuPDF's syntax (`1-3,7`, `N` for the last).
+        #[arg(long)]
+        pages: Option<String>,
+        /// MuPDF's stext options, as for `stext`.
+        #[arg(long, default_value = "")]
+        options: String,
+        /// Stop before the block that would take the text past this many
+        /// characters; the first block is always given.
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// Stop after this many blocks (or pages, without blocks).
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Start where an earlier call's `next_cursor` says.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// The JSON fields to give, comma-separated: page, bbox, blocks,
+        /// type, lines, wmode, dir, spans, font, size, bold, italic, color,
+        /// text, chars. Text goes at the deepest level kept. Everything but
+        /// chars by default.
+        #[arg(long)]
+        fields: Option<String>,
     },
     /// List the fonts the pages use, as `mutool info` finds them, with
     /// what each loads as; --extract writes the embedded font programs as
@@ -478,6 +510,44 @@ fn run(cli: Cli) -> ExitCode {
         }),
         Command::Trace { file } => open(file)
             .map(|(doc, facts)| report("nupdf.trace/v0", &facts, &doc, trace::trace(&doc))),
+        Command::Extract {
+            file,
+            format,
+            pages,
+            options,
+            max_chars,
+            max_items,
+            cursor,
+            fields,
+        } => {
+            let usage = |message: String| Failure {
+                exit: Exit::Usage,
+                code: "usage.bad_option",
+                message,
+            };
+            let opts = match nupdf::stext::Options::parse(options) {
+                Ok(o) => o,
+                Err(e) => return fail(usage(e), cli.pretty),
+            };
+            let (doc, facts) = match open(file) {
+                Ok(v) => v,
+                Err(failure) => return fail(failure, cli.pretty),
+            };
+            let args = extract::Args {
+                format: *format,
+                pages: pages.as_deref(),
+                options: opts,
+                max_chars: *max_chars,
+                max_items: *max_items,
+                cursor: cursor.as_deref(),
+                fields: fields.as_deref(),
+            };
+            let extracted = match extract::extract(&doc, &facts.doc_id, &args) {
+                Ok(e) => e,
+                Err(e) => return fail(usage(e), cli.pretty),
+            };
+            return emit_extracted(extracted, &facts, &doc, cli.pretty);
+        }
         Command::Stext { file, options } => nupdf::stext::Options::parse(options)
             .map_err(|message| Failure {
                 exit: Exit::Usage,
@@ -639,6 +709,50 @@ fn stream_objects(doc: &Document, facts: &FileFacts, pretty: bool) -> ExitCode {
         &Report { facts, doc },
         pretty,
     );
+    ExitCode::SUCCESS
+}
+
+/// Writes what `extract` gave in its format.
+fn emit_extracted(
+    extracted: extract::Extracted,
+    facts: &FileFacts,
+    doc: &Document,
+    pretty: bool,
+) -> ExitCode {
+    const SCHEMA: &str = "nupdf.extract/v0";
+    match extracted {
+        extract::Extracted::Json(body) => {
+            emit(
+                &mut std::io::stdout().lock(),
+                &report(SCHEMA, facts, doc, body),
+                pretty,
+            );
+        }
+        extract::Extracted::Lines(pages, body) => {
+            let mut out = std::io::stdout().lock();
+            for page in pages {
+                let mut line = serde_json::Map::new();
+                line.insert("schema".into(), "nupdf.extract.page/v0".into());
+                line.insert("doc_id".into(), facts.doc_id.clone().into());
+                if let serde_json::Value::Object(fields) = page {
+                    line.extend(fields);
+                }
+                emit(&mut out, &serde_json::Value::Object(line), false);
+            }
+            emit(&mut out, &report(SCHEMA, facts, doc, body), false);
+        }
+        extract::Extracted::Text(text, body) => {
+            let mut out = std::io::stdout().lock();
+            // A closed pipe is not ours to report.
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
+            emit(
+                &mut std::io::stderr().lock(),
+                &report(SCHEMA, facts, doc, body),
+                pretty,
+            );
+        }
+    }
     ExitCode::SUCCESS
 }
 

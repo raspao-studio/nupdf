@@ -1238,3 +1238,161 @@ fn stext_options_follow_mupdf() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("usage.bad_option"));
 }
+
+#[test]
+fn extract_gives_ids_spans_and_fonts() {
+    let path = smoke("stext.pdf");
+    let report = run_json(&["extract", path.to_str().unwrap()]);
+    assert_eq!(report["schema"], "nupdf.extract/v0");
+    assert_eq!(report["truncated"], false);
+    let block = &report["pages"][0]["blocks"][0];
+    assert_eq!(block["id"], "p1.b1");
+    assert_eq!(block["type"], "text");
+    let line = &block["lines"][0];
+    assert_eq!(line["id"], "p1.b1.l1");
+    // Text sits at the deepest level given: the spans.
+    assert!(line.get("text").is_none());
+    let span = &line["spans"][0];
+    assert_eq!(span["id"], "p1.b1.l1.s1");
+    assert_eq!(span["text"], "Hello world!");
+    assert_eq!(span["font"], "Helvetica");
+    assert_eq!(span["size"], 12.0);
+    assert_eq!(span["color"], "#000000");
+    assert!(span.get("chars").is_none());
+    // Two runs of one line in two fonts are two spans.
+    let page = &report["pages"][0];
+    let spans_of = |text: &str| {
+        page["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|b| b["lines"].as_array().into_iter().flatten())
+            .find(|l| {
+                l["spans"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s["text"].as_str().unwrap())
+                    .collect::<String>()
+                    == text
+            })
+            .map(|l| l["spans"].as_array().unwrap().len())
+    };
+    assert_eq!(spans_of("fiflffffi ligatures"), Some(1));
+    // Characters with their quads, on request.
+    let chars = run_json(&[
+        "extract",
+        path.to_str().unwrap(),
+        "--pages",
+        "1",
+        "--fields",
+        "blocks,lines,spans,text,chars",
+    ]);
+    let first = &chars["pages"][0]["blocks"][0]["lines"][0]["spans"][0]["chars"][0];
+    assert_eq!(first[0], "H");
+    assert_eq!(first[1].as_array().unwrap().len(), 8);
+}
+
+#[test]
+fn extract_budgets_truncate_at_blocks_and_resume_by_cursor() {
+    let path = smoke("stext.pdf");
+    let file = path.to_str().unwrap();
+    let whole = run_json(&["extract", file, "--fields", "blocks,text"]);
+    let all: Vec<String> = whole["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["blocks"].as_array().unwrap().iter())
+        .map(|b| b["id"].as_str().unwrap().to_string())
+        .collect();
+    // Two blocks at a time until the cursor runs out.
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..all.len() {
+        let mut args = vec![
+            "extract",
+            file,
+            "--fields",
+            "blocks,text",
+            "--max-items",
+            "2",
+        ];
+        if let Some(c) = &cursor {
+            args.extend(["--cursor", c.as_str()]);
+        }
+        let part = run_json(&args);
+        for p in part["pages"].as_array().unwrap() {
+            for b in p["blocks"].as_array().unwrap() {
+                seen.push(b["id"].as_str().unwrap().to_string());
+            }
+        }
+        if part["truncated"] == false {
+            assert!(part["next_cursor"].is_null());
+            break;
+        }
+        cursor = Some(part["next_cursor"].as_str().unwrap().to_string());
+    }
+    assert_eq!(seen, all);
+    // A character budget always gives the first block.
+    let small = run_json(&[
+        "extract",
+        file,
+        "--fields",
+        "blocks,text",
+        "--max-chars",
+        "1",
+    ]);
+    assert_eq!(small["pages"][0]["blocks"].as_array().unwrap().len(), 1);
+    assert_eq!(small["truncated"], true);
+    // A cursor belongs to its document.
+    let other = smoke("minimal.pdf");
+    let out = nupdf(&[
+        "extract",
+        other.to_str().unwrap(),
+        "--cursor",
+        small["next_cursor"].as_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn extract_writes_text_jsonl_and_markdown() {
+    let path = smoke("stext.pdf");
+    let file = path.to_str().unwrap();
+    // Plain text as mutool draw -F txt writes it, the report on stderr.
+    let out = nupdf(&["extract", file, "--format", "text"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("Hello world!\na line that ends in a hyphen-\nated word\n\n"));
+    assert_eq!(text.matches("\u{c}\n").count(), 2);
+    let report: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(report["schema"], "nupdf.extract/v0");
+    // Joined hyphens, with dehyphenate.
+    let out = nupdf(&[
+        "extract",
+        file,
+        "--format",
+        "text",
+        "--options",
+        "dehyphenate",
+    ]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("a line that ends in a hyphenated word\n"));
+    // A page per line, then the report.
+    let out = nupdf(&["extract", file, "--format", "jsonl"]);
+    let lines: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["schema"], "nupdf.extract.page/v0");
+    assert_eq!(lines[1]["id"], "p2");
+    assert_eq!(lines[2]["schema"], "nupdf.extract/v0");
+    // Markdown: a comment per page, list items, escaped syntax.
+    let out = nupdf(&["extract", file, "--format", "markdown"]);
+    let md = String::from_utf8(out.stdout).unwrap();
+    assert!(md.starts_with("<!-- p1 -->\n\nHello world!"));
+    assert!(md.contains("\n- a bullet indented after it\n"));
+    assert!(md.contains("<!-- p2 -->"));
+}
