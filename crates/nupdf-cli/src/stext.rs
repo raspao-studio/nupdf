@@ -216,6 +216,10 @@ impl Serialize for Blocks<'_> {
                         transform: Numbers([m.a, m.b, m.c, m.d, m.e, m.f]),
                     })?
                 }
+                Block::Vector(v) => seq.serialize_element(&VectorJson {
+                    bbox: rect(v.bbox),
+                    flags: v.flags,
+                })?,
             }
         }
         seq.end()
@@ -251,6 +255,23 @@ impl Serialize for ImageJson {
         map.serialize_entry("type", "image")?;
         map.serialize_entry("bbox", &self.bbox)?;
         map.serialize_entry("transform", &self.transform)?;
+        map.end()
+    }
+}
+
+/// A vector block as the glue gives it: its flags as one number (stroked
+/// 1, rectangle 2, continues 4); its color is left out, as for characters.
+struct VectorJson {
+    bbox: Numbers<4>,
+    flags: u32,
+}
+
+impl Serialize for VectorJson {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(3))?;
+        map.serialize_entry("type", "vector")?;
+        map.serialize_entry("bbox", &self.bbox)?;
+        map.serialize_entry("flags", &self.flags)?;
         map.end()
     }
 }

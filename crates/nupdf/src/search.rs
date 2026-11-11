@@ -511,7 +511,7 @@ pub fn search_page(page: &StextPage, needle: &str, opts: u32) -> Result<Vec<Hit>
     };
     let chars = |pos: Position| match &page.blocks[pos.block] {
         Block::Text(t) => Some((&t.lines[pos.line], &t.lines[pos.line].chars[pos.ch])),
-        Block::Image(_) => None,
+        Block::Image(_) | Block::Vector(_) => None,
     };
     let s = &spun.out;
     let mut hits = Vec::new();
