@@ -10,8 +10,8 @@ use nupdf::{Dict, Document, ObjRef, Object};
 
 // The first byte picks how the rest is read: as a font file opened on its
 // own, or embedded in a simple or composite PDF font of each kind and
-// loaded as MuPDF loads it. Either way each glyph's name, width and code
-// mapping is asked for.
+// loaded as MuPDF loads it. Either way each glyph's name, width, code
+// mapping and outline box is asked for.
 fuzz_target!(|data: &[u8]| {
     let pick = data.first().copied().unwrap_or(0);
     let body = data.get(1..).unwrap_or_default();
@@ -21,6 +21,7 @@ fuzz_target!(|data: &[u8]| {
         };
         for gid in 0..face.num_glyphs.min(512) {
             let _ = face.advance(gid);
+            let _ = face.glyph_cbox(gid);
             if let Some(name) = face.glyph_name(gid) {
                 let _ = face.name_index(&name);
             }
@@ -75,7 +76,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     for cid in 0..512 {
-        let _ = fd.cid_to_gid(cid);
+        let gid = fd.cid_to_gid(cid);
+        let _ = nupdf::fontdesc::bound_glyph(&fd.font, gid, nupdf::geometry::Matrix::IDENTITY);
         let _ = fd.lookup_hmtx(cid);
         let _ = fd.lookup_vmtx(cid);
     }

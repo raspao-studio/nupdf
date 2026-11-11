@@ -32,6 +32,12 @@ pub struct Sfnt {
     hmtx: Option<(usize, usize)>,
     pub has_cff: bool,
     pub has_glyf: bool,
+    /// The style `sfnt_load_face` gives the face, and the OS/2 family
+    /// class when the table loads.
+    pub bold: bool,
+    pub italic: bool,
+    pub fixed_pitch: bool,
+    pub family_class: Option<i16>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +128,10 @@ impl Sfnt {
             hmtx: None,
             has_cff: false,
             has_glyf: false,
+            bold: false,
+            italic: false,
+            fixed_pitch: false,
+            family_class: None,
         };
         font.has_cff = font.table(b"CFF ").is_some();
         font.has_glyf = font.table(b"glyf").is_some();
@@ -156,6 +166,7 @@ impl Sfnt {
         }
         font.hmtx = font.table(b"hmtx");
         font.metrics_from_os2();
+        font.style(h);
         font.load_post();
         font.load_cmaps();
         Ok(font)
@@ -168,9 +179,51 @@ impl Sfnt {
             .map(|&(_, o, l)| (o, l))
     }
 
+    /// What the TrueType glyph loader reads: `loca`, `glyf` and the
+    /// location format; None without a `loca` table.
+    pub(crate) fn glyf(&self) -> Option<super::outline::Glyf<'_>> {
+        let loca = self.table(b"loca")?;
+        let glyf = self.table(b"glyf").unwrap_or((0, 0));
+        let (h, _) = self.table(b"head")?;
+        Some(super::outline::Glyf {
+            data: &self.data,
+            loca,
+            long_loca: i16_at(&self.data, h + 50).unwrap_or(0) != 0,
+            glyf,
+            num_glyphs: self.num_glyphs,
+        })
+    }
+
     pub fn table_data(&self, tag: &[u8; 4]) -> Option<&[u8]> {
         let (o, l) = self.table(tag)?;
         self.data.get(o..o + l)
+    }
+
+    /// `sfnt_load_face`'s style flags: OS/2 fsSelection when the table
+    /// loads and the font has outlines, else head's macStyle; post's
+    /// isFixedPitch.
+    fn style(&mut self, head: usize) {
+        let os2 = self
+            .table_data(b"OS/2")
+            .filter(|t| t.len() >= 78)
+            .map(<[u8]>::to_vec);
+        let has_outline = self.has_glyf || self.has_cff || self.table(b"CFF2").is_some();
+        match &os2 {
+            Some(os2) if has_outline => {
+                let sel = u16_at(os2, 62).unwrap_or(0);
+                self.italic = sel & 512 != 0 || sel & 1 != 0;
+                self.bold = sel & 32 != 0;
+            }
+            _ => {
+                let mac = u16_at(&self.data, head + 44).unwrap_or(0);
+                self.bold = mac & 1 != 0;
+                self.italic = mac & 2 != 0;
+            }
+        }
+        self.family_class = os2.as_ref().and_then(|t| i16_at(t, 30));
+        if let Some(post) = self.table_data(b"post").filter(|t| t.len() >= 32) {
+            self.fixed_pitch = u32_at(post, 12).unwrap_or(0) != 0;
+        }
     }
 
     /// The ascender and descender `sfnt_load_face` settles on.

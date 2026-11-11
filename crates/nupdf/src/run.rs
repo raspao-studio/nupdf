@@ -1042,7 +1042,7 @@ impl<'a> Run<'a> {
         }
         let trm = tsm.concat(self.tos.tm);
         let gid = fd.cid_to_gid(cid);
-        self.tos.char_bbox = bound_glyph(&fd.font, gid, trm).expand(1.0);
+        self.tos.char_bbox = fontdesc::bound_glyph(&fd.font, gid, trm).expand(1.0);
         (trm, adv, gid)
     }
 
@@ -1342,7 +1342,7 @@ impl<'a> Run<'a> {
             let Some(proc) = &t3.procs[gid] else {
                 continue;
             };
-            let mut dev = GlyphProbe::default();
+            let mut dev = GlyphProbe::new(t3.matrix);
             let store = std::mem::take(&mut self.state.store);
             let result = run_glyph(
                 self.doc,
@@ -1365,19 +1365,18 @@ impl<'a> Run<'a> {
                 }
             };
             out.flags[gid] = flags;
-            // The box d1 gives, unless it is not to be trusted; then (as an
-            // approximation of measuring the glyph) the font's.
+            // The box d1 gives, unless it is not to be trusted; then the
+            // one measured from what the glyph draws, if anything.
+            let measured = if dev.drew { dev.bbox } else { Rect::EMPTY };
             let r = if flags & DEVFLAG_BBOX_DEFINED != 0 {
                 let r = d1.transform(t3.matrix);
-                if font.invalid_bbox || !font.bbox.contains(d1) {
-                    if dev.drew { font.bbox } else { r }
+                if (font.invalid_bbox || !font.bbox.contains(d1)) && !measured.is_empty() {
+                    measured
                 } else {
                     r
                 }
-            } else if dev.drew {
-                font.bbox
             } else {
-                Rect::EMPTY
+                measured
             };
             out.bboxes[gid] = r;
         }
@@ -3414,104 +3413,296 @@ struct Prepared {
 }
 
 /// The display list a Type 3 glyph is prepared into, reduced to whether
-/// anything was drawn into it.
-#[derive(Debug, Default)]
+/// anything was drawn into it and to its box: what MuPDF's bbox device
+/// finds when it runs the list under the font matrix
+/// (`fz_bound_t3_glyph`), the list's culling of empty content included.
+#[derive(Debug)]
 struct GlyphProbe {
     drew: bool,
+    /// The font matrix the list is run under.
+    t3m: Matrix,
+    /// `fz_run_display_list`'s depth inside culled clips.
+    clipped: u32,
+    /// The bbox device's result, clip stack and depth inside masks and
+    /// tiles.
+    bbox: Rect,
+    stack: Vec<Rect>,
+    top: usize,
+    ignore: u32,
+}
+
+/// `STACK_SIZE` in bbox-device.c.
+const BBOX_STACK: usize = 96;
+
+/// What the display list culls a node by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Node {
+    /// Paths and text: dropped only when the box is invalid.
+    Marks,
+    /// A clip, mask or group: culled when empty, with what it encloses.
+    Clip,
+    /// Anything else: dropped when the box is empty.
+    Other,
+}
+
+impl GlyphProbe {
+    fn new(t3m: Matrix) -> GlyphProbe {
+        GlyphProbe {
+            drew: false,
+            t3m,
+            clipped: 0,
+            bbox: Rect::EMPTY,
+            stack: Vec::new(),
+            top: 0,
+            ignore: 0,
+        }
+    }
+
+    /// Records a node whose list box is `rect` (in the glyph's space):
+    /// true when the list hands it on.
+    fn visible(&mut self, rect: Rect, node: Node) -> bool {
+        self.drew = true;
+        let r = rect.transform(self.t3m);
+        let empty = match node {
+            Node::Marks => !r.is_valid(),
+            Node::Clip | Node::Other => r.is_empty(),
+        };
+        if self.clipped > 0 || empty {
+            if node == Node::Clip {
+                self.clipped += 1;
+            }
+            return false;
+        }
+        true
+    }
+
+    /// A pop_clip or end_group node.
+    fn visible_pop(&mut self) -> bool {
+        self.drew = true;
+        if self.clipped > 0 {
+            self.clipped -= 1;
+            return false;
+        }
+        true
+    }
+
+    /// `fz_bbox_add_rect`.
+    fn add(&mut self, rect: Rect, clip: bool) {
+        let mut rect = rect;
+        if 0 < self.top && self.top <= BBOX_STACK {
+            rect = rect.intersect(self.stack[self.top - 1]);
+        }
+        if !clip && self.top <= BBOX_STACK && self.ignore == 0 {
+            self.bbox = self.bbox.union(rect);
+        }
+        if clip {
+            self.top += 1;
+            if self.top <= BBOX_STACK {
+                self.stack.truncate(self.top - 1);
+                self.stack.push(rect);
+            }
+        }
+    }
+
+    fn pop(&mut self) {
+        self.top = self.top.saturating_sub(1);
+    }
+
+    fn mark(&mut self, list_box: Rect, node: Node, bbox: impl FnOnce(Matrix) -> Rect, clip: bool) {
+        if self.visible(list_box, node) {
+            let ctm = self.t3m;
+            self.add(bbox(ctm), clip);
+        }
+    }
 }
 
 #[allow(unused_variables)]
 impl Device for GlyphProbe {
     fn fill_path(
         &mut self,
-        _: &Path,
+        p: &Path,
         _: bool,
-        _: Matrix,
+        ctm: Matrix,
         _: &ColorSpace,
         _: &[f32],
         _: f32,
         _: ColorParams,
     ) {
-        self.drew = true;
+        self.mark(
+            p.bound(None, ctm),
+            Node::Marks,
+            |m| p.bound(None, ctm.concat(m)),
+            false,
+        );
     }
     fn stroke_path(
         &mut self,
-        _: &Path,
-        _: &StrokeState,
-        _: Matrix,
+        p: &Path,
+        s: &StrokeState,
+        ctm: Matrix,
         _: &ColorSpace,
         _: &[f32],
         _: f32,
         _: ColorParams,
     ) {
-        self.drew = true;
+        self.mark(
+            p.bound(Some(s), ctm),
+            Node::Marks,
+            |m| p.bound(Some(s), ctm.concat(m)),
+            false,
+        );
     }
-    fn clip_path(&mut self, _: &Path, _: bool, _: Matrix, _: Rect) {
-        self.drew = true;
+    fn clip_path(&mut self, p: &Path, _: bool, ctm: Matrix, scissor: Rect) {
+        let list_box = p.bound(None, ctm).intersect(scissor);
+        self.mark(list_box, Node::Clip, |m| p.bound(None, ctm.concat(m)), true);
     }
-    fn clip_stroke_path(&mut self, _: &Path, _: &StrokeState, _: Matrix, _: Rect) {
-        self.drew = true;
+    fn clip_stroke_path(&mut self, p: &Path, s: &StrokeState, ctm: Matrix, scissor: Rect) {
+        let list_box = p.bound(Some(s), ctm).intersect(scissor);
+        self.mark(
+            list_box,
+            Node::Clip,
+            |m| p.bound(Some(s), ctm.concat(m)),
+            true,
+        );
     }
-    fn fill_shade(&mut self, _: &Shade, _: Matrix, _: f32, _: ColorParams) {
-        self.drew = true;
+    fn fill_shade(&mut self, sh: &Shade, ctm: Matrix, _: f32, _: ColorParams) {
+        self.mark(
+            sh.bound(ctm),
+            Node::Other,
+            |m| sh.bound(ctm.concat(m)),
+            false,
+        );
     }
-    fn fill_image(&mut self, _: &Image, _: Matrix, _: f32, _: ColorParams) {
-        self.drew = true;
+    fn fill_image(&mut self, _: &Image, ctm: Matrix, _: f32, _: ColorParams) {
+        let unit = |m: Matrix| Rect::UNIT.transform(m);
+        self.mark(unit(ctm), Node::Other, |m| unit(ctm.concat(m)), false);
     }
     fn fill_image_mask(
         &mut self,
         _: &Image,
-        _: Matrix,
+        ctm: Matrix,
         _: &ColorSpace,
         _: &[f32],
         _: f32,
         _: ColorParams,
     ) {
-        self.drew = true;
+        let unit = |m: Matrix| Rect::UNIT.transform(m);
+        self.mark(unit(ctm), Node::Other, |m| unit(ctm.concat(m)), false);
     }
-    fn clip_image_mask(&mut self, _: &Image, _: Matrix, _: Rect) {
-        self.drew = true;
+    fn clip_image_mask(&mut self, _: &Image, ctm: Matrix, scissor: Rect) {
+        let unit = |m: Matrix| Rect::UNIT.transform(m);
+        self.mark(
+            unit(ctm).intersect(scissor),
+            Node::Clip,
+            |m| unit(ctm.concat(m)),
+            true,
+        );
     }
     fn fill_text(
         &mut self,
-        _: &Text,
-        _: Matrix,
+        t: &Text,
+        ctm: Matrix,
         _: &ColorSpace,
         _: &[f32],
         _: f32,
         _: ColorParams,
     ) {
-        self.drew = true;
+        self.mark(
+            t.bound(None, ctm),
+            Node::Marks,
+            |m| t.bound(None, ctm.concat(m)),
+            false,
+        );
     }
     fn stroke_text(
         &mut self,
-        _: &Text,
-        _: &StrokeState,
-        _: Matrix,
+        t: &Text,
+        s: &StrokeState,
+        ctm: Matrix,
         _: &ColorSpace,
         _: &[f32],
         _: f32,
         _: ColorParams,
     ) {
-        self.drew = true;
+        self.mark(
+            t.bound(Some(s), ctm),
+            Node::Marks,
+            |m| t.bound(Some(s), ctm.concat(m)),
+            false,
+        );
     }
-    fn clip_text(&mut self, _: &Text, _: Matrix, _: Rect) {
-        self.drew = true;
+    fn clip_text(&mut self, t: &Text, ctm: Matrix, scissor: Rect) {
+        let list_box = t.bound(None, ctm).intersect(scissor);
+        self.mark(list_box, Node::Clip, |m| t.bound(None, ctm.concat(m)), true);
     }
-    fn clip_stroke_text(&mut self, _: &Text, _: &StrokeState, _: Matrix, _: Rect) {
-        self.drew = true;
+    fn clip_stroke_text(&mut self, t: &Text, s: &StrokeState, ctm: Matrix, scissor: Rect) {
+        let list_box = t.bound(Some(s), ctm).intersect(scissor);
+        self.mark(
+            list_box,
+            Node::Clip,
+            |m| t.bound(Some(s), ctm.concat(m)),
+            true,
+        );
     }
-    fn ignore_text(&mut self, _: &Text, _: Matrix) {
-        self.drew = true;
+    fn ignore_text(&mut self, t: &Text, ctm: Matrix) {
+        // The bbox device has no ignore_text.
+        self.visible(t.bound(None, ctm), Node::Other);
     }
     fn pop_clip(&mut self) {
-        self.drew = true;
+        if self.visible_pop() {
+            self.pop();
+        }
     }
-    fn begin_mask(&mut self, _: Rect, _: bool, _: Option<&ColorSpace>, _: &[f32], _: ColorParams) {
-        self.drew = true;
+    fn begin_mask(
+        &mut self,
+        area: Rect,
+        _: bool,
+        _: Option<&ColorSpace>,
+        _: &[f32],
+        _: ColorParams,
+    ) {
+        if self.visible(area, Node::Clip) {
+            self.add(area.transform(self.t3m), true);
+            self.ignore += 1;
+        }
     }
-    fn begin_group(&mut self, _: Rect, _: Option<&ColorSpace>, _: bool, _: bool, _: u8, _: f32) {
+    fn end_mask(&mut self, _: Option<&Function>) {
         self.drew = true;
+        if self.clipped == 0 {
+            self.ignore = self.ignore.saturating_sub(1);
+        }
+    }
+    fn begin_group(&mut self, area: Rect, _: Option<&ColorSpace>, _: bool, _: bool, _: u8, _: f32) {
+        if self.visible(area, Node::Clip) {
+            self.add(area.transform(self.t3m), true);
+        }
+    }
+    fn end_group(&mut self) {
+        if self.visible_pop() {
+            self.pop();
+        }
+    }
+    fn begin_tile(
+        &mut self,
+        area: Rect,
+        view: Rect,
+        xstep: f32,
+        ystep: f32,
+        ctm: Matrix,
+        id: i32,
+    ) -> bool {
+        self.drew = true;
+        if self.clipped == 0 {
+            self.add(area.transform(ctm.concat(self.t3m)), false);
+            self.ignore += 1;
+        }
+        false
+    }
+    fn end_tile(&mut self) {
+        self.drew = true;
+        if self.clipped == 0 {
+            self.ignore = self.ignore.saturating_sub(1);
+        }
     }
     fn begin_layer(&mut self, _: &[u8]) {
         self.drew = true;
@@ -3538,22 +3729,6 @@ fn run_glyph(
     let out = content::process_glyph(doc, resources, contents, &mut run).and_then(|()| run.close());
     let (flags, d1) = (run.flags, run.d1_rect);
     (out.map(|()| (flags, d1)), run.into_store())
-}
-
-/// `fz_bound_glyph`. A glyph from a font file is taken to fill the
-/// font's box: its outline is not measured yet.
-fn bound_glyph(font: &Font, gid: i32, trm: Matrix) -> Rect {
-    let r = match &font.t3 {
-        Some(t3) => match usize::try_from(gid).ok().and_then(|g| t3.bboxes.get(g)) {
-            Some(r) if r.is_infinite() || r.is_empty() => {
-                Rect::new(0.0, 0.0, 0.000_000_1, 0.000_000_1)
-            }
-            Some(r) => *r,
-            None => font.bbox,
-        },
-        None => font.bbox,
-    };
-    r.transform(trm)
 }
 
 /// `ucdn_get_bidi_class`.

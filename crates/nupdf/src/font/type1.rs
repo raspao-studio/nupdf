@@ -9,6 +9,7 @@
 //! font matrix, the encoding, the charstrings in their order (with
 //! `.notdef` made glyph 0), and the advance a glyph's `hsbw` sets.
 
+use super::outline::{self, CBox, Charstrings, LoadError};
 use std::sync::Arc;
 
 /// How the font names its encoding.
@@ -33,6 +34,10 @@ pub struct Type1 {
     pub encoding: Encoding,
     pub units_per_em: u16,
     pub bbox: [i32; 4],
+    /// FontInfo's style, as FreeType's Type 1 driver reads it.
+    pub bold: bool,
+    pub italic: bool,
+    pub fixed_pitch: bool,
 }
 
 fn is_space(b: u8) -> bool {
@@ -263,6 +268,9 @@ impl Type1 {
             encoding: Encoding::None,
             units_per_em: 0,
             bbox: [0; 4],
+            bold: false,
+            italic: false,
+            fixed_pitch: false,
         };
         let mut encoding_names: Vec<Option<Vec<u8>>> = Vec::new();
         let mut s = Scanner { d: clear, at: 0 };
@@ -280,6 +288,17 @@ impl Type1 {
                         }
                     }
                 }
+                // T1_ToInt: the integer part, so -0.5 is upright.
+                b"/ItalicAngle" => {
+                    let t = s.token().unwrap_or_default();
+                    font.italic = numbers(t).first().is_some_and(|v| v.trunc() != 0.0);
+                }
+                b"/Weight" => {
+                    let t = s.token().unwrap_or_default();
+                    let w = t.strip_prefix(b"(").and_then(|t| t.strip_suffix(b")"));
+                    font.bold = matches!(w, Some(b"Bold" | b"Black"));
+                }
+                b"/isFixedPitch" => font.fixed_pitch = s.token() == Some(b"true"),
                 b"/FontBBox" => {
                     let b = numbers(s.token().unwrap_or_default());
                     if b.len() >= 4 {
@@ -450,6 +469,12 @@ impl Type1 {
         self.names.get(gid as usize).cloned()
     }
 
+    /// The control box of glyph `gid`, in font units.
+    pub fn outline_cbox(&self, gid: u32) -> Result<Option<CBox>, LoadError> {
+        let cs = self.charstrings.get(gid as usize).ok_or(LoadError)?;
+        outline::charstring_cbox(self, cs)
+    }
+
     /// The width `hsbw` or `sbw` sets, rounded, as `T1_Get_Advances`
     /// returns it.
     pub fn advance(&self, gid: u32) -> Option<i64> {
@@ -528,4 +553,26 @@ fn charstring(bin: &[u8], len_iv: i64) -> Vec<u8> {
     }
     let plain = decrypt(bin, 4330);
     plain.get(len_iv as usize..).unwrap_or_default().to_vec()
+}
+
+impl Charstrings for Type1 {
+    fn is_t1(&self) -> bool {
+        true
+    }
+
+    fn local_subr(&self, n: i64) -> Option<&[u8]> {
+        self.subrs.get(usize::try_from(n).ok()?).map(Vec::as_slice)
+    }
+
+    fn global_subr(&self, _: i64) -> Option<&[u8]> {
+        None
+    }
+
+    /// `t1_lookup_glyph_by_stdcharcode_ps`.
+    fn seac_component(&self, code: i64) -> Option<&[u8]> {
+        let sid = *super::names::STANDARD_ENCODING.get(usize::try_from(code).ok()?)?;
+        let name = super::names::SID_NAMES.get(usize::from(sid))?.as_bytes();
+        let gid = self.names.iter().position(|n| n == name)?;
+        self.charstrings.get(gid).map(Vec::as_slice)
+    }
 }

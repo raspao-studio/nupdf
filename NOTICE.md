@@ -28,9 +28,9 @@ The files in [xtask/data/arlington](xtask/data/arlington) are definitions from t
 
 ## FreeType
 
-The font readers in [crates/nupdf/src/font](crates/nupdf/src/font) follow FreeType 2 (the copy bundled with MuPDF 1.28.6), so that fonts open, fail, map characters and report widths as they do in MuPDF. Portions of this software are copyright (C) 1996-2025 The FreeType Project (https://freetype.org). All rights reserved. FreeType is used under the FreeType License, whose text is included unaltered as [FTL.TXT](crates/nupdf/src/font/FTL.TXT). The PostScript name tables and CFF's standard encodings in [names.rs](crates/nupdf/src/font/names.rs) are generated from FreeType's sources by `cargo xtask tables`.
+The font readers in [crates/nupdf/src/font](crates/nupdf/src/font) follow FreeType 2 (the copy bundled with MuPDF 1.28.6), so that fonts open, fail, map characters, report widths and bound their glyphs as they do in MuPDF. Portions of this software are copyright (C) 1996-2025 The FreeType Project (https://freetype.org). All rights reserved. FreeType is used under the FreeType License, whose text is included unaltered as [FTL.TXT](crates/nupdf/src/font/FTL.TXT). The PostScript name tables and CFF's standard encodings in [names.rs](crates/nupdf/src/font/names.rs) are generated from FreeType's sources by `cargo xtask tables`.
 
-Changes from the original files: the C code was rewritten in Rust and reduced to what MuPDF asks of FreeType when it loads a PDF's fonts: opening a face (the TrueType, Type 1 and CFF drivers, in MuPDF's order), its charmaps with their validation, glyph names and advance widths. Outlines, hinting, rasterizing, bitmap and color fonts, and the other drivers were left out. This is not FreeType and should not be taken for it.
+Changes from the original files: the C code was rewritten in Rust and reduced to what MuPDF asks of FreeType when it loads a PDF's fonts: opening a face (the TrueType, Type 1 and CFF drivers, in MuPDF's order), its charmaps with their validation, glyph names and advance widths, and the control box of a glyph's unhinted outline (the TrueType glyph loader and the Adobe charstring engine, reduced to the points they emit). Hinting, rasterizing, bitmap and color fonts, and the other drivers were left out. This is not FreeType and should not be taken for it.
 
 ## URW base fonts
 
