@@ -7,7 +7,8 @@
 // The options are MuPDF's stext option string ("preserve-ligatures,..."),
 // clipping only when absent. Colors are left out: MuPDF converts them with
 // its color management. Vector blocks (option `vectors`) carry their flags
-// as one number: stroked 1, rectangle 2, continues 4. Each page loses its
+// as one number: stroked 1, rectangle 2, continues 4; structure blocks
+// (option `segment`) hold the blocks within them. Each page loses its
 // /Annots before it is loaded, as for the trace check.
 
 var doc = Document.openDocument(scriptArgs[0]);
@@ -20,10 +21,22 @@ function list(v) {
 }
 
 function walk(text) {
+  // Structure blocks hold the blocks within them; `blocks` is the list
+  // being filled, and `outer` the lists around it.
   var blocks = [];
+  var outer = [];
   var block = null;
   var line = null;
   text.walk({
+    beginStruct: function (standard, raw, index) {
+      var s = { type: "struct", standard: standard, raw: raw, index: index, blocks: [] };
+      blocks.push(s);
+      outer.push(blocks);
+      blocks = s.blocks;
+    },
+    endStruct: function () {
+      blocks = outer.pop();
+    },
     onImageBlock: function (bbox, transform) {
       blocks.push({ type: "image", bbox: list(bbox), transform: list(transform) });
     },

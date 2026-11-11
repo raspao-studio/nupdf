@@ -84,16 +84,32 @@ pub fn block_text(block: &TextBlock) -> String {
 pub fn block_len(block: &Block) -> usize {
     match block {
         Block::Text(t) => t.lines.iter().map(|l| l.chars.len()).sum(),
+        Block::Struct(s) => s.blocks.iter().map(block_len).sum(),
         Block::Image(_) | Block::Vector(_) => 0,
     }
+}
+
+/// The text blocks among `blocks`, those within structures in place.
+pub fn text_blocks<'a>(blocks: &[&'a Block]) -> Vec<&'a TextBlock> {
+    fn walk<'a>(b: &'a Block, out: &mut Vec<&'a TextBlock>) {
+        match b {
+            Block::Text(t) => out.push(t),
+            Block::Struct(s) => s.blocks.iter().for_each(|c| walk(c, out)),
+            Block::Image(_) | Block::Vector(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    for b in blocks {
+        walk(b, &mut out);
+    }
+    out
 }
 
 /// The page's body text size: the size most of its characters have,
 /// spaces left out, to the nearest half point.
 pub fn body_size(blocks: &[&Block]) -> f32 {
     let mut counts: Vec<(i32, usize)> = Vec::new();
-    for b in blocks {
-        let Block::Text(t) = b else { continue };
+    for t in text_blocks(blocks) {
         for ch in t.lines.iter().flat_map(|l| &l.chars) {
             if ch.c == ' ' as i32 {
                 continue;
@@ -326,19 +342,17 @@ pub fn markdown(blocks: &[&Block], body: f32) -> String {
     // (heading level, size, text): a heading that wraps into blocks of
     // its own size is one heading.
     let mut parts: Vec<(usize, f32, String)> = Vec::new();
-    for b in blocks {
-        if let Block::Text(t) = b {
-            let (level, size, md) = block_markdown(t, body);
-            if md.is_empty() {
-                continue;
+    for t in text_blocks(blocks) {
+        let (level, size, md) = block_markdown(t, body);
+        if md.is_empty() {
+            continue;
+        }
+        match parts.last_mut() {
+            Some((l, s, text)) if level > 0 && *l == level && *s == size => {
+                text.push(' ');
+                text.push_str(&md);
             }
-            match parts.last_mut() {
-                Some((l, s, text)) if level > 0 && *l == level && *s == size => {
-                    text.push(' ');
-                    text.push_str(&md);
-                }
-                _ => parts.push((level, size, md)),
-            }
+            _ => parts.push((level, size, md)),
         }
     }
     let parts: Vec<String> = parts
@@ -391,7 +405,7 @@ mod tests {
             .iter()
             .filter_map(|b| match b {
                 Block::Text(t) => Some(t.lines.iter()),
-                Block::Image(_) | Block::Vector(_) => None,
+                Block::Image(_) | Block::Vector(_) | Block::Struct(_) => None,
             })
             .flatten()
             .collect()

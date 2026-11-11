@@ -53,6 +53,7 @@ pub mod regexp;
 pub mod repair;
 pub mod run;
 pub mod search;
+pub mod segment;
 pub mod shade;
 pub mod slots;
 pub mod stext;

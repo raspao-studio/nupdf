@@ -1528,3 +1528,50 @@ fn stext_pretty_is_the_same_report_laid_out() {
         }
     }
 }
+
+#[test]
+fn segment_gathers_blocks_into_structures() {
+    let path = smoke("stext.pdf");
+    let file = path.to_str().unwrap();
+    let count = |blocks: &Value| -> (usize, usize) {
+        fn walk(v: &Value, structs: &mut usize, chars: &mut usize) {
+            for b in v.as_array().into_iter().flatten() {
+                if b["type"] == "struct" {
+                    *structs += 1;
+                    assert_eq!(
+                        (b["standard"].as_str(), b["raw"].as_str()),
+                        (Some("Div"), Some("Split"))
+                    );
+                    walk(&b["blocks"], structs, chars);
+                }
+                for l in b["lines"].as_array().into_iter().flatten() {
+                    *chars += l["chars"].as_array().map_or(0, Vec::len);
+                }
+            }
+        }
+        let (mut s, mut c) = (0, 0);
+        walk(blocks, &mut s, &mut c);
+        (s, c)
+    };
+    let flat = run_json(&["stext", file]);
+    let split = run_json(&["stext", file, "--options", "segment"]);
+    let (s0, c0) = count(&flat["pages"][0]["blocks"]);
+    let (s1, c1) = count(&split["pages"][0]["blocks"]);
+    assert_eq!(s0, 0);
+    assert!(s1 > 1, "{s1}");
+    // Every character is still there, within the structures.
+    assert_eq!(c0, c1);
+
+    let ex = run_json(&[
+        "extract",
+        file,
+        "--options",
+        "segment",
+        "--fields",
+        "blocks",
+    ]);
+    // A structure's blocks are within it, with ids under its own.
+    let first = &ex["pages"][0]["blocks"][0];
+    assert_eq!(first["id"], "p1.b1");
+    assert_eq!(first["blocks"][0]["id"], "p1.b1.b1");
+}
