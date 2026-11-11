@@ -129,7 +129,7 @@ MuPDF needs a cloned `fz_context` per thread and serializes access to a document
 
 - `Document: Send + Sync`. Object resolution is lazy. Loaded objects go into a cache split into 64 shards, each behind an `RwLock`, so readers rarely contend. Two threads that race to load the same object may both parse it, and the first result stored wins. A repair builds a new `State` and swaps it in; readers holding the old one finish against it.
 - Shared caches (fonts, decoded images, glyphs) are concurrent maps with size bounds and are keyed by `ObjRef`.
-- Page-level operations (extract, search, render, redaction planning) fan out over pages with rayon. Results are collected by page index, so output is identical at every thread count, and a test enforces that.
+- Page-level operations (extract, search, render, redaction planning) fan out over pages on scoped threads (`parallel`, D37). Each page has its own resource store and its diagnostics are captured, then reported deduplicated in a fixed order; results are collected by page index. Output is identical at every thread count, and tests enforce that.
 - `batch` adds file-level parallelism on top. The MCP server keeps open documents in a handle cache, so repeated calls do not reparse.
 - Rendering adds band-level parallelism within a page in M7.
 

@@ -6,8 +6,24 @@
 //! These are MuPDF's `fz_warn` calls with stable codes. The message text
 //! follows MuPDF's wording so the harness can line the two up.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Mutex;
+
+thread_local! {
+    /// Where this thread's diagnostics go while [`capture`] runs.
+    static CAPTURE: RefCell<Option<Vec<Diagnostic>>> = const { RefCell::new(None) };
+}
+
+/// Runs `f`, keeping the diagnostics it reports on this thread instead of
+/// letting them reach their sinks, so that work done on several threads
+/// can report in a fixed order ([`Diagnostics::replay`]).
+pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<Diagnostic>) {
+    let outer = CAPTURE.with(|c| c.replace(Some(Vec::new())));
+    let r = f();
+    let got = CAPTURE.with(|c| c.replace(outer)).unwrap_or_default();
+    (r, got)
+}
 
 /// Keep memory bounded on pathological files that warn per byte: every
 /// diagnostic up to this many,
@@ -36,10 +52,19 @@ impl Diagnostics {
     }
 
     pub fn warn(&self, code: &'static str, message: impl Into<String>) {
+        let message = message.into();
+        let Some(message) = CAPTURE.with(|c| match c.borrow_mut().as_mut() {
+            Some(buf) => {
+                buf.push(Diagnostic { code, message });
+                None
+            }
+            None => Some(message),
+        }) else {
+            return;
+        };
         let (Ok(mut items), Ok(mut seen)) = (self.items.lock(), self.seen.lock()) else {
             return;
         };
-        let message = message.into();
         let fresh = !seen.contains(&message);
         if items.len() < MAX_DIAGNOSTICS || (fresh && items.len() < MAX_DISTINCT) {
             if fresh {
@@ -48,6 +73,13 @@ impl Diagnostics {
             items.push(Diagnostic { code, message });
         } else if let Ok(mut dropped) = self.dropped.lock() {
             *dropped += 1;
+        }
+    }
+
+    /// Reports diagnostics [`capture`] kept, in their order.
+    pub fn replay(&self, diagnostics: Vec<Diagnostic>) {
+        for d in diagnostics {
+            self.warn(d.code, d.message);
         }
     }
 
@@ -119,7 +151,25 @@ pub mod report {
 
 #[cfg(test)]
 mod tests {
-    use super::{Diagnostics, MAX_DIAGNOSTICS, report};
+    use super::{Diagnostics, MAX_DIAGNOSTICS, capture, report};
+
+    #[test]
+    fn captured_diagnostics_replay_in_order() {
+        let d = Diagnostics::new();
+        d.warn("t.before", "before");
+        let ((), got) = capture(|| {
+            d.warn("t.a", "a");
+            let ((), inner) = capture(|| d.warn("t.inner", "inner"));
+            assert_eq!(inner.len(), 1);
+            d.warn("t.b", "b");
+        });
+        assert_eq!(d.snapshot().len(), 1);
+        let codes: Vec<_> = got.iter().map(|x| x.code).collect();
+        assert_eq!(codes, ["t.a", "t.b"]);
+        d.replay(got);
+        let codes: Vec<_> = d.snapshot().iter().map(|x| x.code).collect();
+        assert_eq!(codes, ["t.before", "t.a", "t.b"]);
+    }
 
     #[test]
     fn past_the_cap_only_new_messages_are_kept() {
