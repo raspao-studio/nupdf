@@ -1150,6 +1150,19 @@ impl Document {
         self.stream_data_in(&self.current(), stream, true)
     }
 
+    /// A stream read as `pdf_open_stream` opens it and the lexer or a bit
+    /// reader takes it, a byte at a time: for functions and the like.
+    pub fn stream_bytes(&self, stream: &Stream) -> Result<Vec<u8>, DecodeError> {
+        let st = self.current();
+        if let Some(data) = self.edited_data(stream) {
+            let resolve = |o: &Object| self.resolve_in(&st, o);
+            return filter::decode(&stream.dict, &data, &resolve, &self.diag, &self.limits);
+        }
+        let length = self.stream_length(&st, stream, true);
+        let mut s = self.open_decoded(&st, stream, length, true)?;
+        Ok(s.read_bytewise(self.limits.max_decoded_bytes)?)
+    }
+
     /// A content stream as MuPDF's interpreter reads it: through
     /// `pdf_open_image_stream` with image filters refused, a byte at a time
     /// (`fz_read_byte`). Also whether the read ended in an error, which

@@ -18,6 +18,7 @@ pub mod edit;
 pub mod fax;
 pub mod fax_encode;
 pub mod filter;
+pub mod function;
 mod garbage;
 pub mod geometry;
 pub mod graft;
