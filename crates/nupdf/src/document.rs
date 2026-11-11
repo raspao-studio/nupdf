@@ -1150,6 +1150,35 @@ impl Document {
         self.stream_data_in(&self.current(), stream, true)
     }
 
+    /// An image's samples as `fz_decomp_image_from_stream` reads them: the
+    /// stream through all its filters, read up to the `len` bytes the image
+    /// needs (`fz_read`). MuPDF keeps the image filter for that read, so no
+    /// compression-bomb guard applies to it.
+    pub fn image_samples(&self, stream: &Stream, len: usize) -> Result<Vec<u8>, DecodeError> {
+        let st = self.current();
+        if let Some(data) = self.edited_data(stream) {
+            let resolve = |o: &Object| self.resolve_in(&st, o);
+            let mut s = filter::open_filters(
+                stream::Stream::memory(&data, &self.diag),
+                &stream.dict,
+                &resolve,
+                None,
+                None,
+                true,
+            )?;
+            let mut out = vec![0; len];
+            let n = s.read(&mut out);
+            out.truncate(n);
+            return Ok(out);
+        }
+        let length = self.stream_length(&st, stream, true);
+        let mut s = self.open_decoded(&st, stream, length, true)?;
+        let mut out = vec![0; len];
+        let n = s.read(&mut out);
+        out.truncate(n);
+        Ok(out)
+    }
+
     /// A stream read as `pdf_open_stream` opens it and the lexer or a bit
     /// reader takes it, a byte at a time: for functions and the like.
     pub fn stream_bytes(&self, stream: &Stream) -> Result<Vec<u8>, DecodeError> {

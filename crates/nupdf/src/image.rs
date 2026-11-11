@@ -35,6 +35,9 @@ pub struct Image {
     pub intent: Option<i32>,
     /// From the inline image's dictionary or the XObject's stream.
     pub is_jpx: bool,
+    /// The XObject whose stream holds the samples; None for an inline
+    /// image.
+    pub stream: Option<Object>,
 }
 
 /// `fz_lookup_rendering_intent` of an image's /Intent.
@@ -159,7 +162,90 @@ fn load_imp(doc: &Document, obj: &Object, forcemask: bool) -> Result<Image, Stri
         mask,
         intent: intent(doc, get(b"Intent").as_ref()),
         is_jpx: false,
+        stream: Some(obj.clone()),
     })
+}
+
+/// The JPEG data of an image whose last filter is DCTDecode, as MuPDF's
+/// compressed buffer holds it: the stream with its other filters undone.
+/// None for an image with another last filter.
+pub fn jpeg_data(doc: &Document, image: &Image) -> Result<Option<Vec<u8>>, String> {
+    Ok(jpeg_parts(doc, image)?.map(|(data, _)| data))
+}
+
+/// `jpeg_data`, with the DCTDecode filter's parameters.
+pub(crate) fn jpeg_parts(
+    doc: &Document,
+    image: &Image,
+) -> Result<Option<(Vec<u8>, Object)>, String> {
+    let Some(obj) = &image.stream else {
+        return Ok(None);
+    };
+    let Object::Stream(s) = doc.resolve(obj) else {
+        return Ok(None);
+    };
+    // pdf_dict_geta: the abbreviation first.
+    let geta = |key: &[u8], abbrev: &[u8]| {
+        s.dict
+            .get(abbrev)
+            .filter(|v| !matches!(v, Object::Null))
+            .or_else(|| s.dict.get(key))
+            .map_or(Object::Null, |v| doc.resolve(v))
+    };
+    let filters = geta(b"Filter", b"F");
+    let is_dct = |o: &Object| o.is_name(b"DCTDecode") || o.is_name(b"DCT");
+    let earlier = match &filters {
+        f if is_dct(f) => Vec::new(),
+        Object::Array(fs) => match fs.split_last() {
+            Some((last, rest)) if is_dct(&doc.resolve(last)) => rest.to_vec(),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let params = geta(b"DecodeParms", b"DP");
+    let last_params = match &params {
+        Object::Array(ps) => ps
+            .get(earlier.len())
+            .map_or(Object::Null, |p| doc.resolve(p)),
+        p if earlier.is_empty() => p.clone(),
+        _ => Object::Null,
+    };
+    let raw = doc.raw_stream_data(&s)?;
+    if earlier.is_empty() {
+        return Ok(Some((raw.into_owned(), last_params)));
+    }
+    let mut dict = crate::object::Dict::new();
+    dict.put(
+        b"Filter",
+        Object::Array(std::sync::Arc::new(earlier.clone())),
+    );
+    if let Object::Array(ps) = &params {
+        let ps: Vec<Object> = ps.iter().take(earlier.len()).cloned().collect();
+        dict.put(b"DecodeParms", Object::Array(std::sync::Arc::new(ps)));
+    }
+    let resolve = |o: &Object| doc.resolve(o);
+    crate::filter::decode(&dict, &raw, &resolve, doc.diagnostics(), &doc.limits())
+        .map(|d| Some((d, last_params)))
+        .map_err(|e| e.report())
+}
+
+/// `compressed_image_get_pixmap`'s patch for JPEG data: a frame header
+/// with no height, or more rows than the image has, gets the image's.
+pub(crate) fn patch_jpeg_height(data: &mut [u8], height: i32) {
+    let mut d = 2usize;
+    while d + 9 < data.len() && data[d] == 0xFF {
+        let m = data[d + 1];
+        let sof = !(m < 0xC0 || (0xC3 < m && m < 0xC9) || 0xCB < m);
+        if sof {
+            let h = (i32::from(data[d + 5]) << 8) | i32::from(data[d + 6]);
+            if h == 0 || h > height {
+                data[d + 5] = ((height >> 8) & 0xFF) as u8;
+                data[d + 6] = (height & 0xFF) as u8;
+            }
+        }
+        let len = (usize::from(data[d + 2]) << 8) | usize::from(data[d + 3]);
+        d += len + 2;
+    }
 }
 
 fn check_size(width: i32, height: i32, bpc: i32) -> Result<(), String> {
@@ -223,6 +309,7 @@ fn load_jpx_data(
         mask: None,
         intent: None,
         is_jpx: true,
+        stream: Some(obj.clone()),
     };
     img.decode = decode_with_default(doc, &Object::Null, img.colorspace.as_ref(), 8, n, false);
     if forcemask {
@@ -517,6 +604,7 @@ pub fn from_inline(doc: &Document, image: &InlineImage) -> Image {
         mask: None,
         intent: intent(doc, get(b"Intent").as_ref()),
         is_jpx: false,
+        stream: None,
     }
 }
 
@@ -608,6 +696,27 @@ fn color_key(doc: &Document, key: &[Object], n: usize, warn: bool) -> Option<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jpeg_frame_heights_are_patched_to_the_image() {
+        // SOI, an APP0 of 4 bytes, then SOF0 claiming 0x1234 rows, and SOS.
+        let mut jpeg = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x12,
+            0x34, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xDA, 0x00, 0x02,
+        ];
+        patch_jpeg_height(&mut jpeg, 100);
+        assert_eq!(&jpeg[13..15], &[0x00, 100]);
+        // A height within the image is kept.
+        patch_jpeg_height(&mut jpeg, 200);
+        assert_eq!(&jpeg[13..15], &[0x00, 100]);
+        // Huffman tables (C4) are not frames.
+        let mut dht = vec![
+            0xFF, 0xD8, 0xFF, 0xC4, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let before = dht.clone();
+        patch_jpeg_height(&mut dht, 1);
+        assert_eq!(dht, before);
+    }
 
     #[test]
     fn decode_arrays_are_kept_when_they_are_not_the_identity() {
