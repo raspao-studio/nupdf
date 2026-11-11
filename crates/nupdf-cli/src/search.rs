@@ -6,7 +6,6 @@
 //! characters (DECISIONS D36).
 
 use nupdf::Document;
-use nupdf::content::Store;
 use nupdf::extract;
 use nupdf::geometry::Quad;
 use nupdf::search::{self, Hit, Position};
@@ -20,6 +19,7 @@ pub struct Args<'a> {
     pub stext: Options,
     pub pages: Option<&'a str>,
     pub max_items: Option<usize>,
+    pub threads: Option<usize>,
 }
 
 fn number(v: f32) -> Value {
@@ -124,30 +124,41 @@ pub fn search(doc: &Document, args: &Args) -> Result<Value, String> {
     let mut hits = Vec::new();
     let mut errors = Vec::new();
     let mut truncated = false;
-    let mut store = Store::default();
-    'pages: for index in indices {
-        let n = index as usize + 1;
-        let page = match doc.page(index) {
-            Ok(obj) if doc.resolve(&obj).as_dict().is_none() => {
-                Err("page object is not a dictionary".to_string())
-            }
-            Ok(obj) => {
-                let (result, next) = stext::extract_page(doc, &obj, args.stext, store);
-                store = next;
-                result.map_err(|e| nupdf::diag::report::strip(&e).to_string())
-            }
-            Err(e) => Err(e.0),
-        };
-        let found =
-            page.and_then(|p| search::search_page(&p, args.needle, args.options).map(|h| (p, h)));
-        match found {
-            Ok((p, page_hits)) => {
-                for hit in &page_hits {
+    let page_hits = |i: usize, page: nupdf::parallel::PageResult| {
+        let n = indices[i] as usize + 1;
+        page.and_then(|p| {
+            search::search_page(&p, args.needle, args.options).map(|h| {
+                // As many as can be kept: those past the cap are dropped.
+                let keep = args.max_items.map_or(h.len(), |m| h.len().min(m + 1));
+                h[..keep]
+                    .iter()
+                    .map(|hit| hit_value(&p, n, hit))
+                    .collect::<Vec<_>>()
+            })
+        })
+    };
+    // Without threads, pages past the last hit kept are not run, as in
+    // MuPDF's loop.
+    let found: Box<dyn Iterator<Item = Result<Vec<Value>, String>>> = match args.threads {
+        None => Box::new(
+            nupdf::parallel::sequential(doc, &indices, args.stext)
+                .enumerate()
+                .map(|(i, p)| page_hits(i, p)),
+        ),
+        Some(n) => Box::new(
+            nupdf::parallel::map_pages(doc, &indices, args.stext, n, &page_hits).into_iter(),
+        ),
+    };
+    'pages: for (index, page) in indices.iter().zip(found) {
+        let n = *index as usize + 1;
+        match page {
+            Ok(page_hits) => {
+                for hit in page_hits {
                     if args.max_items.is_some_and(|m| hits.len() >= m) {
                         truncated = true;
                         break 'pages;
                     }
-                    hits.push(hit_value(&p, n, hit));
+                    hits.push(hit);
                 }
             }
             Err(e) => errors.push(json!({ "page": n, "error": e })),

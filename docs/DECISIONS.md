@@ -408,3 +408,16 @@ The search item adds `nupdf search`, a port of `fz_match_stext_page_cb`. The che
 - **Hits carry content ids** (D35): `id` for a hit within one span (`p3.b2.l4.s1:5-12`, from 0, the end excluded), otherwise `begin` and `end`, and their text.
 - **An empty needle finds nothing.** MuPDF returns no hits for an empty needle; one that becomes empty when transformed (only marks, with `ignore-diacritics`) would match everywhere without moving on in MuPDF, and finds nothing here.
 
+## D37. Pages run in parallel on request, with a report that does not depend on the thread count
+
+*2026-11-11*
+
+`stext`, `extract` and `search` take `--threads N` (`parallel`). Without it pages run one after another as MuPDF runs them, sharing one resource store; with it they run on N threads and the output is the same at every N, 1 included. The two can differ only in diagnostics.
+
+- **Each thread keeps its own store** (fonts, images, shadings, patterns) for the pages it takes, as a run without threads keeps one for all of them. The store holds layer state that is not `Send`, so it cannot be shared. What a store has cached does not change a page's text: across the standard tier the pages from `--threads` equal the pages without it, for `stext` and for `search`.
+- **The work of turning a page into output runs on the threads too** (`parallel::map_pages`): `stext` builds each page's JSON there and `search` its hits.
+- **The page tree is walked first, on the calling thread**, so its warnings come in order. Then the threads take pages in turn and their results are put back in page order.
+- **Each page's diagnostics are kept apart while it runs** (`diag::capture`) and reported once each, sorted by code and message. The document is shared, so a warning from loading an object goes to whichever page loads it first, and that changes with the thread count; sorted and deduplicated, the set does not. Repeats of a warning across pages are therefore reported once.
+- **A repair during the run starts the run again.** A page that makes the document repair itself changes what the pages before it would have read, and which pages ran before it depends on timing. So the file is opened afresh (`Document::reopen`, keeping an accepted password) and every page is done again, one after another, on the new document. A document made or changed in memory has no file to reopen; its pages stay as they ran.
+- **`extract` works on 64 pages at a time**, the same at every thread count, so budgets and cursors stop it early without extracting the rest of a long document. `stext` works on all the pages asked for, and so does `search` with threads; without them it stops running pages once `--max-items` is reached, as before.
+- **Workers run on 1 GB stacks**, as the CLI's main thread does: content streams nest about a thousand forms deep.

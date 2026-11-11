@@ -30,6 +30,7 @@ pub struct Args<'a> {
     pub max_items: Option<usize>,
     pub cursor: Option<&'a str>,
     pub fields: Option<&'a str>,
+    pub threads: Option<usize>,
 }
 
 /// What `extract` gives back: for JSON, the report's body; for JSON
@@ -40,6 +41,9 @@ pub enum Extracted {
     Lines(Vec<Value>, Value),
     Text(String, Value),
 }
+
+/// How many pages `--threads` works on ahead.
+const WINDOW: usize = 64;
 
 /// Every field, in the order levels nest.
 const FIELDS: &[&str] = &[
@@ -302,6 +306,7 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
     let mut text = String::new();
     let mut errors = Vec::new();
     let mut store = Store::default();
+    let mut ahead = std::collections::VecDeque::new();
     // Whether a unit of len characters still fits; the first always does.
     let fits = |chars: usize, items: usize, len: usize| {
         (chars == 0 && items == 0)
@@ -313,16 +318,33 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
         let id = format!("p{n}");
         let skip = std::mem::take(&mut first_block);
         pos += 1;
-        let extracted = match doc.page(index) {
-            Ok(obj) if doc.resolve(&obj).as_dict().is_none() => {
-                Err("page object is not a dictionary".to_string())
+        let extracted = if let Some(threads) = args.threads {
+            // Pages are worked on ahead in windows of the same size at
+            // every thread count, so the report does not depend on it.
+            if ahead.is_empty() {
+                let window = &indices[pos - 1..indices.len().min(pos - 1 + WINDOW)];
+                ahead.extend(nupdf::parallel::extract(
+                    doc,
+                    window,
+                    args.options,
+                    Some(threads),
+                ));
             }
-            Ok(obj) => {
-                let (result, next_store) = stext::extract_page(doc, &obj, args.options, store);
-                store = next_store;
-                result.map_err(|e| nupdf::diag::report::strip(&e).to_string())
+            ahead
+                .pop_front()
+                .unwrap_or_else(|| Err("page was not extracted".to_string()))
+        } else {
+            match doc.page(index) {
+                Ok(obj) if doc.resolve(&obj).as_dict().is_none() => {
+                    Err("page object is not a dictionary".to_string())
+                }
+                Ok(obj) => {
+                    let (result, next_store) = stext::extract_page(doc, &obj, args.options, store);
+                    store = next_store;
+                    result.map_err(|e| nupdf::diag::report::strip(&e).to_string())
+                }
+                Err(e) => Err(e.0),
             }
-            Err(e) => Err(e.0),
         };
         let page: StextPage = match extracted {
             Ok(p) => p,

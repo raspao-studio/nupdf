@@ -43,6 +43,7 @@ mod names;
 pub mod object;
 pub mod outline;
 pub mod page;
+pub mod parallel;
 pub mod parse;
 pub mod path;
 pub mod pixmap;
