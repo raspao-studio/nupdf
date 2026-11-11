@@ -67,7 +67,8 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `merge` (`mutool merge`: pages, external links, outline items) | `tools/pdfmerge.c` | M3 |
 | `content::interpret` | `pdf/pdf-interpret.c`, `pdf/pdf-op-run.c`, `pdf/pdf-run.c` | M4 |
 | `device` | `fitz/device.c` | M4 |
-| `resources`, `xobject`, `pattern`, `shade`, `function`, `colorspace`, `image` | `pdf/pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c`, `pdf-shade.c`, `pdf-function.c`, `pdf-colorspace.c`, `pdf-image.c` | M4 |
+| `colorspace` (colorspace definitions: families, components, indexed and separation bases) | `pdf/pdf-colorspace.c`, `fitz/colorspace.c` (`fz_new_indexed_colorspace`) | M4 |
+| `resources`, `xobject`, `pattern`, `shade`, `function`, `image` | `pdf/pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c`, `pdf-shade.c`, `pdf-function.c`, `pdf-image.c` | M4 |
 | `font`, `cmap`, `encoding` | `pdf/pdf-font.c`, `pdf-type3.c`, `pdf-cmap*.c`, `pdf-unicode.c`, `pdf-metrics.c`, `fitz/font.c` | M4 |
 | `layer` (optional content) | `pdf/pdf-layer.c` | M4 |
 | `text` (stext) | `fitz/stext-device.c`, `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` | M5 |

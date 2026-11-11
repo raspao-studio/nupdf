@@ -6,6 +6,7 @@
 //! The roadmap lives in `docs/PLAN.md`; the module-to-MuPDF map in
 //! `docs/ARCHITECTURE.md`.
 
+pub mod colorspace;
 pub mod crypt;
 pub mod dct;
 pub mod deflate;
