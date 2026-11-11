@@ -5,40 +5,23 @@
 //! glue walks it (oracle/js/stext.js).
 
 use nupdf::Document;
-use nupdf::content::Store;
 use nupdf::geometry::{Point, Quad, Rect};
-use nupdf::stext::{self, Block, Options, StextPage};
+use nupdf::stext::{Block, Options, StextPage};
 use serde_json::{Map, Value, json};
 
 /// Each page's blocks, or the error that stopped its run.
-pub fn stext(doc: &Document, opts: Options) -> Value {
+pub fn stext(doc: &Document, opts: Options, threads: Option<usize>) -> Value {
     let mut out = Map::new();
     let count = doc.page_count();
     out.insert(
         "page_count".into(),
         count.as_ref().map_or(Value::Null, |n| json!(n)),
     );
-    let mut pages = Vec::new();
-    let mut store = Store::default();
-    for index in 0..count.unwrap_or(0) {
-        let page = match doc.page(index) {
-            Ok(p) => p,
-            Err(e) => {
-                pages.push(json!({ "error": e.0 }));
-                continue;
-            }
-        };
-        if doc.resolve(&page).as_dict().is_none() {
-            pages.push(json!({ "error": "page object is not a dictionary" }));
-            continue;
-        }
-        let (result, next) = stext::extract_page(doc, &page, opts, store);
-        store = next;
-        pages.push(match result {
-            Ok(p) => json!({ "blocks": blocks(&p) }),
-            Err(e) => json!({ "error": nupdf::diag::report::strip(&e) }),
-        });
-    }
+    let indices: Vec<i32> = (0..count.unwrap_or(0)).collect();
+    let pages = nupdf::parallel::map(doc, &indices, opts, threads, &|_, r| match r {
+        Ok(p) => json!({ "blocks": blocks(&p) }),
+        Err(e) => json!({ "error": e }),
+    });
     out.insert("pages".into(), Value::Array(pages));
     Value::Object(out)
 }

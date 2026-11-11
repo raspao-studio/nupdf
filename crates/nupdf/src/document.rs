@@ -649,6 +649,21 @@ impl Document {
         &self.diag
     }
 
+    /// The same file opened again, as it was before any repair or load, with
+    /// this document's security handler (so an accepted password carries
+    /// over). `None` for documents made or changed in memory, which have
+    /// no file to go back to.
+    pub fn reopen(&self) -> Option<Document> {
+        if self.created || self.edited.load(Ordering::SeqCst) {
+            return None;
+        }
+        let doc = Self::open_with(self.data.clone(), self.limits).ok()?;
+        if let (Ok(mut c), Some(current)) = (doc.crypt.write(), self.crypt()) {
+            *c = Some(current);
+        }
+        Some(doc)
+    }
+
     pub fn trailer(&self) -> Dict {
         if let Some(t) = self.with_edits(|e| e.trailer.clone()).flatten() {
             return t;
