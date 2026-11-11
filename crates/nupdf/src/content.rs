@@ -328,6 +328,16 @@ pub struct Store {
     /// has been checked (MuPDF writes them into the document).
     pub struct_parents: Option<HashMap<i32, Object>>,
     ocg: Option<Rc<layer::Descriptor>>,
+    /// Fonts by object number, and fonts given directly, by value.
+    pub fonts: HashMap<i32, Arc<crate::fontdesc::FontDesc>>,
+    pub direct_fonts: Vec<(Object, Arc<crate::fontdesc::FontDesc>)>,
+    /// `pdf_load_hail_mary_font`'s font, once loaded.
+    pub hail_mary: Option<Arc<crate::fontdesc::FontDesc>>,
+    /// Type 3 fonts whose glyphs are being prepared (`t3loading` while
+    /// in the store), by their font object, and fonts whose glyphs are
+    /// being drawn, by font.
+    pub t3_loading: Vec<Object>,
+    pub t3_running: Vec<usize>,
 }
 
 impl Store {
@@ -381,6 +391,32 @@ pub fn process_contents(
         proc.state().rstack.pop();
     }
     out
+}
+
+/// `pdf_process_glyph`: a Type 3 glyph's procedure, with the font's
+/// resources. Syntax errors that escape become format errors.
+pub fn process_glyph(
+    doc: &Document,
+    resources: Option<&Object>,
+    data: &[u8],
+    proc: &mut dyn Processor,
+) -> Result<(), String> {
+    if let Some(res) = resources {
+        proc.state().rstack.push(res.clone());
+    }
+    let out = {
+        let diag = doc.diagnostics();
+        let mut csi = Csi::new(doc, proc);
+        let mut lx = Lexer::small(data, 0, diag);
+        csi.process_stream(&mut lx).and_then(|()| csi.process_end())
+    };
+    if resources.is_some() {
+        proc.state().rstack.pop();
+    }
+    out.map_err(|line| match line.strip_prefix("syntax error: ") {
+        Some(rest) => report::format(rest),
+        None => line,
+    })
 }
 
 /// `pdf_process_raw_contents`.

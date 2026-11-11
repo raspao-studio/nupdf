@@ -100,7 +100,7 @@ Each editing command makes one edit, then writes the document as `clean` writes 
 | `decrypt`, `encrypt` | Remove or add encryption | M2, M3 |
 | `merge`, `split`, `pages`, `meta`, `clean` | Structural editing | M3 |
 | `operators` | Each page's content-stream operators with their operands, as MuPDF's interpreter dispatches them; `--no-resources` processes the content streams alone | M4 |
-| `trace` | Each page's device calls, as MuPDF's run processor makes them for the page's contents: paths with their matrices, colors and stroke states, clips, images, shadings, groups, masks, layers, structure and metatext (text is drawn once fonts load) | M4 |
+| `trace` | Each page's device calls, as MuPDF's run processor makes them for the page's contents: paths with their matrices, colors and stroke states, clips, images, shadings, text (spans with their font, matrix, writing mode and language, and each glyph's id, Unicode and position), groups, masks, layers, structure and metatext | M4 |
 | `fonts`, `images` | Font inventory, image list and extraction | M4 |
 | `extract` | Text as JSON (ids, bboxes, fonts), plain, Markdown or JSONL | M5 |
 | `search` | Literal or regex hits with quads and ids | M5 |

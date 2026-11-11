@@ -79,6 +79,55 @@ impl Rect {
         self.x0 == MIN_INF && self.x1 == MAX_INF && self.y0 == MIN_INF && self.y1 == MAX_INF
     }
 
+    /// `fz_union_rect`.
+    pub fn union(self, b: Rect) -> Rect {
+        if !b.is_valid() {
+            return self;
+        }
+        if !self.is_valid() {
+            return b;
+        }
+        if self.is_infinite() {
+            return self;
+        }
+        if b.is_infinite() {
+            return b;
+        }
+        let mut a = self;
+        if a.x0 > b.x0 {
+            a.x0 = b.x0;
+        }
+        if a.y0 > b.y0 {
+            a.y0 = b.y0;
+        }
+        if a.x1 < b.x1 {
+            a.x1 = b.x1;
+        }
+        if a.y1 < b.y1 {
+            a.y1 = b.y1;
+        }
+        a
+    }
+
+    /// `fz_expand_rect`.
+    pub fn expand(self, e: f32) -> Rect {
+        if self.is_infinite() || !self.is_valid() {
+            return self;
+        }
+        Rect::new(self.x0 - e, self.y0 - e, self.x1 + e, self.y1 + e)
+    }
+
+    /// `fz_contains_rect`.
+    pub fn contains(&self, b: Rect) -> bool {
+        if !self.is_valid() {
+            return false;
+        }
+        if !b.is_valid() {
+            return true;
+        }
+        self.x0 <= b.x0 && self.y0 <= b.y0 && self.x1 >= b.x1 && self.y1 >= b.y1
+    }
+
     /// `fz_intersect_rect`.
     pub fn intersect(self, b: Rect) -> Rect {
         if b.is_infinite() {

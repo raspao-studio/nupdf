@@ -5,7 +5,8 @@
 //
 // Each call is an array: its name, then its arguments. Paths are their
 // walked segments, colorspaces their type and number of components,
-// shadings their bounds under the call's matrix, images their shape.
+// shadings their bounds under the call's matrix, images their shape, text
+// its spans and glyphs.
 // Each page loses its /Annots before it is loaded. The tile callbacks are
 // left out: the glue's beginTile returns from inside its exception frame,
 // which breaks the script engine after a few calls, so MuPDF draws each
@@ -72,6 +73,24 @@ function mat(m) {
   return [m[0], m[1], m[2], m[3], m[4], m[5]];
 }
 
+// Text as its walk gives it: per span, the font's name, the matrix
+// without its translation, the writing mode, bidi level, markup direction
+// and language, then each glyph's id, Unicode and position.
+function text(t) {
+  var out = [];
+  var cur = null;
+  t.walk({
+    beginSpan: function (f, trm, wmode, bidi, dir, lang) {
+      cur = [f.getName(), [trm[0], trm[1], trm[2], trm[3]], wmode, bidi, dir, lang, []];
+      out.push(cur);
+    },
+    showGlyph: function (f, trm, gid, ucs) {
+      cur[6].push([gid, ucs, trm[4], trm[5]]);
+    },
+  });
+  return out;
+}
+
 var events;
 
 function rec(a) { events.push(a); }
@@ -85,11 +104,15 @@ var device = {
   },
   clipPath: function (p, eo, ctm) { rec(["clip_path", path(p), eo, mat(ctm)]); },
   clipStrokePath: function (p, s, ctm) { rec(["clip_stroke_path", path(p), stroke(s), mat(ctm)]); },
-  fillText: function () { rec(["fill_text"]); },
-  strokeText: function () { rec(["stroke_text"]); },
-  clipText: function () { rec(["clip_text"]); },
-  clipStrokeText: function () { rec(["clip_stroke_text"]); },
-  ignoreText: function () { rec(["ignore_text"]); },
+  fillText: function (t, ctm, c, v, alpha, cp) {
+    rec(["fill_text", text(t), mat(ctm), cs(c), color(c, v), alpha, params(cp)]);
+  },
+  strokeText: function (t, s, ctm, c, v, alpha, cp) {
+    rec(["stroke_text", text(t), stroke(s), mat(ctm), cs(c), color(c, v), alpha, params(cp)]);
+  },
+  clipText: function (t, ctm) { rec(["clip_text", text(t), mat(ctm)]); },
+  clipStrokeText: function (t, s, ctm) { rec(["clip_stroke_text", text(t), stroke(s), mat(ctm)]); },
+  ignoreText: function (t, ctm) { rec(["ignore_text", text(t), mat(ctm)]); },
   fillShade: function (sh, ctm, alpha, cp) {
     var b = sh.getBounds(ctm);
     rec(["fill_shade", [b[0], b[1], b[2], b[3]], mat(ctm), alpha, params(cp)]);

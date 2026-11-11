@@ -65,7 +65,7 @@ impl Default for StrokeState {
 }
 
 /// `FZ_LINEJOIN_MITER` and `FZ_LINEJOIN_MITER_XPS`.
-const LINEJOIN_MITER: i32 = 0;
+pub const LINEJOIN_MITER: i32 = 0;
 const LINEJOIN_MITER_XPS: i32 = 3;
 
 /// A path being built, then handed to a device.

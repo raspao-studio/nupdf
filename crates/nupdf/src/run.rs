@@ -4,19 +4,20 @@
 // (pdf_run_page_contents, pdf_structure_type), source/pdf/pdf-page.c
 // (the blending scan, pdf_load_default_colorspaces), source/pdf/pdf-pattern.c,
 // source/pdf/pdf-xobject.c, source/pdf/pdf-interpret.c (the SMask entry of
-// pdf_process_extgstate) and source/pdf/pdf-nametree.c (pdf_lookup_number),
-// Copyright (C) 2004-2026 Artifex Software, Inc.
+// pdf_process_extgstate, the text object state), source/pdf/pdf-nametree.c
+// (pdf_lookup_number) and source/fitz/font.c (Type 3 glyph preparation and
+// direct drawing, fz_bound_glyph), Copyright (C) 2004-2026 Artifex Software,
+// Inc.
 
 //! The run processor: content-stream operators to device calls, as
 //! `pdf_new_run_processor` maps them, and a page run as
 //! `pdf_run_page_contents` does it.
 //!
 //! The graphics state stack, clipping, soft masks, transparency groups,
-//! tiling patterns, shadings, images, form XObjects, optional content
-//! layers, marked-content structure and metatext follow MuPDF. Text is not
-//! shown yet: the text operators change no state a device sees, so text
-//! and what MuPDF draws around it (its groups, masks and clips) are
-//! missing from the device calls.
+//! tiling patterns, shadings, images, form XObjects, text with the fonts
+//! `fontdesc` loads (Type 3 glyphs among them), optional content layers,
+//! marked-content structure and metatext follow MuPDF. Glyph boxes are
+//! their font's box until outlines are read (DECISIONS D32).
 
 use std::sync::Arc;
 
@@ -25,12 +26,15 @@ use crate::content::{self, Op, ProcState, Processor, Store};
 use crate::device::{self, ColorParams, DefaultColorSpaces, Device, Metatext};
 use crate::diag::report;
 use crate::document::Document;
+use crate::fontdesc::{self, Font, FontDesc};
 use crate::function::{self, Function};
 use crate::geometry::{Matrix, Rect};
+use crate::glyphs;
 use crate::image::{self, Image};
 use crate::object::Object;
 use crate::path::{Path, StrokeState};
 use crate::shade::Shade;
+use crate::text::Text;
 
 /// `pdf_gsave`'s limit: the stack grows by doubling and stops short of
 /// 4096 entries.
@@ -44,10 +48,32 @@ const MAX_TILES: usize = 1 << 20;
 /// the blending scan.
 const MAX_SCAN_DEPTH: usize = 256;
 
-// The device flags the processor reads (FZ_DEVFLAG_*).
+// The device flags the processor reads and sets (FZ_DEVFLAG_*).
 const DEVFLAG_MASK: u32 = 1;
 const DEVFLAG_COLOR: u32 = 2;
-const DEVFLAG_BBOX_DEFINED: u32 = 8;
+const DEVFLAG_UNCACHEABLE: u32 = 4;
+const DEVFLAG_FILLCOLOR_UNDEFINED: u32 = 8;
+const DEVFLAG_STROKECOLOR_UNDEFINED: u32 = 16;
+const DEVFLAG_STARTCAP_UNDEFINED: u32 = 32;
+const DEVFLAG_DASHCAP_UNDEFINED: u32 = 64;
+const DEVFLAG_ENDCAP_UNDEFINED: u32 = 128;
+const DEVFLAG_LINEJOIN_UNDEFINED: u32 = 256;
+const DEVFLAG_MITERLIMIT_UNDEFINED: u32 = 512;
+const DEVFLAG_LINEWIDTH_UNDEFINED: u32 = 1024;
+const DEVFLAG_BBOX_DEFINED: u32 = 2048;
+const DEVFLAG_DASH_PATTERN_UNDEFINED: u32 = 8192;
+/// `FZ_BIDI_NEUTRAL`: the direction the interpreter marks text with.
+const BIDI_NEUTRAL: i32 = 2;
+/// What `fz_prepare_t3_glyph` starts a glyph's device with.
+const PREPARE_FLAGS: u32 = DEVFLAG_FILLCOLOR_UNDEFINED
+    | DEVFLAG_STROKECOLOR_UNDEFINED
+    | DEVFLAG_STARTCAP_UNDEFINED
+    | DEVFLAG_DASHCAP_UNDEFINED
+    | DEVFLAG_ENDCAP_UNDEFINED
+    | DEVFLAG_LINEJOIN_UNDEFINED
+    | DEVFLAG_MITERLIMIT_UNDEFINED
+    | DEVFLAG_LINEWIDTH_UNDEFINED
+    | DEVFLAG_DASH_PATTERN_UNDEFINED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -90,18 +116,76 @@ impl Material {
     }
 }
 
-/// The font a gstate's text uses, as far as text without glyphs needs to
-/// know.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Font {
-    None,
-    Simple,
-    /// Type 3 glyphs are never clips.
-    Type3,
+/// `pdf_text_state`.
+#[derive(Debug, Clone)]
+struct TextState {
+    char_space: f32,
+    word_space: f32,
+    scale: f32,
+    leading: f32,
+    font: Option<Arc<FontDesc>>,
+    size: f32,
+    render: i32,
+    rise: f32,
 }
 
-/// `pdf_gstate`, with only the part of the text state that decides
-/// whether text is shown and clips.
+impl TextState {
+    fn new() -> TextState {
+        TextState {
+            char_space: 0.0,
+            word_space: 0.0,
+            scale: 1.0,
+            leading: 0.0,
+            font: None,
+            size: -1.0,
+            render: 0,
+            rise: 0.0,
+        }
+    }
+}
+
+/// The part of the text state a glyph's matrix and advance take.
+#[derive(Debug, Clone, Copy)]
+struct TextMetrics {
+    size: f32,
+    scale: f32,
+    rise: f32,
+    char_space: f32,
+}
+
+/// `pdf_text_object_state`.
+#[derive(Debug)]
+struct Tos {
+    text: Option<Text>,
+    text_bbox: Rect,
+    clip_text: Option<Text>,
+    clip_text_bbox: Rect,
+    text_mode: i32,
+    tlm: Matrix,
+    tm: Matrix,
+    char_tx: f32,
+    char_ty: f32,
+    char_bbox: Rect,
+}
+
+impl Tos {
+    fn new() -> Tos {
+        Tos {
+            text: None,
+            text_bbox: Rect::EMPTY,
+            clip_text: None,
+            clip_text_bbox: Rect::EMPTY,
+            text_mode: 0,
+            tlm: Matrix::IDENTITY,
+            tm: Matrix::IDENTITY,
+            char_tx: 0.0,
+            char_ty: 0.0,
+            char_bbox: Rect::EMPTY,
+        }
+    }
+}
+
+/// `pdf_gstate`.
 #[derive(Debug, Clone)]
 struct GState {
     ctm: Matrix,
@@ -119,8 +203,7 @@ struct GState {
     softmask_cs: Option<ColorSpace>,
     softmask_bc: [f32; MAX_COLORS],
     luminosity: bool,
-    font: Font,
-    render: i32,
+    text: TextState,
 }
 
 impl GState {
@@ -141,8 +224,7 @@ impl GState {
             softmask_cs: None,
             softmask_bc: [0.0; MAX_COLORS],
             luminosity: false,
-            font: Font::None,
-            render: 0,
+            text: TextState::new(),
         }
     }
 
@@ -506,12 +588,11 @@ pub struct Run<'a> {
     /// end of the run unwinds nothing.
     aborted: bool,
     tiles: usize,
-    /// Text shown since the last flush (`tos.text`), in this render mode.
-    text_pending: bool,
-    text_mode: i32,
-    /// Glyphs shown in a clipping mode since the last `ET`
-    /// (`tos.clip_text`).
-    clip_pending: bool,
+    tos: Tos,
+    /// The bidi level guessed for the last glyph.
+    bidi: i32,
+    /// The box a Type 3 glyph's `d1` gives (`dev->d1_rect`).
+    d1_rect: Rect,
 }
 
 impl<'a> Run<'a> {
@@ -524,11 +605,59 @@ impl<'a> Run<'a> {
         default_cs: Arc<DefaultColorSpaces>,
         store: Store,
     ) -> Result<Run<'a>, String> {
+        let mut run = Run::with_gstates(doc, dev, ctm, default_cs, store, None);
+        run.set_struct_parent(struct_parent);
+        if run.process_structure
+            && struct_parent != -1
+            && let Some(root) = run.struct_tree_root.clone()
+        {
+            let tree = doc.dict_get(&root, b"ParentTree");
+            if let Some(obj) = lookup_number(doc, &tree, struct_parent)
+                && doc.resolve(&obj).as_dict().is_some()
+            {
+                run.send_begin_structure(&obj)?;
+            }
+        }
+        Ok(run)
+    }
+
+    /// `pdf_new_run_processor` up to its structure: the gstates a Type 3
+    /// glyph inherits, if any, then the extra level for the parent.
+    fn with_gstates(
+        doc: &'a Document,
+        dev: &'a mut dyn Device,
+        ctm: Matrix,
+        default_cs: Arc<DefaultColorSpaces>,
+        store: Store,
+        inherit: Option<Inherit>,
+    ) -> Run<'a> {
         let root = doc.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
         let struct_tree_root = stored(doc, &root, b"StructTreeRoot");
         let role_map = struct_tree_root
             .as_ref()
             .and_then(|s| stored(doc, s, b"RoleMap"));
+        let mut gstate = vec![GState::new(ctm)];
+        if let Some(inherit) = inherit {
+            gstate.clear();
+            let has_fill = inherit.fill.is_some();
+            let has_stroke = inherit.stroke.is_some();
+            for mut g in [inherit.fill, inherit.stroke].into_iter().flatten() {
+                g.clip_depth = 0;
+                gstate.push(g);
+            }
+            let mut g = inherit.gstate;
+            g.clip_depth = 0;
+            g.ctm = ctm;
+            if has_fill {
+                g.fill.gstate_num = 0;
+            }
+            // MuPDF sets the fill's number here too.
+            if has_stroke {
+                g.fill.gstate_num = i32::from(has_fill);
+            }
+            gstate.push(g);
+        }
+        let gparent = gstate.len() - 1;
         let mut run = Run {
             doc,
             dev,
@@ -539,9 +668,9 @@ impl<'a> Run<'a> {
             path: Path::new(),
             clip: false,
             clip_even_odd: false,
-            gstate: vec![GState::new(ctm)],
+            gstate,
             gbot: 0,
-            gparent: 0,
+            gparent,
             cycle: Vec::new(),
             role_map,
             marked: Vec::new(),
@@ -557,25 +686,14 @@ impl<'a> Run<'a> {
             process_structure: true,
             aborted: false,
             tiles: 0,
-            text_pending: false,
-            text_mode: 0,
-            clip_pending: false,
+            tos: Tos::new(),
+            bidi: 0,
+            d1_rect: Rect::EMPTY,
         };
         // An extra level for the parent gstate.
-        run.gsave()?;
-        run.set_struct_parent(struct_parent);
-        if run.process_structure
-            && struct_parent != -1
-            && let Some(root) = run.struct_tree_root.clone()
-        {
-            let tree = doc.dict_get(&root, b"ParentTree");
-            if let Some(obj) = lookup_number(doc, &tree, struct_parent)
-                && doc.resolve(&obj).as_dict().is_some()
-            {
-                run.send_begin_structure(&obj)?;
-            }
-        }
-        Ok(run)
+        let top = run.gs().clone();
+        run.gstate.push(top);
+        run
     }
 
     /// The store, for the next page.
@@ -708,91 +826,646 @@ impl<'a> Run<'a> {
         }
     }
 
-    // Text. No glyphs are drawn, but text shown flushes pending layers and
-    // structure where MuPDF flushes it, and text clips are made at `ET`.
+    // Text.
 
     /// `pdf_flush_text`.
     fn flush_text(&mut self) -> Result<(), String> {
-        if !std::mem::take(&mut self.text_pending) {
-            return Ok(());
-        }
-        self.pop_any_pending_mcid_changes();
-        self.flush_begin_layer()
+        self.flush_text_imp(false)
     }
 
     /// `pdf_flush_clip_text`.
     fn flush_clip_text(&mut self) -> Result<(), String> {
-        if !std::mem::take(&mut self.clip_pending) {
+        self.flush_text_imp(true)
+    }
+
+    /// `pdf_flush_text_imp`: the text shown since the last flush, drawn
+    /// in its render mode, or the glyphs a clipping mode gathered, clipped
+    /// to at `ET`.
+    fn flush_text_imp(&mut self, flush_clip: bool) -> Result<(), String> {
+        let text = if flush_clip {
+            self.tos.clip_text.take()
+        } else {
+            self.tos.text.take()
+        };
+        let Some(text) = text else {
             return Ok(());
-        }
+        };
         self.pop_any_pending_mcid_changes();
         self.flush_begin_layer()?;
-        self.push_nest(Nest::LiveClip)?;
-        self.gs_mut().clip_depth += 1;
-        let ctm = self.gs().ctm;
-        self.dev.clip_text(ctm);
+        let (mut dofill, mut dostroke, mut doclip, doinvisible) = match self.tos.text_mode {
+            0 => (true, false, false, false),
+            1 => (false, true, false, false),
+            2 => (true, true, false, false),
+            3 => (false, false, false, true),
+            4 => (true, false, true, false),
+            5 => (false, true, true, false),
+            6 => (true, true, true, false),
+            7 => (false, false, true, false),
+            _ => (false, false, false, false),
+        };
+        if flush_clip {
+            dostroke = false;
+            dofill = false;
+        } else {
+            doclip = false;
+        }
+        if self.state.hidden > 0 {
+            dostroke = false;
+            dofill = false;
+        }
+        let gs = self.gs().clone();
+        let mut tb = self.tos.text_bbox.transform(gs.ctm);
+        if dostroke {
+            tb = crate::path::adjust_for_stroke(tb, &gs.stroke_state, gs.ctm);
+        }
+        if !tb.is_valid() {
+            dofill = false;
+            dostroke = false;
+        }
+        // Nothing is sent for text without glyphs.
+        if text.is_empty() {
+            return Ok(());
+        }
+        let mut save = SoftmaskSave::default();
+        if dofill || dostroke {
+            self.begin_group(tb, &mut save)?;
+        }
+        let gs = self.gs().clone();
+        let mut knockout = false;
+        if dofill
+            && dostroke
+            && gs.stroke.alpha != 0.0
+            && !(gs.stroke.alpha == 1.0 && gs.blendmode == 0)
+        {
+            knockout = true;
+            self.dev.begin_group(tb, None, false, true, 0, 1.0);
+        }
+        if doinvisible {
+            self.dev.ignore_text(&text, gs.ctm);
+        }
+        if dofill {
+            let m = &gs.fill;
+            match m.kind {
+                Kind::Color => {
+                    self.dev
+                        .fill_text(&text, gs.ctm, &m.colorspace, m.color(), m.alpha, m.params)
+                }
+                Kind::Pattern => {
+                    if let Some(pat) = &m.pattern {
+                        self.dev.clip_text(&text, gs.ctm, tb);
+                        self.show_pattern(pat, m.gstate_num, tb, false)?;
+                        self.dev.pop_clip();
+                    }
+                }
+                Kind::Shade => {
+                    if let Some(shade) = &m.shade {
+                        self.dev.clip_text(&text, gs.ctm, tb);
+                        let ctm = self.gstate_ctm(m.gstate_num);
+                        self.dev.fill_shade(shade, ctm, m.alpha, m.params);
+                        self.dev.pop_clip();
+                    }
+                }
+            }
+        }
+        if dostroke {
+            let gs = self.gs().clone();
+            let m = &gs.stroke;
+            match m.kind {
+                Kind::Color => self.dev.stroke_text(
+                    &text,
+                    &gs.stroke_state,
+                    gs.ctm,
+                    &m.colorspace,
+                    m.color(),
+                    m.alpha,
+                    m.params,
+                ),
+                Kind::Pattern => {
+                    if let Some(pat) = &m.pattern {
+                        self.dev
+                            .clip_stroke_text(&text, &gs.stroke_state, gs.ctm, tb);
+                        self.show_pattern(pat, m.gstate_num, tb, true)?;
+                        self.dev.pop_clip();
+                    }
+                }
+                Kind::Shade => {
+                    if let Some(shade) = &m.shade {
+                        self.dev
+                            .clip_stroke_text(&text, &gs.stroke_state, gs.ctm, tb);
+                        let ctm = self.gstate_ctm(m.gstate_num);
+                        self.dev.fill_shade(shade, ctm, m.alpha, m.params);
+                        self.dev.pop_clip();
+                    }
+                }
+            }
+        }
+        if knockout {
+            self.dev.end_group();
+        }
+        if dofill || dostroke {
+            self.end_group(&mut save);
+        }
+        if doclip {
+            let ctm = self.gs().ctm;
+            let ctb = self.tos.clip_text_bbox.transform(ctm);
+            self.push_nest(Nest::LiveClip)?;
+            self.gs_mut().clip_depth += 1;
+            self.dev.clip_text(&text, ctm, ctb);
+        }
         Ok(())
     }
 
-    /// Characters shown, as `pdf_show_char` handles each: text in a new
-    /// render mode flushes what came before.
-    fn show_chars(&mut self) -> Result<(), String> {
-        let (font, render) = (self.gs().font, self.gs().render);
-        if font == Font::None {
+    /// `pdf_tos_translate`.
+    fn tos_translate(&mut self, tx: f32, ty: f32) {
+        self.tos.tlm = self.tos.tlm.pre_translate(tx, ty);
+        self.tos.tm = self.tos.tlm;
+    }
+
+    /// `pdf_tos_newline`.
+    fn tos_newline(&mut self) {
+        let leading = self.gs().text.leading;
+        self.tos.tlm = self.tos.tlm.pre_translate(0.0, -leading);
+        self.tos.tm = self.tos.tlm;
+    }
+
+    /// A color operator's flags: the color is now defined; a masked Type 3
+    /// glyph ignores it.
+    fn color_masked(&mut self, stroke: bool) -> bool {
+        self.flags &= !if stroke {
+            DEVFLAG_STROKECOLOR_UNDEFINED
+        } else {
+            DEVFLAG_FILLCOLOR_UNDEFINED
+        };
+        self.flags & DEVFLAG_MASK != 0
+    }
+
+    /// `pdf_tos_reset`.
+    fn tos_reset(&mut self, render: i32) {
+        self.tos.text = Some(Text::new());
+        self.tos.text_mode = render;
+        self.tos.text_bbox = Rect::EMPTY;
+    }
+
+    /// `pdf_tos_make_trm`: the glyph's matrix and advance, and where the
+    /// next glyph goes.
+    fn make_trm(&mut self, fd: &FontDesc, cid: i32) -> (Matrix, f32, i32) {
+        let t = &self.gs().text;
+        let ts = TextMetrics {
+            size: t.size,
+            scale: t.scale,
+            rise: t.rise,
+            char_space: t.char_space,
+        };
+        let mut tsm = Matrix {
+            a: ts.size * ts.scale,
+            b: 0.0,
+            c: 0.0,
+            d: ts.size,
+            e: 0.0,
+            f: ts.rise,
+        };
+        let adv;
+        if fd.wmode == 0 {
+            let h = fd.lookup_hmtx(cid);
+            let w0 = h.w as f32 * 0.001;
+            adv = w0;
+            self.tos.char_tx = (w0 * ts.size + ts.char_space) * ts.scale;
+            self.tos.char_ty = 0.0;
+        } else {
+            let v = fd.lookup_vmtx(cid);
+            let w1 = v.w as f32 * 0.001;
+            adv = w1;
+            tsm.e -= v.x as f32 * ts.size * ts.scale * 0.001;
+            tsm.f -= v.y as f32 * ts.size * 0.001;
+            self.tos.char_tx = 0.0;
+            self.tos.char_ty = w1 * ts.size + ts.char_space;
+        }
+        let trm = tsm.concat(self.tos.tm);
+        let gid = fd.cid_to_gid(cid);
+        self.tos.char_bbox = bound_glyph(&fd.font, gid, trm).expand(1.0);
+        (trm, adv, gid)
+    }
+
+    /// `pdf_tos_move_after_char`.
+    fn move_after_char(&mut self) {
+        self.tos.text_bbox = self.tos.text_bbox.union(self.tos.char_bbox);
+        if self.tos.clip_text.is_some() {
+            self.tos.clip_text_bbox = self.tos.clip_text_bbox.union(self.tos.char_bbox);
+        }
+        self.tos.tm = self
+            .tos
+            .tm
+            .pre_translate(self.tos.char_tx, self.tos.char_ty);
+    }
+
+    /// `pdf_show_char`.
+    fn show_char(&mut self, fd: &Arc<FontDesc>, cid: i32, lang: i32) -> Result<(), String> {
+        let (trm, adv, gid) = self.make_trm(fd, cid);
+        let font = &fd.font;
+        let t3 = font.t3.as_ref();
+        let t3_flags = |gid: i32| {
+            t3.and_then(|t| usize::try_from(gid).ok().and_then(|g| t.flags.get(g)))
+                .copied()
+                .unwrap_or(0)
+        };
+        let mut render_direct =
+            t3.is_some() && (0..256).contains(&gid) && t3_flags(gid) & DEVFLAG_UNCACHEABLE != 0;
+        let render = self.gs().text.render;
+        let type3_hitr = t3.is_some() && render >= 4;
+        if self.tos.text.is_none() || render != self.tos.text_mode || render_direct || type3_hitr {
+            self.flush_text()?;
+            let render = self.gs().text.render;
+            self.tos_reset(render);
+        }
+        if type3_hitr {
+            self.tos.text_mode -= 4;
+        }
+        if t3.is_some() && self.tos.text_mode != 3 {
+            self.tos.text_mode = 0;
+        }
+        // Colored Type 3 glyphs are not drawn with patterns.
+        if t3.is_some() && t3_flags(gid) & DEVFLAG_COLOR != 0 && self.gs().fill.kind != Kind::Color
+        {
+            render_direct = true;
+        }
+        if render_direct && self.tos.text_mode != 3 {
+            let composed = trm.concat(self.gs().ctm);
+            self.render_t3_glyph_direct(fd, gid, composed)?;
+            // Shown invisibly, to be extracted.
+            self.tos.text_mode = 3;
+        }
+
+        let mut ucs = fd
+            .to_unicode
+            .as_ref()
+            .map(|u| u.lookup_full(cid as u32))
+            .unwrap_or_default();
+        if ucs.len() == 1 && (8..=13).contains(&ucs[0]) {
+            ucs[0] = 32;
+        }
+        if ucs.len() == 1 && (ucs[0] < 32 || (127..160).contains(&ucs[0])) {
+            ucs.clear();
+        }
+        if ucs.is_empty()
+            && let Some(&u) = fd
+                .cid_to_ucs
+                .as_ref()
+                .and_then(|m| usize::try_from(cid).ok().and_then(|c| m.get(c)))
+        {
+            ucs.push(i32::from(u));
+        }
+        if ucs.is_empty() || (ucs.len() == 1 && ucs[0] == 0) {
+            ucs = vec![glyphs::REPLACEMENT as i32];
+        }
+        self.bidi = guess_bidi_level(bidi_class(ucs[0]), self.bidi);
+        let (wmode, bidi) = (fd.wmode, self.bidi);
+        if let Some(text) = self.tos.text.as_mut() {
+            text.show_glyph(
+                font,
+                trm,
+                adv,
+                gid,
+                ucs[0],
+                cid,
+                wmode,
+                bidi,
+                BIDI_NEUTRAL,
+                lang,
+            );
+        }
+        if self.tos.text_mode & 4 != 0 {
+            if self.tos.clip_text.is_none() {
+                self.tos.clip_text = Some(Text::new());
+                self.tos.clip_text_bbox = Rect::EMPTY;
+            }
+            if let Some(text) = self.tos.clip_text.as_mut() {
+                text.show_glyph(
+                    font,
+                    trm,
+                    adv,
+                    gid,
+                    ucs[0],
+                    cid,
+                    wmode,
+                    bidi,
+                    BIDI_NEUTRAL,
+                    lang,
+                );
+            }
+        }
+        if let Some(text) = self.tos.text.as_mut() {
+            for &u in &ucs[1..] {
+                text.show_glyph(font, trm, 0.0, -1, u, -1, wmode, bidi, BIDI_NEUTRAL, lang);
+            }
+        }
+        self.move_after_char();
+        Ok(())
+    }
+
+    /// `pdf_show_space`.
+    fn show_space(&mut self, tadj: f32) {
+        let ts = &self.gs().text;
+        let horizontal = ts.font.as_ref().is_none_or(|f| f.wmode == 0);
+        self.tos.tm = if horizontal {
+            self.tos.tm.pre_translate(tadj * ts.scale, 0.0)
+        } else {
+            self.tos.tm.pre_translate(0.0, tadj)
+        };
+    }
+
+    /// `find_lang_from_mc`: the /Lang of the innermost marked content.
+    /// MuPDF means to fall back to the structure element's and then to
+    /// outer marked content, but `pdf_dict_get_string` never returns NULL,
+    /// so a missing /Lang ends the search with no language.
+    fn lang_from_marked_content(&self) -> i32 {
+        let doc = self.doc;
+        let Some(mc) = self.marked.last() else {
+            return 0;
+        };
+        match mc.val.as_ref().map(|v| doc.dict_get(v, b"Lang")) {
+            Some(Object::String(l)) => crate::text::language_from_string(&l[..l.len().min(7)]),
+            _ => 0,
+        }
+    }
+
+    /// `show_string`.
+    fn show_codes(&mut self, fd: &Arc<FontDesc>, s: &[u8]) -> Result<(), String> {
+        let lang = self.lang_from_marked_content();
+        self.pop_any_pending_mcid_changes();
+        self.flush_begin_layer()?;
+        let mut at = 0;
+        while at < s.len() {
+            let (cpt, w) = fd.encoding.decode(&s[at..]);
+            at += w.max(1);
+            let cid = fd.encoding.lookup(cpt);
+            if cid >= 0 {
+                self.show_char(fd, cid, lang)?;
+            } else {
+                self.warn("run.encode_character", "cannot encode character");
+            }
+            if cpt == 32 && w == 1 {
+                let ws = self.gs().text.word_space;
+                self.show_space(ws);
+            }
+        }
+        Ok(())
+    }
+
+    /// `pdf_show_string`.
+    fn show_string(&mut self, s: &[u8]) -> Result<(), String> {
+        let Some(fd) = self.gs().text.font.clone() else {
             self.warn(
                 "run.no_font",
                 "cannot draw text since font and size not set",
             );
             return Ok(());
-        }
-        let mut mode = render;
-        if font == Font::Type3 {
-            if render >= 4 {
-                mode -= 4;
-            }
-            if mode != 3 {
-                mode = 0;
-            }
-        }
-        if !self.text_pending || mode != self.text_mode {
-            self.flush_text()?;
-        }
-        self.text_pending = true;
-        self.text_mode = mode;
-        if mode & 4 != 0 {
-            self.clip_pending = true;
-        }
-        Ok(())
+        };
+        self.show_codes(&fd, s)
     }
 
-    fn show_string(&mut self, text: &[u8]) -> Result<(), String> {
-        if self.gs().font == Font::None {
-            return self.show_chars();
-        }
-        if text.is_empty() {
-            return Ok(());
-        }
-        self.show_chars()
-    }
-
+    /// `pdf_show_text`.
     fn show_array(&mut self, array: Option<&Object>) -> Result<(), String> {
         let doc = self.doc;
-        if self.gs().font == Font::None {
-            return self.show_chars();
-        }
-        let items = match array.map(|a| doc.resolve(a)) {
-            Some(Object::Array(items)) => items,
-            Some(Object::String(s)) => return self.show_string(&s),
-            _ => return Ok(()),
+        let Some(fd) = self.gs().text.font.clone() else {
+            self.warn(
+                "run.no_font",
+                "cannot draw text since font and size not set",
+            );
+            return Ok(());
         };
-        for item in items.iter() {
-            if let Object::String(s) = doc.resolve(item)
-                && !s.is_empty()
-            {
-                self.show_chars()?;
+        match array.map(|a| doc.resolve(a)) {
+            Some(Object::Array(items)) => {
+                for item in items.iter() {
+                    match doc.resolve(item) {
+                        Object::String(s) => self.show_codes(&fd, &s)?,
+                        other => {
+                            let size = self.gs().text.size;
+                            self.show_space(-other.to_real() * size * 0.001);
+                        }
+                    }
+                }
             }
+            Some(Object::String(s)) => self.show_codes(&fd, &s)?,
+            _ => {}
         }
         Ok(())
+    }
+
+    /// The font `Tf` selects: `pdf_try_load_font`, or the last-resort font
+    /// for a name that is no font dictionary.
+    fn load_font(&mut self, font: Option<&Object>) -> Result<Arc<FontDesc>, String> {
+        if let Some(obj) = font {
+            match self.try_load_font(obj) {
+                Ok(fd) => return Ok(fd),
+                Err(line) => self.warn("error.reported", line),
+            }
+        }
+        self.hail_mary()
+    }
+
+    /// `pdf_load_hail_mary_font`, once.
+    fn hail_mary(&mut self) -> Result<Arc<FontDesc>, String> {
+        if let Some(fd) = &self.state.store.hail_mary {
+            return Ok(fd.clone());
+        }
+        let fd = Arc::new(fontdesc::Loader { doc: self.doc }.hail_mary()?);
+        self.state.store.hail_mary = Some(fd.clone());
+        Ok(fd)
+    }
+
+    /// `pdf_load_font`, with the store.
+    fn try_load_font(&mut self, obj: &Object) -> Result<Arc<FontDesc>, String> {
+        let num = obj.as_ref().map(|r| r.num);
+        let store = &self.state.store;
+        // MuPDF stores a Type 3 font before preparing its glyphs, so a
+        // glyph that selects it finds it there, still loading.
+        if store.t3_loading.contains(obj) {
+            return Err(report::syntax("recursive type3 font"));
+        }
+        let cached = match num {
+            Some(n) => store.fonts.get(&n).cloned(),
+            None => store
+                .direct_fonts
+                .iter()
+                .find(|(o, _)| o == obj)
+                .map(|(_, f)| f.clone()),
+        };
+        if let Some(fd) = cached {
+            return Ok(fd);
+        }
+        let resources = self.state.resources().cloned();
+        let mut fd = fontdesc::Loader { doc: self.doc }.load(obj, resources.as_ref())?;
+        let type3 = fd.font.t3.is_some();
+        if type3 {
+            self.state.store.t3_loading.push(obj.clone());
+            let prepared = self.prepare_t3_glyphs(&fd.font);
+            self.state.store.t3_loading.pop();
+            if let Some(font) = Arc::get_mut(&mut fd.font)
+                && let Some(t3) = font.t3.as_mut()
+            {
+                t3.flags = prepared.flags;
+                t3.bboxes = prepared.bboxes;
+                if let Some(bbox) = prepared.font_bbox {
+                    font.bbox = bbox;
+                    font.ascender = bbox.y1;
+                    font.descender = bbox.y0;
+                }
+            }
+        }
+        let fd = Arc::new(fd);
+        match num {
+            Some(n) => {
+                self.state.store.fonts.insert(n, fd.clone());
+            }
+            None => self
+                .state
+                .store
+                .direct_fonts
+                .push((obj.clone(), fd.clone())),
+        }
+        Ok(fd)
+    }
+
+    /// `pdf_load_type3_glyphs`: each glyph run once, for the flags its
+    /// operators leave (`fz_prepare_t3_glyph`) and its box.
+    fn prepare_t3_glyphs(&mut self, font: &Font) -> Prepared {
+        let mut out = Prepared {
+            flags: vec![0; 256],
+            bboxes: vec![Rect::EMPTY; 256],
+            font_bbox: None,
+        };
+        let Some(t3) = &font.t3 else {
+            return out;
+        };
+        let mut failed = None;
+        for gid in 0..256 {
+            let Some(proc) = &t3.procs[gid] else {
+                continue;
+            };
+            let mut dev = GlyphProbe::default();
+            let store = std::mem::take(&mut self.state.store);
+            let result = run_glyph(
+                self.doc,
+                &mut dev,
+                Matrix::IDENTITY,
+                PREPARE_FLAGS,
+                t3.resources.as_ref(),
+                proc,
+                None,
+                Arc::new(DefaultColorSpaces::default()),
+                store,
+            );
+            let (result, store) = result;
+            self.state.store = store;
+            let (flags, d1) = match result {
+                Ok(v) => v,
+                Err(line) => {
+                    failed = Some(line);
+                    break;
+                }
+            };
+            out.flags[gid] = flags;
+            // The box d1 gives, unless it is not to be trusted; then (as an
+            // approximation of measuring the glyph) the font's.
+            let r = if flags & DEVFLAG_BBOX_DEFINED != 0 {
+                let r = d1.transform(t3.matrix);
+                if font.invalid_bbox || !font.bbox.contains(d1) {
+                    if dev.drew { font.bbox } else { r }
+                } else {
+                    r
+                }
+            } else if dev.drew {
+                font.bbox
+            } else {
+                Rect::EMPTY
+            };
+            out.bboxes[gid] = r;
+        }
+        if let Some(line) = failed {
+            self.warn("error.reported", line);
+            self.warn("font.type3_glyphs", "type3 glyph load failed");
+        } else if font.invalid_bbox || font.bbox.is_empty() {
+            let mut bbox = Rect::EMPTY;
+            for (gid, r) in out.bboxes.iter().enumerate() {
+                if t3.procs[gid].is_some() {
+                    bbox = bbox.union(*r);
+                }
+            }
+            out.font_bbox = Some(bbox);
+        }
+        out
+    }
+
+    /// `fz_render_t3_glyph_direct`: a glyph that takes the current
+    /// graphics state run straight onto the device.
+    fn render_t3_glyph_direct(
+        &mut self,
+        fd: &Arc<FontDesc>,
+        gid: i32,
+        trm: Matrix,
+    ) -> Result<(), String> {
+        let Some(t3) = &fd.font.t3 else {
+            return Ok(());
+        };
+        let Some(proc) = usize::try_from(gid)
+            .ok()
+            .filter(|&g| g < 256)
+            .and_then(|g| t3.procs[g].as_ref())
+        else {
+            return Ok(());
+        };
+        let key = Arc::as_ptr(&fd.font) as usize;
+        if self.state.store.t3_running.contains(&key) {
+            return Err(report::syntax("recursive type3 font"));
+        }
+        let flags = t3.flags.get(gid as usize).copied().unwrap_or(0);
+        if flags & DEVFLAG_MASK != 0 {
+            if flags & DEVFLAG_COLOR != 0 {
+                self.warn(
+                    "font.type3_flags",
+                    "type3 glyph claims to be both masked and colored",
+                );
+            }
+        } else if flags & DEVFLAG_COLOR == 0 {
+            self.warn(
+                "font.type3_flags",
+                "type3 glyph doesn't specify masked or colored",
+            );
+        }
+        let ctm = t3.matrix.concat(trm);
+        self.gsave()?;
+        let mut gs = self.gs().clone();
+        gs.text.font = None;
+        let fill_gs = (gs.fill.kind == Kind::Pattern && gs.fill.gstate_num >= 0)
+            .then(|| self.gstate.get(gs.fill.gstate_num as usize).cloned())
+            .flatten();
+        let stroke_gs = (gs.stroke.kind == Kind::Pattern && gs.stroke.gstate_num >= 0)
+            .then(|| self.gstate.get(gs.stroke.gstate_num as usize).cloned())
+            .flatten();
+        self.state.store.t3_running.push(key);
+        let store = std::mem::take(&mut self.state.store);
+        let inherit = Inherit {
+            gstate: gs,
+            fill: fill_gs,
+            stroke: stroke_gs,
+        };
+        let result = run_glyph(
+            self.doc,
+            &mut *self.dev,
+            ctm,
+            self.flags,
+            t3.resources.as_ref(),
+            proc,
+            Some(inherit),
+            self.default_cs.clone(),
+            store,
+        );
+        let (result, store) = result;
+        self.state.store = store;
+        let result = result.map(|_| ());
+        self.state.store.t3_running.retain(|&k| k != key);
+        self.grestore();
+        result
     }
 
     // The graphics state stack.
@@ -967,8 +1640,7 @@ impl<'a> Run<'a> {
             g.softmask_cs = pat_gs.softmask_cs.clone();
             g.softmask_bc = pat_gs.softmask_bc;
             g.luminosity = pat_gs.luminosity;
-            g.font = pat_gs.font;
-            g.render = pat_gs.render;
+            g.text = pat_gs.text.clone();
         }
         // Uncolored patterns are not cached: they are colored when drawn.
         let id = if pat.ismask {
@@ -1173,6 +1845,28 @@ impl<'a> Run<'a> {
     ) -> Result<(), String> {
         self.pop_any_pending_mcid_changes();
         self.flush_begin_layer()?;
+        {
+            let s = &self.gs().stroke_state;
+            let undefined = |f: u32| self.flags & f != 0;
+            let uncacheable = (stroke
+                && (undefined(
+                    DEVFLAG_STROKECOLOR_UNDEFINED
+                        | DEVFLAG_LINEJOIN_UNDEFINED
+                        | DEVFLAG_LINEWIDTH_UNDEFINED
+                        | DEVFLAG_DASH_PATTERN_UNDEFINED,
+                ) || (!s.dash.is_empty()
+                    && undefined(
+                        DEVFLAG_STARTCAP_UNDEFINED
+                            | DEVFLAG_DASHCAP_UNDEFINED
+                            | DEVFLAG_ENDCAP_UNDEFINED,
+                    ))
+                    || (s.linejoin == crate::path::LINEJOIN_MITER
+                        && undefined(DEVFLAG_MITERLIMIT_UNDEFINED))))
+                || (fill && undefined(DEVFLAG_FILLCOLOR_UNDEFINED));
+            if uncacheable {
+                self.flags |= DEVFLAG_UNCACHEABLE;
+            }
+        }
         let mut path = std::mem::take(&mut self.path);
         if close && !path.close_path() {
             self.warn("path.no_current_point", "closepath with no current point");
@@ -2412,14 +3106,19 @@ impl Processor for Run<'_> {
                 self.flush_text()?;
                 self.pop_any_pending_mcid_changes();
                 self.flush_begin_layer()?;
+                self.flags &= !DEVFLAG_LINEWIDTH_UNDEFINED;
                 self.gs_mut().stroke_state.linewidth = w;
             }
             Op::LineJoin(j) => {
                 self.flush_text()?;
+                self.flags &= !DEVFLAG_LINEJOIN_UNDEFINED;
                 self.gs_mut().stroke_state.linejoin = j;
             }
             Op::LineCap(c) => {
                 self.flush_text()?;
+                self.flags &= !(DEVFLAG_STARTCAP_UNDEFINED
+                    | DEVFLAG_DASHCAP_UNDEFINED
+                    | DEVFLAG_ENDCAP_UNDEFINED);
                 let s = &mut self.gs_mut().stroke_state;
                 s.start_cap = c;
                 s.dash_cap = c;
@@ -2427,10 +3126,12 @@ impl Processor for Run<'_> {
             }
             Op::MiterLimit(m) => {
                 self.flush_text()?;
+                self.flags &= !DEVFLAG_MITERLIMIT_UNDEFINED;
                 self.gs_mut().stroke_state.miterlimit = m;
             }
             Op::Dash { array, phase } => {
                 self.flush_text()?;
+                self.flags &= !DEVFLAG_DASH_PATTERN_UNDEFINED;
                 let dash = match array.map(|a| doc.resolve(a)) {
                     Some(Object::Array(a)) => a.iter().map(|v| doc.resolve(v).to_real()).collect(),
                     _ => Vec::new(),
@@ -2494,7 +3195,7 @@ impl Processor for Run<'_> {
             }
             Op::Transform([a, b, c, d, e, f]) => {
                 self.flush_text()?;
-                if self.clip_pending {
+                if self.tos.clip_text.is_some() {
                     self.warn(
                         "run.clip_text_ctm",
                         "ignoring CTM change for accumulated glyph clip paths",
@@ -2548,34 +3249,63 @@ impl Processor for Run<'_> {
                 self.flush_text()?;
                 self.flush_clip_text()?;
             }
-            Op::Font { font, .. } => {
-                let type3 = font.is_some_and(|f| doc.dict_get(f, b"Subtype").is_name(b"Type3"));
-                self.gs_mut().font = if type3 { Font::Type3 } else { Font::Simple };
+            Op::Font { font, size, .. } => {
+                let fd = self.load_font(font)?;
+                let t = &mut self.gs_mut().text;
+                t.font = Some(fd);
+                t.size = size;
             }
-            Op::RenderMode(r) => self.gs_mut().render = r,
-            Op::Show { text, .. }
-            | Op::NextLineShow { text, .. }
-            | Op::NextLineShowSpaced { text, .. } => self.show_string(text)?,
+            Op::RenderMode(r) => self.gs_mut().text.render = r,
+            Op::CharSpacing(v) => self.gs_mut().text.char_space = v,
+            Op::WordSpacing(v) => self.gs_mut().text.word_space = v,
+            Op::HorizontalScaling(v) => self.gs_mut().text.scale = v / 100.0,
+            Op::Leading(v) => self.gs_mut().text.leading = v,
+            Op::Rise(v) => self.gs_mut().text.rise = v,
+            Op::BeginText => {
+                self.tos.tm = Matrix::IDENTITY;
+                self.tos.tlm = Matrix::IDENTITY;
+                self.bidi = 0;
+            }
+            Op::TextMove(tx, ty) => self.tos_translate(tx, ty),
+            Op::TextMoveSetLeading(tx, ty) => {
+                self.gs_mut().text.leading = -ty;
+                self.tos_translate(tx, ty);
+            }
+            Op::TextMatrix([a, b, c, d, e, f]) => {
+                self.tos.tm = Matrix { a, b, c, d, e, f };
+                self.tos.tlm = self.tos.tm;
+            }
+            Op::NextLine => self.tos_newline(),
+            Op::Show { text, .. } => self.show_string(text)?,
+            Op::NextLineShow { text, .. } => {
+                self.tos_newline();
+                self.show_string(text)?;
+            }
+            Op::NextLineShowSpaced {
+                word_spacing,
+                char_spacing,
+                text,
+                ..
+            } => {
+                let t = &mut self.gs_mut().text;
+                t.word_space = word_spacing;
+                t.char_space = char_spacing;
+                self.tos_newline();
+                self.show_string(text)?;
+            }
             Op::ShowArray(array) => self.show_array(array)?,
-            // Positions and spacing only move glyphs.
-            Op::BeginText
-            | Op::CharSpacing(_)
-            | Op::WordSpacing(_)
-            | Op::HorizontalScaling(_)
-            | Op::Leading(_)
-            | Op::Rise(_)
-            | Op::TextMove(..)
-            | Op::TextMoveSetLeading(..)
-            | Op::TextMatrix(_)
-            | Op::NextLine => {}
             Op::Type3Width(..) => self.flags |= DEVFLAG_COLOR,
-            Op::Type3Bbox(_) => self.flags |= DEVFLAG_MASK | DEVFLAG_BBOX_DEFINED,
+            Op::Type3Bbox([_, _, llx, lly, urx, ury]) => {
+                self.flags |= DEVFLAG_MASK | DEVFLAG_BBOX_DEFINED;
+                self.flags &= !(DEVFLAG_FILLCOLOR_UNDEFINED | DEVFLAG_STROKECOLOR_UNDEFINED);
+                self.d1_rect = Rect::new(llx.min(urx), lly.min(ury), llx.max(urx), lly.max(ury));
+            }
             Op::ColorSpace {
                 stroke,
                 name,
                 colorspace,
             } => {
-                if self.flags & DEVFLAG_MASK != 0 {
+                if self.color_masked(stroke) {
                     return Ok(());
                 }
                 match colorspace {
@@ -2584,7 +3314,7 @@ impl Processor for Run<'_> {
                 }
             }
             Op::Color { stroke, color } => {
-                if self.flags & DEVFLAG_MASK != 0 {
+                if self.color_masked(stroke) {
                     return Ok(());
                 }
                 self.set_color(stroke, &padded(color))?;
@@ -2596,33 +3326,33 @@ impl Processor for Run<'_> {
                 ..
             } => {
                 let pat = self.load_pattern(pattern);
-                if self.flags & DEVFLAG_MASK != 0 {
+                if self.color_masked(stroke) {
                     return Ok(());
                 }
                 self.set_pattern(stroke, Some(pat), Some(&padded(color)))?;
             }
             Op::ColorShade { stroke, shade, .. } => {
-                if self.flags & DEVFLAG_MASK != 0 {
+                if self.color_masked(stroke) {
                     return Ok(());
                 }
                 self.set_shade(stroke, shade.clone())?;
             }
             Op::Gray { stroke, gray } => {
-                if self.flags & DEVFLAG_MASK != 0 {
+                if self.color_masked(stroke) {
                     return Ok(());
                 }
                 self.set_colorspace(stroke, ColorSpace::Gray)?;
                 self.set_color(stroke, &padded(&[gray]))?;
             }
             Op::Rgb { stroke, rgb } => {
-                if self.flags & DEVFLAG_MASK != 0 {
+                if self.color_masked(stroke) {
                     return Ok(());
                 }
                 self.set_colorspace(stroke, ColorSpace::Rgb)?;
                 self.set_color(stroke, &padded(&rgb))?;
             }
             Op::Cmyk { stroke, cmyk } => {
-                if self.flags & DEVFLAG_MASK != 0 {
+                if self.color_masked(stroke) {
                     return Ok(());
                 }
                 self.set_colorspace(stroke, ColorSpace::Cmyk)?;
@@ -2662,6 +3392,194 @@ impl Processor for Run<'_> {
             Op::BeginCompatibility | Op::EndCompatibility | Op::EndOfData => {}
         }
         Ok(())
+    }
+}
+
+/// The gstates a directly drawn Type 3 glyph starts from: the current
+/// one, and the parents of its pattern colors.
+#[derive(Debug)]
+struct Inherit {
+    gstate: GState,
+    fill: Option<GState>,
+    stroke: Option<GState>,
+}
+
+/// What preparing a Type 3 font's glyphs found.
+#[derive(Debug)]
+struct Prepared {
+    flags: Vec<u32>,
+    bboxes: Vec<Rect>,
+    /// The union of the glyph boxes, for a font with no usable box.
+    font_bbox: Option<Rect>,
+}
+
+/// The display list a Type 3 glyph is prepared into, reduced to whether
+/// anything was drawn into it.
+#[derive(Debug, Default)]
+struct GlyphProbe {
+    drew: bool,
+}
+
+#[allow(unused_variables)]
+impl Device for GlyphProbe {
+    fn fill_path(
+        &mut self,
+        _: &Path,
+        _: bool,
+        _: Matrix,
+        _: &ColorSpace,
+        _: &[f32],
+        _: f32,
+        _: ColorParams,
+    ) {
+        self.drew = true;
+    }
+    fn stroke_path(
+        &mut self,
+        _: &Path,
+        _: &StrokeState,
+        _: Matrix,
+        _: &ColorSpace,
+        _: &[f32],
+        _: f32,
+        _: ColorParams,
+    ) {
+        self.drew = true;
+    }
+    fn clip_path(&mut self, _: &Path, _: bool, _: Matrix, _: Rect) {
+        self.drew = true;
+    }
+    fn clip_stroke_path(&mut self, _: &Path, _: &StrokeState, _: Matrix, _: Rect) {
+        self.drew = true;
+    }
+    fn fill_shade(&mut self, _: &Shade, _: Matrix, _: f32, _: ColorParams) {
+        self.drew = true;
+    }
+    fn fill_image(&mut self, _: &Image, _: Matrix, _: f32, _: ColorParams) {
+        self.drew = true;
+    }
+    fn fill_image_mask(
+        &mut self,
+        _: &Image,
+        _: Matrix,
+        _: &ColorSpace,
+        _: &[f32],
+        _: f32,
+        _: ColorParams,
+    ) {
+        self.drew = true;
+    }
+    fn clip_image_mask(&mut self, _: &Image, _: Matrix, _: Rect) {
+        self.drew = true;
+    }
+    fn fill_text(
+        &mut self,
+        _: &Text,
+        _: Matrix,
+        _: &ColorSpace,
+        _: &[f32],
+        _: f32,
+        _: ColorParams,
+    ) {
+        self.drew = true;
+    }
+    fn stroke_text(
+        &mut self,
+        _: &Text,
+        _: &StrokeState,
+        _: Matrix,
+        _: &ColorSpace,
+        _: &[f32],
+        _: f32,
+        _: ColorParams,
+    ) {
+        self.drew = true;
+    }
+    fn clip_text(&mut self, _: &Text, _: Matrix, _: Rect) {
+        self.drew = true;
+    }
+    fn clip_stroke_text(&mut self, _: &Text, _: &StrokeState, _: Matrix, _: Rect) {
+        self.drew = true;
+    }
+    fn ignore_text(&mut self, _: &Text, _: Matrix) {
+        self.drew = true;
+    }
+    fn pop_clip(&mut self) {
+        self.drew = true;
+    }
+    fn begin_mask(&mut self, _: Rect, _: bool, _: Option<&ColorSpace>, _: &[f32], _: ColorParams) {
+        self.drew = true;
+    }
+    fn begin_group(&mut self, _: Rect, _: Option<&ColorSpace>, _: bool, _: bool, _: u8, _: f32) {
+        self.drew = true;
+    }
+    fn begin_layer(&mut self, _: &[u8]) {
+        self.drew = true;
+    }
+}
+
+/// `pdf_run_glyph`: a Type 3 glyph's procedure in a processor of its own.
+/// Gives back the device flags it left and its `d1` box, and the store
+/// whatever happened.
+#[allow(clippy::too_many_arguments)]
+fn run_glyph(
+    doc: &Document,
+    dev: &mut dyn Device,
+    ctm: Matrix,
+    flags: u32,
+    resources: Option<&Object>,
+    contents: &[u8],
+    inherit: Option<Inherit>,
+    default_cs: Arc<DefaultColorSpaces>,
+    store: Store,
+) -> (Result<(u32, Rect), String>, Store) {
+    let mut run = Run::with_gstates(doc, dev, ctm, default_cs, store, inherit);
+    run.flags = flags;
+    let out = content::process_glyph(doc, resources, contents, &mut run).and_then(|()| run.close());
+    let (flags, d1) = (run.flags, run.d1_rect);
+    (out.map(|()| (flags, d1)), run.into_store())
+}
+
+/// `fz_bound_glyph`. A glyph from a font file is taken to fill the
+/// font's box: its outline is not measured yet.
+fn bound_glyph(font: &Font, gid: i32, trm: Matrix) -> Rect {
+    let r = match &font.t3 {
+        Some(t3) => match usize::try_from(gid).ok().and_then(|g| t3.bboxes.get(g)) {
+            Some(r) if r.is_infinite() || r.is_empty() => {
+                Rect::new(0.0, 0.0, 0.000_000_1, 0.000_000_1)
+            }
+            Some(r) => *r,
+            None => font.bbox,
+        },
+        None => font.bbox,
+    };
+    r.transform(trm)
+}
+
+/// `ucdn_get_bidi_class`.
+fn bidi_class(c: i32) -> u8 {
+    let Ok(c) = u32::try_from(c) else {
+        return 0;
+    };
+    if c >= 0x110000 {
+        // ucdn's record 0.
+        return crate::tables::BIDI_CLASS[0].1;
+    }
+    let table = &crate::tables::BIDI_CLASS;
+    let i = table.partition_point(|&(start, _)| start <= c);
+    table[i.saturating_sub(1)].1
+}
+
+/// `guess_bidi_level`.
+fn guess_bidi_level(class: u8, cur: i32) -> i32 {
+    match class {
+        // L, EN, ES, ET.
+        0 | 8 | 9 | 10 => 0,
+        // R, AL, AN.
+        3 | 4 | 11 => 1,
+        // CS, NSM, BN, B, S, WS, ON.
+        12..=18 => cur,
+        _ => 0,
     }
 }
 
