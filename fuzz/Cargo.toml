@@ -78,3 +78,10 @@ path = "fuzz_targets/content.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "function"
+path = "fuzz_targets/function.rs"
+test = false
+doc = false
+bench = false

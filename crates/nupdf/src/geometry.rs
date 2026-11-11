@@ -45,6 +45,13 @@ impl Rect {
         x1: MIN_INF,
         y1: MIN_INF,
     };
+    /// `fz_infinite_rect`.
+    pub const INFINITE: Rect = Rect {
+        x0: MIN_INF,
+        y0: MIN_INF,
+        x1: MAX_INF,
+        y1: MAX_INF,
+    };
     /// `fz_unit_rect`.
     pub const UNIT: Rect = Rect {
         x0: 0.0,
