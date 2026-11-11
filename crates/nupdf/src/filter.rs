@@ -712,17 +712,19 @@ impl<'a> Lzw<'a> {
 }
 
 impl Source for Lzw<'_> {
-    fn next(&mut self, _: usize, out: &mut Vec<u8>, diag: &Diagnostics) -> Result<Next, String> {
-        const MAX: usize = 4096;
+    fn next(&mut self, max: usize, out: &mut Vec<u8>, diag: &Diagnostics) -> Result<Next, String> {
+        // At most the reader's hint, up to the 4 KiB buffer, as next_lzwd:
+        // read a byte at a time, a failing code loses only that byte.
+        let cap = max.clamp(1, 4096);
         let out_of_range = || report::format("out of range code encountered in lzw decode");
         let (clear, eod_code, first) = (self.clear(), self.clear() + 1, self.clear() + 2);
         let copy = |f: &mut Self, out: &mut Vec<u8>| {
-            let n = (f.string.len() - f.rp).min(MAX - out.len());
+            let n = (f.string.len() - f.rp).min(cap - out.len());
             out.extend_from_slice(&f.string[f.rp..f.rp + n]);
             f.rp += n;
         };
         copy(self, out);
-        while out.len() < MAX {
+        while out.len() < cap {
             if self.eod {
                 return Ok(Next::Eof);
             }
@@ -1406,6 +1408,35 @@ mod tests {
         );
         assert_eq!(out.unwrap(), [7, 8]);
         assert!(diag.has("filter.bad_predictor"));
+    }
+
+    #[test]
+    fn lzw_read_a_byte_at_a_time_loses_only_the_byte_that_fails() {
+        // Nine-bit codes: clear, 'a', 'b', 'c', then one past the table.
+        let mut bits = 0u64;
+        for code in [256u64, 97, 98, 99, 500] {
+            bits = (bits << 9) | code;
+        }
+        let bits = bits << (64 - 45);
+        let encoded = &bits.to_be_bytes()[..6];
+        let diag = Diagnostics::new();
+        let mut dict = Dict::new();
+        dict.put(b"Filter", Object::name(b"LZWDecode"));
+        let mut s = open_filters(
+            Stream::memory(encoded, &diag),
+            &dict,
+            &|o| o.clone(),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        // As the content lexer reads, as next_lzwd honors the size asked for.
+        assert_eq!(s.read_bytewise(usize::MAX).unwrap(), b"abc");
+        assert!(s.had_error());
+        // Read whole, the failing buffer holds all three.
+        let diag = Diagnostics::new();
+        assert!(run("LZWDecode", None, encoded, &diag).unwrap().is_empty());
     }
 
     #[test]
