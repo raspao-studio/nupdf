@@ -85,7 +85,9 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `layer` (optional content: the default configuration's states and whether a group or membership dictionary hides content) | `pdf/pdf-layer.c` (`pdf_read_ocg`, `pdf_select_layer_config`, `pdf_is_ocg_hidden`) | M4 |
 | `stext` (structured text: the stext device and its options, with the device's container stack and scissors) | `fitz/stext-device.c`, `fitz/device.c` (the container stack), `fitz/glyphbox.c`, `fitz/string.c` (`fz_chartorune`, `fz_utflen`), `fitz/util.c` (`fz_new_stext_page_from_page`); later `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` | M5 |
 | `extract` (content ids, spans, the text of each level, Markdown) | nupdf's own; the text follows `fitz/stext-output.c` (`do_as_text`, in `stext`) | M5 |
-| `search` | `fitz/stext-search.c` | M5 |
+| `search` (search in structured text: flattening, text transforms, finders, quads) | `fitz/stext-search.c`, `fitz/util.c` (`fz_new_buffer_from_flattened_stext_page`) | M5 |
+| `regexp` (MuPDF's regular expressions) | `fitz/regexp.c` | M5 |
+| `unicode` (categories, combining classes, decomposition, composition, case) | `fitz/ucdn.c`, `fitz/string.c` (`fz_toupper`, `fz_tolower`, `fz_isalpha`) | M5 |
 | `redact`, `content::filter` | `pdf/pdf-clean.c`, `pdf/pdf-op-filter.c`, `pdf/pdf-image-rewriter.c`, `pdf/pdf-annot.c` | M6 |
 | `verify` | new | M6 |
 | `render` | `fitz/draw-*.c`, `fitz/colorspace.c`, `fitz/color-lcms.c`, `fitz/separation.c` | M7 |

@@ -249,6 +249,10 @@ fn tables(source: &Path) -> Result<String> {
         &std::fs::read_to_string(source.join("fitz/ucdn_db.h"))?,
         &mut out,
     )?;
+    utf_tables(
+        &std::fs::read_to_string(source.join("fitz/utfdata.h"))?,
+        &mut out,
+    )?;
     Ok(out.trim_end().to_string() + "\n")
 }
 
@@ -302,9 +306,30 @@ fn bidi_classes(db: &str, out: &mut String) -> Result<()> {
             .copied()
             .context("ucdn record out of range")
     };
+    let combining = |code: u32| -> Result<u32> {
+        let get = |v: &[u32], i: u32| {
+            v.get(i as usize)
+                .copied()
+                .context("ucdn index out of range")
+        };
+        let index = get(&index0, code >> (shift1 + shift2))? << shift1;
+        let offset = (code >> shift2) & ((1 << shift1) - 1);
+        let index = get(&index1, index + offset)? << shift2;
+        let offset = code & ((1 << shift2) - 1);
+        let record = get(&index2, index + offset)? as usize;
+        records
+            .get(record * 6 + 1)
+            .copied()
+            .context("ucdn record out of range")
+    };
     let mut runs: Vec<(u32, u32)> = Vec::new();
     let mut categories: Vec<(u32, u32)> = Vec::new();
+    let mut classes: Vec<(u32, u32)> = Vec::new();
     for code in 0..0x110000u32 {
+        let k = combining(code)?;
+        if classes.last().is_none_or(|&(_, last)| last != k) {
+            classes.push((code, k));
+        }
         let c = class(code)?;
         if runs.last().is_none_or(|&(_, last)| last != c) {
             runs.push((code, c));
@@ -353,12 +378,135 @@ fn bidi_classes(db: &str, out: &mut String) -> Result<()> {
         let _ = writeln!(out, "    {},", line.join(", "));
     }
     let _ = writeln!(out, "];\n");
-    compat_decompositions(db, out)
+    let _ = writeln!(
+        out,
+        "/// `ucdn_get_combining_class` as runs of code points, as `BIDI_CLASS`."
+    );
+    let _ = writeln!(
+        out,
+        "pub static COMBINING_CLASS: [(u32, u8); {}] = [",
+        classes.len()
+    );
+    for chunk in classes.chunks(6) {
+        let line: Vec<String> = chunk
+            .iter()
+            .map(|(s, c)| format!("(0x{s:x}, {c})"))
+            .collect();
+        let _ = writeln!(out, "    {},", line.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    decompositions(db, out)?;
+    compositions(db, out)
 }
 
-/// `ucdn_compat_decompose` for the presentation forms structured text
-/// takes apart (U+FB00 to U+FDFF and U+FE70 to U+FEFC).
-fn compat_decompositions(db: &str, out: &mut String) -> Result<()> {
+/// `ucdn_compose` for every pair it composes (Hangul apart, which is
+/// worked out): the first and last code points and what they make, sorted.
+fn compositions(db: &str, out: &mut String) -> Result<()> {
+    let reindex = |name: &str| -> Result<Vec<(u32, u32, u32)>> {
+        let n = numbers(&array(db, name)?.replace(['{', '}'], ","))?;
+        if !n.len().is_multiple_of(3) {
+            bail!("{name} is not a list of reindex records");
+        }
+        Ok(n.chunks(3).map(|r| (r[0], r[1], r[2])).collect())
+    };
+    let first = reindex("nfc_first")?;
+    let last = reindex("nfc_last")?;
+    let index0 = numbers(array(db, " comp_index0")?)?;
+    let index1 = numbers(array(db, " comp_index1")?)?;
+    let data = numbers(array(db, " comp_data")?)?;
+    let (shift1, shift2) = (3u32, 1u32);
+    for (name, want) in [
+        ("COMP_SHIFT1", shift1),
+        ("COMP_SHIFT2", shift2),
+        ("TOTAL_LAST", 72),
+    ] {
+        if !db.contains(&format!("#define {name} {want}\n")) {
+            bail!("ucdn_db.h changed {name}");
+        }
+    }
+    let get = |v: &[u32], i: u32| {
+        v.get(i as usize)
+            .copied()
+            .context("ucdn composition index out of range")
+    };
+    let mut pairs = Vec::new();
+    for &(fs, fc, fi) in &first {
+        for a in fs..=fs + fc {
+            let l = fi + (a - fs);
+            for &(ls, lc, li) in &last {
+                for b in ls..=ls + lc {
+                    let r = li + (b - ls);
+                    let indexi = l * 72 + r;
+                    let index = get(&index0, indexi >> (shift1 + shift2))? << shift1;
+                    let offset = (indexi >> shift2) & ((1 << shift1) - 1);
+                    let index = get(&index1, index + offset)? << shift2;
+                    let offset = indexi & ((1 << shift2) - 1);
+                    let c = get(&data, index + offset)?;
+                    if c != 0 {
+                        pairs.push((a, b, c));
+                    }
+                }
+            }
+        }
+    }
+    pairs.sort_unstable();
+    let _ = writeln!(
+        out,
+        "/// `ucdn_compose`'s pairs: first, last and composed code points, sorted."
+    );
+    let _ = writeln!(
+        out,
+        "pub static COMPOSITION: [(u32, u32, u32); {}] = [",
+        pairs.len()
+    );
+    for chunk in pairs.chunks(4) {
+        let line: Vec<String> = chunk
+            .iter()
+            .map(|(a, b, c)| format!("(0x{a:x}, 0x{b:x}, 0x{c:x})"))
+            .collect();
+        let _ = writeln!(out, "    {},", line.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    Ok(())
+}
+
+/// The case and letter tables of source/fitz/utfdata.h, as written.
+fn utf_tables(text: &str, out: &mut String) -> Result<()> {
+    for name in [
+        "ucd_alpha2",
+        "ucd_alpha1",
+        "ucd_tolower2",
+        "ucd_tolower1",
+        "ucd_toupper2",
+        "ucd_toupper1",
+    ] {
+        let values: Vec<i64> = items(array(text, name)?)?
+            .into_iter()
+            .map(|i| {
+                let i = i.unwrap_or_default();
+                let (neg, digits) = match i.strip_prefix('-') {
+                    Some(d) => (true, d.to_string()),
+                    None => (false, i),
+                };
+                number(&digits).map(|v| if neg { -i64::from(v) } else { i64::from(v) })
+            })
+            .collect::<Result<_>>()?;
+        let rust = name.to_uppercase();
+        let _ = writeln!(out, "/// `{name}` (source/fitz/utfdata.h).");
+        let _ = writeln!(out, "pub static {rust}: [i32; {}] = [", values.len());
+        for chunk in values.chunks(12) {
+            let line: Vec<String> = chunk.iter().map(|v| format!("{v}")).collect();
+            let _ = writeln!(out, "    {},", line.join(", "));
+        }
+        let _ = writeln!(out, "];\n");
+    }
+    Ok(())
+}
+
+/// Every decomposition record `ucdn_decompose` and
+/// `ucdn_compat_decompose` read: the code point, whether it is canonical,
+/// and what it decomposes to.
+fn decompositions(db: &str, out: &mut String) -> Result<()> {
     let data = numbers(array(db, "decomp_data")?)?;
     let index0 = numbers(array(db, "decomp_index0")?)?;
     let index1 = numbers(array(db, "decomp_index1")?)?;
@@ -374,17 +522,19 @@ fn compat_decompositions(db: &str, out: &mut String) -> Result<()> {
             .copied()
             .context("ucdn decomposition index out of range")
     };
-    let mut entries: Vec<(u32, Vec<u32>)> = Vec::new();
-    for code in (0xFB00..=0xFDFFu32).chain(0xFE70..=0xFEFC) {
+    let mut entries: Vec<(u32, bool, Vec<u32>)> = Vec::new();
+    for code in 0..0x110000u32 {
         let index = get(&index0, code >> (shift1 + shift2))? << shift1;
         let offset = (code >> shift2) & ((1 << shift1) - 1);
         let index = get(&index1, index + offset)? << shift2;
         let offset = code & ((1 << shift2) - 1);
         let mut at = get(&index2, index + offset)?;
-        let len = get(&data, at)? >> 8;
+        let head = get(&data, at)?;
+        let len = head >> 8;
         if len == 0 {
             continue;
         }
+        let canonical = head & 0xff == 0;
         at += 1;
         let mut runes = Vec::new();
         for _ in 0..len {
@@ -399,21 +549,26 @@ fn compat_decompositions(db: &str, out: &mut String) -> Result<()> {
                 at += 2;
             }
         }
-        entries.push((code, runes));
+        entries.push((code, canonical, runes));
     }
     let _ = writeln!(
         out,
-        "/// `ucdn_compat_decompose` of the presentation forms (U+FB00 to U+FDFF,\n\
-         /// U+FE70 to U+FEFC) that have a decomposition."
+        "/// UCDN's decomposition records: each code point that has one, whether\n\
+         /// it is canonical (`ucdn_decompose` takes those) and what it\n\
+         /// decomposes to (`ucdn_compat_decompose` takes them all)."
     );
     let _ = writeln!(
         out,
-        "pub static COMPAT_DECOMPOSITION: [(u32, &[u32]); {}] = [",
+        "pub static DECOMPOSITION: [(u32, bool, &[u32]); {}] = [",
         entries.len()
     );
-    for (code, runes) in &entries {
+    for (code, canonical, runes) in &entries {
         let list: Vec<String> = runes.iter().map(|r| format!("0x{r:x}")).collect();
-        let _ = writeln!(out, "    (0x{code:x}, &[{}]),", list.join(", "));
+        let _ = writeln!(
+            out,
+            "    (0x{code:x}, {canonical}, &[{}]),",
+            list.join(", ")
+        );
     }
     let _ = writeln!(out, "];\n");
     Ok(())
