@@ -436,6 +436,18 @@ pub const CHECKS: &[Check] = &[
         reread: Some(Reader::Mutool("oracle/js/objects.js")),
         oracle_args: &[],
     },
+    Check {
+        name: "roundtrip-text",
+        about: "the `clean` output of each side as MuPDF reads it back: each page's text (fz_print_stext_page_as_text)",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &["clean", "--no-verify"],
+        compare: Compare::Fields(&["/page_count", "/pages"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: Some(Reader::Mutool("oracle/js/roundtrip-text.js")),
+        oracle_args: &[],
+    },
     clean_gc(
         "clean-g",
         &["clean", "-g", "--dry-run", "--no-verify"],
