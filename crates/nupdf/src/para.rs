@@ -541,7 +541,8 @@ impl Justify {
             }
         }
         let n = self.gap_count_this_line as f32;
-        self.gap_size_this_line = (self.gap_size_this_line * n + gap) / (n + 1.0);
+        // Fused, as clang compiles MuPDF's `size * n + gap`.
+        self.gap_size_this_line = self.gap_size_this_line.mul_add(n, gap) / (n + 1.0);
         self.gap_count_this_line += 1;
     }
 }
@@ -1069,7 +1070,7 @@ fn do_para_break(blocks: &mut Vec<Block>, in_header: bool, depth: usize) {
                 }
                 i += 1;
             }
-            Block::Image(_) | Block::Vector(_) => i += 1,
+            Block::Image(_) | Block::Vector(_) | Block::Grid(_) => i += 1,
         }
     }
 }

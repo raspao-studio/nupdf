@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use crate::colorspace::{ColorSpace, Family};
+use crate::colorspace::ColorSpace;
 use crate::content::Store;
 use crate::device::{ColorParams, Device, Metatext};
 use crate::document::Document;
@@ -144,6 +144,7 @@ impl Options {
                 "fuzzy-vectors" => flags::FUZZY_VECTORS,
                 "segment" => flags::SEGMENT,
                 "paragraph-break" => flags::PARAGRAPH_BREAK,
+                "table-hunt" => flags::TABLE_HUNT,
                 _ => return Err(format!("unknown stext option: {key}")),
             };
             if on {
@@ -219,6 +220,35 @@ pub struct StructBlock {
     pub blocks: Vec<Block>,
 }
 
+/// `fz_stext_grid_divider`: a column or row edge of a table.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct GridDivider {
+    pub reinforcement: i32,
+    pub pos: f32,
+    pub min: f32,
+    pub max: f32,
+    pub uncertainty: i32,
+}
+
+/// `fz_stext_grid_positions`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GridPositions {
+    pub list: Vec<GridDivider>,
+    pub max_uncertainty: i32,
+}
+
+/// A grid block (`FZ_STEXT_BLOCK_GRID`): the edges a table was found
+/// with, and each cell's `FZ_STEXT_GRID_*` flags, `w` by `h` of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridBlock {
+    pub bbox: Rect,
+    pub xs: GridPositions,
+    pub ys: GridPositions,
+    pub w: usize,
+    pub h: usize,
+    pub cells: Vec<u32>,
+}
+
 /// `fz_stext_block`.
 #[derive(Debug, Clone)]
 pub enum Block {
@@ -226,6 +256,7 @@ pub enum Block {
     Image(ImageBlock),
     Vector(VectorBlock),
     Struct(StructBlock),
+    Grid(GridBlock),
 }
 
 impl Block {
@@ -235,6 +266,7 @@ impl Block {
             Block::Image(i) => i.bbox,
             Block::Vector(v) => v.bbox,
             Block::Struct(s) => s.bbox,
+            Block::Grid(g) => g.bbox,
         }
     }
 }
@@ -267,7 +299,7 @@ pub fn blocks_text(blocks: &[Block], out: &mut String) {
                 out.push('\n');
             }
             Block::Struct(s) => blocks_text(&s.blocks, out),
-            Block::Image(_) | Block::Vector(_) => {}
+            Block::Image(_) | Block::Vector(_) | Block::Grid(_) => {}
         }
     }
 }
@@ -456,7 +488,9 @@ struct Last {
 
 /// `fz_stext_device`.
 #[derive(Debug)]
-pub struct StextDevice {
+pub struct StextDevice<'a> {
+    /// For colors that need the document (separations' tint transforms).
+    doc: Option<&'a Document>,
     page: StextPage,
     flags: u32,
     clip_rect: Rect,
@@ -479,10 +513,11 @@ pub struct StextDevice {
     lazy_vectors: Vec<Block>,
 }
 
-impl StextDevice {
+impl<'a> StextDevice<'a> {
     /// `fz_new_stext_device` for a page with these bounds.
-    pub fn new(mediabox: Rect, opts: Options) -> StextDevice {
+    pub fn new(mediabox: Rect, opts: Options) -> StextDevice<'a> {
         StextDevice {
+            doc: None,
             page: StextPage {
                 mediabox,
                 blocks: Vec::new(),
@@ -514,6 +549,12 @@ impl StextDevice {
         }
     }
 
+    /// The document, for colors that need it.
+    pub fn with_doc(mut self, doc: &'a Document) -> StextDevice<'a> {
+        self.doc = Some(doc);
+        self
+    }
+
     /// `fz_stext_close_device`: the page, its boxes made.
     pub fn finish(mut self) -> StextPage {
         // A disabled device is not closed.
@@ -530,6 +571,9 @@ impl StextDevice {
         }
         if self.flags & flags::PARAGRAPH_BREAK != 0 {
             crate::para::paragraph_break(&mut self.page);
+        }
+        if self.flags & flags::TABLE_HUNT != 0 {
+            crate::table::table_hunt(&mut self.page);
         }
         self.page
     }
@@ -1204,18 +1248,8 @@ fn reverse_bidi_runs(chars: &mut [StextChar]) {
 
 /// `hexrgba_from_color`, for the spaces structured text can convert
 /// without color management (others are black).
-fn argb(cs: &ColorSpace, color: &[f32], alpha: f32) -> u32 {
-    let v = |i: usize| color.get(i).copied().unwrap_or(0.0);
-    let rgb = match cs.family() {
-        Some(Family::Gray) => [v(0), v(0), v(0)],
-        Some(Family::Rgb) => [v(0), v(1), v(2)],
-        Some(Family::Cmyk) => [
-            1.0 - (v(0) + v(3)).min(1.0),
-            1.0 - (v(1) + v(3)).min(1.0),
-            1.0 - (v(2) + v(3)).min(1.0),
-        ],
-        _ => [0.0, 0.0, 0.0],
-    };
+fn argb(doc: Option<&Document>, cs: &ColorSpace, color: &[f32], alpha: f32) -> u32 {
+    let rgb = cs.to_rgb(doc, color);
     let byte = |f: f32| (f * 255.0 + 0.5).clamp(0.0, 255.0) as u32;
     (byte(alpha) << 24) | (byte(rgb[0]) << 16) | (byte(rgb[1]) << 8) | byte(rgb[2])
 }
@@ -1234,7 +1268,7 @@ enum VectorAt {
     Gone,
 }
 
-impl StextDevice {
+impl StextDevice<'_> {
     fn vector_mut(&mut self, at: VectorAt) -> Option<&mut VectorBlock> {
         let block = match at {
             VectorAt::Page(i) => self.page.blocks.get_mut(i),
@@ -1404,8 +1438,8 @@ impl StextDevice {
 }
 
 /// `split_path_data`: a path walked to find the rectangles in it.
-struct Split<'a> {
-    dev: &'a mut StextDevice,
+struct Split<'a, 'd> {
+    dev: &'a mut StextDevice<'d>,
     ctm: Matrix,
     argb: u32,
     flags: u32,
@@ -1419,7 +1453,7 @@ struct Split<'a> {
     stroke: Option<&'a StrokeState>,
 }
 
-impl Split<'_> {
+impl Split<'_, '_> {
     /// `add_vector`.
     fn add_vector(&mut self, bbox: Rect, flags: u32) {
         // Filling empty bounds does nothing.
@@ -1496,7 +1530,7 @@ impl Split<'_> {
     }
 }
 
-impl Walker for Split<'_> {
+impl Walker for Split<'_, '_> {
     fn move_to(&mut self, x: f32, y: f32) {
         let p = self.ctm.transform_xy(x, y);
         self.segment_finished();
@@ -1563,7 +1597,7 @@ impl Walker for Split<'_> {
 }
 
 #[allow(unused_variables)]
-impl Device for StextDevice {
+impl Device for StextDevice<'_> {
     fn fill_path(
         &mut self,
         path: &Path,
@@ -1579,7 +1613,7 @@ impl Device for StextDevice {
             return;
         }
         self.widen_actualtext(path.bound(None, ctm));
-        self.add_vectors_from_path(path, ctm, argb(cs, color, alpha), None, 0.0);
+        self.add_vectors_from_path(path, ctm, argb(self.doc, cs, color, alpha), None, 0.0);
     }
 
     fn stroke_path(
@@ -1598,7 +1632,13 @@ impl Device for StextDevice {
         }
         self.widen_actualtext(path.bound(Some(stroke), ctm));
         let exp = stroke.linewidth / 2.0;
-        self.add_vectors_from_path(path, ctm, argb(cs, color, alpha), Some(stroke), exp);
+        self.add_vectors_from_path(
+            path,
+            ctm,
+            argb(self.doc, cs, color, alpha),
+            Some(stroke),
+            exp,
+        );
     }
 
     fn clip_path(&mut self, path: &Path, even_odd: bool, ctm: Matrix, scissor: Rect) {
@@ -1621,7 +1661,12 @@ impl Device for StextDevice {
         alpha: f32,
         params: ColorParams,
     ) {
-        self.text(text, ctm, argb(cs, color, alpha), char_flags::FILLED);
+        self.text(
+            text,
+            ctm,
+            argb(self.doc, cs, color, alpha),
+            char_flags::FILLED,
+        );
     }
 
     fn stroke_text(
@@ -1634,7 +1679,12 @@ impl Device for StextDevice {
         alpha: f32,
         params: ColorParams,
     ) {
-        self.text(text, ctm, argb(cs, color, alpha), char_flags::STROKED);
+        self.text(
+            text,
+            ctm,
+            argb(self.doc, cs, color, alpha),
+            char_flags::STROKED,
+        );
     }
 
     fn clip_text(&mut self, text: &Text, ctm: Matrix, scissor: Rect) {
@@ -1826,7 +1876,7 @@ impl Device for StextDevice {
     }
 }
 
-impl StextDevice {
+impl StextDevice<'_> {
     /// `fz_stext_fill_image`.
     fn image(&mut self, ctm: Matrix, alpha: f32) {
         if self.disabled {
@@ -1864,7 +1914,7 @@ pub fn extract_page(
         Ok((rect, ctm)) => rect.transform(ctm),
         Err(e) => return (Err(crate::diag::report::line(&e.0)), store),
     };
-    let mut dev = StextDevice::new(mediabox, opts);
+    let mut dev = StextDevice::new(mediabox, opts).with_doc(doc);
     let run = crate::run::run_page_contents(doc, page, &mut dev, store);
     let page = match run.error {
         Some(e) => Err(e),

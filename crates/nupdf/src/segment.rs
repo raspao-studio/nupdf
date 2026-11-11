@@ -13,9 +13,8 @@
 //! the end.
 
 use crate::geometry::Rect;
-use crate::stext::{
-    Block, StextLine, StextPage, StructBlock, TextBlock, VectorBlock, vector_flags,
-};
+use crate::stext::{Block, StextLine, StextPage, TextBlock, VectorBlock, vector_flags};
+use crate::stext_tree::{Kind, Lists, PAGE};
 
 /// `MAX_ANALYSIS_DEPTH`.
 const MAX_ANALYSIS_DEPTH: usize = 6;
@@ -230,7 +229,8 @@ fn feed_blocks(boxer: &mut Boxer, blocks: &[Block]) {
                 boxer.feed(r);
             }
             Block::Struct(s) => feed_blocks(boxer, &s.blocks),
-            Block::Image(b) => boxer.feed(b.bbox),
+            // Images and grids, by their boxes.
+            b @ (Block::Image(_) | Block::Grid(_)) => boxer.feed(b.bbox()),
         }
         i += 1;
     }
@@ -238,175 +238,7 @@ fn feed_blocks(boxer: &mut Boxer, blocks: &[Block]) {
 
 // ---- the page as linked lists -------------------------------------------
 
-/// A block in one of the lists.
-#[derive(Debug)]
-struct Node {
-    prev: Option<usize>,
-    next: Option<usize>,
-    kind: Kind,
-}
-
-#[derive(Debug)]
-enum Kind {
-    /// A text, image or vector block.
-    Leaf(Block),
-    /// A structure block and the list of its blocks.
-    Struct { bbox: Rect, index: i32, down: usize },
-}
-
-/// `fz_stext_struct`, or the page's own list.
-#[derive(Debug)]
-struct List {
-    first: Option<usize>,
-    last: Option<usize>,
-    /// The list holding this one's block; `None` for the page.
-    parent: Option<usize>,
-    /// This list's structure block.
-    up: Option<usize>,
-    standard: &'static str,
-    raw: String,
-}
-
-/// The page's list.
-const PAGE: usize = 0;
-
-#[derive(Debug)]
-struct Lists {
-    nodes: Vec<Node>,
-    lists: Vec<List>,
-}
-
 impl Lists {
-    fn new(blocks: Vec<Block>) -> Lists {
-        let mut l = Lists {
-            nodes: Vec::new(),
-            lists: Vec::new(),
-        };
-        l.lists.push(List {
-            first: None,
-            last: None,
-            parent: None,
-            up: None,
-            standard: "",
-            raw: String::new(),
-        });
-        l.fill(PAGE, blocks);
-        l
-    }
-
-    fn fill(&mut self, list: usize, blocks: Vec<Block>) {
-        for b in blocks {
-            let node = match b {
-                Block::Struct(s) => {
-                    let down = self.new_list(Some(list), s.standard, s.raw);
-                    let n = self.new_node(Kind::Struct {
-                        bbox: s.bbox,
-                        index: s.index,
-                        down,
-                    });
-                    self.lists[down].up = Some(n);
-                    self.fill(down, s.blocks);
-                    n
-                }
-                b => self.new_node(Kind::Leaf(b)),
-            };
-            self.push_back(list, node);
-        }
-    }
-
-    fn new_node(&mut self, kind: Kind) -> usize {
-        self.nodes.push(Node {
-            prev: None,
-            next: None,
-            kind,
-        });
-        self.nodes.len() - 1
-    }
-
-    fn new_list(&mut self, parent: Option<usize>, standard: &'static str, raw: String) -> usize {
-        self.lists.push(List {
-            first: None,
-            last: None,
-            parent,
-            up: None,
-            standard,
-            raw,
-        });
-        self.lists.len() - 1
-    }
-
-    fn push_back(&mut self, list: usize, node: usize) {
-        let last = self.lists[list].last;
-        self.nodes[node].prev = last;
-        self.nodes[node].next = None;
-        match last {
-            Some(l) => self.nodes[l].next = Some(node),
-            None => self.lists[list].first = Some(node),
-        }
-        self.lists[list].last = Some(node);
-    }
-
-    fn bbox(&self, n: usize) -> Rect {
-        match &self.nodes[n].kind {
-            Kind::Leaf(b) => b.bbox(),
-            Kind::Struct { bbox, .. } => *bbox,
-        }
-    }
-
-    /// The blocks of `list`, as blocks again.
-    fn into_blocks(mut self) -> Vec<Block> {
-        self.take_list(PAGE)
-    }
-
-    fn take_list(&mut self, list: usize) -> Vec<Block> {
-        let mut out = Vec::new();
-        let mut at = self.lists[list].first;
-        // Each node is in one list once; the count bounds the walk.
-        let mut budget = self.nodes.len();
-        while let Some(n) = at {
-            if budget == 0 {
-                break;
-            }
-            budget -= 1;
-            at = self.nodes[n].next;
-            let kind = std::mem::replace(
-                &mut self.nodes[n].kind,
-                Kind::Leaf(Block::Vector(VectorBlock {
-                    bbox: Rect::EMPTY,
-                    flags: 0,
-                    argb: 0,
-                })),
-            );
-            match kind {
-                Kind::Leaf(b) => out.push(b),
-                Kind::Struct { bbox, index, down } => {
-                    let blocks = self.take_list(down);
-                    out.push(Block::Struct(StructBlock {
-                        bbox,
-                        index,
-                        standard: self.lists[down].standard,
-                        raw: std::mem::take(&mut self.lists[down].raw),
-                        blocks,
-                    }));
-                }
-            }
-        }
-        out
-    }
-
-    /// Unlinks `n` from `list`.
-    fn unlink(&mut self, list: usize, n: usize) {
-        let (prev, next) = (self.nodes[n].prev, self.nodes[n].next);
-        match prev {
-            Some(p) => self.nodes[p].next = next,
-            None => self.lists[list].first = next,
-        }
-        match next {
-            Some(x) => self.nodes[x].prev = prev,
-            None => self.lists[list].last = prev,
-        }
-    }
-
     /// `page_subset`: the blocks and lines within `mediabox`, from `parent`
     /// onwards in the page's order, gathered into a new `Div` structure in
     /// the list the first of them came from.
@@ -765,6 +597,7 @@ mod tests {
                 Block::Image(_) => "i".into(),
                 Block::Vector(_) => "v".into(),
                 Block::Text(_) => "t".into(),
+                Block::Grid(_) => "g".into(),
             })
             .collect::<Vec<_>>()
             .join(" ")

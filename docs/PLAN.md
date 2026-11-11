@@ -252,7 +252,7 @@ MuPDF reference: `fitz/stext-device.c`, `stext-output.c`, `stext-search.c`, `ste
 - [x] Structured text model (pages, blocks, lines, chars) with MuPDF's options: preserve ligatures, preserve whitespace, preserve spans, dehyphenate, clip to mediabox
 - [x] Output: JSON with stable ids, plain text, Markdown, JSONL per page, with output budgets
 - [x] Search: literal and regex, case- and diacritic-insensitive, across hyphenation and line breaks; hits carry quads and span ids
-- [ ] Paragraph, column and table segmentation (`stext-para`, `stext-boxer`, `stext-table`), at parity first
+- [x] Paragraph, column and table segmentation (`stext-para`, `stext-boxer`, `stext-table`), at parity first
 - [x] Page-parallel extraction with output identical at every thread count
 - [ ] Opt-in improved reading order, scored against hand-labeled ground truth rather than MuPDF
 - [x] Bench pairs: against `mutool draw -F stext.json`, plus, for context, PyMuPDF, pypdf, pdfplumber, pdfminer.six, pdftotext and pdf_oxide

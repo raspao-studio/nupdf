@@ -58,6 +58,61 @@ impl ColorSpace {
         }
     }
 
+    /// The color as sRGB, approximating `fz_convert_color` without color
+    /// management: device and ICC spaces by their family's formula, an
+    /// indexed color through its table, a separation through its tint
+    /// transform (evaluated with `doc`; without one, a separation reads as
+    /// black). Distinct colors stay distinct, which is what the stext
+    /// device's comparisons of colors need.
+    pub fn to_rgb(&self, doc: Option<&Document>, color: &[f32]) -> [f32; 3] {
+        self.to_rgb_at(doc, color, 0)
+    }
+
+    fn to_rgb_at(&self, doc: Option<&Document>, color: &[f32], depth: usize) -> [f32; 3] {
+        let v = |i: usize| color.get(i).copied().unwrap_or(0.0);
+        if depth > MAX_DEPTH {
+            return [0.0, 0.0, 0.0];
+        }
+        match self {
+            ColorSpace::Indexed { base, high, lookup } => {
+                let n = base.n();
+                let i = ((v(0) * 255.0) as i32).clamp(0, i32::from(*high)) as usize;
+                let at = |k: usize| f32::from(lookup.get(i * n + k).copied().unwrap_or(0));
+                let mut b = [0.0f32; 4];
+                if matches!(**base, ColorSpace::Lab) {
+                    b[0] = at(0) * 100.0 / 255.0;
+                    b[1] = at(1) - 128.0;
+                    b[2] = at(2) - 128.0;
+                } else {
+                    for (k, x) in b.iter_mut().enumerate().take(n.min(4)) {
+                        *x = at(k) / 255.0;
+                    }
+                }
+                base.to_rgb_at(doc, &b, depth + 1)
+            }
+            ColorSpace::Separation { base, tint, .. } => {
+                let Some(doc) = doc else {
+                    return [0.0, 0.0, 0.0];
+                };
+                let mut b = [0.0f32; MAX_COLORS];
+                let n = base.n().min(MAX_COLORS);
+                tint.eval(doc, color, &mut b[..n]);
+                base.to_rgb_at(Some(doc), &b[..n], depth + 1)
+            }
+            _ => match self.family() {
+                Some(Family::Gray) => [v(0), v(0), v(0)],
+                Some(Family::Rgb) => [v(0), v(1), v(2)],
+                Some(Family::Cmyk) => [
+                    1.0 - (v(0) + v(3)).min(1.0),
+                    1.0 - (v(1) + v(3)).min(1.0),
+                    1.0 - (v(2) + v(3)).min(1.0),
+                ],
+                Some(Family::Lab) => lab_to_srgb(v(0), v(1), v(2)),
+                None => [0.0, 0.0, 0.0],
+            },
+        }
+    }
+
     pub fn is_indexed(&self) -> bool {
         matches!(self, ColorSpace::Indexed { .. })
     }
@@ -448,8 +503,58 @@ fn load_devicen(doc: &Document, items: &[Object], cycle: &mut Cycle) -> Result<C
     })
 }
 
+/// CIE L*a*b* (D50) to sRGB, without chromatic adaptation.
+fn lab_to_srgb(l: f32, a: f32, b: f32) -> [f32; 3] {
+    let fy = (l + 16.0) / 116.0;
+    let fx = fy + a / 500.0;
+    let fz = fy - b / 200.0;
+    let f = |t: f32| {
+        if t > 6.0 / 29.0 {
+            t * t * t
+        } else {
+            3.0 * (6.0f32 / 29.0).powi(2) * (t - 4.0 / 29.0)
+        }
+    };
+    let (x, y, z) = (0.9642 * f(fx), f(fy), 0.8249 * f(fz));
+    let lin = [
+        3.1339 * x - 1.6169 * y - 0.4906 * z,
+        -0.9785 * x + 1.9160 * y + 0.0334 * z,
+        0.0720 * x - 0.2290 * y + 1.4057 * z,
+    ];
+    lin.map(|c| {
+        let c = c.clamp(0.0, 1.0);
+        if c <= 0.0031308 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn indexed_and_device_colors_convert_to_rgb() {
+        let lookup = vec![255, 0, 0, 0, 0, 255];
+        let cs = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::Rgb),
+            high: 1,
+            lookup,
+        };
+        // Indexed colors arrive as index / 255.
+        assert_eq!(cs.to_rgb(None, &[0.0]), [1.0, 0.0, 0.0]);
+        assert_eq!(cs.to_rgb(None, &[1.0 / 255.0]), [0.0, 0.0, 1.0]);
+        // Past the table: its last entry.
+        assert_eq!(cs.to_rgb(None, &[1.0]), [0.0, 0.0, 1.0]);
+        assert_eq!(ColorSpace::Gray.to_rgb(None, &[0.5]), [0.5, 0.5, 0.5]);
+        assert_eq!(
+            ColorSpace::Cmyk.to_rgb(None, &[0.0, 0.0, 0.0, 0.0]),
+            [1.0, 1.0, 1.0]
+        );
+        let white = ColorSpace::Lab.to_rgb(None, &[100.0, 0.0, 0.0]);
+        assert!(white.iter().all(|&c| c > 0.99), "{white:?}");
+    }
     use super::*;
 
     fn doc() -> Document {
