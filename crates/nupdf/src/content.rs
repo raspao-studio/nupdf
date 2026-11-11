@@ -29,13 +29,15 @@
 //!   `EI` is searched for after that.
 //! - Unbalanced `q` are closed at the end.
 //!
-//! Resource lookups that fail are errors, as in MuPDF. What a resource
-//! loads into is the interpreter's business: fonts, patterns, shadings,
-//! images and soft masks are handed over as objects, and optional content
-//! is not evaluated yet, so a `Do` of a hidden XObject is still handed
-//! over.
+//! Resource lookups that fail are errors, as in MuPDF, and so are
+//! colorspaces and shadings that do not load: they are loaded here, as
+//! `pdf_process_keyword` loads them. Fonts, patterns, images and soft
+//! masks are handed over as objects for the interpreter to load, and
+//! optional content is not evaluated yet, so a `Do` of a hidden XObject is
+//! still handed over.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -45,6 +47,7 @@ use crate::document::Document;
 use crate::lex::{Lexer, Token};
 use crate::object::{Dict, Object};
 use crate::parse::{parse_array, parse_dict};
+use crate::shade::{self, Shade};
 use crate::stream::{Next, Source, Stream};
 
 /// MuPDF's MAX_SYNTAX_ERRORS.
@@ -181,6 +184,7 @@ pub enum Op<'a> {
         stroke: bool,
         name: &'a [u8],
         shading: &'a Object,
+        shade: &'a Shade,
     },
     Color {
         stroke: bool,
@@ -206,6 +210,7 @@ pub enum Op<'a> {
     Shade {
         name: &'a [u8],
         shading: &'a Object,
+        shade: &'a Shade,
     },
     DrawImage {
         name: &'a [u8],
@@ -334,6 +339,9 @@ struct Csi<'d, 'p> {
     proc: &'p mut dyn Processor,
     /// Resource dictionaries, innermost last (`pdf_resource_stack`).
     rstack: Vec<Object>,
+    /// Shadings loaded so far, by object number, as MuPDF's store keeps
+    /// them: a function-based one is sampled 66,049 times.
+    shades: HashMap<i32, Result<Arc<Shade>, String>>,
     gstate: i32,
     xbalance: i32,
     in_text: bool,
@@ -351,6 +359,7 @@ impl<'d, 'p> Csi<'d, 'p> {
             doc,
             proc,
             rstack: Vec::new(),
+            shades: HashMap::new(),
             gstate: 0,
             xbalance: 0,
             in_text: false,
@@ -715,9 +724,11 @@ impl<'d, 'p> Csi<'d, 'p> {
                         String::from_utf8_lossy(&name)
                     )));
                 };
+                let shade = self.load_shade(&shading)?;
                 self.emit(Op::Shade {
                     name: &name,
                     shading: &shading,
+                    shade: &shade,
                 })
             }
             b"Do" => self.process_do(&name),
@@ -921,13 +932,30 @@ impl<'d, 'p> Csi<'d, 'p> {
                 pattern: &pattern,
                 color: &color,
             }),
-            2 => self.emit(Op::ColorShade {
-                stroke,
-                name,
-                shading: &pattern,
-            }),
+            2 => {
+                let shade = self.load_shade(&pattern)?;
+                self.emit(Op::ColorShade {
+                    stroke,
+                    name,
+                    shading: &pattern,
+                    shade: &shade,
+                })
+            }
             other => Err(report::syntax(&format!("unknown pattern type: {other}"))),
         }
+    }
+
+    /// `pdf_load_shading`, once per object.
+    fn load_shade(&mut self, obj: &Object) -> Result<Arc<Shade>, String> {
+        let Some(r) = obj.as_ref() else {
+            return shade::load(self.doc, obj).map(Arc::new);
+        };
+        if let Some(done) = self.shades.get(&r.num) {
+            return done.clone();
+        }
+        let loaded = shade::load(self.doc, obj).map(Arc::new);
+        self.shades.insert(r.num, loaded.clone());
+        loaded
     }
 
     /// `pdf_process_Do`.

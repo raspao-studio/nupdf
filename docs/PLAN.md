@@ -225,17 +225,18 @@ MuPDF reference: `pdf-interpret.c`, `pdf-op-run.c`, `pdf-op-buffer.c`, `pdf-run.
 - [x] Content lexer and parser, including inline images with MuPDF's `EI` detection (DECISIONS D29): `pdf_process_stream` and `pdf_process_keyword` with MuPDF's operand stack and recovery, ExtGState entries, contents arrays joined as `fz_open_concat` joins them, and inline images decoded through a leech to find their end (`content`, with colorspace definitions in `colorspace`); the `operators` command
 - [ ] Interpreter: graphics and text state, CTM, `q`/`Q`, `BT`/`ET`, marked content, Form XObjects with recursion limits, shadings, patterns, inline images, optional-content visibility, Type3 glyph procedures
 - [ ] `Device` trait mirroring `fz_device`, plus a trace device whose output lines up with `mutool trace`
-- [ ] Functions (types 0, 2, 3 and 4) and color-space definitions (conversion arrives in M7)
+- [x] Functions (types 0, 2, 3 and 4) and color-space definitions (conversion arrives in M7) (DECISIONS D30): `pdf-function.c` loaded and evaluated as MuPDF does, calculator functions included (`function`); colorspaces with their tint transforms, ICC profiles judged by their header (`colorspace`); shadings loaded, functions sampled, as `pdf_load_shading` does (`shade`). The interpreter loads them as `pdf_process_keyword` does, and the `operators-resources` check compares the result
 - [ ] Fonts: simple and composite; embedded Type1 (own parser, or hayro-font), CFF, OpenType and TrueType (skrifa/read-fonts); standard-14 metrics and MuPDF's substitute fonts; encodings, `/Differences`, the Adobe Glyph List, ToUnicode, predefined CMaps (generated from MuPDF's tables), `/W` widths, vertical writing
 - [ ] Commands: `trace`, `fonts`, `images` (list and extract)
-- [ ] Fuzz targets: content parser, font parsers. `content` processes any input as a page's contents, with resources of each kind and without: 15 minutes (839K runs), nothing found
+- [ ] Fuzz targets: content parser, font parsers. `content` processes any input as a page's contents, with resources of each kind and without: 15 minutes (839K runs), nothing found; `function` loads any input as a calculator or sampled function, evaluates it and samples it as an axial shading's: 15 minutes (8.7M runs), nothing found
 
 **Status** (standard tier, 5,142 files, of which 19 neither tool opens):
 
 | Check | Parity | Remaining mismatches |
 |---|---|---|
 | `operators` (each page's operators and operands, its resources and annotations taken away) | 100% (5,123 / 5,123) | |
-| `operators-warnings` (distinct warnings and reported errors while doing so) | 99.5% (5,096 / 5,123) | 24 files that differ when they are opened, as in `warnings`. 2 where the oracle's own edits, made on a repaired document, make MuPDF's page tree map fail to load, and 1 where nupdf's inflate names a different zlib error |
+| `operators-resources` (the same with each page's resources kept, so the colorspaces, functions, shadings and patterns they name are loaded) | 100% (5,123 / 5,123) | |
+| `operators-warnings` (distinct warnings and reported errors, resources taken away) | 99.5% (5,096 / 5,123) | 24 files that differ when they are opened, as in `warnings`. 2 where the oracle's own edits, made on a repaired document, make MuPDF's page tree map fail to load, and 1 where nupdf's inflate names a different zlib error |
 
 Exit: ≥99% page-trace parity on the standard tier: same operations, matrices within 1e-3, same glyph ids and Unicode.
 
