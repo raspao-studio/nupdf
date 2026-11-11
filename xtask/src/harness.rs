@@ -26,7 +26,9 @@ pub struct Check {
     /// Script under oracle/js, run as `mutool run <script> <file>`.
     pub oracle_script: &'static str,
     /// `nupdf` arguments; the file path is appended, or takes the place of
-    /// each `{file}` among them.
+    /// each `{file}` among them. `{dir}` is a scratch directory for files
+    /// nupdf writes; the `"file"` fields of its report name them, and are
+    /// replaced by their BLAKE3 hashes as the oracle's are.
     pub nupdf_args: &'static [&'static str],
     pub compare: Compare,
     /// The oracle takes a scratch directory as a second argument and names
@@ -35,6 +37,9 @@ pub struct Check {
     pub oracle_writes_files: bool,
     /// Applied to each file the oracle wrote before it is hashed.
     pub oracle_file_fixup: Option<fn(&mut [u8])>,
+    /// Applied to nupdf's report before it is compared: drops what nupdf
+    /// reports that the oracle has no way to.
+    pub nupdf_fixup: Option<fn(&mut Value)>,
     /// Further oracle arguments, after the file (and the scratch directory).
     pub oracle_args: &'static [&'static str],
     /// Compare what a reader makes of each side's output instead of the
@@ -97,6 +102,7 @@ pub const CHECKS: &[Check] = &[
         ]),
         oracle_writes_files: false,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
     },
@@ -111,6 +117,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: false,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
     },
@@ -125,6 +132,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: false,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
     },
@@ -136,6 +144,7 @@ pub const CHECKS: &[Check] = &[
         compare: Compare::Warnings,
         oracle_writes_files: false,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
     },
@@ -150,6 +159,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: true,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
     },
@@ -164,6 +174,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: true,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
     },
@@ -178,6 +189,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: false,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &["bare"],
     },
@@ -189,6 +201,7 @@ pub const CHECKS: &[Check] = &[
         compare: Compare::Warnings,
         oracle_writes_files: false,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &["bare"],
     },
@@ -203,17 +216,73 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: false,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &["resources"],
     },
     Check {
+        name: "fonts",
+        about: "the fonts each page's resources reach, as `mutool info` lists them: page, object, subtype, name and encoding",
+        oracle_script: "oracle/js/inventory.js",
+        nupdf_args: &["fonts"],
+        compare: Compare::Fields(&["/page_count", "/fonts", "/page_errors"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        nupdf_fixup: Some(drop_font_loads),
+        reread: None,
+        oracle_args: &["fonts"],
+    },
+    Check {
+        name: "font-files",
+        about: "each font descriptor's embedded program as `mutool extract` writes it: file name and BLAKE3",
+        oracle_script: "oracle/js/inventory.js",
+        nupdf_args: &["fonts", "--extract", "{dir}"],
+        compare: Compare::Collection {
+            counts: &["/object_count"],
+            items: "extracted",
+        },
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["font-files"],
+    },
+    Check {
+        name: "image-list",
+        about: "the images each page's resources reach, as `mutool info` lists them: page, object, size, depth, filters and colorspace",
+        oracle_script: "oracle/js/inventory.js",
+        nupdf_args: &["images"],
+        compare: Compare::Fields(&["/page_count", "/images", "/page_errors"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["images"],
+    },
+    Check {
+        name: "image-pixmaps",
+        about: "each image XObject decoded to a pixmap as fz_get_pixmap_from_image does: size, components, alpha, colorspace and the MD5 of the samples, or the error",
+        oracle_script: "oracle/js/inventory.js",
+        nupdf_args: &["images", "--digests"],
+        compare: Compare::Collection {
+            counts: &["/object_count"],
+            items: "pixmaps",
+        },
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["pixmaps"],
+    },
+    Check {
         name: "trace",
-        about: "each page's device calls as MuPDF's run processor makes them for the page's contents (paths, clips, colors, images, shadings, groups, masks, layers, structure), with text left out on both sides until fonts are loaded",
+        about: "each page's device calls as MuPDF's run processor makes them for the page's contents (paths, clips, colors, images, shadings, text, groups, masks, layers, structure)",
         oracle_script: "oracle/js/trace.js",
         nupdf_args: &["trace"],
         compare: Compare::Trace,
         oracle_writes_files: false,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
     },
@@ -226,6 +295,7 @@ pub const CHECKS: &[Check] = &[
         compare: Compare::Fields(&["/output/blake3"]),
         oracle_writes_files: true,
         oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
     },
@@ -240,6 +310,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: true,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: Some(Reader::Mutool("oracle/js/objects.js")),
         oracle_args: &[],
     },
@@ -508,6 +579,7 @@ pub const CHECKS: &[Check] = &[
         },
         oracle_writes_files: true,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: Some(Reader::Mutool("oracle/js/objects.js")),
         oracle_args: &["garbage=4"],
     },
@@ -570,6 +642,7 @@ const fn validated(
         compare: Compare::Fields(&["/qpdf/status", "/qpdf/messages"]),
         oracle_writes_files: true,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: Some(Reader::Qpdf),
         oracle_args,
     }
@@ -591,6 +664,7 @@ const fn modelled(
         compare: Compare::Fields(&["/arlington/violations"]),
         oracle_writes_files: true,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: Some(Reader::Arlington),
         oracle_args,
     }
@@ -606,6 +680,7 @@ const fn incremental(
     Check {
         about: "the edit appended to the file as MuPDF's incremental save appends it: the file's bytes, then the objects changed, an xref in the style of the last one read, and a trailer pointing back: BLAKE3 of the output",
         oracle_file_fixup: Some(name_nupdf_in_increment),
+        nupdf_fixup: None,
         ..clean_gc(name, nupdf_args, oracle_args)
     }
 }
@@ -643,6 +718,7 @@ const fn roundtrip_encrypted(
         },
         oracle_writes_files: true,
         oracle_file_fixup: None,
+        nupdf_fixup: None,
         reread: Some(Reader::Mutool("oracle/js/objects.js")),
         oracle_args,
     }
@@ -687,6 +763,7 @@ const fn clean_gc(
         compare: Compare::Fields(&["/output/blake3"]),
         oracle_writes_files: true,
         oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
         reread: None,
         oracle_args,
     }
@@ -935,17 +1012,31 @@ fn run_sides(
     {
         hash_written_files(json, dir, check.oracle_file_fixup);
     }
-    let args = nupdf_argv(check, file);
-    (oracle, side(nupdf, &args, timeout))
+    let ours_dir = dir.join("nupdf");
+    if check.nupdf_args.contains(&"{dir}") {
+        let _ = std::fs::create_dir_all(&ours_dir);
+    }
+    let args = nupdf_argv(check, file, &ours_dir);
+    let mut ours = side(nupdf, &args, timeout);
+    if let Some(json) = &mut ours.json {
+        if check.nupdf_args.contains(&"{dir}") {
+            hash_written_files(json, &ours_dir, None);
+        }
+        if let Some(f) = check.nupdf_fixup {
+            f(json);
+        }
+    }
+    (oracle, ours)
 }
 
 /// The check's `nupdf` arguments with the file in them.
-fn nupdf_argv<'a>(check: &'a Check, file: &'a Path) -> Vec<&'a std::ffi::OsStr> {
+fn nupdf_argv<'a>(check: &'a Check, file: &'a Path, dir: &'a Path) -> Vec<&'a std::ffi::OsStr> {
     let mut args: Vec<&std::ffi::OsStr> = check
         .nupdf_args
         .iter()
         .map(|a| match *a {
             "{file}" => file.as_os_str(),
+            "{dir}" => dir.as_os_str(),
             a => std::ffi::OsStr::new(a),
         })
         .collect();
@@ -1045,7 +1136,7 @@ fn reread_sides(
     let oracle = run.after(oracle, &oracle_dir.join(name), &dir.join("oracle-read"));
 
     let written = dir.join("nupdf.pdf");
-    let mut args = nupdf_argv(check, file);
+    let mut args = nupdf_argv(check, file, dir);
     args.extend(["-o".as_ref(), written.as_os_str()]);
     let ours = side(nupdf, &args, run.timeout);
     let ours = run.after(ours, &written, &dir.join("nupdf-read"));
@@ -1202,6 +1293,18 @@ pub fn hash_written_files(value: &mut Value, dir: &Path, fixup: Option<fn(&mut [
             .iter_mut()
             .for_each(|v| hash_written_files(v, dir, fixup)),
         _ => {}
+    }
+}
+
+/// The `fonts` report's `load` facts: what nupdf loaded each font as,
+/// which MuPDF's scripts cannot see.
+fn drop_font_loads(json: &mut Value) {
+    if let Some(Value::Array(fonts)) = json.get_mut("fonts") {
+        for f in fonts {
+            if let Value::Object(f) = f {
+                f.remove("load");
+            }
+        }
     }
 }
 

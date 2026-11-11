@@ -280,7 +280,191 @@ fn content_fixtures() -> Vec<Fixture> {
             "Pages a run processor draws: clips, transparency groups and soft masks, tiling patterns drawn as tiles and cell by cell, shading fills, images with masks, optional content layers, a tagged structure tree with a missing parent, text clips, a crop box and default colorspaces",
             content_run(),
         ),
+        fx(
+            "fonts-images.pdf",
+            "Fonts and images a page reaches through its own resources, a form and a Type 3 font: builtin, described and embedded fonts, a font descriptor of an unknown kind; images at each depth, indexed, keyed, with decode arrays, a /Matte soft mask, truncated, as an image mask, as JPEG behind Flate, in CMYK, Separation and Lab",
+            fonts_images(),
+        ),
     ]
+}
+
+/// What `fonts` and `images` list, extract and decode.
+fn fonts_images() -> Vec<u8> {
+    use crate::encode;
+    use crate::jpeg::{self, Component, Spec};
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>");
+    pdf.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 5 0 R/Resources\
+         <</Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>/F2 10 0 R/F3 11 0 R/F4 12 0 R/F5 13 0 R/F6 9 0 R>>\
+         /XObject<</Fm 30 0 R/I1 40 0 R/I2 41 0 R/I3 42 0 R/I4 43 0 R/I5 44 0 R/I6 45 0 R\
+         /I7 46 0 R/I8 47 0 R/I9 49 0 R/I10 50 0 R/I11 51 0 R/I12 52 0 R/I13 53 0 R>>>>>>",
+    );
+    // A second page that uses some again, and its own font through the form.
+    pdf.obj(
+        4,
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 5 0 R/Resources\
+         <</Font<</F2 10 0 R>>/XObject<</Fm 30 0 R/I1 40 0 R>>/Pattern<</P 31 0 R>>>>>>",
+    );
+    pdf.stream(5, "", b"BT /F1 10 Tf (A) Tj ET /Fm Do /I1 Do");
+    pdf.obj(9, "12");
+    pdf.obj(
+        10,
+        "<</Type/Font/Subtype/TrueType/BaseFont/Arial,Bold/Encoding<</BaseEncoding/WinAnsiEncoding/Differences[65/B]>>\
+         /FirstChar 65/LastChar 65/Widths[600]/FontDescriptor 14 0 R>>",
+    );
+    pdf.obj(
+        11,
+        "<</Type/Font/Subtype/Type1/BaseFont/ABCDEF+Dingbats/Encoding/StandardEncoding/FontDescriptor 15 0 R>>",
+    );
+    pdf.obj(
+        12,
+        "<</Type/Font/Subtype/Type3/Name/T3/FontMatrix[0.001 0 0 0.001 0 0]/FontBBox[0 0 1000 1000]\
+         /Encoding<</Differences[65/a]>>/CharProcs<</a 20 0 R>>/FirstChar 65/LastChar 65/Widths[1000]\
+         /Resources<</Font<</G 16 0 R>>>>>>",
+    );
+    pdf.obj(
+        13,
+        "<</Type/Font/Subtype/Type1/BaseFont/Junk/FontDescriptor 17 0 R>>",
+    );
+    pdf.obj(
+        14,
+        "<</Type/FontDescriptor/FontName/Arial,Bold/Flags 32/Ascent 900/Descent -200>>",
+    );
+    pdf.obj(
+        15,
+        "<</Type/FontDescriptor/FontName/ABCDEF+Dingbats/Flags 4/FontFile3 18 0 R>>",
+    );
+    pdf.obj(16, "<</Type/Font/Subtype/Type1/BaseFont/Times-Roman>>");
+    pdf.obj(
+        17,
+        "<</Type/FontDescriptor/FontName/Junk/Flags 32/FontFile 19 0 R/FontFile3 21 0 R>>",
+    );
+    pdf.stream(
+        18,
+        "/Subtype/Type1C",
+        include_bytes!("../../crates/nupdf/fonts/urw/Dingbats.cff"),
+    );
+    pdf.stream(19, "/Length1 4/Length2 0/Length3 0", b"junk");
+    pdf.stream(20, "", b"1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f");
+    pdf.stream(21, "/Subtype/Bogus", b"junk");
+    pdf.stream(
+        30,
+        "/Type/XObject/Subtype/Form/BBox[0 0 10 10]/Resources<</Font<</F7<</Type/Font/Subtype/Type1/BaseFont/Courier>>>>\
+         /XObject<</I14 54 0 R>>>>",
+        b"/I14 Do",
+    );
+    pdf.stream(
+        31,
+        "/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 1 1]/XStep 1/YStep 1/Resources<</XObject<</I15 55 0 R>>>>",
+        b"/I15 Do",
+    );
+    let image = |pdf: &mut Pdf, num: u32, dict: &str, data: &[u8]| {
+        pdf.stream(num, &format!("/Type/XObject/Subtype/Image{dict}"), data);
+    };
+    image(
+        &mut pdf,
+        40,
+        "/Width 3/Height 2/ColorSpace/DeviceGray/BitsPerComponent 1/Decode[1 0]",
+        &[0b1010_0000, 0b0110_0000],
+    );
+    image(
+        &mut pdf,
+        41,
+        "/Width 4/Height 1/ColorSpace/DeviceGray/BitsPerComponent 2",
+        &[0b0001_1011],
+    );
+    image(
+        &mut pdf,
+        42,
+        "/Width 2/Height 1/ColorSpace/DeviceRGB/BitsPerComponent 4",
+        &[0x12, 0x34, 0x56],
+    );
+    image(
+        &mut pdf,
+        43,
+        "/Width 2/Height 1/ColorSpace/DeviceRGB/BitsPerComponent 16/Mask[0 4096 0 65535 0 65535]",
+        &[0x0f, 0xff, 0x80, 0, 0x40, 0, 0x20, 0, 0x20, 0, 0x20, 0],
+    );
+    image(
+        &mut pdf,
+        44,
+        "/Width 4/Height 1/ColorSpace[/Indexed/DeviceRGB 2<ff000000ff000000ff>]/BitsPerComponent 2/Decode[3 0]",
+        &[0b0001_1011],
+    );
+    image(
+        &mut pdf,
+        45,
+        "/Width 1/Height 1/ColorSpace/DeviceCMYK/BitsPerComponent 8",
+        &[10, 20, 30, 40],
+    );
+    image(
+        &mut pdf,
+        46,
+        "/Width 2/Height 1/ColorSpace[/Separation/Spot/DeviceCMYK<</FunctionType 2/Domain[0 1]/C0[0 0 0 0]/C1[0 0 0 1]/N 1>>]/BitsPerComponent 8",
+        &[0, 200],
+    );
+    image(
+        &mut pdf,
+        47,
+        "/Width 2/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8/SMask 48 0 R",
+        &[100, 200],
+    );
+    pdf.stream(
+        48,
+        "/Type/XObject/Subtype/Image/Width 2/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8/Matte[0.5]",
+        &[0, 128],
+    );
+    image(
+        &mut pdf,
+        49,
+        "/Width 2/Height 2/ColorSpace/DeviceRGB/BitsPerComponent 8",
+        &[1, 2, 3, 4, 5],
+    );
+    image(&mut pdf, 50, "/Width 8/Height 1/ImageMask true", &[0x0f]);
+    let jpeg = jpeg::encode(&Spec {
+        width: 8,
+        height: 8,
+        components: vec![Component { id: 1, h: 1, v: 1 }],
+        sample: |_, x, y| (x * 30 + y * 3) as u8,
+        jfif: true,
+        adobe: None,
+        restart_interval: 0,
+        progressive: None,
+    });
+    image(
+        &mut pdf,
+        51,
+        "/Width 8/Height 8/ColorSpace/DeviceGray/BitsPerComponent 8/Filter[/FlateDecode/DCTDecode]",
+        &encode::flate(&jpeg),
+    );
+    image(
+        &mut pdf,
+        52,
+        "/Width 1/Height 1/ColorSpace[/Lab<</WhitePoint[0.9505 1 1.089]>>]/BitsPerComponent 8/Decode[0 100 -50 50 -50 50]",
+        &[128, 64, 192],
+    );
+    image(
+        &mut pdf,
+        53,
+        "/Width 2/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8/Mask[300 400]",
+        &[44, 200],
+    );
+    image(
+        &mut pdf,
+        54,
+        "/Width 1/Height 1/ColorSpace/DeviceRGB/BitsPerComponent 8",
+        &[9, 8, 7],
+    );
+    image(
+        &mut pdf,
+        55,
+        "/Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8/Filter/DCTDecode",
+        &jpeg,
+    );
+    pdf.finish_with_xref("")
 }
 
 /// What the run processor turns into device calls, page by page.

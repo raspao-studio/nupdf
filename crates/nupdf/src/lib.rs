@@ -30,6 +30,7 @@ pub mod graft;
 pub mod header;
 pub mod image;
 pub mod insert;
+pub mod inventory;
 pub mod jbig2;
 pub mod jpeg;
 pub mod layer;

@@ -12,7 +12,7 @@ Related docs: [ARCHITECTURE](ARCHITECTURE.md) · [AGENT-INTERFACE](AGENT-INTERFA
 | M1 | Syntax, xref, repair, page tree | ~25k lines | done |
 | M2 | Filters and encryption | ~15k | done |
 | M3 | Writer and structural editing | ~10k | done |
-| M4 | Content streams, resources, fonts | ~25k | in progress |
+| M4 | Content streams, resources, fonts | ~25k | done |
 | M5 | Text extraction and search | ~15k | |
 | M6 | Redaction and verification | ~5k plus verifier | |
 | M7 | Rendering | ~30k | |
@@ -227,8 +227,8 @@ MuPDF reference: `pdf-interpret.c`, `pdf-op-run.c`, `pdf-op-buffer.c`, `pdf-run.
 - [x] `Device` trait mirroring `fz_device`, plus a trace device whose output lines up with `mutool trace`: `device`, and the trace device of the `trace` command, checked against MuPDF's script device
 - [x] Functions (types 0, 2, 3 and 4) and color-space definitions (conversion arrives in M7) (DECISIONS D30): `pdf-function.c` loaded and evaluated as MuPDF does, calculator functions included (`function`); colorspaces with their tint transforms, ICC profiles judged by their header (`colorspace`); shadings loaded, functions sampled, as `pdf_load_shading` does (`shade`). The interpreter loads them as `pdf_process_keyword` does, and the `operators-resources` check compares the result
 - [x] Fonts (with them, text in the trace, and Type 3 glyph procedures) (DECISIONS D32): simple, composite and Type 3 fonts as `pdf_load_font` loads them (`fontdesc`), on a port of the parts of FreeType MuPDF uses to open TrueType, OpenType, CFF and Type 1 programs, map characters and measure glyphs (`font`); the standard 14 fonts and MuPDF's substitutes from the URW fonts it bundles; encodings, `/Differences`, the Adobe Glyph List, ToUnicode, predefined CMaps generated from MuPDF's tables (`cmap`, `glyphs`, `tables`, `cargo xtask tables`), `/W` and `/W2` widths, vertical writing; glyphs shown in spans as `fz_text` holds them (`text`), Type 3 glyphs prepared when their font loads and drawn through the device when they take the graphics state. Glyph outlines (and so exact glyph boxes) wait for M7, and CJK substitutes for a decision on carrying MuPDF's 25 MB CJK font
-- [ ] Commands: `trace` (done), `fonts`, `images` (list and extract)
-- [x] Fuzz targets: content parser, font parsers. `content` processes any input as a page's contents, with resources of each kind and without: 15 minutes (839K runs), nothing found; `function` loads any input as a calculator or sampled function, evaluates it and samples it as an axial shading's: 15 minutes (8.7M runs), nothing found; `run` runs each page of any document into a device: 2 minutes (60K runs), nothing found; `font` opens any input as a font program, on its own or embedded in a simple or composite font of each kind, and asks for each glyph's name, width and mapping: 5 minutes (497K runs), nothing found; `cmap` loads any input as an embedded CMap and looks up the codes it splits itself into: 5 minutes (3.6M runs), nothing found
+- [x] Commands: `trace`, `fonts`, `images` (list and extract) (DECISIONS D33): the fonts and images each page's resources reach, as `mutool info` walks them (`inventory`); embedded font programs and images written as `mutool extract` writes them; images decoded to pixmaps as `fz_get_pixmap_from_image` decodes them (`pixmap`), with MuPDF's PAM and PNG writers. JPEG 2000 images are listed but not decoded yet
+- [x] Fuzz targets: content parser, font parsers. `content` processes any input as a page's contents, with resources of each kind and without: 15 minutes (839K runs), nothing found; `function` loads any input as a calculator or sampled function, evaluates it and samples it as an axial shading's: 15 minutes (8.7M runs), nothing found; `run` runs each page of any document into a device: 2 minutes (60K runs), nothing found; `font` opens any input as a font program, on its own or embedded in a simple or composite font of each kind, and asks for each glyph's name, width and mapping: 5 minutes (497K runs), nothing found; `cmap` loads any input as an embedded CMap and looks up the codes it splits itself into: 5 minutes (3.6M runs), nothing found; `pixmap` decodes any input as the samples of an image of each depth, colorspace, decode array, color key and /Matte mask, and writes it as PAM and PNG: 5 minutes (1.4M runs), nothing found
 
 **Status** (standard tier, 5,142 files, of which 19 neither tool opens):
 
@@ -238,6 +238,10 @@ MuPDF reference: `pdf-interpret.c`, `pdf-op-run.c`, `pdf-op-buffer.c`, `pdf-run.
 | `operators-resources` (the same with each page's resources kept, so the colorspaces, functions, shadings and patterns they name are loaded) | 100% (5,123 / 5,123) | |
 | `operators-warnings` (distinct warnings and reported errors, resources taken away) | 99.5% (5,096 / 5,123) | 24 files that differ when they are opened, as in `warnings`. 2 where the oracle's own edits, made on a repaired document, make MuPDF's page tree map fail to load, and 1 where nupdf's inflate names a different zlib error |
 | `trace` (each page's device calls, text included: spans, glyph ids, Unicode and positions) | 99.5% (5,098 / 5,123) | All 25 are CJK fonts that are not embedded: MuPDF's build carries a CJK font to substitute and nupdf does not (DECISIONS D32) |
+| `fonts` (the fonts each page's resources reach: page, object, subtype, name, encoding) | 100% (5,123 / 5,123) | |
+| `font-files` (each embedded font program as `mutool extract` writes it) | 100% (5,123 / 5,123) | |
+| `image-list` (the images each page's resources reach: page, object, size, depth, filters, colorspace) | 100% (5,123 / 5,123) | |
+| `image-pixmaps` (each image XObject decoded to a pixmap: size, components, alpha, colorspace, MD5 of the samples) | 99.2% (5,081 / 5,123) | 27 files with JPEG 2000 images, which nupdf does not decode yet; 14 whose JBIG2 streams already decode differently (as in `images`); 1 with a `/Length 0` stream behind two filters, where MuPDF's image read sees the Flate data cut short and nupdf's does not |
 
 Exit: ≥99% page-trace parity on the standard tier: same operations, matrices within 1e-3, same glyph ids and Unicode.
 
