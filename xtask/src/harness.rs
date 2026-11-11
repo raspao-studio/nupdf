@@ -189,6 +189,20 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["bare"],
     },
     Check {
+        name: "operators-resources",
+        about: "the same with each page's resources kept: which operators are dispatched once the colorspaces, functions, shadings and patterns they name are loaded",
+        oracle_script: "oracle/js/operators.js",
+        nupdf_args: &["operators"],
+        compare: Compare::Collection {
+            counts: &["/page_count"],
+            items: "pages",
+        },
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        reread: None,
+        oracle_args: &["resources"],
+    },
+    Check {
         name: "clean",
         about: "the document rewritten as `mutool clean` writes it: BLAKE3 of the output",
         oracle_script: "oracle/js/clean.js",

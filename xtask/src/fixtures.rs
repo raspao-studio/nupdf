@@ -270,7 +270,151 @@ fn content_fixtures() -> Vec<Fixture> {
             "Inline images: unfiltered at each depth and colorspace, every filter, data containing EI, a filter chain, truncated data, and the errors MuPDF reports for them",
             pages_with_contents(&inline_images(), &[]),
         ),
+        fx(
+            "content-resources.pdf",
+            "Colorspaces with tint transforms of each function type, shadings of each type, tiling and shading patterns, inline images in named colorspaces and XObjects of each subtype, loaded or failing as MuPDF loads them",
+            content_resources(),
+        ),
     ]
+}
+
+/// Pages naming resources that load, and that fail to, as MuPDF loads
+/// them: the operators that follow show which were dispatched.
+fn content_resources() -> Vec<u8> {
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    pdf.obj(2, "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R 6 0 R]/Count 4/MediaBox[0 0 200 200]/Resources 7 0 R>>");
+    let contents = [
+        // Colorspaces, then patterns.
+        "1 w /CS0 cs /CS1 cs /CS2 cs /CS3 cs /CS4 cs /CS5 cs /CS6 cs /CS7 cs /CS8 cs /CS9 cs \
+         /CS10 cs /CS11 cs /CS12 cs /CS13 cs /CS14 cs /CS15 cs /CS5 CS 0.5 0.5 0.5 SC \
+         /Pattern cs /P1 scn /P2 scn /P3 scn /P4 scn 0.5 /P1 scn /P5 scn 2 w",
+        // Shadings.
+        "1 w /Sh1 sh /Sh2 sh /Sh3 sh /Sh4 sh /Sh5 sh /Sh6 sh /Sh7 sh /Sh8 sh /Sh9 sh /Sh10 sh \
+         /Sh11 sh /Sh12 sh /Sh13 sh /Sh14 sh /Sh1 sh 2 w",
+        // Inline images in named and separation colorspaces.
+        "q 1 w BI /W 1 /H 1 /CS /CS1 ID s EI 2 w BI /W 1 /H 1 /CS /CS0 /BPC 8 ID s EI 3 w \
+         BI /W 1 /H 1 /CS [/DeviceN [/A /B] /RGB null] ID ab EI 4 w \
+         BI /W 1 /H 1 /CS [/Separation /S /RGB <</FunctionType 2/Domain[0 1]/N 1/C0[0 0 0]/C1[1 1 1]>>] ID s EI 5 w \
+         BI /W 1 /H 1 /CS /CS3 ID s EI 6 w Q",
+        // XObjects of each subtype.
+        "1 w /Im1 Do /Fm1 Do /PS1 Do /X1 Do /X2 Do /X3 Do 2 w",
+    ];
+    for (i, c) in contents.iter().enumerate() {
+        let page = 3 + i as u32;
+        pdf.obj(
+            page,
+            &format!("<</Type/Page/Parent 2 0 R/Contents {} 0 R>>", 40 + page),
+        );
+        pdf.stream(40 + page, "", c.as_bytes());
+    }
+    pdf.obj(
+        7,
+        "<</ColorSpace<</CS0[/Indexed/DeviceRGB 1<ff000000ff00>]/CS1[/Separation/Spot/DeviceRGB 10 0 R]\
+         /CS2[/DeviceN[/A/B]/DeviceCMYK 13 0 R]/CS3[/Separation/Bad/DeviceRGB 14 0 R]/CS4[/ICCBased 20 0 R]\
+         /CS5[/Pattern/DeviceRGB]/CS6[/Pattern]/CS7[/Lab<<>>]/CS8/Foo/CS9[/Indexed/CS99 1<00>]\
+         /CS10[/CalRGB<</WhitePoint[1 1 1]>>]/CS11[/Separation/S/DeviceRGB 11 0 R]\
+         /CS12[/Separation/S/DeviceRGB 12 0 R]/CS13[/Separation/S/DeviceRGB 15 0 R]\
+         /CS14[/Separation/S/DeviceRGB 16 0 R]/CS15[/Separation/S/DeviceRGB 17 0 R]>>\
+         /Pattern<</P1 21 0 R/P2<</PatternType 2/Shading 31 0 R/Matrix[1 0 0 1 5 5]>>/P3<</PatternType 3>>\
+         /P4<</PatternType 2>>/P5<</PatternType 2/Shading 37 0 R>>>>\
+         /Shading<</Sh1 30 0 R/Sh2 31 0 R/Sh3 32 0 R/Sh4 33 0 R/Sh5 34 0 R/Sh6 35 0 R/Sh7 36 0 R\
+         /Sh8 37 0 R/Sh9 38 0 R/Sh10<</ShadingType 9/ColorSpace/DeviceGray/Function 10 0 R>>\
+         /Sh11<</ShadingType 2/Function 10 0 R>>/Sh12 39 0 R/Sh13 40 0 R\
+         /Sh14<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 1 1]/Function[10 0 R 10 0 R]>>>>\
+         /XObject<</Im1 22 0 R/Fm1 23 0 R/PS1<</Subtype/PS>>/X1<</Subtype/Foo>>/X2<<>>\
+         /X3<</Subtype/Form/Subtype2/PS>>>>>>",
+    );
+    // Functions: exponential, sampled, calculator, stitching, and broken
+    // ones of each kind.
+    pdf.obj(
+        10,
+        "<</FunctionType 2/Domain[0 1]/C0[0 0 0]/C1[1 0.5 0]/N 1>>",
+    );
+    pdf.stream(
+        11,
+        "/FunctionType 0/Domain[0 1]/Range[0 1 0 1 0 1]/Size[2]/BitsPerSample 8",
+        b"\x00\x40\x80\xff\xc0\x20",
+    );
+    pdf.obj(
+        12,
+        "<</FunctionType 3/Domain[0 1]/Functions[10 0 R 10 0 R]/Bounds[0.5]/Encode[0 1 1 0]>>",
+    );
+    pdf.stream(
+        13,
+        "/FunctionType 4/Domain[0 1 0 1]/Range[0 1 0 1 0 1 0 1]",
+        b"{ 2 copy add 2 div exch pop 0 }",
+    );
+    pdf.obj(14, "<</FunctionType 7/Domain[0 1]>>");
+    pdf.stream(
+        15,
+        "/FunctionType 4/Domain[0 1]/Range[0 1 0 1 0 1]",
+        b"{ dup frob }",
+    );
+    pdf.stream(
+        16,
+        "/FunctionType 0/Domain[0 1]/Range[0 1 0 1 0 1]/Size[4]/BitsPerSample 8",
+        b"\x00\x01",
+    );
+    pdf.obj(
+        17,
+        "<</FunctionType 3/Domain[0 1]/Functions[10 0 R 10 0 R 10 0 R]/Bounds[0.6 0.3]>>",
+    );
+    pdf.stream(
+        18,
+        "/FunctionType 4/Domain[0 1 0 1]/Range[0 1 0 1 0 1]",
+        b"{ add 2 div dup dup }",
+    );
+    pdf.stream(
+        19,
+        "/FunctionType 0/Domain[0 1]/Range[0 1 0 1 0 1]/Size[2]/BitsPerSample 7",
+        b"\x00\x01\x02",
+    );
+    pdf.stream(20, "/N 3", b"not an ICC profile");
+    pdf.stream(
+        21,
+        "/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 10 10]/XStep 0/YStep 10/Resources<<>>",
+        b"0 0 5 5 re f",
+    );
+    pdf.stream(
+        22,
+        "/Type/XObject/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8",
+        b"\x80",
+    );
+    pdf.stream(
+        23,
+        "/Type/XObject/Subtype/Form/BBox[0 0 10 10]",
+        b"0 0 5 5 re f",
+    );
+    // Shadings of each type, then broken ones.
+    pdf.obj(30, "<</ShadingType 1/ColorSpace/DeviceRGB/Domain[0 1 0 1]/Function 18 0 R/Matrix[2 0 0 2 0 0]>>");
+    pdf.obj(31, "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 100 0]/Function 10 0 R/Extend[true true]/Background[1 1 1]/BBox[0 0 50 50]>>");
+    pdf.obj(32, "<</ShadingType 3/ColorSpace/DeviceRGB/Coords[50 50 0 50 50 40]/Function 12 0 R/Domain[0 1]>>");
+    pdf.stream(33, "/ShadingType 4/ColorSpace/DeviceRGB/BitsPerCoordinate 8/BitsPerComponent 8/BitsPerFlag 8/Decode[0 100 0 100 0 1]/Function 10 0 R", b"\x00\x00\x00\x00\x00\x80\x00\x80\x00\xff\x80\x80");
+    pdf.stream(34, "/ShadingType 5/ColorSpace/DeviceGray/BitsPerCoordinate 8/BitsPerComponent 8/VerticesPerRow 1/Decode[0 100 0 100 0 1]", b"\x00\x00\x00\x80\x80\x80");
+    pdf.stream(
+        35,
+        "/ShadingType 6/ColorSpace/DeviceGray/BitsPerCoordinate 9/BitsPerComponent 3/BitsPerFlag 3",
+        b"\x00",
+    );
+    pdf.obj(36, "<</ShadingType 7/ColorSpace/DeviceGray/BitsPerCoordinate 8/BitsPerComponent 8/BitsPerFlag 8>>");
+    pdf.obj(
+        37,
+        "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 1 1]>>",
+    );
+    pdf.obj(
+        38,
+        "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 1 1]/Function[10 0 R 11 0 R]>>",
+    );
+    pdf.obj(
+        39,
+        "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 1 1]/Function 11 0 R>>",
+    );
+    pdf.obj(
+        40,
+        "<</ShadingType 3/ColorSpace/DeviceRGB/Coords[0 0 1 1 1 2]/Function 15 0 R>>",
+    );
+    pdf.finish_with_xref("")
 }
 
 /// One inline image per page, each followed by an operator, so that what

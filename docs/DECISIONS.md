@@ -314,3 +314,14 @@ M4's exit is measured on `mutool trace`, which needs the whole interpreter: font
 - **The oracle's quirks.** The script glue has bugs that the comparison works around rather than hides. It passes `"` the wrong arguments, so `"` is left out on both sides. For an inline image without a `/CS` name it pushes a null string, which crashes the script engine, so `BI` is not reported on both sides; what follows the image shows where it ended. It hides the ExtGState's line, font and flatness entries inside a `gs`, but not its dash. And it pushes short ASCII text as a C string, which runs on into what longer strings left in MuPDF's buffer and is read by mujs as UTF-8. nupdf's library reports the exact operand and also its C-string view, and only the recorder that writes the oracle's format reproduces the rest.
 - **Warnings.** `operators-warnings` compares the distinct warnings and reported errors, the content's syntax errors among them, which made diagnostics keep every distinct message past their cap of 1,000 entries (up to 10,000), and made decoders print a bad byte as MuPDF's `%c` does.
 
+## D30. Resources load where MuPDF's interpreter loads them
+
+*2026-11-11*
+
+`pdf_process_keyword` does not only dispatch operators: it loads the colorspace `CS` names, the shading `sh` names and a shading pattern's shading, and throws when one does not load, which counts as a syntax error and drops the operator. So the loaders come before the interpreter, and are checked through the same processor oracle with the page's resources kept (`operators-resources`).
+
+- **Functions** are a port of `pdf-function.c`, evaluation included: shadings sample their functions when they load, 256 times along an axis and on a 257 by 257 grid for a function-based shading. Arithmetic is single precision with MuPDF's guards, and integer arithmetic in calculator functions wraps as C's does in practice. Function evaluation shows only in rendering, so it is checked fully in M7.
+- **Colorspaces** load their tint transforms. An ICC profile is not parsed: its header names the component count, and MuPDF's checks with lcms on a broken profile (which warn and fall back to /Alternate or /N) are not reproduced.
+- **Shadings** are kept per object number for one run of a page, as MuPDF's store keeps them, so that a function-based shading used many times is sampled once.
+- **What waits.** Fonts load with the font item, so `Tf` still hands over the font dictionary, and the warnings of a run with resources are not compared yet: font loading warns, and so do the transparency scans `pdf_load_page` makes of the resources. Optional content waits for the interpreter: MuPDF's processor for scripts has no usage, so it never evaluates it.
+

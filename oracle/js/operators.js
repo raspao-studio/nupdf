@@ -1,19 +1,20 @@
 // Oracle for the `operators` checks: each page's content-stream operators,
 // as MuPDF's interpreter hands them to a processor (PDFPage.process).
-// Usage: mutool run oracle/js/operators.js <file> [bare]
+// Usage: mutool run oracle/js/operators.js <file> [bare|resources]
 //
 // Each operator is an array: its name (the processor callback's, without
 // "op_"), then its operands. Numbers are as the interpreter passes them,
 // strings hex, names in MuPDF's printed form, objects in the encoding of
-// objects.js. With "bare", each page loses its /Annots and gets empty
-// /Resources before it is loaded, so that only its content streams count:
-// every resource lookup fails. Two operators are left out, for quirks of
+// objects.js. Each page loses its /Annots before it is loaded. With
+// "bare" it also gets empty /Resources, so that only its content streams
+// count: every resource lookup fails. With "resources" it keeps them, so
+// that the colorspaces, shadings and patterns it names are loaded. Two operators are left out, for quirks of
 // the script glue: `"`, whose op_dquote is called with the wrong
 // arguments, and BI, whose op_BI crashes the script engine for an image
 // without a /CS name (it pushes a null string).
 
 var doc = Document.openDocument(scriptArgs[0]);
-var bare = scriptArgs[1] === "bare";
+var mode = scriptArgs[1] || "bare";
 
 function hex2(b) {
   return (b < 16 ? "0" : "") + b.toString(16);
@@ -124,10 +125,8 @@ for (var p = 0; p < (out.page_count || 0); p++) {
   try {
     var obj = doc.findPage(p);
     if (!obj.isDictionary()) throw new Error("page object is not a dictionary");
-    if (bare) {
-      obj.delete("Annots");
-      obj.put("Resources", doc.newDictionary());
-    }
+    obj.delete("Annots");
+    if (mode === "bare") obj.put("Resources", doc.newDictionary());
     var page = doc.loadPage(p);
     try {
       page.process(proc);
