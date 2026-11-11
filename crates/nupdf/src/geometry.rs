@@ -64,6 +64,11 @@ impl Rect {
         Rect { x0, y0, x1, y1 }
     }
 
+    /// `fz_is_valid_rect`.
+    pub fn is_valid(&self) -> bool {
+        self.x0 <= self.x1 && self.y0 <= self.y1
+    }
+
     /// `fz_is_empty_rect`.
     pub fn is_empty(&self) -> bool {
         self.x0 >= self.x1 || self.y0 >= self.y1
@@ -270,6 +275,22 @@ impl Matrix {
             e: de as f32,
             f: df as f32,
         }
+    }
+
+    /// `fz_pre_translate`.
+    pub fn pre_translate(mut self, tx: f32, ty: f32) -> Matrix {
+        self.e += tx * self.a + ty * self.c;
+        self.f += tx * self.b + ty * self.d;
+        self
+    }
+
+    /// `fz_pre_scale`.
+    pub fn pre_scale(mut self, sx: f32, sy: f32) -> Matrix {
+        self.a *= sx;
+        self.b *= sx;
+        self.c *= sy;
+        self.d *= sy;
+        self
     }
 
     /// `fz_transform_point_xy`.

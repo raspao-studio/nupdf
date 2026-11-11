@@ -71,7 +71,9 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `device` | `fitz/device.c` | M4 |
 | `function` (functions of types 0, 2, 3 and 4, loaded and evaluated) | `pdf/pdf-function.c`, `fitz/device.c` (`fz_eval_function`) | M4 |
 | `shade` (shadings loaded, their functions sampled) | `pdf/pdf-shade.c` | M4 |
-| `resources`, `xobject`, `pattern`, `image` | `pdf/pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c`, `pdf-image.c` | M4 |
+| `resources`, `xobject`, `pattern` | `pdf/pdf-resources.c`, `pdf-xobject.c`, `pdf-pattern.c` | M4 |
+| `path` (paths built and bounded as MuPDF builds them) | `fitz/path.c` | M4 |
+| `image` (images as `pdf_load_image` loads them, JPEG 2000 judged by its header as openjpeg reads it) | `pdf/pdf-image.c`, `fitz/image.c` (`fz_new_image_of_size`), `fitz/load-jpx.c`, `thirdparty/openjpeg/src/lib/openjp2/jp2.c` (`opj_jp2_read_header`) | M4 |
 | `font`, `cmap`, `encoding` | `pdf/pdf-font.c`, `pdf-type3.c`, `pdf-cmap*.c`, `pdf-unicode.c`, `pdf-metrics.c`, `fitz/font.c` | M4 |
 | `layer` (optional content) | `pdf/pdf-layer.c` | M4 |
 | `text` (stext) | `fitz/stext-device.c`, `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` | M5 |
