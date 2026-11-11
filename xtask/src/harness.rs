@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::proc::{self, Status};
 use crate::{corpus, oracle};
@@ -81,6 +81,11 @@ pub enum Compare {
     /// text included, with numbers within a few float steps: MuPDF's build fuses multiply-adds, so a
     /// matrix or a bounding box can differ in its last bits.
     Trace,
+    /// Each page's structured text (`/pages/*`) and error: the same
+    /// blocks, lines and characters in the same order, each character's
+    /// font, flags and direction equal, its origin and size close and its
+    /// box overlapping the oracle's by an IoU of at least 0.98.
+    Stext,
 }
 
 pub const CHECKS: &[Check] = &[
@@ -285,6 +290,54 @@ pub const CHECKS: &[Check] = &[
         nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
+    },
+    Check {
+        name: "stext",
+        about: "each page's structured text as MuPDF's stext device gathers it with default options: blocks, lines and characters, with each character's box, origin, font, size and flags",
+        oracle_script: "oracle/js/stext.js",
+        nupdf_args: &["stext"],
+        compare: Compare::Stext,
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &[],
+    },
+    Check {
+        name: "stext-preserve",
+        about: "structured text with ligatures, whitespace and spans kept, images and shadings as blocks, and hyphens joined",
+        oracle_script: "oracle/js/stext.js",
+        nupdf_args: &[
+            "stext",
+            "--options",
+            "preserve-ligatures,preserve-whitespace,preserve-spans,preserve-images,dehyphenate",
+        ],
+        compare: Compare::Stext,
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &[
+            "preserve-ligatures,preserve-whitespace,preserve-spans,preserve-images,dehyphenate",
+        ],
+    },
+    Check {
+        name: "stext-raw",
+        about: "structured text with no spaces added, CIDs for unknown Unicode, ActualText ignored, no clipping, and boxes from glyph outlines",
+        oracle_script: "oracle/js/stext.js",
+        nupdf_args: &[
+            "stext",
+            "--options",
+            "inhibit-spaces,use-cid-for-unknown-unicode,ignore-actualtext,clip=no,accurate-bboxes",
+        ],
+        compare: Compare::Stext,
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &[
+            "inhibit-spaces,use-cid-for-unknown-unicode,ignore-actualtext,clip=no,accurate-bboxes",
+        ],
     },
     Check {
         name: "clean",
@@ -807,6 +860,30 @@ pub struct FileResult {
     pub oracle_warnings: Vec<String>,
     pub oracle_ms: f64,
     pub nupdf_ms: f64,
+    /// For `Compare::Stext`: how many pages and characters agree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stext: Option<StextMetrics>,
+}
+
+/// The M5 measures: pages whose text is MuPDF's character for character,
+/// and characters whose box overlaps MuPDF's by an IoU of 0.98 or more.
+/// Pages the oracle could not extract are not counted; the characters of
+/// a page whose text differs all count as wrong.
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct StextMetrics {
+    pub pages: usize,
+    pub pages_same_text: usize,
+    pub chars: usize,
+    pub chars_close: usize,
+}
+
+impl std::ops::AddAssign for StextMetrics {
+    fn add_assign(&mut self, o: StextMetrics) {
+        self.pages += o.pages;
+        self.pages_same_text += o.pages_same_text;
+        self.chars += o.chars;
+        self.chars_close += o.chars_close;
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -884,6 +961,30 @@ pub fn run(
             serde_json::to_string_pretty(&results)?,
         )?;
         summary.push_str(&summary_row(check.name, &results));
+        if let Compare::Stext = check.compare {
+            let mut m = StextMetrics::default();
+            for r in &results {
+                m += r.stext.unwrap_or_default();
+            }
+            let pct = |a: usize, b: usize| {
+                if b == 0 {
+                    0.0
+                } else {
+                    100.0 * a as f64 / b as f64
+                }
+            };
+            let _ = writeln!(
+                notes,
+                "- `{}` measures: {} of {} pages ({:.2}%) have MuPDF's text; {} of {} characters ({:.2}%) have a box with IoU >= 0.98",
+                check.name,
+                m.pages_same_text,
+                m.pages,
+                pct(m.pages_same_text, m.pages),
+                m.chars_close,
+                m.chars,
+                pct(m.chars_close, m.chars),
+            );
+        }
         current.checks.insert(
             check.name.to_string(),
             results
@@ -1225,7 +1326,11 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
         oracle_warnings,
         oracle_ms: oracle.ms,
         nupdf_ms: ours.ms,
+        stext: None,
     };
+    if let (Compare::Stext, Some(a)) = (check.compare, &oracle.json) {
+        result.stext = Some(stext_metrics(a, ours.json.as_ref().unwrap_or(&Value::Null)));
+    }
     let failure = |side: &Side, who: &str| -> Option<String> {
         if side.json.is_some() {
             return None;
@@ -1253,6 +1358,7 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
                     }
                     Compare::Warnings => compare_warnings(&oracle.stderr, b),
                     Compare::Trace => compare_trace(a, b),
+                    Compare::Stext => compare_stext(a, b),
                 };
                 if result.diffs.is_empty() {
                     Outcome::Match
@@ -1504,6 +1610,268 @@ pub fn compare_trace(oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
         });
     }
     diffs
+}
+
+/// `Compare::Stext`: the page count, then each page's error and text; a
+/// page that differs is reported where it first differs.
+pub fn compare_stext(oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
+    const MAX_REPORTED: usize = 5;
+    let mut diffs = compare(&["/page_count"], oracle, ours);
+    let pages = |v: &Value| {
+        v.get("pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (a, b) = (pages(oracle), pages(ours));
+    let mut differing = 0;
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).unwrap_or(&Value::Null);
+        let y = b.get(i).unwrap_or(&Value::Null);
+        if let Some(d) = stext_page_diff(&format!("/pages/{i}"), x, y) {
+            differing += 1;
+            if diffs.len() < MAX_REPORTED {
+                diffs.push(d);
+            }
+        }
+    }
+    if differing > MAX_REPORTED {
+        diffs.push(FieldDiff {
+            field: "/pages (more)".into(),
+            oracle: Value::Null,
+            nupdf: Value::from(format!("{differing} pages differ in total")),
+        });
+    }
+    diffs
+}
+
+/// `StextMetrics` for one file.
+pub fn stext_metrics(oracle: &Value, ours: &Value) -> StextMetrics {
+    let mut m = StextMetrics::default();
+    let pages = |v: &Value| {
+        v.get("pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (a, b) = (pages(oracle), pages(ours));
+    let chars = |p: &Value| -> Vec<Value> {
+        let mut out = Vec::new();
+        for block in p
+            .get("blocks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for line in block
+                .get("lines")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                out.extend(
+                    line.get("chars")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+            }
+        }
+        out
+    };
+    for (i, x) in a.iter().enumerate() {
+        if x.get("blocks").is_none() {
+            continue;
+        }
+        let y = b.get(i).unwrap_or(&Value::Null);
+        let (cx, cy) = (chars(x), chars(y));
+        m.pages += 1;
+        m.chars += cx.len();
+        if y.get("blocks").is_none() || stext_page_text(x) != stext_page_text(y) {
+            continue;
+        }
+        m.pages_same_text += 1;
+        m.chars_close += cx
+            .iter()
+            .zip(&cy)
+            .filter(|(c, d)| box_iou(&quad_box(&c[4]), &quad_box(&d[4])) >= 0.98)
+            .count();
+    }
+    m
+}
+
+/// A page's text as `fz_print_stext_page_as_text` lays it out: a line per
+/// line, an empty line after each block.
+pub fn stext_page_text(page: &Value) -> String {
+    let mut out = String::new();
+    for block in page
+        .get("blocks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(lines) = block.get("lines").and_then(Value::as_array) else {
+            continue;
+        };
+        for line in lines {
+            for ch in line
+                .get("chars")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                out.push_str(ch.get(0).and_then(Value::as_str).unwrap_or(""));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Intersection over union of two `[x0, y0, x1, y1]` boxes; boxes with no
+/// area are compared by their corners instead.
+pub fn box_iou(a: &Value, b: &Value) -> f64 {
+    let r = |v: &Value| -> Option<[f64; 4]> {
+        let v = v.as_array()?;
+        let n = |i: usize| v.get(i).and_then(Value::as_f64);
+        Some([n(0)?, n(1)?, n(2)?, n(3)?])
+    };
+    let (Some(p), Some(q)) = (r(a), r(b)) else {
+        return if json_close(a, b) { 1.0 } else { 0.0 };
+    };
+    let area = |r: [f64; 4]| (r[2] - r[0]).max(0.0) * (r[3] - r[1]).max(0.0);
+    let inter = [
+        p[0].max(q[0]),
+        p[1].max(q[1]),
+        p[2].min(q[2]),
+        p[3].min(q[3]),
+    ];
+    let union = area(p) + area(q) - area(inter);
+    if union <= 0.0 || area(p) == 0.0 || area(q) == 0.0 {
+        return if json_close(a, b) { 1.0 } else { 0.0 };
+    }
+    area(inter) / union
+}
+
+/// The box around a character's quad, `[ul, ur, ll, lr]` as eight numbers.
+fn quad_box(q: &Value) -> Value {
+    let n: Vec<f64> = q
+        .as_array()
+        .map(|v| v.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default();
+    if n.len() != 8 {
+        return q.clone();
+    }
+    let xs = [n[0], n[2], n[4], n[6]];
+    let ys = [n[1], n[3], n[5], n[7]];
+    let min = |v: [f64; 4]| v.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = |v: [f64; 4]| v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    json!([min(xs), min(ys), max(xs), max(ys)])
+}
+
+fn stext_page_diff(at: &str, x: &Value, y: &Value) -> Option<FieldDiff> {
+    let diff = |field: String, o: &Value, n: &Value| FieldDiff {
+        field,
+        oracle: truncate(o),
+        nupdf: truncate(n),
+    };
+    let error = |v: &Value| v.get("error").cloned().unwrap_or(Value::Null);
+    if !json_eq(&error(x), &error(y)) {
+        return Some(diff(format!("{at}/error"), &error(x), &error(y)));
+    }
+    let (tx, ty) = (stext_page_text(x), stext_page_text(y));
+    if tx != ty {
+        let k = tx
+            .chars()
+            .zip(ty.chars())
+            .take_while(|(p, q)| p == q)
+            .count();
+        let around = |t: &str| -> Value {
+            let start = k.saturating_sub(20);
+            Value::from(t.chars().skip(start).take(60).collect::<String>())
+        };
+        return Some(diff(
+            format!("{at}/text (at character {k})"),
+            &around(&tx),
+            &around(&ty),
+        ));
+    }
+    let list = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (bx, by) = (list(x, "blocks"), list(y, "blocks"));
+    if bx.len() != by.len() {
+        return Some(diff(
+            format!("{at}/blocks (count)"),
+            &json!(bx.len()),
+            &json!(by.len()),
+        ));
+    }
+    for (bi, (p, q)) in bx.iter().zip(&by).enumerate() {
+        let at = format!("{at}/blocks/{bi}");
+        for key in ["type", "flags"] {
+            if !json_eq(&p[key], &q[key]) {
+                return Some(diff(format!("{at}/{key}"), &p[key], &q[key]));
+            }
+        }
+        if box_iou(&p["bbox"], &q["bbox"]) < 0.98 {
+            return Some(diff(format!("{at}/bbox"), &p["bbox"], &q["bbox"]));
+        }
+        if !json_close(&p["transform"], &q["transform"]) {
+            return Some(diff(
+                format!("{at}/transform"),
+                &p["transform"],
+                &q["transform"],
+            ));
+        }
+        let (lx, ly) = (list(p, "lines"), list(q, "lines"));
+        if lx.len() != ly.len() {
+            return Some(diff(
+                format!("{at}/lines (count)"),
+                &json!(lx.len()),
+                &json!(ly.len()),
+            ));
+        }
+        for (li, (l, m)) in lx.iter().zip(&ly).enumerate() {
+            let at = format!("{at}/lines/{li}");
+            if !json_eq(&l["wmode"], &m["wmode"]) || !json_close(&l["dir"], &m["dir"]) {
+                return Some(diff(
+                    at,
+                    &json!([l["wmode"], l["dir"]]),
+                    &json!([m["wmode"], m["dir"]]),
+                ));
+            }
+            if box_iou(&l["bbox"], &m["bbox"]) < 0.98 {
+                return Some(diff(format!("{at}/bbox"), &l["bbox"], &m["bbox"]));
+            }
+            let (cx, cy) = (list(l, "chars"), list(m, "chars"));
+            if cx.len() != cy.len() {
+                return Some(diff(
+                    format!("{at}/chars (count)"),
+                    &json!(cx.len()),
+                    &json!(cy.len()),
+                ));
+            }
+            for (ci, (c, d)) in cx.iter().zip(&cy).enumerate() {
+                // [text, origin, font, size, quad, flags, bidi]
+                let close = json_eq(&c[2], &d[2])
+                    && json_eq(&c[5], &d[5])
+                    && json_eq(&c[6], &d[6])
+                    && json_close(&c[1], &d[1])
+                    && json_close(&c[3], &d[3])
+                    && box_iou(&quad_box(&c[4]), &quad_box(&d[4])) >= 0.98;
+                if !close {
+                    return Some(diff(format!("{at}/chars/{ci}"), c, d));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `json_eq`, with numbers equal within 1e-4 of the larger (or of 1).

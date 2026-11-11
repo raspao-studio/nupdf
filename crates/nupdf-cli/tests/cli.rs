@@ -1147,3 +1147,94 @@ fn images_list_decode_and_extract() {
     assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A page's lines as text, a list per block.
+fn stext_lines(page: &Value) -> Vec<Vec<String>> {
+    page["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .map(|b| {
+            b["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| {
+                    l["chars"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| c[0].as_str().unwrap())
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn stext_gathers_lines_blocks_and_characters() {
+    let path = smoke("stext.pdf");
+    let report = run_json(&["stext", path.to_str().unwrap()]);
+    assert_eq!(report["schema"], "nupdf.stext/v0");
+    assert_eq!(report["page_count"], 2);
+    let page = &report["pages"][0];
+    let blocks = stext_lines(page);
+    // A wide gap becomes a space; a narrow one does not.
+    assert_eq!(blocks[0][0], "Hello world!");
+    let chars = page["blocks"][0]["lines"][0]["chars"].as_array().unwrap();
+    let space = &chars[5];
+    // [text, origin, font, size, quad, flags, bidi]: a synthetic space
+    // (0.3 em is not past the large-space threshold) in a filled line.
+    assert_eq!(space[0], " ");
+    assert_eq!(space[2], "Helvetica");
+    assert_eq!(space[5].as_i64().unwrap(), 16 | 4);
+    // A distant baseline starts a block; ligatures come apart.
+    assert_eq!(blocks[1][0], "A new paragraph");
+    assert!(blocks[1].contains(&"fiflffffi ligatures".to_string()));
+    assert!(blocks[1].contains(&"Replaced and Hi".to_string()));
+    // Glyphs past the page and outside a clip path are dropped.
+    assert_eq!(blocks[2], ["past th"]);
+    assert_eq!(blocks[3], ["cut by a clip p"]);
+    let flat: Vec<&String> = blocks.iter().flatten().collect();
+    assert!(flat.iter().any(|l| *l == "\u{3042}\u{3044}"));
+    // Vertical CJK text runs down a line of its own per character.
+    let vertical = page["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["lines"].as_array().into_iter().flatten())
+        .find(|l| l["wmode"] == 1)
+        .unwrap();
+    assert_eq!(vertical["dir"], serde_json::json!([0.0, 1.0]));
+    // ActualText with nothing but an image takes the image's box.
+    assert_eq!(stext_lines(&report["pages"][1])[0], ["Picture"]);
+}
+
+#[test]
+fn stext_options_follow_mupdf() {
+    let path = smoke("stext.pdf");
+    let file = path.to_str().unwrap();
+    let raw = run_json(&[
+        "stext",
+        file,
+        "--options",
+        "preserve-ligatures,preserve-images,clip=no",
+    ]);
+    let page = &raw["pages"][0];
+    let flat: Vec<String> = stext_lines(page).into_iter().flatten().collect();
+    assert!(flat.contains(&"\u{fb01}\u{fb02}\u{fb00}\u{fb03} ligatures".to_string()));
+    assert!(flat.contains(&"past the page edge".to_string()));
+    let images = page["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["type"] == "image")
+        .count();
+    // The image and the shading.
+    assert_eq!(images, 2);
+    let out = nupdf(&["stext", file, "--options", "bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("usage.bad_option"));
+}

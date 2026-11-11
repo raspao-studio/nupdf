@@ -351,6 +351,100 @@ impl Matrix {
     }
 }
 
+impl Point {
+    pub const fn new(x: f32, y: f32) -> Point {
+        Point { x, y }
+    }
+
+    /// `fz_transform_vector`: the point through the matrix, without its
+    /// translation.
+    pub fn transform_vector(self, m: Matrix) -> Point {
+        Point {
+            x: self.x * m.a + self.y * m.c,
+            y: self.x * m.b + self.y * m.d,
+        }
+    }
+
+    /// `fz_normalize_vector`.
+    pub fn normalize(self) -> Point {
+        let len = self.x * self.x + self.y * self.y;
+        if len != 0.0 {
+            let len = len.sqrt();
+            Point {
+                x: self.x / len,
+                y: self.y / len,
+            }
+        } else {
+            self
+        }
+    }
+}
+
+impl Matrix {
+    /// `fz_matrix_expansion`.
+    pub fn expansion(self) -> f32 {
+        (self.a * self.d - self.b * self.c).abs().sqrt()
+    }
+}
+
+/// `fz_quad`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Quad {
+    pub ul: Point,
+    pub ur: Point,
+    pub ll: Point,
+    pub lr: Point,
+}
+
+impl Rect {
+    /// `fz_invalid_rect`.
+    pub const INVALID: Rect = Rect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: -1.0,
+        y1: -1.0,
+    };
+
+    /// `fz_rect_from_quad`.
+    pub fn from_quad(q: Quad) -> Rect {
+        let pts = [q.ll, q.ul, q.ur, q.lr];
+        if pts.iter().any(|p| p.x.is_nan() || p.y.is_nan()) {
+            return Rect::INVALID;
+        }
+        if pts.iter().all(|p| p.x.is_infinite() && p.y.is_infinite()) {
+            let inf = |a: Point, b: Point, c: Point, d: Point| {
+                a.x < 0.0
+                    && a.y < 0.0
+                    && b.x < 0.0
+                    && b.y > 0.0
+                    && c.x > 0.0
+                    && c.y > 0.0
+                    && d.x > 0.0
+                    && d.y < 0.0
+            };
+            if inf(q.ll, q.ul, q.ur, q.lr)
+                || inf(q.ul, q.ur, q.lr, q.ll)
+                || inf(q.ur, q.lr, q.ll, q.ul)
+                || inf(q.lr, q.ll, q.ul, q.ur)
+                || inf(q.ll, q.lr, q.ur, q.ul)
+                || inf(q.lr, q.ur, q.ul, q.ll)
+                || inf(q.ur, q.ul, q.ll, q.lr)
+                || inf(q.ul, q.ll, q.lr, q.ur)
+            {
+                return Rect::INFINITE;
+            }
+        }
+        let min4 = |a: f32, b: f32, c: f32, d: f32| a.min(b).min(c).min(d);
+        let max4 = |a: f32, b: f32, c: f32, d: f32| a.max(b).max(c).max(d);
+        Rect {
+            x0: min4(q.ll.x, q.lr.x, q.ul.x, q.ur.x),
+            y0: min4(q.ll.y, q.lr.y, q.ul.y, q.ur.y),
+            x1: max4(q.ll.x, q.lr.x, q.ul.x, q.ur.x),
+            y1: max4(q.ll.y, q.lr.y, q.ul.y, q.ur.y),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

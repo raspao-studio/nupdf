@@ -8,6 +8,7 @@ mod commands;
 mod inventory;
 mod md5;
 mod objects;
+mod stext;
 mod trace;
 
 use std::io::Write;
@@ -156,6 +157,19 @@ enum Command {
     /// List each page's device calls, as MuPDF's run processor makes them
     /// for a page's contents.
     Trace { file: PathBuf },
+    /// Each page's structured text, as MuPDF's stext device gathers it
+    /// from the page's contents: blocks, lines and characters with their
+    /// quads, origins, fonts and sizes.
+    Stext {
+        file: PathBuf,
+        /// MuPDF's stext options, comma-separated: preserve-ligatures,
+        /// preserve-whitespace, preserve-spans, preserve-images,
+        /// dehyphenate, inhibit-spaces, clip (on unless =no), clip-rect=
+        /// x0:y0:x1:y1, use-cid-for-unknown-unicode,
+        /// use-gid-for-unknown-unicode, ignore-actualtext.
+        #[arg(long, default_value = "")]
+        options: String,
+    },
     /// List the fonts the pages use, as `mutool info` finds them, with
     /// what each loads as; --extract writes the embedded font programs as
     /// `mutool extract` does.
@@ -464,6 +478,16 @@ fn run(cli: Cli) -> ExitCode {
         }),
         Command::Trace { file } => open(file)
             .map(|(doc, facts)| report("nupdf.trace/v0", &facts, &doc, trace::trace(&doc))),
+        Command::Stext { file, options } => nupdf::stext::Options::parse(options)
+            .map_err(|message| Failure {
+                exit: Exit::Usage,
+                code: "usage.bad_option",
+                message,
+            })
+            .and_then(|opts| open(file).map(|(doc, facts)| (opts, doc, facts)))
+            .map(|(opts, doc, facts)| {
+                report("nupdf.stext/v0", &facts, &doc, stext::stext(&doc, opts))
+            }),
         Command::Fonts { file, extract } => open(file).and_then(|(doc, facts)| {
             let dir = extract.as_deref().map(output_dir).transpose()?;
             Ok(report(

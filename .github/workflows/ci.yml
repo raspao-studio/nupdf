@@ -44,8 +44,9 @@ jobs:
           workspaces: fuzz
       - name: Seed the document and font corpora
         run: |
-          mkdir -p fuzz/corpus/open_walk fuzz/corpus/run fuzz/corpus/font
+          mkdir -p fuzz/corpus/open_walk fuzz/corpus/run fuzz/corpus/font fuzz/corpus/stext
           cp corpus/smoke/*.pdf fuzz/corpus/open_walk/ && cp corpus/smoke/*.pdf fuzz/corpus/run/
+          for f in corpus/smoke/*.pdf; do (printf '\000'; cat "$f") > "fuzz/corpus/stext/$(basename "$f")"; done
           # The base fonts, read on their own (0) and embedded as FontFile3 (4).
           for f in crates/nupdf/fonts/urw/*.cff; do
             (printf '\000'; cat "$f") > "fuzz/corpus/font/$(basename "$f").0"
@@ -53,7 +54,7 @@ jobs:
           done
       - name: Run each target for 30 seconds
         run: |
-          for target in lex parse_object filters open_walk crypt images content function run font cmap pixmap; do
+          for target in lex parse_object filters open_walk crypt images content function run font cmap pixmap stext; do
             # The prebuilt cargo-fuzz is a musl binary and would default to a
             # musl target, which AddressSanitizer does not support.
             cargo fuzz run -O --target x86_64-unknown-linux-gnu "$target" -- -max_total_time=30 -rss_limit_mb=2048 -timeout=10

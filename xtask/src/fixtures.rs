@@ -281,6 +281,11 @@ fn content_fixtures() -> Vec<Fixture> {
             content_run(),
         ),
         fx(
+            "stext.pdf",
+            "Text as the stext device gathers it: gaps that make spaces and paragraphs, a hyphen at a line end, ligatures, whitespace, a bullet, a combining mark, ActualText (in UTF-16, and over an image with no text), text past the page and a clip path, rotated text, each text render mode, text drawn twice, a Type 3 font, CJK text set horizontally and vertically in a non-embedded CID font, an image and a shading",
+            stext_text(),
+        ),
+        fx(
             "fonts-images.pdf",
             "Fonts and images a page reaches through its own resources, a form and a Type 3 font: builtin, described and embedded fonts, a font descriptor of an unknown kind; images at each depth, indexed, keyed, with decode arrays, a /Matte soft mask, truncated, as an image mask, as JPEG behind Flate, in CMYK, Separation and Lab",
             fonts_images(),
@@ -289,6 +294,90 @@ fn content_fixtures() -> Vec<Fixture> {
 }
 
 /// What `fonts` and `images` list, extract and decode.
+fn stext_text() -> Vec<u8> {
+    let mut pdf = Pdf::new("1.7");
+    pdf.obj(1, "<</Type/Catalog/Pages 2 0 R>>");
+    pdf.obj(
+        2,
+        "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2/MediaBox[0 0 300 300]/Resources 5 0 R>>",
+    );
+    pdf.obj(3, "<</Type/Page/Parent 2 0 R/Contents 10 0 R>>");
+    pdf.obj(4, "<</Type/Page/Parent 2 0 R/Contents 11 0 R/Rotate 90>>");
+    pdf.obj(
+        5,
+        "<</Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
+         /F2<</Type/Font/Subtype/Type1/BaseFont/Times-Roman/Encoding<</Differences[1/fi/fl/ff/ffi]>>>>\
+         /F3 20 0 R/F4 21 0 R/F5 22 0 R/F6<</Type/Font/Subtype/Type1/BaseFont/Courier/ToUnicode 24 0 R>>>>\
+         /XObject<</Im1 25 0 R>>/Shading<</Sh1 26 0 R>>>>",
+    );
+    let page1 = "BT /F1 12 Tf 20 280 Td [(Hello) -300 (world) -100 (!)] TJ \
+         0 -14 Td (a line that ends in a hyphen-) Tj 0 -14 Td (ated word) Tj \
+         0 -40 Td (A new paragraph) Tj 0 -14 Td (tab\\there, nbsp\\240here) Tj \
+         0 -14 Td (\\225 a bullet) Tj 10 -14 Td (indented after it) Tj ET \
+         BT /F2 12 Tf 20 180 Td <01020304> Tj ( ligatures) Tj ET \
+         BT /F6 10 Tf 20 165 Td (e\\001 combined) Tj ET \
+         BT /F1 10 Tf 20 150 Td /Span <</ActualText (Replaced)>> BDC (orig) Tj EMC \
+         ( and ) Tj /Span <</ActualText <FEFF00480069>>> BDC (xyz) Tj EMC ET \
+         BT /F1 10 Tf 270 135 Td (past the page edge) Tj ET \
+         q 20 110 60 20 re W n BT /F1 10 Tf 20 115 Td (cut by a clip path) Tj ET Q \
+         BT /F1 10 Tf 0 1 -1 0 290 20 Tm (rotated) Tj ET \
+         BT /F1 10 Tf 20 95 Td 1 Tr (stroked) Tj 3 Tr ( invisible) Tj 2 Tr ( both) Tj ET \
+         q BT /F1 10 Tf 150 95 Td 7 Tr (clip) Tj ET 0 g 150 90 40 20 re f Q \
+         BT /F1 10 Tf 20 80 Td (Bold) Tj ET BT /F1 10 Tf 20.2 80 Td (Bold) Tj ET \
+         BT /F3 10 Tf 20 65 Td (AB) Tj ET \
+         BT /F4 12 Tf 20 45 Td <30423044> Tj ET \
+         BT /F5 12 Tf 250 100 Td <30463048> Tj ET \
+         q 40 0 0 20 150 20 cm /Im1 Do Q q 150 50 60 10 re W n /Sh1 sh Q";
+    pdf.stream(10, "", page1.as_bytes());
+    // First on its page: ActualText over an image borrows Helvetica.
+    pdf.stream(
+        11,
+        "",
+        b"/Span <</ActualText (Picture)>> BDC q 50 0 0 50 100 100 cm /Im1 Do Q EMC \
+          BT /F1 12 Tf 20 20 Td (after) Tj ET",
+    );
+    pdf.obj(
+        20,
+        "<</Type/Font/Subtype/Type3/FontMatrix[0.001 0 0 0.001 0 0]/FontBBox[0 0 0 0]\
+         /Encoding<</Differences[65/sq/tri]>>/CharProcs<</sq 27 0 R/tri 28 0 R>>/FirstChar 65/LastChar 66\
+         /Widths[600 700]/Resources<<>>>>",
+    );
+    pdf.stream(27, "", b"600 0 d0 50 0 500 500 re f");
+    pdf.stream(28, "", b"700 0 0 0 700 700 d1 0 0 m 700 0 l 350 650 l f");
+    let cjk = |num: u32, encoding: &str| {
+        format!(
+            "<</Type/Font/Subtype/Type0/BaseFont/MS-Mincho/Encoding/{encoding}/DescendantFonts[<</Type/Font\
+             /Subtype/CIDFontType0/BaseFont/MS-Mincho/CIDSystemInfo<</Registry(Adobe)/Ordering(Japan1)/Supplement 2>>\
+             /FontDescriptor {num} 0 R/DW 1000>>]>>"
+        )
+    };
+    pdf.obj(21, &cjk(23, "UniJIS-UCS2-H"));
+    pdf.obj(22, &cjk(23, "UniJIS-UCS2-V"));
+    pdf.obj(
+        23,
+        "<</Type/FontDescriptor/FontName/MS-Mincho/Flags 4/FontBBox[0 -200 1000 900]/ItalicAngle 0\
+         /Ascent 880/Descent -120/CapHeight 700/StemV 80>>",
+    );
+    pdf.stream(
+        24,
+        "",
+        b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /X def \
+          1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <01> <0301> endbfchar \
+          2 beginbfrange <20> <7E> <0020> endbfrange endcmap CMapName currentdict /CMap defineresource pop end end",
+    );
+    pdf.stream(
+        25,
+        "/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceGray/BitsPerComponent 8",
+        &[0, 128, 255, 64],
+    );
+    pdf.obj(
+        26,
+        "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[150 0 210 0]\
+         /Function<</FunctionType 2/Domain[0 1]/C0[1 0 0]/C1[0 0 1]/N 1>>>>",
+    );
+    pdf.finish_with_xref("")
+}
+
 fn fonts_images() -> Vec<u8> {
     use crate::encode;
     use crate::jpeg::{self, Component, Spec};

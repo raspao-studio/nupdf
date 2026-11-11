@@ -249,7 +249,7 @@ Exit: ≥99% page-trace parity on the standard tier: same operations, matrices w
 
 MuPDF reference: `fitz/stext-device.c`, `stext-output.c`, `stext-search.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-table.c`, `stext-boxer.c`, `stext-raft.c`.
 
-- [ ] Structured text model (pages, blocks, lines, chars) with MuPDF's options: preserve ligatures, preserve whitespace, preserve spans, dehyphenate, clip to mediabox
+- [x] Structured text model (pages, blocks, lines, chars) with MuPDF's options: preserve ligatures, preserve whitespace, preserve spans, dehyphenate, clip to mediabox
 - [ ] Output: JSON with stable ids, plain text, Markdown, JSONL per page, with output budgets
 - [ ] Search: literal and regex, case- and diacritic-insensitive, across hyphenation and line breaks; hits carry quads and span ids
 - [ ] Paragraph, column and table segmentation (`stext-para`, `stext-boxer`, `stext-table`), at parity first
