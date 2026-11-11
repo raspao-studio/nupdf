@@ -600,6 +600,47 @@ pub use crate::strtof::fz_atof;
 mod tests {
     use super::*;
 
+    #[test]
+    fn raw_tokens_write_their_bytes_into_the_buffer() {
+        let diag = Diagnostics::new();
+        let input = b"/F1 12 Tf (a\\)b) Tj <41 42> 1.5 obj -.5x [";
+        let mut lexer = Lexer::new(input, 0, &diag);
+        let mut buf = Vec::new();
+        let mut got = Vec::new();
+        loop {
+            let t = lexer.next_raw(&mut buf);
+            if t == RawToken::Eof {
+                break;
+            }
+            got.push((t, buf.clone()));
+        }
+        let want: Vec<(RawToken, &[u8])> = vec![
+            (RawToken::Name, b"F1"),
+            (RawToken::Int(12), b"12"),
+            (RawToken::Keyword, b"Tf"),
+            (RawToken::String, b"a)b"),
+            (RawToken::Keyword, b"Tj"),
+            (RawToken::String, b"AB"),
+            (RawToken::Real(1.5), b"1.5"),
+            (RawToken::Obj, b"obj"),
+            (RawToken::Keyword, b"-.5x"),
+            (RawToken::OpenArray, b""),
+        ];
+        assert_eq!(got.len(), want.len());
+        for ((t, b), (wt, wb)) in got.iter().zip(&want) {
+            assert_eq!(t, wt);
+            // Numbers leave their digits behind; only bytes of names,
+            // strings and keywords are the token's.
+            if matches!(t, RawToken::Name | RawToken::String | RawToken::Keyword) {
+                assert_eq!(b.as_slice(), *wb, "{t:?}");
+            }
+        }
+        // The same input as tokens.
+        let tokens = tokens(input);
+        assert_eq!(tokens[3], Token::String(b"a)b".to_vec()));
+        assert_eq!(tokens[8], Token::Keyword(b"-.5x".to_vec()));
+    }
+
     fn tokens(input: &[u8]) -> Vec<Token> {
         let diag = Diagnostics::new();
         let mut lexer = Lexer::new(input, 0, &diag);
