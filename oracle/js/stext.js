@@ -1,4 +1,4 @@
-// Oracle for the `stext` check: each page's structured text, as
+// Oracle for the `stext` checks: each page's structured text, as
 // Page.toStructuredText makes it (fz_new_stext_page_from_page: the page's
 // contents run through the stext device, no annotations), walked block by
 // block, line by line and character by character.
@@ -6,8 +6,9 @@
 //
 // The options are MuPDF's stext option string ("preserve-ligatures,..."),
 // clipping only when absent. Colors are left out: MuPDF converts them with
-// its color management. Each page loses its /Annots before it is loaded,
-// as for the trace check.
+// its color management. Vector blocks (option `vectors`) carry their flags
+// as one number: stroked 1, rectangle 2, continues 4. Each page loses its
+// /Annots before it is loaded, as for the trace check.
 
 var doc = Document.openDocument(scriptArgs[0]);
 var options = scriptArgs.length > 1 ? scriptArgs[1] : "";
@@ -25,6 +26,10 @@ function walk(text) {
   text.walk({
     onImageBlock: function (bbox, transform) {
       blocks.push({ type: "image", bbox: list(bbox), transform: list(transform) });
+    },
+    onVector: function (bbox, flags) {
+      var f = (flags.isStroked ? 1 : 0) | (flags.isRectangle ? 2 : 0) | (flags.continues ? 4 : 0);
+      blocks.push({ type: "vector", bbox: list(bbox), flags: f });
     },
     beginTextBlock: function (bbox, flags) {
       block = { type: "text", bbox: list(bbox), flags: flags, lines: [] };

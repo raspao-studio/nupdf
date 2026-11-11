@@ -84,7 +84,7 @@ pub fn block_text(block: &TextBlock) -> String {
 pub fn block_len(block: &Block) -> usize {
     match block {
         Block::Text(t) => t.lines.iter().map(|l| l.chars.len()).sum(),
-        Block::Image(_) => 0,
+        Block::Image(_) | Block::Vector(_) => 0,
     }
 }
 
@@ -391,7 +391,7 @@ mod tests {
             .iter()
             .filter_map(|b| match b {
                 Block::Text(t) => Some(t.lines.iter()),
-                Block::Image(_) => None,
+                Block::Image(_) | Block::Vector(_) => None,
             })
             .flatten()
             .collect()

@@ -65,6 +65,8 @@ impl Default for StrokeState {
 }
 
 /// `FZ_LINEJOIN_MITER` and `FZ_LINEJOIN_MITER_XPS`.
+/// `FZ_LINECAP_ROUND`.
+pub const LINECAP_ROUND: i32 = 1;
 pub const LINEJOIN_MITER: i32 = 0;
 const LINEJOIN_MITER_XPS: i32 = 3;
 
