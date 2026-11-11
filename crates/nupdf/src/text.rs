@@ -8,8 +8,9 @@
 
 use std::sync::Arc;
 
-use crate::fontdesc::Font;
-use crate::geometry::Matrix;
+use crate::fontdesc::{self, Font};
+use crate::geometry::{Matrix, Rect};
+use crate::path::StrokeState;
 
 /// `fz_text_item`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,14 +39,52 @@ pub struct TextSpan {
 }
 
 /// `fz_text`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Text {
     pub spans: Vec<TextSpan>,
+    /// Which text object this is: devices that see the same text twice
+    /// in a row (filled, then stroked) compare it by identity.
+    pub id: u64,
+}
+
+impl Default for Text {
+    fn default() -> Text {
+        Text::new()
+    }
 }
 
 impl Text {
+    /// `fz_bound_text`: the union of the glyphs' boxes, widened for the
+    /// stroke and by a unit for the glyph cache's positioning.
+    pub fn bound(&self, stroke: Option<&StrokeState>, ctm: Matrix) -> Rect {
+        let mut bbox = Rect::EMPTY;
+        for span in &self.spans {
+            for item in &span.items {
+                if item.gid >= 0 {
+                    let tm = Matrix {
+                        e: item.x,
+                        f: item.y,
+                        ..span.trm
+                    };
+                    bbox = bbox.union(fontdesc::bound_glyph(&span.font, item.gid, tm.concat(ctm)));
+                }
+            }
+        }
+        if !bbox.is_empty() {
+            if let Some(s) = stroke {
+                bbox = crate::path::adjust_for_stroke(bbox, s, ctm);
+            }
+            bbox = Rect::new(bbox.x0 - 1.0, bbox.y0 - 1.0, bbox.x1 + 1.0, bbox.y1 + 1.0);
+        }
+        bbox
+    }
+
     pub fn new() -> Text {
-        Text::default()
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Text {
+            spans: Vec::new(),
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 
     pub fn is_empty(&self) -> bool {

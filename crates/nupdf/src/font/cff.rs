@@ -10,6 +10,7 @@
 //! names, and the advance a glyph's charstring sets.
 
 use super::names;
+use super::outline::{self, CBox, Charstrings, LoadError};
 
 #[derive(Debug, Clone)]
 pub struct Cff {
@@ -26,6 +27,10 @@ pub struct Cff {
     pub is_cid: bool,
     pub units_per_em: u32,
     pub bbox: [i32; 4],
+    /// The style FreeType's CFF driver gives the face.
+    pub bold: bool,
+    pub italic: bool,
+    pub fixed_pitch: bool,
     /// Per font dictionary: default and nominal width, local subrs.
     privates: Vec<Private>,
     fd_select: FdSelect,
@@ -36,6 +41,21 @@ struct Private {
     default_width: f64,
     nominal_width: f64,
     subrs: Index,
+    /// The font dictionary's units per em, as `cff_face_init` works it
+    /// out from its FontMatrix and the top one's.
+    units_per_em: u32,
+}
+
+/// The units per em a FontMatrix gives: one over its vertical scale.
+fn matrix_upm(m: &[f64]) -> Option<u32> {
+    let yy = if m.get(3).copied().unwrap_or(0.0) != 0.0 {
+        m[3].abs()
+    } else {
+        m.get(1)?.abs()
+    };
+    (yy > 0.0)
+        .then(|| ((1.0 / yy) + 0.5) as u32)
+        .filter(|&u| u > 0)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -211,6 +231,9 @@ impl Cff {
             is_cid,
             units_per_em: 1000,
             bbox: [0; 4],
+            bold: false,
+            italic: false,
+            fixed_pitch: false,
             privates: Vec::new(),
             fd_select: FdSelect::None,
         };
@@ -232,25 +255,100 @@ impl Cff {
                 b[3].ceil() as i32,
             ];
         }
+        font.style(&top, &_names);
         let charset = first(&top, 15, 0.0) as usize;
         font.load_charset(charset, num_glyphs)?;
         if is_cid {
             let fdarray = first(&top, 1236, 0.0) as usize;
             if let Some((fds, _)) = read_index(d, fdarray) {
+                let top_matrix = get(&top, 1207).filter(|m| m.len() >= 4).is_some();
                 for &(s, e) in &fds.items {
                     let fd = read_dict(&d[s..e]);
-                    font.privates.push(font.load_private(&fd));
+                    let mut private = font.load_private(&fd);
+                    let top_upm = font.units_per_em;
+                    let sub = get(&fd, 1207)
+                        .filter(|m| m.len() >= 4)
+                        .and_then(|m| matrix_upm(m));
+                    private.units_per_em = match sub {
+                        Some(sub) if top_matrix => {
+                            let scaling = if top_upm > 1 && sub > 1 {
+                                top_upm.min(sub)
+                            } else {
+                                1
+                            };
+                            (u64::from(sub) * u64::from(top_upm) / u64::from(scaling)) as u32
+                        }
+                        Some(sub) => sub,
+                        None => top_upm,
+                    };
+                    font.privates.push(private);
                 }
             }
             let sel = first(&top, 1237, 0.0) as usize;
             font.fd_select = font.load_fd_select(sel, num_glyphs);
         } else {
-            let p = font.load_private(&top);
+            let mut p = font.load_private(&top);
+            p.units_per_em = font.units_per_em;
             font.privates.push(p);
             let enc = first(&top, 16, 0.0) as usize;
             font.load_encoding(enc, num_glyphs);
         }
         Ok(font)
+    }
+
+    /// `cff_face_init`'s style flags: ItalicAngle (an integer, rounded
+    /// down), the Weight string, and a style name taken from FullName
+    /// past FamilyName that starts with Bold or Black.
+    fn style(&mut self, top: &[(u16, Vec<f64>)], names: &Index) {
+        let d: &[u8] = &self.data;
+        self.italic = first(top, 1202, 0.0).floor() != 0.0;
+        self.fixed_pitch = first(top, 1201, 0.0) != 0.0;
+        let sid = |op: u16| get(top, op).and_then(|v| v.first()).map(|&v| v as u16);
+        let weight = sid(4).and_then(|s| self.sid_string(s));
+        self.bold = matches!(weight, Some(b"Bold" | b"Black"));
+        if self.bold {
+            return;
+        }
+        let family: Option<Vec<u8>> = if self.is_cid {
+            None
+        } else {
+            match sid(3).and_then(|s| self.sid_string(s)) {
+                Some(f) => Some(f.to_vec()),
+                None => names.items.first().map(|&(s, e)| {
+                    let n = &d[s..e];
+                    // remove_subset_prefix.
+                    match n.iter().position(|&c| c == b'+') {
+                        Some(6) if n[..6].iter().all(u8::is_ascii_uppercase) => n[7..].to_vec(),
+                        _ => n.to_vec(),
+                    }
+                }),
+            }
+        };
+        let (Some(family), Some(full)) = (family, sid(2).and_then(|s| self.sid_string(s))) else {
+            return;
+        };
+        let (mut f, mut p) = (0usize, 0usize);
+        let at = |s: &[u8], i: usize| s.get(i).copied().unwrap_or(0);
+        while at(full, p) != 0 {
+            if at(full, p) == at(&family, f) {
+                f += 1;
+                p += 1;
+                continue;
+            }
+            if matches!(at(full, p), b' ' | b'-') {
+                p += 1;
+                continue;
+            }
+            if matches!(at(&family, f), b' ' | b'-') {
+                f += 1;
+                continue;
+            }
+            if at(&family, f) == 0 {
+                let style = &full[p..];
+                self.bold = style.starts_with(b"Bold") || style.starts_with(b"Black");
+            }
+            break;
+        }
     }
 
     fn load_private(&self, dict: &[(u16, Vec<f64>)]) -> Private {
@@ -275,6 +373,7 @@ impl Cff {
             default_width: first(&private, 20, 0.0),
             nominal_width: first(&private, 21, 0.0),
             subrs,
+            units_per_em: self.units_per_em,
         }
     }
 
@@ -504,6 +603,59 @@ impl Cff {
             .map_or(0, |g| g as u32)
     }
 
+    /// `cff_slot_load` as far as `fz_bound_ft_glyph` goes: the control box
+    /// of glyph `index` (a CID in a CID-keyed font), in font units.
+    pub fn outline_cbox(&self, index: u32) -> Result<Option<CBox>, LoadError> {
+        let gid = if self.is_cid {
+            if index == 0 {
+                0
+            } else {
+                let g = self.gid_of_cid(index);
+                if g == 0 {
+                    return Err(LoadError);
+                }
+                g
+            }
+        } else if index >= self.num_glyphs() {
+            return Err(LoadError);
+        } else {
+            index
+        };
+        let &(s, e) = self.charstrings.items.get(gid as usize).ok_or(LoadError)?;
+        let cs = self.data.get(s..e).ok_or(LoadError)?;
+        let private = self
+            .privates
+            .get(self.fd_of(gid as usize))
+            .cloned()
+            .unwrap_or_default();
+        let cbox = outline::charstring_cbox(
+            &Glyph {
+                font: self,
+                private: &private,
+            },
+            cs,
+        )?;
+        // A font dictionary with units of its own is scaled to the top
+        // dictionary's (`cff_slot_load`).
+        let (top, sub) = (self.units_per_em, private.units_per_em);
+        if sub == 0 || sub == top {
+            return Ok(cbox);
+        }
+        let k = f64::from(top) / f64::from(sub);
+        Ok(cbox.map(|b| CBox {
+            x0: b.x0 * k,
+            y0: b.y0 * k,
+            x1: b.x1 * k,
+            y1: b.y1 * k,
+        }))
+    }
+
+    fn item<'a>(&'a self, index: &Index, n: i64) -> Option<&'a [u8]> {
+        let i = usize::try_from(n + bias(index.len())).ok()?;
+        let &(s, e) = index.items.get(i)?;
+        self.data.get(s..e)
+    }
+
     /// The advance the charstring of `gid` sets: the width operand of its
     /// first stack-clearing operator, or the default width. None when the
     /// glyph does not exist.
@@ -639,5 +791,36 @@ impl Width<'_> {
             let _ = self.hints;
         }
         None
+    }
+}
+
+/// A glyph's charstring context: its font and private dictionary.
+struct Glyph<'a> {
+    font: &'a Cff,
+    private: &'a Private,
+}
+
+impl Charstrings for Glyph<'_> {
+    fn is_t1(&self) -> bool {
+        false
+    }
+
+    fn local_subr(&self, n: i64) -> Option<&[u8]> {
+        self.font.item(&self.private.subrs, n)
+    }
+
+    fn global_subr(&self, n: i64) -> Option<&[u8]> {
+        self.font.item(&self.font.gsubrs, n)
+    }
+
+    /// `cff_lookup_glyph_by_stdcharcode`.
+    fn seac_component(&self, code: i64) -> Option<&[u8]> {
+        if self.font.is_cid {
+            return None;
+        }
+        let sid = *names::STANDARD_ENCODING.get(usize::try_from(code).ok()?)?;
+        let gid = self.font.sids.iter().position(|&s| s == sid)?;
+        let &(s, e) = self.font.charstrings.items.get(gid)?;
+        self.font.data.get(s..e)
     }
 }

@@ -8,7 +8,7 @@
 //! builtin or a substitute), the encoding from codes to CIDs and glyphs,
 //! the Unicode of each code, and the widths.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::cmap::{self, Cmap};
 use crate::diag::report;
@@ -47,6 +47,47 @@ pub struct Font {
     pub ascender: f32,
     pub descender: f32,
     pub t3: Option<Type3>,
+    /// `fz_font`'s style flags.
+    pub is_mono: bool,
+    pub is_serif: bool,
+    pub is_bold: bool,
+    pub is_italic: bool,
+    /// `width_table` and `width_default`: the PDF's widths by glyph, for
+    /// stretching a substitute font's glyphs.
+    pub width_table: Option<Arc<(Vec<i16>, i32)>>,
+    /// The glyph boxes measured so far (`bbox_table`).
+    glyph_boxes: GlyphBoxes,
+}
+
+/// A block of 256 glyph boxes, allocated on first use.
+type BoxBlock = OnceLock<Box<[OnceLock<Rect>]>>;
+
+/// Glyph boxes, measured on first use, in blocks of 256 glyphs.
+#[derive(Clone, Default)]
+pub struct GlyphBoxes(Arc<Vec<BoxBlock>>);
+
+impl std::fmt::Debug for GlyphBoxes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GlyphBoxes({} blocks)", self.0.len())
+    }
+}
+
+impl GlyphBoxes {
+    fn new(glyphs: u32) -> GlyphBoxes {
+        GlyphBoxes(Arc::new(
+            (0..glyphs.div_ceil(256)).map(|_| OnceLock::new()).collect(),
+        ))
+    }
+
+    /// The box of glyph `gid`, measured by `f` the first time; None for a
+    /// glyph past the font's count.
+    fn get(&self, gid: usize, f: impl FnOnce() -> Rect) -> Option<Rect> {
+        let block = self
+            .0
+            .get(gid >> 8)?
+            .get_or_init(|| (0..256).map(|_| OnceLock::new()).collect());
+        Some(*block.get(gid & 255)?.get_or_init(f))
+    }
 }
 
 /// A Type 3 font's glyph procedures, widths and matrix, and what the
@@ -76,6 +117,12 @@ impl Font {
             ascender: 0.0,
             descender: 0.0,
             t3: None,
+            is_mono: false,
+            is_serif: false,
+            is_bold: false,
+            is_italic: false,
+            width_table: None,
+            glyph_boxes: GlyphBoxes::default(),
         }
     }
 
@@ -420,6 +467,9 @@ fn new_font(name: &[u8], data: Arc<[u8]>) -> Result<Font, String> {
         )
     })?;
     let mut font = Font::new(name);
+    // MuPDF keeps a glyph box table for every font it loads from a
+    // program, CJK substitutes apart.
+    font.glyph_boxes = GlyphBoxes::new(face.num_glyphs);
     let upem = f32::from(face.units_per_em);
     let [x0, y0, x1, y1] = face.bbox;
     font.set_bbox(
@@ -444,6 +494,12 @@ fn new_font(name: &[u8], data: Arc<[u8]>) -> Result<Font, String> {
         let d = desc as f32 / upem;
         if d > 0.0 { -d } else { d }
     };
+    // The face's style, then what the name says.
+    let has = |s: &[u8]| name.windows(s.len()).any(|w| w == s);
+    font.is_mono = face.fixed_width;
+    font.is_serif = face.family_class.is_none_or(|c| c & 2048 == 0);
+    font.is_bold = face.bold || has(b"Semibold") || has(b"Bold");
+    font.is_italic = face.italic || has(b"Italic") || has(b"Oblique");
     font.face = Some(face);
     Ok(font)
 }
@@ -498,6 +554,108 @@ fn read_encoding(
     }
 }
 
+/// `fz_bound_glyph`: a Type 3 glyph's prepared box, a font program's
+/// glyph as its outline measures, or the font's box.
+pub fn bound_glyph(font: &Font, gid: i32, trm: Matrix) -> Rect {
+    let tiny = Rect::new(0.0, 0.0, 0.000_000_1, 0.000_000_1);
+    let r = match &font.t3 {
+        Some(t3) => match usize::try_from(gid).ok().and_then(|g| t3.bboxes.get(g)) {
+            Some(r) if r.is_infinite() || r.is_empty() => tiny,
+            Some(r) => *r,
+            None => font.bbox,
+        },
+        None => match (&font.face, usize::try_from(gid)) {
+            (Some(face), Ok(g)) => font
+                .glyph_boxes
+                .get(g, || {
+                    let r = measure_glyph(font, face, g as u32);
+                    if r.is_empty() { tiny } else { r }
+                })
+                .unwrap_or(font.bbox),
+            _ => font.bbox,
+        },
+    };
+    r.transform(trm)
+}
+
+/// `fz_bound_ft_glyph`: the control box of the glyph's outline, in ems,
+/// stretched to the PDF's width for a substitute font; empty for a glyph
+/// that does not load. A font program whose outlines are not read here
+/// gives the font's box.
+fn measure_glyph(font: &Font, face: &Face, gid: u32) -> Rect {
+    let Some(result) = face.glyph_cbox(gid) else {
+        return font.bbox;
+    };
+    let b = match result {
+        Ok(Some(b)) => b,
+        Ok(None) | Err(_) => return Rect::new(0.0, 0.0, 0.0, 0.0),
+    };
+    let (mut x0, mut x1) = (b.x0, b.x1);
+    if let Some(xx) = stretch(font, face, gid) {
+        x0 = crate::font::outline::mul_fix(x0 as i64, xx) as f64;
+        x1 = crate::font::outline::mul_fix(x1 as i64, xx) as f64;
+    }
+    let recip = 1.0 / f32::from(face.units_per_em);
+    Rect::new(
+        x0 as f32 * recip,
+        b.y0 as f32 * recip,
+        x1 as f32 * recip,
+        b.y1 as f32 * recip,
+    )
+}
+
+/// `fz_adjust_ft_glyph_width`: the horizontal scale, in 16.16, that fits
+/// a substitute font's glyph to the width the PDF gives it.
+fn stretch(font: &Font, face: &Face, gid: u32) -> Option<i64> {
+    if !font.ft_stretch {
+        return None;
+    }
+    let (table, default) = font.width_table.as_deref()?;
+    let adv = face.advance(gid).unwrap_or(0);
+    let realw = adv as f32 * 1000.0 / f32::from(face.units_per_em);
+    let subw = table
+        .get(gid as usize)
+        .map_or(*default as f32, |&w| f32::from(w));
+    (realw > 0.0 && subw > 0.0).then(|| ((subw / realw) * 65536.0) as i64)
+}
+
+/// `pdf_make_width_table`: the widest PDF width given each glyph, codes
+/// taken through the encoding as MuPDF takes them. The walk over the
+/// width ranges is bounded, as no real font needs more.
+fn make_width_table(fd: &FontDesc) -> (Vec<i16>, i32) {
+    const MAX_WALK: u64 = 1 << 24;
+    let gids = || {
+        fd.hmtx
+            .iter()
+            .flat_map(|h| (h.lo..=h.hi).map(move |k| (k, h.w)))
+            .take(MAX_WALK as usize)
+            .map(|(k, w)| (fd.cid_to_gid(fd.encoding.lookup(k as u32)), w))
+    };
+    let n = gids().map(|(g, _)| g).fold(0, i32::max);
+    let count = n as usize + 1;
+    let mut table = vec![-1i16; count];
+    let default = fd.dhmtx.w;
+    for (gid, w) in gids() {
+        if let Some(slot) = usize::try_from(gid).ok().and_then(|g| table.get_mut(g)) {
+            *slot = (w.max(i32::from(*slot))) as i16;
+        }
+    }
+    for w in &mut table {
+        if *w == -1 {
+            *w = default as i16;
+        }
+    }
+    (table, default)
+}
+
+/// `fz_new_base14_font`.
+pub fn base14_font(name: &str) -> Option<Arc<Font>> {
+    let data = font::base14(name)?;
+    new_font(name.as_bytes(), Arc::from(data))
+        .ok()
+        .map(Arc::new)
+}
+
 /// Loads fonts for one document.
 #[derive(Debug)]
 pub struct Loader<'a> {
@@ -518,7 +676,8 @@ impl Loader<'_> {
                 String::from_utf8_lossy(name)
             ))
         })?;
-        let font = new_font(name, Arc::from(data))?;
+        let mut font = new_font(name, Arc::from(data))?;
+        font.is_serif = clean.contains("Times");
         if clean == "Symbol" || clean == "ZapfDingbats" {
             fd.flags |= FD_SYMBOLIC;
         }
@@ -565,20 +724,34 @@ impl Loader<'_> {
         let data =
             font::base14(base).ok_or_else(|| report::syntax("cannot find substitute font"))?;
         let mut font = new_font(name, Arc::from(data))?;
+        font.is_mono = mono;
+        font.is_serif = serif;
+        font.is_bold = bold;
+        font.is_italic = italic;
         font.ft_substitute = true;
         font.ft_stretch = true;
         Ok(font)
     }
 
-    /// `pdf_load_system_font`. The oracle's builtin CJK fonts are not
-    /// carried, so a CJK substitute fails as in a build without them.
+    /// `pdf_load_substitute_cjk_font`: MuPDF's builtin CJK font, as far
+    /// as its metrics (`font::cjk_metrics`). It keeps no glyph boxes, so
+    /// its glyphs are bounded by the font's box.
+    fn cjk_substitute(&self, name: &[u8]) -> Result<Font, String> {
+        let mut font = new_font(name, font::cjk_metrics())?;
+        font.glyph_boxes = GlyphBoxes::default();
+        font.ft_substitute = true;
+        font.ft_stretch = false;
+        Ok(font)
+    }
+
+    /// `pdf_load_system_font`.
     fn system(&self, fd: &FontDesc, name: &[u8], collection: Option<&str>) -> Result<Font, String> {
         let has = |s: &[u8]| name.windows(s.len()).any(|w| w == s);
         let bold = has(b"Bold") || fd.flags & FD_FORCE_BOLD != 0;
         let italic = has(b"Italic") || has(b"Oblique") || fd.flags & FD_ITALIC != 0;
         let mono = fd.flags & FD_FIXED_PITCH != 0;
         let serif = fd.flags & FD_SERIF != 0;
-        let cjk = || Err(report::syntax("cannot find builtin CJK font"));
+        let cjk = || self.cjk_substitute(name);
         match collection {
             Some("Adobe-CNS1" | "Adobe-GB1" | "Adobe-Japan1" | "Adobe-Korea1") => cjk(),
             Some(c) => {
@@ -1266,6 +1439,13 @@ impl Loader<'_> {
     /// `pdf_load_font`, without the store: `resources` is the innermost
     /// resource dictionary (a Type 3 font without its own uses it).
     pub fn load(&self, dict: &Object, resources: Option<&Object>) -> Result<FontDesc, String> {
+        let mut fd = self.load_kind(dict, resources)?;
+        let table = make_width_table(&fd);
+        Arc::make_mut(&mut fd.font).width_table = Some(Arc::new(table));
+        Ok(fd)
+    }
+
+    fn load_kind(&self, dict: &Object, resources: Option<&Object>) -> Result<FontDesc, String> {
         let doc = self.doc;
         let has = |key: &[u8]| stored(doc, dict, key).is_some();
         match doc.dict_get(dict, b"Subtype").as_name() {
