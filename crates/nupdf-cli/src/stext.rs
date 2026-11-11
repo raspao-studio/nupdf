@@ -6,96 +6,284 @@
 
 use nupdf::Document;
 use nupdf::geometry::{Point, Quad, Rect};
-use nupdf::stext::{Block, Options, StextPage};
-use serde_json::{Map, Value, json};
+use nupdf::parallel::PageResult;
+use nupdf::stext::{Block, Options, StextChar, StextLine, StextPage};
+use serde::ser::{SerializeMap, SerializeSeq, SerializeTuple};
+use serde::{Serialize, Serializer};
 
-/// Each page's blocks, or the error that stopped its run.
-pub fn stext(doc: &Document, opts: Options, threads: Option<usize>) -> Value {
-    let mut out = Map::new();
-    let count = doc.page_count();
-    out.insert(
-        "page_count".into(),
-        count.as_ref().map_or(Value::Null, |n| json!(n)),
-    );
-    let indices: Vec<i32> = (0..count.unwrap_or(0)).collect();
-    let pages = nupdf::parallel::map(doc, &indices, opts, threads, &|_, r| match r {
-        Ok(p) => json!({ "blocks": blocks(&p) }),
-        Err(e) => json!({ "error": e }),
-    });
-    out.insert("pages".into(), Value::Array(pages));
-    Value::Object(out)
+/// The `stext` report's body. For compact output each page is written as
+/// JSON on the thread that ran it, so that turning a long document into
+/// text is not left to one thread at the end; output laid out again
+/// (`--pretty`) keeps the pages to write them at the end.
+pub struct Body {
+    page_count: Option<i32>,
+    pages: Pages,
 }
 
-fn number(v: f32) -> Value {
-    if v.is_finite() {
-        json!(f64::from(v))
-    } else {
-        Value::Null
+enum Pages {
+    /// Each page as compact JSON; `None` only if it could not be written,
+    /// which a page of finite numbers and strings never fails to be.
+    Written(Vec<Option<String>>),
+    Kept(Vec<PageResult>),
+}
+
+impl Body {
+    /// Writes the report as one line of compact JSON, the pages copied as
+    /// they were written: `schema`, `doc_id`, the body, `diagnostics`.
+    pub fn write_compact(
+        &self,
+        out: &mut impl std::io::Write,
+        schema: &str,
+        doc_id: &str,
+        diagnostics: &serde_json::Value,
+    ) -> std::io::Result<()> {
+        write!(
+            out,
+            "{{\"schema\":{},\"doc_id\":{},\"page_count\":{},\"pages\":[",
+            serde_json::to_string(schema)?,
+            serde_json::to_string(doc_id)?,
+            serde_json::to_string(&self.page_count)?,
+        )?;
+        match &self.pages {
+            Pages::Written(pages) => {
+                for (i, page) in pages.iter().enumerate() {
+                    if i > 0 {
+                        out.write_all(b",")?;
+                    }
+                    out.write_all(page.as_deref().unwrap_or("null").as_bytes())?;
+                }
+            }
+            Pages::Kept(pages) => {
+                for (i, page) in pages.iter().enumerate() {
+                    if i > 0 {
+                        out.write_all(b",")?;
+                    }
+                    serde_json::to_writer(&mut *out, &PageJson(page))?;
+                }
+            }
+        }
+        write!(
+            out,
+            "],\"diagnostics\":{}}}",
+            serde_json::to_string(diagnostics)?
+        )
+    }
+
+    /// Writes the fields into a map being serialized.
+    pub fn serialize_into<M: SerializeMap>(&self, map: &mut M) -> Result<(), M::Error> {
+        map.serialize_entry("page_count", &self.page_count)?;
+        match &self.pages {
+            Pages::Kept(pages) => {
+                let pages: Vec<_> = pages.iter().map(PageJson).collect();
+                map.serialize_entry("pages", &pages)
+            }
+            Pages::Written(pages) => {
+                let pages: Vec<_> = pages
+                    .iter()
+                    .map(|p| {
+                        p.as_ref()
+                            .and_then(|p| serde_json::value::RawValue::from_string(p.clone()).ok())
+                    })
+                    .collect();
+                map.serialize_entry("pages", &pages)
+            }
+        }
     }
 }
 
-fn rect(r: Rect) -> Value {
-    json!([number(r.x0), number(r.y0), number(r.x1), number(r.y1)])
+/// Each page's blocks, or the error that stopped its run; written as JSON
+/// on the threads unless `keep`.
+pub fn stext(doc: &Document, opts: Options, threads: Option<usize>, keep: bool) -> Body {
+    let count = doc.page_count().ok();
+    let indices: Vec<i32> = (0..count.unwrap_or(0)).collect();
+    let pages = if keep {
+        Pages::Kept(nupdf::parallel::map(
+            doc,
+            &indices,
+            opts,
+            threads,
+            &|_, r| r,
+        ))
+    } else {
+        Pages::Written(nupdf::parallel::map(
+            doc,
+            &indices,
+            opts,
+            threads,
+            &|_, r| write_page(&r),
+        ))
+    };
+    Body {
+        page_count: count,
+        pages,
+    }
 }
 
-fn point(p: Point) -> Value {
-    json!([number(p.x), number(p.y)])
+/// A page as compact JSON. Each thread writes into one buffer it keeps,
+/// and the page is copied out at its size: growing a fresh buffer for
+/// every page copied the larger pages over and over.
+fn write_page(page: &PageResult) -> Option<String> {
+    thread_local! {
+        static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    BUF.with(|buf| {
+        let mut buf = buf.try_borrow_mut().ok()?;
+        buf.clear();
+        serde_json::to_writer(&mut *buf, &PageJson(page)).ok()?;
+        String::from_utf8(buf.as_slice().to_vec()).ok()
+    })
 }
 
-fn quad(q: Quad) -> Value {
-    json!([
-        number(q.ul.x),
-        number(q.ul.y),
-        number(q.ur.x),
-        number(q.ur.y),
-        number(q.ll.x),
-        number(q.ll.y),
-        number(q.lr.x),
-        number(q.lr.y)
+/// A page as the glue gives it: `{"blocks": [...]}` or `{"error": ...}`.
+struct PageJson<'a>(&'a PageResult);
+
+impl Serialize for PageJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(1))?;
+        match self.0 {
+            Ok(page) => map.serialize_entry("blocks", &Blocks(page))?,
+            Err(e) => map.serialize_entry("error", e)?,
+        }
+        map.end()
+    }
+}
+
+/// A coordinate: `null` if not finite, as JSON has no such numbers.
+struct Number(f32);
+
+impl Serialize for Number {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.0.is_finite() {
+            s.serialize_f64(f64::from(self.0))
+        } else {
+            s.serialize_unit()
+        }
+    }
+}
+
+/// Numbers as a JSON array.
+struct Numbers<const N: usize>([f32; N]);
+
+impl<const N: usize> Serialize for Numbers<N> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut t = s.serialize_tuple(N)?;
+        for v in self.0 {
+            t.serialize_element(&Number(v))?;
+        }
+        t.end()
+    }
+}
+
+fn rect(r: Rect) -> Numbers<4> {
+    Numbers([r.x0, r.y0, r.x1, r.y1])
+}
+
+fn point(p: Point) -> Numbers<2> {
+    Numbers([p.x, p.y])
+}
+
+fn quad(q: Quad) -> Numbers<8> {
+    Numbers([
+        q.ul.x, q.ul.y, q.ur.x, q.ur.y, q.ll.x, q.ll.y, q.lr.x, q.lr.y,
     ])
 }
 
 /// A character as the glue's `fz_runetochar` and string push give it:
 /// U+FFFD past Unicode (NUL is written overlong, so it stays).
-fn char_text(c: i32) -> String {
+fn char_text(c: i32) -> char {
     u32::try_from(c)
         .ok()
         .and_then(char::from_u32)
         .unwrap_or('\u{fffd}')
-        .to_string()
 }
 
-fn blocks(page: &StextPage) -> Value {
-    page.blocks
-        .iter()
-        .map(|b| match b {
-            Block::Text(t) => json!({
-                "type": "text",
-                "bbox": rect(t.bbox),
-                "flags": t.flags,
-                "lines": t.lines.iter().map(|l| json!({
-                    "bbox": rect(l.bbox),
-                    "wmode": l.wmode,
-                    "dir": point(l.dir),
-                    "chars": l.chars.iter().map(|c| json!([
-                        char_text(c.c),
-                        point(c.origin),
-                        crate::trace::script_string(&c.font.name),
-                        number(c.size),
-                        quad(c.quad),
-                        c.flags,
-                        c.bidi,
-                    ])).collect::<Vec<_>>(),
-                })).collect::<Vec<_>>(),
-            }),
-            Block::Image(i) => json!({
-                "type": "image",
-                "bbox": rect(i.bbox),
-                "transform": [
-                    number(i.transform.a), number(i.transform.b), number(i.transform.c),
-                    number(i.transform.d), number(i.transform.e), number(i.transform.f)
-                ],
-            }),
-        })
-        .collect()
+struct Blocks<'a>(&'a StextPage);
+
+impl Serialize for Blocks<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(self.0.blocks.len()))?;
+        for b in &self.0.blocks {
+            match b {
+                Block::Text(t) => seq.serialize_element(&TextJson {
+                    bbox: rect(t.bbox),
+                    flags: t.flags,
+                    lines: &t.lines,
+                })?,
+                Block::Image(i) => {
+                    let m = i.transform;
+                    seq.serialize_element(&ImageJson {
+                        bbox: rect(i.bbox),
+                        transform: Numbers([m.a, m.b, m.c, m.d, m.e, m.f]),
+                    })?
+                }
+            }
+        }
+        seq.end()
+    }
+}
+
+struct TextJson<'a> {
+    bbox: Numbers<4>,
+    flags: i32,
+    lines: &'a [StextLine],
+}
+
+impl Serialize for TextJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(4))?;
+        map.serialize_entry("type", "text")?;
+        map.serialize_entry("bbox", &self.bbox)?;
+        map.serialize_entry("flags", &self.flags)?;
+        let lines: Vec<_> = self.lines.iter().map(LineJson).collect();
+        map.serialize_entry("lines", &lines)?;
+        map.end()
+    }
+}
+
+struct ImageJson {
+    bbox: Numbers<4>,
+    transform: Numbers<6>,
+}
+
+impl Serialize for ImageJson {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(3))?;
+        map.serialize_entry("type", "image")?;
+        map.serialize_entry("bbox", &self.bbox)?;
+        map.serialize_entry("transform", &self.transform)?;
+        map.end()
+    }
+}
+
+struct LineJson<'a>(&'a StextLine);
+
+impl Serialize for LineJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let l = self.0;
+        let mut map = s.serialize_map(Some(4))?;
+        map.serialize_entry("bbox", &rect(l.bbox))?;
+        map.serialize_entry("wmode", &l.wmode)?;
+        map.serialize_entry("dir", &point(l.dir))?;
+        let chars: Vec<_> = l.chars.iter().map(CharJson).collect();
+        map.serialize_entry("chars", &chars)?;
+        map.end()
+    }
+}
+
+/// `[text, origin, font, size, quad, flags, bidi]`.
+struct CharJson<'a>(&'a StextChar);
+
+impl Serialize for CharJson<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let c = self.0;
+        let mut t = s.serialize_tuple(7)?;
+        t.serialize_element(&char_text(c.c))?;
+        t.serialize_element(&point(c.origin))?;
+        t.serialize_element(&crate::trace::script_string(&c.font.name))?;
+        t.serialize_element(&Number(c.size))?;
+        t.serialize_element(&quad(c.quad))?;
+        t.serialize_element(&c.flags)?;
+        t.serialize_element(&c.bidi)?;
+        t.end()
+    }
 }

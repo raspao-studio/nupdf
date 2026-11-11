@@ -623,21 +623,47 @@ fn run(cli: Cli) -> ExitCode {
             file,
             options,
             threads,
-        } => nupdf::stext::Options::parse(options)
-            .map_err(|message| Failure {
-                exit: Exit::Usage,
-                code: "usage.bad_option",
-                message,
-            })
-            .and_then(|opts| open(file).map(|(doc, facts)| (opts, doc, facts)))
-            .map(|(opts, doc, facts)| {
-                report(
+        } => {
+            let opts = match nupdf::stext::Options::parse(options) {
+                Ok(o) => o,
+                Err(message) => {
+                    let usage = Failure {
+                        exit: Exit::Usage,
+                        code: "usage.bad_option",
+                        message,
+                    };
+                    return fail(usage, cli.pretty);
+                }
+            };
+            let (doc, facts) = match open(file) {
+                Ok(v) => v,
+                Err(failure) => return fail(failure, cli.pretty),
+            };
+            let body = stext::stext(&doc, opts, *threads, cli.pretty);
+            let stdout = &mut std::io::stdout().lock();
+            if cli.pretty {
+                let report = StextReport {
+                    facts: &facts,
+                    doc: &doc,
+                    body,
+                };
+                emit(stdout, &report, true);
+            } else {
+                let mut out = std::io::BufWriter::new(stdout);
+                // A closed pipe is not ours to report.
+                let written = body.write_compact(
+                    &mut out,
                     "nupdf.stext/v0",
-                    &facts,
-                    &doc,
-                    stext::stext(&doc, opts, *threads),
-                )
-            }),
+                    &facts.doc_id,
+                    &diagnostics(&doc),
+                );
+                if written.is_ok() {
+                    let _ = writeln!(out);
+                }
+                let _ = out.flush();
+            }
+            return ExitCode::SUCCESS;
+        }
         Command::Fonts { file, extract } => open(file).and_then(|(doc, facts)| {
             let dir = extract.as_deref().map(output_dir).transpose()?;
             Ok(report(
@@ -761,6 +787,25 @@ fn emit(out: &mut impl Write, value: &impl Serialize, pretty: bool) {
         let _ = writeln!(out);
     }
     let _ = out.flush();
+}
+
+/// A `stext` report with its pages already written as JSON.
+struct StextReport<'a> {
+    facts: &'a FileFacts,
+    doc: &'a Document,
+    body: stext::Body,
+}
+
+impl Serialize for StextReport<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = s.serialize_map(Some(5))?;
+        map.serialize_entry("schema", "nupdf.stext/v0")?;
+        map.serialize_entry("doc_id", &self.facts.doc_id)?;
+        self.body.serialize_into(&mut map)?;
+        map.serialize_entry("diagnostics", &diagnostics(self.doc))?;
+        map.end()
+    }
 }
 
 /// `objects` reports can be far larger than the file (one entry per declared
