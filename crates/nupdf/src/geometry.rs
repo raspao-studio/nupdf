@@ -109,6 +109,27 @@ impl Rect {
         a
     }
 
+    /// `fz_include_point_in_rect`.
+    pub fn include_point(self, p: Point) -> Rect {
+        if self.is_infinite() {
+            return self;
+        }
+        let mut r = self;
+        if p.x < r.x0 {
+            r.x0 = p.x;
+        }
+        if p.x > r.x1 {
+            r.x1 = p.x;
+        }
+        if p.y < r.y0 {
+            r.y0 = p.y;
+        }
+        if p.y > r.y1 {
+            r.y1 = p.y;
+        }
+        r
+    }
+
     /// `fz_expand_rect`.
     pub fn expand(self, e: f32) -> Rect {
         if self.is_infinite() || !self.is_valid() {

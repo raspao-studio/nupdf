@@ -242,6 +242,7 @@ fn block_value(block: &Block, id: &str, f: &Fields) -> Value {
     let (kind, bbox) = match block {
         Block::Text(t) => ("text", t.bbox),
         Block::Image(i) => ("image", i.bbox),
+        Block::Vector(v) => ("vector", v.bbox),
     };
     if f.has("type") {
         m.insert("type".into(), kind.into());
