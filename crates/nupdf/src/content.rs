@@ -50,7 +50,7 @@ use crate::diag::{Diagnostics, report};
 use crate::document::Document;
 use crate::image::Image;
 use crate::layer;
-use crate::lex::{Lexer, Token};
+use crate::lex::{Lexer, RawToken};
 use crate::object::{Dict, Object};
 use crate::parse::{parse_array, parse_dict};
 use crate::shade::{self, Shade};
@@ -63,6 +63,35 @@ const STACK_SIZE: usize = 32;
 /// `pdf_csi`'s name and string buffers.
 const NAME_SIZE: usize = 256;
 const STRING_SIZE: usize = 256;
+
+/// A text operator's string, held apart from the processor while the
+/// operator runs.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a short-lived copy on the stack; boxing it would allocate for every Tj"
+)]
+enum TextOperand {
+    /// The short-string buffer, its length, and where a NUL ends it.
+    Short([u8; STRING_SIZE], usize, usize),
+    Long(Option<Arc<[u8]>>),
+}
+
+impl TextOperand {
+    fn text(&self) -> &[u8] {
+        match self {
+            TextOperand::Short(b, len, _) => &b[..*len],
+            TextOperand::Long(s) => s.as_deref().unwrap_or_default(),
+        }
+    }
+
+    /// The string read as a C string.
+    fn c_string(&self) -> &[u8] {
+        match self {
+            TextOperand::Short(b, _, end) => &b[..*end],
+            TextOperand::Long(s) => s.as_deref().unwrap_or_default(),
+        }
+    }
+}
 /// `parse_inline_image`'s colorspace name buffer.
 const CSNAME_SIZE: usize = 40;
 
@@ -597,16 +626,18 @@ impl<'d, 'p> Csi<'d, 'p> {
     /// The inner loop of `pdf_process_stream`, until the end of the data
     /// (Ok) or an error.
     fn lex_ops(&mut self, lx: &mut Lexer, in_text_array: &mut bool) -> Result<(), String> {
+        // Names, strings and keywords are lexed into one buffer.
+        let mut buf = Vec::new();
         loop {
-            let tok = lx.next_token();
+            let tok = lx.next_raw(&mut buf);
             if *in_text_array {
                 match tok {
-                    Token::CloseArray => *in_text_array = false,
-                    Token::Real(f) => self.push_text_item(Object::Real(f)),
-                    Token::Int(i) => self.push_text_item(Object::Int(i)),
-                    Token::String(s) => self.push_text_item(Object::String(Arc::from(s))),
-                    Token::Eof => return Ok(()),
-                    Token::Keyword(w) if matches!(cstr(&w), b"Tw" | b"Tc") => {
+                    RawToken::CloseArray => *in_text_array = false,
+                    RawToken::Real(f) => self.push_text_item(Object::Real(f)),
+                    RawToken::Int(i) => self.push_text_item(Object::Int(i)),
+                    RawToken::String => self.push_text_item(Object::String(Arc::from(&buf[..]))),
+                    RawToken::Eof => return Ok(()),
+                    RawToken::Keyword if matches!(cstr(&buf), b"Tw" | b"Tc") => {
                         // A spacing operator inside a TJ array takes the
                         // number before it.
                         let last = match &self.obj {
@@ -620,15 +651,15 @@ impl<'d, 'p> Csi<'d, 'p> {
                         if let Some(Object::Array(a)) = &mut self.obj {
                             Arc::make_mut(a).pop();
                         }
-                        self.keyword(lx, cstr(&w))?;
+                        self.keyword(lx, cstr(&buf))?;
                     }
                     _ => return Err(report::syntax("syntax error in array")),
                 }
                 continue;
             }
             match tok {
-                Token::EndStream | Token::Eof => return Ok(()),
-                Token::OpenArray => {
+                RawToken::EndStream | RawToken::Eof => return Ok(()),
+                RawToken::OpenArray => {
                     self.obj = None;
                     if self.in_text {
                         *in_text_array = true;
@@ -638,31 +669,32 @@ impl<'d, 'p> Csi<'d, 'p> {
                         self.obj = Some(Object::Array(Arc::new(a)));
                     }
                 }
-                Token::OpenDict => {
+                RawToken::OpenDict => {
                     self.obj = None;
                     let d = parse_dict(lx, 0).map_err(|e| report::syntax(&e.0))?;
                     self.obj = Some(Object::Dict(Arc::new(d)));
                 }
-                Token::Name(n) => {
-                    let n = cstr(&n);
+                RawToken::Name => {
+                    let n = cstr(&buf);
                     if self.name.is_empty() {
-                        self.name = n[..n.len().min(NAME_SIZE - 1)].to_vec();
+                        self.name
+                            .extend_from_slice(&n[..n.len().min(NAME_SIZE - 1)]);
                     } else {
                         self.obj = Some(Object::name(n));
                     }
                 }
-                Token::Int(i) => self.push_number(i as f32)?,
-                Token::Real(f) => self.push_number(f)?,
-                Token::String(s) => {
-                    if s.len() <= STRING_SIZE {
-                        self.string[..s.len()].copy_from_slice(&s);
-                        self.string_len = s.len();
+                RawToken::Int(i) => self.push_number(i as f32)?,
+                RawToken::Real(f) => self.push_number(f)?,
+                RawToken::String => {
+                    if buf.len() <= STRING_SIZE {
+                        self.string[..buf.len()].copy_from_slice(&buf);
+                        self.string_len = buf.len();
                     } else {
-                        self.obj = Some(Object::String(Arc::from(s)));
+                        self.obj = Some(Object::String(Arc::from(&buf[..])));
                     }
                 }
-                Token::Keyword(w) => {
-                    self.keyword(lx, cstr(&w))?;
+                RawToken::Keyword => {
+                    self.keyword(lx, cstr(&buf))?;
                     self.clear_stack();
                 }
                 _ => return Err(report::syntax("syntax error in content stream")),
@@ -687,23 +719,19 @@ impl<'d, 'p> Csi<'d, 'p> {
 
     /// The string operand of `Tj`, `'` and `"`: the short string, or else
     /// the string in the object slot; and the same read as a C string.
-    fn text(&self) -> (Vec<u8>, Vec<u8>) {
+    fn text(&self) -> TextOperand {
         if self.string_len > 0 {
             let end = self
                 .string
                 .iter()
                 .position(|&b| b == 0)
                 .unwrap_or(STRING_SIZE);
-            return (
-                self.string[..self.string_len].to_vec(),
-                self.string[..end].to_vec(),
-            );
+            return TextOperand::Short(self.string, self.string_len, end);
         }
-        let text = match &self.obj {
-            Some(Object::String(s)) => s.to_vec(),
-            _ => Vec::new(),
-        };
-        (text.clone(), text)
+        match &self.obj {
+            Some(Object::String(s)) => TextOperand::Long(Some(s.clone())),
+            _ => TextOperand::Long(None),
+        }
     }
 
     /// `pdf_process_keyword`.
@@ -799,26 +827,26 @@ impl<'d, 'p> Csi<'d, 'p> {
                 self.emit(Op::ShowArray(obj.as_ref()))
             }
             b"Tj" => {
-                let (text, c_string) = self.text();
+                let t = self.text();
                 self.emit(Op::Show {
-                    text: &text,
-                    c_string: &c_string,
+                    text: t.text(),
+                    c_string: t.c_string(),
                 })
             }
             b"'" => {
-                let (text, c_string) = self.text();
+                let t = self.text();
                 self.emit(Op::NextLineShow {
-                    text: &text,
-                    c_string: &c_string,
+                    text: t.text(),
+                    c_string: t.c_string(),
                 })
             }
             b"\"" => {
-                let (text, c_string) = self.text();
+                let t = self.text();
                 self.emit(Op::NextLineShowSpaced {
                     word_spacing: self.s(0),
                     char_spacing: self.s(1),
-                    text: &text,
-                    c_string: &c_string,
+                    text: t.text(),
+                    c_string: t.c_string(),
                 })
             }
             b"d0" => self.emit(Op::Type3Width(self.s(0), self.s(1))),

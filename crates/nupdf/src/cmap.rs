@@ -293,26 +293,35 @@ impl Cmap {
     /// `pdf_lookup_cmap_full`: the values a code maps to, none when
     /// unmapped.
     pub fn lookup_full(&self, cpt: u32) -> Vec<i32> {
+        let mut out = Vec::new();
+        self.lookup_full_into(cpt, &mut out);
+        out
+    }
+
+    /// [`Cmap::lookup_full`] into `out`, which is cleared first: text runs
+    /// look up every glyph, and a buffer kept across them saves an
+    /// allocation each.
+    pub fn lookup_full_into(&self, cpt: u32, out: &mut Vec<i32>) {
+        out.clear();
         let mut cmap = self;
         for _ in 0..MAX_USECMAP {
             if let Some(e) = cmap.find(cpt) {
                 if !e.many {
-                    return vec![cpt.wrapping_sub(e.low).wrapping_add(e.out) as i32];
+                    out.push(cpt.wrapping_sub(e.low).wrapping_add(e.out) as i32);
+                    return;
                 }
                 let at = e.out as usize;
                 let len = cmap.table.get(at).copied().unwrap_or(0).max(0) as usize;
-                return cmap
-                    .table
-                    .get(at + 1..at + 1 + len)
-                    .map(<[i32]>::to_vec)
-                    .unwrap_or_default();
+                if let Some(values) = cmap.table.get(at + 1..at + 1 + len) {
+                    out.extend_from_slice(values);
+                }
+                return;
             }
             match &cmap.usecmap {
                 Some(u) => cmap = u,
-                None => return Vec::new(),
+                None => return,
             }
         }
-        Vec::new()
     }
 
     /// `pdf_decode_cmap`: the code at the start of `s` and its length in

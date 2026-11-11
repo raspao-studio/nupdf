@@ -593,6 +593,9 @@ pub struct Run<'a> {
     bidi: i32,
     /// The box a Type 3 glyph's `d1` gives (`dev->d1_rect`).
     d1_rect: Rect,
+    /// The Unicode values of the glyph being shown, kept to save an
+    /// allocation per glyph.
+    ucs: Vec<i32>,
 }
 
 impl<'a> Run<'a> {
@@ -689,6 +692,7 @@ impl<'a> Run<'a> {
             tos: Tos::new(),
             bidi: 0,
             d1_rect: Rect::EMPTY,
+            ucs: Vec::new(),
         };
         // An extra level for the parent gstate.
         let top = run.gs().clone();
@@ -1095,11 +1099,11 @@ impl<'a> Run<'a> {
             self.tos.text_mode = 3;
         }
 
-        let mut ucs = fd
-            .to_unicode
-            .as_ref()
-            .map(|u| u.lookup_full(cid as u32))
-            .unwrap_or_default();
+        let mut ucs = std::mem::take(&mut self.ucs);
+        ucs.clear();
+        if let Some(u) = fd.to_unicode.as_ref() {
+            u.lookup_full_into(cid as u32, &mut ucs);
+        }
         if ucs.len() == 1 && (8..=13).contains(&ucs[0]) {
             ucs[0] = 32;
         }
@@ -1115,7 +1119,8 @@ impl<'a> Run<'a> {
             ucs.push(i32::from(u));
         }
         if ucs.is_empty() || (ucs.len() == 1 && ucs[0] == 0) {
-            ucs = vec![glyphs::REPLACEMENT as i32];
+            ucs.clear();
+            ucs.push(glyphs::REPLACEMENT as i32);
         }
         self.bidi = guess_bidi_level(bidi_class(ucs[0]), self.bidi);
         let (wmode, bidi) = (fd.wmode, self.bidi);
@@ -1158,6 +1163,7 @@ impl<'a> Run<'a> {
                 text.show_glyph(font, trm, 0.0, -1, u, -1, wmode, bidi, BIDI_NEUTRAL, lang);
             }
         }
+        self.ucs = ucs;
         self.move_after_char();
         Ok(())
     }
