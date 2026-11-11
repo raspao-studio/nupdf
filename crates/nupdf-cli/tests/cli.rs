@@ -1495,3 +1495,36 @@ fn threads_do_not_change_the_output() {
         }
     }
 }
+
+#[test]
+fn stext_pretty_is_the_same_report_laid_out() {
+    // Compact output writes each page on its thread; --pretty writes them
+    // all at the end. Both must say the same thing.
+    for name in [
+        "stext.pdf",
+        "fonts-images.pdf",
+        "wrong-object-at-offset.pdf",
+    ] {
+        let path = smoke(name);
+        let file = path.to_str().unwrap();
+        for extra in [&[][..], &["--options", "preserve-images,preserve-spans"]] {
+            let mut args = vec!["stext", file];
+            args.extend(extra);
+            let compact = nupdf(&args);
+            let mut pretty_args = vec!["--pretty"];
+            pretty_args.extend(&args);
+            let pretty = nupdf(&pretty_args);
+            assert!(
+                compact.status.success() && pretty.status.success(),
+                "{name}"
+            );
+            assert!(String::from_utf8_lossy(&pretty.stdout).lines().count() > 1);
+            let parse = |b: &[u8]| serde_json::from_slice::<Value>(b).unwrap();
+            assert_eq!(
+                parse(&compact.stdout),
+                parse(&pretty.stdout),
+                "{name} {extra:?}"
+            );
+        }
+    }
+}
