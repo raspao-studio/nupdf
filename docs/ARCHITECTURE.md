@@ -75,7 +75,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `path` (paths built and bounded as MuPDF builds them) | `fitz/path.c` | M4 |
 | `image` (images as `pdf_load_image` loads them, JPEG 2000 judged by its header as openjpeg reads it) | `pdf/pdf-image.c`, `fitz/image.c` (`fz_new_image_of_size`), `fitz/load-jpx.c`, `thirdparty/openjpeg/src/lib/openjp2/jp2.c` (`opj_jp2_read_header`) | M4 |
 | `font`, `cmap`, `encoding` | `pdf/pdf-font.c`, `pdf-type3.c`, `pdf-cmap*.c`, `pdf-unicode.c`, `pdf-metrics.c`, `fitz/font.c` | M4 |
-| `layer` (optional content) | `pdf/pdf-layer.c` | M4 |
+| `layer` (optional content: the default configuration's states and whether a group or membership dictionary hides content) | `pdf/pdf-layer.c` (`pdf_read_ocg`, `pdf_select_layer_config`, `pdf_is_ocg_hidden`) | M4 |
 | `text` (stext) | `fitz/stext-device.c`, `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` | M5 |
 | `search` | `fitz/stext-search.c` | M5 |
 | `redact`, `content::filter` | `pdf/pdf-clean.c`, `pdf/pdf-op-filter.c`, `pdf/pdf-image-rewriter.c`, `pdf/pdf-annot.c` | M6 |

@@ -268,6 +268,7 @@ pub fn operators(doc: &Document, bare: bool) -> Value {
                 doc,
                 ops: Vec::new(),
                 in_extgstate: false,
+                state: Default::default(),
             };
             let result = nupdf::content::process_contents(
                 doc,
@@ -310,6 +311,7 @@ struct Recorder<'a> {
     doc: &'a Document,
     ops: Vec<Value>,
     in_extgstate: bool,
+    state: nupdf::content::ProcState,
 }
 
 fn number(v: f32) -> Value {
@@ -426,6 +428,10 @@ impl Recorder<'_> {
 impl nupdf::content::Processor for Recorder<'_> {
     fn wants_soft_mask(&self) -> bool {
         false
+    }
+
+    fn state(&mut self) -> &mut nupdf::content::ProcState {
+        &mut self.state
     }
 
     fn op(&mut self, op: nupdf::content::Op<'_>) -> Result<(), String> {
@@ -553,11 +559,11 @@ impl nupdf::content::Processor for Recorder<'_> {
             Op::DrawImage { name: n, .. } => vec![json!("Do_image"), name(n)],
             Op::DrawForm { name: n, .. } => vec![json!("Do_form"), name(n)],
             Op::MarkedPoint(t) => vec![json!("MP"), name(t)],
-            Op::MarkedPointProperties { tag, raw } => {
+            Op::MarkedPointProperties { tag, raw, .. } => {
                 vec![json!("DP"), name(tag), raw.map_or(Value::Null, encode)]
             }
             Op::BeginMarked(t) => vec![json!("BMC"), name(t)],
-            Op::BeginMarkedProperties { tag, raw } => {
+            Op::BeginMarkedProperties { tag, raw, .. } => {
                 vec![json!("BDC"), name(tag), raw.map_or(Value::Null, encode)]
             }
             Op::EndMarked => vec![json!("EMC")],

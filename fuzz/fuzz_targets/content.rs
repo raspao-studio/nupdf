@@ -4,15 +4,23 @@
 use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
-use nupdf::content::{Op, Processor, process_contents};
+use nupdf::content::{Op, ProcState, Processor, process_contents};
 use nupdf::lex::Lexer;
 use nupdf::parse::parse_stm_obj;
 use nupdf::{Dict, Document, Object};
 
 /// Formats every operator, so that each of its fields is read.
-struct Sink(usize);
+struct Sink(usize, ProcState);
 
 impl Processor for Sink {
+    fn state(&mut self) -> &mut ProcState {
+        &mut self.1
+    }
+
+    fn usage(&self) -> Option<&'static str> {
+        Some("View")
+    }
+
     fn op(&mut self, op: Op<'_>) -> Result<(), String> {
         self.0 += format!("{op:?}").len();
         Ok(())
@@ -36,7 +44,7 @@ fuzz_target!(|data: &[u8]| {
     let diag = nupdf::Diagnostics::new();
     let resources = parse_stm_obj(&mut Lexer::new(RESOURCES, 0, &diag))
         .unwrap_or(Object::Dict(Arc::new(Dict::new())));
-    let mut sink = Sink(0);
+    let mut sink = Sink(0, ProcState::default());
     let _ = process_contents(&doc, Some(&resources), Some(&contents), &mut sink);
     let _ = process_contents(&doc, None, Some(&contents), &mut sink);
 });
