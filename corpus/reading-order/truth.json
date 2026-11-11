@@ -1,0 +1,177 @@
+{
+  "about": "Hand-labeled reading order: for each page, distinctive fragments of its text in the order a person reads them. Pages are 1-based. Each fragment must occur once in the page's text, whitespace collapsed.",
+  "pages": [
+    {
+      "file": "pdfjs/test/pdfs/tracemonkey.pdf",
+      "page": 1,
+      "layout": "title and authors across, then two columns",
+      "fragments": [
+        "Trace-based Just-in-Time",
+        "Andreas Gal",
+        "Mozilla Corporation",
+        "Adobe Corporation",
+        "Intel Corporation",
+        "University of California, Irvine",
+        "Dynamic languages such as JavaScript are more",
+        "Categories and Subject Descriptors",
+        "General Terms",
+        "JavaScript, just-in-time compilation, trace trees",
+        "Dynamic languages such as JavaScript, Python",
+        "Permission to make digital",
+        "and is used for the application logic",
+        "Compilers for statically typed",
+        "We present a trace-based",
+        "Unlike method-based",
+        "Each compiled trace covers"
+      ]
+    },
+    {
+      "file": "pdfjs/test/pdfs/tracemonkey.pdf",
+      "page": 2,
+      "layout": "two columns with figures in the right one",
+      "fragments": [
+        "Hence, recording and compiling",
+        "Every compiled trace contains",
+        "Nested loops can be difficult",
+        "We solve the nested loop problem",
+        "These techniques allow a VM",
+        "We implemented these techniques",
+        "This paper makes the following",
+        "The remainder of this paper",
+        "Sample program: sieve of Eratosthenes",
+        "State machine describing",
+        "a set of industry benchmarks",
+        "Overview: Example Tracing Run",
+        "This section provides an overview",
+        "TraceMonkey always begins executing",
+        "Here is the sequence of events"
+      ]
+    },
+    {
+      "file": "pdfjs/test/pdfs/tracemonkey.pdf",
+      "page": 4,
+      "layout": "two columns",
+      "fragments": [
+        "On this iteration, TraceMonkey calls",
+        "At this point, TraceMonkey has compiled",
+        "In this section, we describe traces",
+        "A trace is simply a program path",
+        "Similar to an extended basic block",
+        "A typed trace is a trace annotated",
+        "In this paper, we only discuss",
+        "In TraceMonkey, traces are recorded",
+        "Bytecode interpreters typically",
+        "A trace records all its intermediate",
+        "For every control-flow branch",
+        "Most of our traces represent loops",
+        "Now, we describe the key optimizations",
+        "All LIR primitives apply",
+        "A potential problem is that",
+        "Representation specialization: objects"
+      ]
+    },
+    {
+      "file": "pdfjs/test/pdfs/Brotli-Prototype-FileA.pdf",
+      "page": 3,
+      "layout": "four columns of notes and a title block",
+      "fragments": [
+        "GENERAL NOTES",
+        "WORK SHALL CONFORM",
+        "CONSTRUCTION NOTES",
+        "ALL CONSTRUCTION SHALL BE TRUE",
+        "SITEWORK / GRADING NOTES",
+        "FOUNDATION NOTES",
+        "FRAMING NOTES",
+        "ELECTRICAL / HVAC NOTES",
+        "PLUMBING NOTES",
+        "WEATHERPROOFING NOTES",
+        "FINISHES NOTES"
+      ]
+    },
+    {
+      "file": "pdfjs/test/pdfs/canvas.pdf",
+      "page": 2,
+      "layout": "two columns of reference tables",
+      "fragments": [
+        "Colors, styles and shadows",
+        "shadowColor",
+        "CanvasGradient interface",
+        "No attributes or methods.",
+        "beginPath(",
+        "isPointInPath(",
+        "textAlign",
+        "measureText(",
+        "TextMetrics interface",
+        "clearRect(",
+        "Pixel manipulation",
+        "putImageData(",
+        "CanvasPixelArray interface",
+        "Source:"
+      ]
+    },
+    {
+      "file": "pdfjs/test/pdfs/bug1669099.pdf",
+      "page": 1,
+      "layout": "a form: options, fields in rows, footnotes, three columns of contacts",
+      "fragments": [
+        "Verein zur Förderung",
+        "Antrag auf Mitgliedschaft",
+        "Ich möchte Mitglied",
+        "Normale Hackerspace Mitgliedschaft",
+        "Hackerspace Mitgliedschaft für 23",
+        "Normale Mitgliedschaft für 70",
+        "Mitgliedschaft für 35",
+        "Vorname(n)",
+        "Nachname",
+        "Straße, Hausnummer",
+        "PLZ",
+        "Stadt/Ort",
+        "Staat",
+        "E-Mail-Adresse(n)",
+        "Bezahlung des Mitgliedsbeitrags",
+        "Die Hausordnung ist unter",
+        "Datum",
+        "Unterschrift",
+        "Bemerkung:",
+        "about/statuten.pdf",
+        "Ermäßigung für SchülerInnen",
+        "Internet:",
+        "Adresse:",
+        "Bankverbindung:"
+      ]
+    },
+    {
+      "file": "pdfjs/test/pdfs/issue6127.pdf",
+      "page": 1,
+      "layout": "a form: title, sections of fields, a table, declarations, small print",
+      "fragments": [
+        "DEMANDE DE RATTACHEMENT",
+        "IL CONVIENT DE LIRE",
+        "OUVRE DROIT AUX PRESTATIONS",
+        "PRENOM(S) :",
+        "NUMERO D’IMMATRICULATION",
+        "ADRESSE :",
+        "IDENTIFICATION DES AYANTS",
+        "NOM DE FAMILLE",
+        "LIEN AVEC",
+        "Je demande que",
+        "Fait à",
+        "J'atteste sur",
+        "Je suis un membre",
+        "Je vis chez",
+        "La loi n",
+        "S 3706"
+      ]
+    },
+    {
+      "file": "pdfjs/test/pdfs/freeculture.pdf",
+      "page": 31,
+      "layout": "one column with a block quotation (a control)",
+      "fragments": [
+        "Since the inception",
+        "A person may use the copy",
+        "Today we are in the middle"
+      ]
+    }
+  ]
+}
