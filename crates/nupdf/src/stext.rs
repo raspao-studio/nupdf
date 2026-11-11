@@ -142,6 +142,7 @@ impl Options {
                 "vectors" => flags::COLLECT_VECTORS,
                 "lazy-vectors" => flags::LAZY_VECTORS,
                 "fuzzy-vectors" => flags::FUZZY_VECTORS,
+                "segment" => flags::SEGMENT,
                 _ => return Err(format!("unknown stext option: {key}")),
             };
             if on {
@@ -202,12 +203,39 @@ pub struct VectorBlock {
     pub argb: u32,
 }
 
+/// A structure block (`FZ_STEXT_BLOCK_STRUCT` with its `fz_stext_struct`):
+/// blocks gathered under a structure element. Segmentation makes `Div`
+/// blocks named `Split`.
+#[derive(Debug, Clone)]
+pub struct StructBlock {
+    pub bbox: Rect,
+    /// The block's position among its siblings' structures.
+    pub index: i32,
+    /// The standard structure type, as `fz_structure_to_string` names it.
+    pub standard: &'static str,
+    /// The structure type as written.
+    pub raw: String,
+    pub blocks: Vec<Block>,
+}
+
 /// `fz_stext_block`.
 #[derive(Debug, Clone)]
 pub enum Block {
     Text(TextBlock),
     Image(ImageBlock),
     Vector(VectorBlock),
+    Struct(StructBlock),
+}
+
+impl Block {
+    pub fn bbox(&self) -> Rect {
+        match self {
+            Block::Text(t) => t.bbox,
+            Block::Image(i) => i.bbox,
+            Block::Vector(v) => v.bbox,
+            Block::Struct(s) => s.bbox,
+        }
+    }
 }
 
 /// `fz_stext_page`.
@@ -223,13 +251,23 @@ impl StextPage {
     /// next (`dehyphenate`) loses its last character and its line break.
     pub fn text(&self) -> String {
         let mut out = String::new();
-        for b in &self.blocks {
-            if let Block::Text(t) = b {
-                block_text(t, &mut out);
+        blocks_text(&self.blocks, &mut out);
+        out
+    }
+}
+
+/// `do_as_text`: text blocks, then an empty line, and the blocks within
+/// structures in place.
+pub fn blocks_text(blocks: &[Block], out: &mut String) {
+    for b in blocks {
+        match b {
+            Block::Text(t) => {
+                block_text(t, out);
                 out.push('\n');
             }
+            Block::Struct(s) => blocks_text(&s.blocks, out),
+            Block::Image(_) | Block::Vector(_) => {}
         }
-        out
     }
 }
 
@@ -486,6 +524,9 @@ impl StextDevice {
         }
         self.flush_lazy_vectors();
         fixup_bboxes_and_bidi(&mut self.page.blocks);
+        if self.flags & flags::SEGMENT != 0 {
+            crate::segment::segment_page(&mut self.page);
+        }
         self.page
     }
 
