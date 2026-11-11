@@ -515,6 +515,7 @@ impl Document {
         st: &State,
         stream: &Stream,
         length: usize,
+        might_be_image: bool,
     ) -> Result<stream::Stream<'_>, DecodeError> {
         let raw = self
             .raw_stream_in(st, stream, length)
@@ -543,7 +544,7 @@ impl Document {
                 num: stream.num,
                 generation: entry_generation(st, stream.num),
             }),
-            true,
+            might_be_image,
         )
     }
 
@@ -1149,6 +1150,23 @@ impl Document {
         self.stream_data_in(&self.current(), stream, true)
     }
 
+    /// A content stream as MuPDF's interpreter reads it: through
+    /// `pdf_open_image_stream` with image filters refused, a byte at a time
+    /// (`fz_read_byte`). Also whether the read ended in an error, which
+    /// stops a contents array there (`fz_open_concat`).
+    pub fn content_stream_data(&self, stream: &Stream) -> Result<(Vec<u8>, bool), DecodeError> {
+        let st = self.current();
+        if let Some(data) = self.edited_data(stream) {
+            let resolve = |o: &Object| self.resolve_in(&st, o);
+            return filter::decode(&stream.dict, &data, &resolve, &self.diag, &self.limits)
+                .map(|d| (d, false));
+        }
+        let length = self.stream_length(&st, stream, true);
+        let mut s = self.open_decoded(&st, stream, length, false)?;
+        let data = s.read_bytewise(self.limits.max_decoded_bytes)?;
+        Ok((data, s.had_error()))
+    }
+
     // ---- loading -------------------------------------------------------
 
     fn attempted(&self) -> bool {
@@ -1195,7 +1213,7 @@ impl Document {
             return filter::decode(&stream.dict, &data, &resolve, &self.diag, &self.limits);
         }
         let length = self.stream_length(st, stream, may_repair);
-        let mut s = self.open_decoded(st, stream, length)?;
+        let mut s = self.open_decoded(st, stream, length, true)?;
         let resolve = |o: &Object| self.resolve_in(st, o);
         let initial = filter::guess_length(length, &stream.dict, &resolve);
         let worst = filter::worst_case(&stream.dict, initial, &resolve);
@@ -1206,7 +1224,7 @@ impl Document {
     /// object streams.
     fn stream_bytes_in(&self, st: &State, stream: &Stream) -> Result<Vec<u8>, DecodeError> {
         let length = self.stream_length(st, stream, false);
-        let mut s = self.open_decoded(st, stream, length)?;
+        let mut s = self.open_decoded(st, stream, length, true)?;
         Ok(s.read_bytewise(self.limits.max_decoded_bytes)?)
     }
 

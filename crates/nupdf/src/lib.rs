@@ -7,6 +7,7 @@
 //! `docs/ARCHITECTURE.md`.
 
 pub mod colorspace;
+pub mod content;
 pub mod crypt;
 pub mod dct;
 pub mod deflate;
