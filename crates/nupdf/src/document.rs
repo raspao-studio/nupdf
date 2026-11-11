@@ -18,7 +18,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::crypt::Crypt;
@@ -224,6 +225,38 @@ impl Drop for LoadGuard {
     }
 }
 
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+/// A document's state as one thread keeps it.
+#[expect(
+    clippy::redundant_allocation,
+    reason = "the Rc is counted without atomics, which is why threads keep it"
+)]
+struct Kept {
+    id: u64,
+    generation: u64,
+    state: Rc<Arc<State>>,
+}
+
+thread_local! {
+    static CURRENT: RefCell<Option<Kept>> = const { RefCell::new(None) };
+}
+
+impl Drop for Document {
+    /// Lets go of the state this thread keeps, so a document dropped where
+    /// it was used does not stay in memory. Other threads let go of theirs
+    /// when they read another document or end.
+    fn drop(&mut self) {
+        let _ = CURRENT.try_with(|kept| {
+            if let Ok(mut kept) = kept.try_borrow_mut()
+                && kept.as_ref().is_some_and(|k| k.id == self.id)
+            {
+                *kept = None;
+            }
+        });
+    }
+}
+
 #[derive(Debug)]
 pub struct Document {
     data: Arc<[u8]>,
@@ -237,6 +270,11 @@ pub struct Document {
     limits: Limits,
     diag: Diagnostics,
     state: RwLock<Arc<State>>,
+    /// Counts the states installed, so that a thread can keep the current
+    /// one ([`Document::current`]) and see when it is replaced.
+    generation: AtomicU64,
+    /// Tells documents apart in each thread's kept state.
+    id: u64,
     /// MuPDF repairs at most once per document.
     repair_attempted: AtomicBool,
     /// Serializes repairs so other threads wait for the new xref.
@@ -372,6 +410,8 @@ impl Document {
             limits,
             diag,
             state: RwLock::new(Arc::new(State::empty())),
+            generation: AtomicU64::new(0),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             repair_attempted: AtomicBool::new(false),
             repair_lock: Mutex::new(()),
             crypt: RwLock::new(None),
@@ -439,13 +479,41 @@ impl Document {
         if let Ok(mut s) = self.state.write() {
             *s = Arc::new(state);
         }
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
-    pub(crate) fn current(&self) -> Arc<State> {
-        self.state
-            .read()
-            .map(|s| Arc::clone(&s))
-            .unwrap_or_else(|_| Arc::new(State::empty()))
+    /// The state objects are read from. Every object lookup asks for it, so
+    /// each thread keeps it rather than have every thread lock and count
+    /// the one shared copy, which on many threads cost more than the work.
+    #[expect(
+        clippy::redundant_allocation,
+        reason = "the Rc is counted without atomics, which is why threads keep it"
+    )]
+    pub(crate) fn current(&self) -> Rc<Arc<State>> {
+        // Read before the state, so a state installed meanwhile is seen as
+        // newer next time.
+        let generation = self.generation.load(Ordering::Acquire);
+        CURRENT.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            if let Some(k) = kept.as_ref()
+                && k.id == self.id
+                && k.generation == generation
+            {
+                return Rc::clone(&k.state);
+            }
+            let state = Rc::new(
+                self.state
+                    .read()
+                    .map(|s| Arc::clone(&s))
+                    .unwrap_or_else(|_| Arc::new(State::empty())),
+            );
+            *kept = Some(Kept {
+                id: self.id,
+                generation,
+                state: Rc::clone(&state),
+            });
+            state
+        })
     }
 
     pub fn data(&self) -> &[u8] {
@@ -2177,5 +2245,63 @@ trailer\n<</Size 3/Root 1 3 R>>\nstartxref\n104\n%%EOF\n";
         let e = doc.xref_entry(2);
         assert_eq!((e.kind, e.generation), (Kind::Free, 1));
         assert_eq!(doc.object(2), Some(Object::Null));
+    }
+}
+
+#[cfg(test)]
+mod kept_state {
+    use super::*;
+
+    /// A file whose xref sends object 3 to object 2's offset, so loading 3
+    /// repairs the document.
+    fn wrong_offset() -> Vec<u8> {
+        let objs = [
+            "1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n",
+            "2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\n",
+            "3 0 obj (three) endobj\n",
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for o in objs {
+            offsets.push(out.len());
+            out.extend_from_slice(o.as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        for o in [offsets[0], offsets[1], offsets[1]] {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer <</Size 4/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        out
+    }
+
+    #[test]
+    fn a_thread_that_kept_the_state_sees_a_repair_made_on_another() {
+        let doc = Document::open(wrong_offset()).unwrap();
+        let before = doc.current();
+        assert!(!doc.repair_attempted());
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let three = doc.resolve(&Object::Ref(ObjRef {
+                    num: 3,
+                    generation: 0,
+                }));
+                assert!(matches!(three, Object::String(s) if &*s == b"three"));
+            });
+        });
+        assert!(doc.repair_attempted());
+        assert!(!Arc::ptr_eq(&before, &doc.current()));
+        assert!(Arc::ptr_eq(&doc.current(), &doc.current()));
+    }
+
+    #[test]
+    fn dropping_a_document_lets_go_of_the_kept_state() {
+        let doc = Document::open(wrong_offset()).unwrap();
+        let state = Arc::downgrade(&doc.current());
+        assert!(state.upgrade().is_some());
+        drop(doc);
+        assert!(state.upgrade().is_none());
     }
 }
