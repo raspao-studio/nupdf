@@ -24,15 +24,23 @@ jobs:
         with:
           path: target/oracle/mupdf-${{ steps.oracle.outputs.version }}/build/release/mutool
           key: mupdf-${{ runner.os }}-${{ steps.oracle.outputs.version }}
-      # The runner's mirrors sometimes fail to resolve: refresh the index
-      # and retry rather than fail the check.
+      # The runner's apt mirrors sometimes cannot be resolved for long
+      # stretches: try apt briefly, then take the same qpdf version from
+      # qpdf's own release.
       - name: Install qpdf
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          for attempt in 1 2 3; do
-            sudo apt-get update -o Acquire::Retries=3 && sudo apt-get install -y -o Acquire::Retries=3 qpdf && exit 0
-            sleep $((attempt * 15))
-          done
-          exit 1
+          if timeout 120 sudo apt-get install -y -o Acquire::Retries=1 qpdf; then
+            exit 0
+          fi
+          dir="$RUNNER_TEMP/qpdf"
+          mkdir -p "$dir"
+          gh release download v11.9.0 --repo qpdf/qpdf --pattern 'qpdf-11.9.0-bin-linux-x86_64.zip' --dir "$dir"
+          unzip -q "$dir"/qpdf-11.9.0-bin-linux-x86_64.zip -d "$dir"
+          bin="$(find "$dir" -type f -name qpdf -path '*/bin/*' | head -1)"
+          "$bin" --version
+          echo "NUPDF_QPDF=$bin" >> "$GITHUB_ENV"
       - run: cargo xtask oracle build
       - run: cargo test --workspace -- --ignored
       - run: cargo xtask harness --tier smoke
