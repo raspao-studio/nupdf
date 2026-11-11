@@ -255,7 +255,7 @@ MuPDF reference: `fitz/stext-device.c`, `stext-output.c`, `stext-search.c`, `ste
 - [ ] Paragraph, column and table segmentation (`stext-para`, `stext-boxer`, `stext-table`), at parity first
 - [x] Page-parallel extraction with output identical at every thread count
 - [ ] Opt-in improved reading order, scored against hand-labeled ground truth rather than MuPDF
-- [ ] Bench pairs: against `mutool draw -F stext.json`, plus, for context, PyMuPDF, pypdf, pdfplumber, pdfminer.six, pdftotext and pdf_oxide
+- [x] Bench pairs: against `mutool draw -F stext.json`, plus, for context, PyMuPDF, pypdf, pdfplumber, pdfminer.six, pdftotext and pdf_oxide
 - [x] `roundtrip-text` check: MuPDF's text of each side's `clean` output, the same on both (moved from M3's exit)
 
 Exit: ≥99% of pages have the same character sequence as MuPDF's stext, and ≥98% of characters have bbox IoU ≥0.98. Single-threaded time ≤1.1× MuPDF's. ≥6× speedup on 8 cores for documents of 50+ pages.

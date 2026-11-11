@@ -1,0 +1,9 @@
+# The Python libraries `cargo xtask bench --pair text-context` times, for
+# context. Install into target/bench-venv:
+#   uv venv target/bench-venv
+#   uv pip install --python target/bench-venv/bin/python -r oracle/bench/requirements.txt
+pymupdf==2.1
+pypdf==7.0.1
+pdfplumber==0.11.10
+pdfminer.six==20260107
+pdf_oxide==0.3.78
