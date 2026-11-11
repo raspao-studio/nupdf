@@ -32,9 +32,13 @@
 //! Resource lookups that fail are errors, as in MuPDF, and so are
 //! colorspaces and shadings that do not load: they are loaded here, as
 //! `pdf_process_keyword` loads them. Fonts, patterns, images and soft
-//! masks are handed over as objects for the interpreter to load, and
-//! optional content is not evaluated yet, so a `Do` of a hidden XObject is
-//! still handed over.
+//! masks are handed over as objects for the processor to load.
+//!
+//! The processor owns the resource stack ([`ProcState`]), so that a form
+//! run from inside a page finds what its own resources lack in the page's,
+//! and optional content is evaluated for the processor's usage: a `Do` of
+//! a hidden XObject is dropped, and marked content inside a hidden group
+//! counts as hidden.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -44,6 +48,8 @@ use std::sync::Arc;
 use crate::colorspace::{self, ColorSpace};
 use crate::diag::{Diagnostics, report};
 use crate::document::Document;
+use crate::image::Image;
+use crate::layer;
 use crate::lex::{Lexer, Token};
 use crate::object::{Dict, Object};
 use crate::parse::{parse_array, parse_dict};
@@ -184,7 +190,7 @@ pub enum Op<'a> {
         stroke: bool,
         name: &'a [u8],
         shading: &'a Object,
-        shade: &'a Shade,
+        shade: &'a Arc<Shade>,
     },
     Color {
         stroke: bool,
@@ -210,7 +216,7 @@ pub enum Op<'a> {
     Shade {
         name: &'a [u8],
         shading: &'a Object,
-        shade: &'a Shade,
+        shade: &'a Arc<Shade>,
     },
     DrawImage {
         name: &'a [u8],
@@ -221,14 +227,18 @@ pub enum Op<'a> {
         form: &'a Object,
     },
     MarkedPoint(&'a [u8]),
+    /// `DP`/`BDC`: `cooked` is the properties, a name looked up in the
+    /// /Properties resources (None when it is not there).
     MarkedPointProperties {
         tag: &'a [u8],
         raw: Option<&'a Object>,
+        cooked: Option<&'a Object>,
     },
     BeginMarked(&'a [u8]),
     BeginMarkedProperties {
         tag: &'a [u8],
         raw: Option<&'a Object>,
+        cooked: Option<&'a Object>,
     },
     EndMarked,
     BeginCompatibility,
@@ -245,10 +255,96 @@ pub enum Op<'a> {
 pub trait Processor {
     fn op(&mut self, op: Op<'_>) -> Result<(), String>;
 
+    /// The resource stack and the rest of the state the interpreter keeps
+    /// on the processor.
+    fn state(&mut self) -> &mut ProcState;
+
+    /// The usage optional content is evaluated for ("View"), or None to
+    /// show everything.
+    fn usage(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Whether the processor takes `/SMask` from an ExtGState. MuPDF looks
     /// at the mask only for processors that do.
     fn wants_soft_mask(&self) -> bool {
         true
+    }
+}
+
+/// What `pdf_processor` keeps across the streams it is handed: the
+/// resource stack, the depth of hidden marked content, and the objects
+/// loaded so far.
+#[derive(Debug, Default)]
+pub struct ProcState {
+    /// Resource dictionaries, innermost last (`pdf_resource_stack`).
+    rstack: Vec<Object>,
+    /// `pdf_processor.hidden`: how deep inside hidden marked content.
+    pub hidden: i32,
+    pub store: Store,
+}
+
+impl ProcState {
+    pub fn with_store(store: Store) -> ProcState {
+        ProcState {
+            rstack: Vec::new(),
+            hidden: 0,
+            store,
+        }
+    }
+
+    /// `pdf_lookup_resource`: the innermost dictionary that has it.
+    pub fn lookup(&self, doc: &Document, kind: &[u8], name: &[u8]) -> Option<Object> {
+        self.rstack.iter().rev().find_map(|res| {
+            let sub = doc.dict_get(res, kind);
+            let found = sub.as_dict()?.get(name)?;
+            (!matches!(found, Object::Null)).then(|| found.clone())
+        })
+    }
+
+    /// The innermost resource dictionary (`proc->rstack->resources`).
+    pub fn resources(&self) -> Option<&Object> {
+        self.rstack.last()
+    }
+
+    /// `pdf_is_ocg_hidden` for this processor's resources.
+    pub fn is_hidden(&mut self, doc: &Document, usage: Option<&str>, ocg: &Object) -> bool {
+        let desc = self.store.ocg(doc);
+        let lookup = |name: &[u8]| self.lookup(doc, b"Properties", name);
+        desc.is_hidden(doc, usage, ocg, &lookup)
+    }
+}
+
+/// What MuPDF's store keeps for a document while it is interpreted: each
+/// object is loaded (and its warnings reported) once.
+#[derive(Debug, Default)]
+pub struct Store {
+    /// By object number; a function-based shading is sampled 66,049
+    /// times.
+    shades: HashMap<i32, Result<Arc<Shade>, String>>,
+    pub images: HashMap<i32, Result<Arc<Image>, String>>,
+    ocg: Option<Rc<layer::Descriptor>>,
+}
+
+impl Store {
+    /// `pdf_read_ocg`, once.
+    pub fn ocg(&mut self, doc: &Document) -> Rc<layer::Descriptor> {
+        self.ocg
+            .get_or_insert_with(|| Rc::new(layer::Descriptor::read(doc)))
+            .clone()
+    }
+
+    /// `pdf_load_shading`, once per object.
+    pub fn shade(&mut self, doc: &Document, obj: &Object) -> Result<Arc<Shade>, String> {
+        let Some(r) = obj.as_ref() else {
+            return shade::load(doc, obj).map(Arc::new);
+        };
+        if let Some(done) = self.shades.get(&r.num) {
+            return done.clone();
+        }
+        let loaded = shade::load(doc, obj).map(Arc::new);
+        self.shades.insert(r.num, loaded.clone());
+        loaded
     }
 }
 
@@ -273,12 +369,21 @@ pub fn process_contents(
     let Some(contents) = contents else {
         return Ok(());
     };
+    if let Some(res) = resources {
+        proc.state().rstack.push(res.clone());
+    }
+    let out = process_raw(doc, contents, proc);
+    if resources.is_some() {
+        proc.state().rstack.pop();
+    }
+    out
+}
+
+/// `pdf_process_raw_contents`.
+fn process_raw(doc: &Document, contents: &Object, proc: &mut dyn Processor) -> Result<(), String> {
     let data = contents_data(doc, contents)?;
     let diag = doc.diagnostics();
     let mut csi = Csi::new(doc, proc);
-    if let Some(res) = resources {
-        csi.rstack.push(res.clone());
-    }
     let mut lx = Lexer::small(&data, 0, diag);
     csi.process_stream(&mut lx)?;
     csi.process_end()
@@ -337,11 +442,6 @@ fn contents_data(doc: &Document, contents: &Object) -> Result<Vec<u8>, String> {
 struct Csi<'d, 'p> {
     doc: &'d Document,
     proc: &'p mut dyn Processor,
-    /// Resource dictionaries, innermost last (`pdf_resource_stack`).
-    rstack: Vec<Object>,
-    /// Shadings loaded so far, by object number, as MuPDF's store keeps
-    /// them: a function-based one is sampled 66,049 times.
-    shades: HashMap<i32, Result<Arc<Shade>, String>>,
     gstate: i32,
     xbalance: i32,
     in_text: bool,
@@ -358,8 +458,6 @@ impl<'d, 'p> Csi<'d, 'p> {
         Csi {
             doc,
             proc,
-            rstack: Vec::new(),
-            shades: HashMap::new(),
             gstate: 0,
             xbalance: 0,
             in_text: false,
@@ -386,12 +484,17 @@ impl<'d, 'p> Csi<'d, 'p> {
     }
 
     /// `pdf_lookup_resource`: the innermost dictionary that has it.
-    fn lookup(&self, kind: &[u8], name: &[u8]) -> Option<Object> {
-        self.rstack.iter().rev().find_map(|res| {
-            let sub = self.doc.dict_get(res, kind);
-            let found = sub.as_dict()?.get(name)?;
-            (!matches!(found, Object::Null)).then(|| found.clone())
-        })
+    fn lookup(&mut self, kind: &[u8], name: &[u8]) -> Option<Object> {
+        let doc = self.doc;
+        self.proc.state().lookup(doc, kind, name)
+    }
+
+    /// `resolve_properties`: a name is looked up in /Properties.
+    fn properties(&mut self, obj: Option<&Object>) -> Option<Object> {
+        match obj? {
+            Object::Name(n) => self.lookup(b"Properties", cstr(n)),
+            o => Some(o.clone()),
+        }
     }
 
     fn s(&self, i: usize) -> f32 {
@@ -735,20 +838,49 @@ impl<'d, 'p> Csi<'d, 'p> {
             b"MP" => self.emit(Op::MarkedPoint(&name)),
             b"DP" => {
                 let obj = self.obj.clone();
+                let cooked = self.properties(obj.as_ref());
                 self.emit(Op::MarkedPointProperties {
                     tag: &name,
                     raw: obj.as_ref(),
+                    cooked: cooked.as_ref(),
                 })
             }
-            b"BMC" => self.emit(Op::BeginMarked(&name)),
+            b"BMC" => {
+                self.emit(Op::BeginMarked(&name))?;
+                let state = self.proc.state();
+                if state.hidden > 0 {
+                    state.hidden += 1;
+                }
+                Ok(())
+            }
             b"BDC" => {
                 let obj = self.obj.clone();
+                let cooked = self.properties(obj.as_ref());
                 self.emit(Op::BeginMarkedProperties {
                     tag: &name,
                     raw: obj.as_ref(),
-                })
+                    cooked: cooked.as_ref(),
+                })?;
+                if self.proc.state().hidden > 0 {
+                    self.proc.state().hidden += 1;
+                } else if name == b"OC" {
+                    let doc = self.doc;
+                    let usage = self.proc.usage();
+                    let ocg = obj.unwrap_or(Object::Null);
+                    if self.proc.state().is_hidden(doc, usage, &ocg) {
+                        self.proc.state().hidden += 1;
+                    }
+                }
+                Ok(())
             }
-            b"EMC" => self.emit(Op::EndMarked),
+            b"EMC" => {
+                self.emit(Op::EndMarked)?;
+                let state = self.proc.state();
+                if state.hidden > 0 {
+                    state.hidden -= 1;
+                }
+                Ok(())
+            }
             b"BX" => {
                 self.xbalance += 1;
                 self.emit(Op::BeginCompatibility)
@@ -947,15 +1079,8 @@ impl<'d, 'p> Csi<'d, 'p> {
 
     /// `pdf_load_shading`, once per object.
     fn load_shade(&mut self, obj: &Object) -> Result<Arc<Shade>, String> {
-        let Some(r) = obj.as_ref() else {
-            return shade::load(self.doc, obj).map(Arc::new);
-        };
-        if let Some(done) = self.shades.get(&r.num) {
-            return done.clone();
-        }
-        let loaded = shade::load(self.doc, obj).map(Arc::new);
-        self.shades.insert(r.num, loaded.clone());
-        loaded
+        let doc = self.doc;
+        self.proc.state().store.shade(doc, obj)
     }
 
     /// `pdf_process_Do`.
@@ -976,6 +1101,16 @@ impl<'d, 'p> Csi<'d, 'p> {
         let Some(subtype) = subtype.as_name() else {
             return Err(report::syntax("no XObject subtype specified"));
         };
+        let doc = self.doc;
+        let usage = self.proc.usage();
+        let oc = doc
+            .resolve(&xobj)
+            .as_dict()
+            .and_then(|d| d.get(b"OC").cloned())
+            .unwrap_or(Object::Null);
+        if self.proc.state().is_hidden(doc, usage, &oc) {
+            return Ok(());
+        }
         match subtype {
             b"Form" => self.emit(Op::DrawForm { name, form: &xobj }),
             b"Image" => self.emit(Op::DrawImage { name, image: &xobj }),
@@ -1236,9 +1371,13 @@ mod tests {
 
     /// Records each operator as text, for tests.
     #[derive(Default)]
-    struct Log(Vec<String>);
+    struct Log(Vec<String>, ProcState);
 
     impl Processor for Log {
+        fn state(&mut self) -> &mut ProcState {
+            &mut self.1
+        }
+
         fn op(&mut self, op: Op<'_>) -> Result<(), String> {
             let line = match op {
                 Op::InlineImage { image, .. } => {
@@ -1309,8 +1448,12 @@ mod tests {
     #[test]
     fn short_strings_share_a_buffer_that_is_never_cleared() {
         #[derive(Default)]
-        struct Texts(Vec<(Vec<u8>, Vec<u8>)>);
+        struct Texts(Vec<(Vec<u8>, Vec<u8>)>, ProcState);
         impl Processor for Texts {
+            fn state(&mut self) -> &mut ProcState {
+                &mut self.1
+            }
+
             fn op(&mut self, op: Op<'_>) -> Result<(), String> {
                 if let Op::Show { text, c_string } = op {
                     self.0.push((text.to_vec(), c_string.to_vec()));

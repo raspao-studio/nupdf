@@ -27,6 +27,7 @@ pub mod image;
 pub mod insert;
 pub mod jbig2;
 pub mod jpeg;
+pub mod layer;
 pub mod lex;
 pub mod limits;
 pub mod link;
