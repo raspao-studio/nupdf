@@ -143,6 +143,7 @@ impl Options {
                 "lazy-vectors" => flags::LAZY_VECTORS,
                 "fuzzy-vectors" => flags::FUZZY_VECTORS,
                 "segment" => flags::SEGMENT,
+                "paragraph-break" => flags::PARAGRAPH_BREAK,
                 _ => return Err(format!("unknown stext option: {key}")),
             };
             if on {
@@ -526,6 +527,9 @@ impl StextDevice {
         fixup_bboxes_and_bidi(&mut self.page.blocks);
         if self.flags & flags::SEGMENT != 0 {
             crate::segment::segment_page(&mut self.page);
+        }
+        if self.flags & flags::PARAGRAPH_BREAK != 0 {
+            crate::para::paragraph_break(&mut self.page);
         }
         self.page
     }
