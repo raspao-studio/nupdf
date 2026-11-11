@@ -101,7 +101,8 @@ Each editing command makes one edit, then writes the document as `clean` writes 
 | `merge`, `split`, `pages`, `meta`, `clean` | Structural editing | M3 |
 | `operators` | Each page's content-stream operators with their operands, as MuPDF's interpreter dispatches them; `--no-resources` processes the content streams alone | M4 |
 | `trace` | Each page's device calls, as MuPDF's run processor makes them for the page's contents: paths with their matrices, colors and stroke states, clips, images, shadings, text (spans with their font, matrix, writing mode and language, and each glyph's id, Unicode and position), groups, masks, layers, structure and metatext | M4 |
-| `fonts`, `images` | Font inventory, image list and extraction | M4 |
+| `fonts` | The fonts the pages use, as `mutool info` finds them (page, object, subtype, name, encoding), with what each loads as (`load`: program, glyph count, embedded or substituted, ToUnicode, vertical); `--extract DIR` writes each embedded program as `mutool extract` does (`font-NNNN.ext`) | M4 |
+| `images` | The images the pages use, as `mutool info` finds them (page, object, size, depth, filters, colorspace); `--digests` decodes every image XObject as MuPDF does and gives its pixmap's size, components, colorspace and MD5; `--extract DIR` writes each as `mutool extract` does (`image-NNNN.jpg`, `.png` or `.pam`; `--format pam` for all PAM) | M4 |
 | `extract` | Text as JSON (ids, bboxes, fonts), plain, Markdown or JSONL | M5 |
 | `search` | Literal or regex hits with quads and ids | M5 |
 | `redact`, `verify` | Remove content and prove it is gone | M6 |

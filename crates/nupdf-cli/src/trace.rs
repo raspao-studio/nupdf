@@ -175,7 +175,7 @@ fn image(img: &Image) -> Value {
 
 /// A C string as the script engine reads it: mujs decodes the bytes as
 /// UTF-8, a byte that does not decode as U+FFFD.
-fn script_string(bytes: &[u8]) -> String {
+pub(crate) fn script_string(bytes: &[u8]) -> String {
     let mut out = String::new();
     let mut s = bytes;
     while let Some(&c) = s.first() {

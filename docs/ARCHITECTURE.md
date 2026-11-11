@@ -79,6 +79,8 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `glyphs` (glyph names to Unicode, named encodings) | `fitz/encodings.c`, `pdf/pdf-font.c` (`pdf_load_encoding`) | M4 |
 | `tables` (generated: the glyph list, encodings, bidi classes) | `fitz/glyphlist.h`, `fitz/encodings.h`, `fitz/ucdn_db.h` | M4 |
 | `text` (glyphs as devices get them, in spans) | `fitz/text.c` | M4 |
+| `inventory` (the fonts and images the pages' resources reach, and embedded font programs) | `tools/pdfinfo.c` (`gatherresourceinfo`, `gatherfonts`, `gatherimages`), `tools/pdfextract.c` (`savefont`) | M4 |
+| `pixmap` (an image decoded to 8-bit samples; PAM and PNG writers) | `fitz/image.c` (`fz_decomp_image_from_stream`, `fz_mask_color_key`, `fz_unblend_masked_tile`, the JPEG height patch of `compressed_image_get_pixmap`), `fitz/draw-unpack.c`, `fitz/pixmap.c` (`fz_convert_indexed_pixmap_to_base`), `fitz/output-pnm.c`, `fitz/output-png.c` | M4 |
 | `layer` (optional content: the default configuration's states and whether a group or membership dictionary hides content) | `pdf/pdf-layer.c` (`pdf_read_ocg`, `pdf_select_layer_config`, `pdf_is_ocg_hidden`) | M4 |
 | `stext` | `fitz/stext-device.c`, `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` | M5 |
 | `search` | `fitz/stext-search.c` | M5 |

@@ -5,6 +5,8 @@
 //! codes. The contract is specified in docs/AGENT-INTERFACE.md.
 
 mod commands;
+mod inventory;
+mod md5;
 mod objects;
 mod trace;
 
@@ -152,8 +154,33 @@ enum Command {
         no_resources: bool,
     },
     /// List each page's device calls, as MuPDF's run processor makes them
-    /// for a page's contents (text is not drawn yet).
+    /// for a page's contents.
     Trace { file: PathBuf },
+    /// List the fonts the pages use, as `mutool info` finds them, with
+    /// what each loads as; --extract writes the embedded font programs as
+    /// `mutool extract` does.
+    Fonts {
+        file: PathBuf,
+        /// Write each embedded program as font-NNNN.ext into this directory.
+        #[arg(long, value_name = "DIR")]
+        extract: Option<PathBuf>,
+    },
+    /// List the images the pages use, as `mutool info` finds them;
+    /// --extract writes every image XObject as `mutool extract` does.
+    Images {
+        file: PathBuf,
+        /// Decode every image XObject and give its pixmap's size,
+        /// components and the MD5 of its samples, as MuPDF's Pixmap
+        /// computeMD5 does.
+        #[arg(long)]
+        digests: bool,
+        /// Write each image XObject as image-NNNN.ext into this directory.
+        #[arg(long, value_name = "DIR")]
+        extract: Option<PathBuf>,
+        /// How --extract writes images.
+        #[arg(long, value_enum, default_value = "auto")]
+        format: inventory::ImageFormat,
+    },
     /// Rewrite the whole document as `mutool clean` does: every object in a
     /// plain xref table, object and xref streams unpacked, encryption kept.
     /// The output is read back and compared object by object before it is
@@ -437,6 +464,29 @@ fn run(cli: Cli) -> ExitCode {
         }),
         Command::Trace { file } => open(file)
             .map(|(doc, facts)| report("nupdf.trace/v0", &facts, &doc, trace::trace(&doc))),
+        Command::Fonts { file, extract } => open(file).and_then(|(doc, facts)| {
+            let dir = extract.as_deref().map(output_dir).transpose()?;
+            Ok(report(
+                "nupdf.fonts/v0",
+                &facts,
+                &doc,
+                inventory::fonts(&doc, dir),
+            ))
+        }),
+        Command::Images {
+            file,
+            digests,
+            extract,
+            format,
+        } => open(file).and_then(|(doc, facts)| {
+            let dir = extract.as_deref().map(output_dir).transpose()?;
+            Ok(report(
+                "nupdf.images/v0",
+                &facts,
+                &doc,
+                inventory::images(&doc, *digests, dir, *format),
+            ))
+        }),
         Command::Clean {
             file,
             output,
@@ -630,6 +680,16 @@ fn open(
 
 /// Wraps a command's fields in the report envelope every command shares:
 /// `schema` and `doc_id` first, `diagnostics` last.
+/// A directory to write into, made if it is missing.
+fn output_dir(dir: &Path) -> Result<&Path, Failure> {
+    std::fs::create_dir_all(dir).map_err(|e| Failure {
+        exit: Exit::Usage,
+        code: "usage.bad_output",
+        message: format!("cannot create {}: {e}", dir.display()),
+    })?;
+    Ok(dir)
+}
+
 fn report(
     schema: &str,
     facts: &FileFacts,

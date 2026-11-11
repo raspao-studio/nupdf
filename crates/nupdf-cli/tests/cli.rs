@@ -1081,3 +1081,69 @@ fn incremental_edits_append_a_revision() {
         assert_eq!(err["error"]["code"], "usage.incremental", "{argv:?}");
     }
 }
+
+#[test]
+fn fonts_list_load_and_extract() {
+    let path = smoke("fonts-images.pdf");
+    let dir = std::env::temp_dir().join(format!("nupdf-fonts-{}", std::process::id()));
+    let report = run_json(&[
+        "fonts",
+        path.to_str().unwrap(),
+        "--extract",
+        dir.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.fonts/v0");
+    let fonts = report["fonts"].as_array().unwrap();
+    let helvetica = fonts.iter().find(|f| f["name"] == "Helvetica").unwrap();
+    assert_eq!(helvetica["page"], 1);
+    assert_eq!(helvetica["load"]["program"], "CFF");
+    assert_eq!(helvetica["load"]["embedded"], false);
+    // Fonts in a Type 3 font's resources and in a form are found too.
+    assert!(fonts.iter().any(|f| f["name"] == "Times-Roman"));
+    assert!(fonts.iter().any(|f| f["name"] == "Courier"));
+    let dingbats = fonts
+        .iter()
+        .find(|f| f["name"] == "ABCDEF+Dingbats")
+        .unwrap();
+    assert_eq!(dingbats["load"]["embedded"], true);
+    let extracted = &report["extracted"];
+    assert_eq!(extracted["15"]["file"], "font-0015.cff");
+    assert!(dir.join("font-0015.cff").exists());
+    assert_eq!(extracted["17"]["error"], "unhandled font type 'Bogus'");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn images_list_decode_and_extract() {
+    let path = smoke("fonts-images.pdf");
+    let dir = std::env::temp_dir().join(format!("nupdf-images-{}", std::process::id()));
+    let report = run_json(&[
+        "images",
+        path.to_str().unwrap(),
+        "--digests",
+        "--extract",
+        dir.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.images/v0");
+    let images = report["images"].as_array().unwrap();
+    // The image in a pattern on page 2 is found there.
+    let in_pattern = images.iter().find(|i| i["object"] == 55).unwrap();
+    assert_eq!(in_pattern["page"], 2);
+    assert_eq!(in_pattern["filters"][0], "DCTDecode");
+    // An indexed image is decoded in its base space.
+    let indexed = &report["pixmaps"]["44"];
+    assert_eq!(indexed["colorspace"][0], "RGB");
+    assert_eq!(indexed["n"], 3);
+    // A color key adds alpha.
+    assert_eq!(report["pixmaps"]["43"]["alpha"], true);
+    let extracted = &report["extracted"];
+    // JPEG data behind Flate is written as JPEG; gray as PNG, CMYK as PAM.
+    assert_eq!(extracted["51"]["file"], "image-0051.jpg");
+    assert_eq!(extracted["40"]["file"], "image-0040.png");
+    assert_eq!(extracted["45"]["file"], "image-0045.pam");
+    let jpg = std::fs::read(dir.join("image-0051.jpg")).unwrap();
+    assert_eq!(&jpg[..2], &[0xFF, 0xD8]);
+    let png = std::fs::read(dir.join("image-0040.png")).unwrap();
+    assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

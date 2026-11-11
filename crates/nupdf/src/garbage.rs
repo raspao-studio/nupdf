@@ -550,7 +550,7 @@ fn hash_dict(d: &Dict, crc: &mut flate2::Crc) {
 }
 
 /// `pdf_objcmp` below the top of an object: whether `a` and `b` differ.
-fn differ(a: &Object, b: &Object) -> bool {
+pub(crate) fn differ(a: &Object, b: &Object) -> bool {
     match (a, b) {
         (Object::Null, Object::Null) => false,
         (Object::Bool(x), Object::Bool(y)) => x != y,
