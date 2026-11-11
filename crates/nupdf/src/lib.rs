@@ -17,6 +17,7 @@ pub mod diag;
 mod doc_id;
 pub mod document;
 pub mod edit;
+pub mod extract;
 pub mod fax;
 pub mod fax_encode;
 pub mod filter;

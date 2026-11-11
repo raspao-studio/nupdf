@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 hum
 // Derived from MuPDF source/fitz/stext-device.c, source/fitz/device.c (the
-// container stack and its scissors), source/fitz/glyphbox.c and source/fitz/string.c (fz_chartorune),
+// container stack and its scissors), source/fitz/stext-output.c (do_as_text),
+// source/fitz/glyphbox.c and source/fitz/string.c (fz_chartorune),
 // Copyright (C) 2004-2026 Artifex Software, Inc.
 
 //! Structured text: the characters a page shows, gathered into lines and
@@ -196,28 +197,45 @@ pub struct StextPage {
 }
 
 impl StextPage {
-    /// The page's text, a line per line and an empty line after each
-    /// block, as `fz_print_stext_page_as_text` writes it.
+    /// The page's text as `fz_print_stext_page_as_text` writes it: a line
+    /// per line and an empty line after each block; a line joined to the
+    /// next (`dehyphenate`) loses its last character and its line break.
     pub fn text(&self) -> String {
         let mut out = String::new();
         for b in &self.blocks {
             if let Block::Text(t) = b {
-                for line in &t.lines {
-                    for ch in &line.chars {
-                        out.push(
-                            u32::try_from(ch.c)
-                                .ok()
-                                .and_then(char::from_u32)
-                                .unwrap_or('\u{fffd}'),
-                        );
-                    }
-                    out.push('\n');
-                }
+                block_text(t, &mut out);
                 out.push('\n');
             }
         }
         out
     }
+}
+
+/// `do_as_text` for one block's lines.
+pub fn block_text(block: &TextBlock, out: &mut String) {
+    for line in &block.lines {
+        let joined = line.flags & LINE_JOINED != 0;
+        let n = line.chars.len();
+        for (i, ch) in line.chars.iter().enumerate() {
+            if joined && i + 1 == n {
+                continue;
+            }
+            out.push(rune_char(ch.c));
+        }
+        if !joined {
+            out.push('\n');
+        }
+    }
+}
+
+/// A character as `fz_runetochar` writes it, as Rust can hold it: U+FFFD
+/// past Unicode and for surrogates.
+pub fn rune_char(c: i32) -> char {
+    u32::try_from(c)
+        .ok()
+        .and_then(char::from_u32)
+        .unwrap_or('\u{fffd}')
 }
 
 /// `fz_chartorune`: one character of UTF-8, U+FFFD and one byte for
