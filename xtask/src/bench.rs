@@ -158,6 +158,9 @@ pub fn run(
     let mutool = oracle::mutool(root)?;
     let nupdf = crate::build_nupdf(root)?;
     let all = corpus::files(root, tier)?;
+    if only == Some(CONTEXT) {
+        return run_context(root, tier, &nupdf, &mutool, &all, runs, sample);
+    }
     let pairs: Vec<&Pair> = PAIRS
         .iter()
         .filter(|p| only.is_none_or(|name| p.name == name))
@@ -224,6 +227,206 @@ pub fn run(
     }
     println!("results: {}", out_dir.display());
     Ok(())
+}
+
+/// The pair that times nupdf's plain text against MuPDF's and, for
+/// context, other tools'.
+pub const CONTEXT: &str = "text-context";
+
+/// The libraries `oracle/bench/text.py` drives, by its names for them.
+const PYTHON_TOOLS: &[&str] = &["pymupdf", "pypdf", "pdfplumber", "pdfminer", "pdf_oxide"];
+
+/// One program in the context bench: a name and how to run it.
+struct ContextTool {
+    name: String,
+    program: std::path::PathBuf,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextRow {
+    file: String,
+    /// Each tool's median ms, in the tools' order; `None` where it failed.
+    ms: Vec<Option<f64>>,
+}
+
+/// `text-context`: every page's text as plain text, by nupdf (`extract
+/// --format text`), MuPDF (`draw -F txt`), pdftotext when on the PATH, and
+/// the Python libraries installed in `target/bench-venv`
+/// (`oracle/bench/requirements.txt`). Each is timed as a process, as an
+/// agent would run it.
+fn run_context(
+    root: &Path,
+    tier: &str,
+    nupdf: &Path,
+    mutool: &Path,
+    all: &[corpus::CorpusFile],
+    runs: usize,
+    sample: Option<usize>,
+) -> Result<()> {
+    let out_dir = root.join("target/bench").join(tier);
+    std::fs::create_dir_all(&out_dir)?;
+    let scratch = out_dir.join("scratch.txt");
+    let scratch = scratch.to_string_lossy().into_owned();
+    let mut tools = vec![
+        ContextTool {
+            name: "nupdf".into(),
+            program: nupdf.to_path_buf(),
+            args: vec![
+                "extract".into(),
+                "{file}".into(),
+                "--format".into(),
+                "text".into(),
+            ],
+        },
+        ContextTool {
+            name: "MuPDF".into(),
+            program: mutool.to_path_buf(),
+            args: vec![
+                "draw".into(),
+                "-q".into(),
+                "-F".into(),
+                "txt".into(),
+                "-o".into(),
+                scratch.clone(),
+                "{file}".into(),
+            ],
+        },
+    ];
+    let mut notes = Vec::new();
+    match which("pdftotext") {
+        Some(p) => tools.push(ContextTool {
+            name: "pdftotext".into(),
+            program: p,
+            args: vec!["-q".into(), "{file}".into(), scratch.clone()],
+        }),
+        None => notes.push("pdftotext is not on the PATH; left out".to_string()),
+    }
+    let python = root.join("target/bench-venv/bin/python");
+    let script = root
+        .join("oracle/bench/text.py")
+        .to_string_lossy()
+        .into_owned();
+    for lib in PYTHON_TOOLS {
+        let module = if *lib == "pdfminer" { "pdfminer" } else { lib };
+        let ok = python.exists()
+            && proc::run(
+                &python,
+                &["-c", &format!("import {module}")],
+                Duration::from_secs(60),
+            )
+            .is_ok_and(|r| r.succeeded());
+        if ok {
+            tools.push(ContextTool {
+                name: (*lib).into(),
+                program: python.clone(),
+                args: vec![script.clone(), (*lib).into(), "{file}".into()],
+            });
+        } else {
+            notes.push(format!(
+                "{lib} is not installed in target/bench-venv; left out"
+            ));
+        }
+    }
+    let files = sample_evenly(all.iter().collect(), sample);
+    let runs = runs.max(1);
+    let mut rows = Vec::new();
+    for file in files {
+        let path = file.path.to_string_lossy().into_owned();
+        let mut ms = Vec::new();
+        for t in &tools {
+            let args: Vec<OsString> = t
+                .args
+                .iter()
+                .map(|a| {
+                    OsString::from(if a == "{file}" {
+                        path.as_str()
+                    } else {
+                        a.as_str()
+                    })
+                })
+                .collect();
+            ms.push(measure_ok(&t.program, &args, runs)?);
+        }
+        rows.push(ContextRow {
+            file: file.name.clone(),
+            ms,
+        });
+    }
+    let report = render_context(tier, runs, &tools, &rows, &notes);
+    std::fs::write(
+        out_dir.join(format!("{CONTEXT}.json")),
+        serde_json::to_string_pretty(&rows)?,
+    )?;
+    std::fs::write(out_dir.join(format!("{CONTEXT}.md")), &report)?;
+    println!("{report}");
+    println!("results: {}", out_dir.display());
+    Ok(())
+}
+
+/// `program` on the PATH.
+fn which(program: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH")?
+        .to_str()?
+        .split(':')
+        .map(|d| Path::new(d).join(program))
+        .find(|p| p.is_file())
+}
+
+/// [`measure`]'s median time, or `None` if the program failed.
+fn measure_ok(program: &Path, args: &[OsString], runs: usize) -> Result<Option<f64>> {
+    let timeout = Duration::from_secs(300);
+    if !proc::run(program, args, timeout)?.succeeded() {
+        return Ok(None);
+    }
+    Ok(Some(measure(program, args, runs)?.0))
+}
+
+fn render_context(
+    tier: &str,
+    runs: usize,
+    tools: &[ContextTool],
+    rows: &[ContextRow],
+    notes: &[String],
+) -> String {
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    let mut out = format!(
+        "# Bench `{CONTEXT}` on `{tier}` (median of {runs} runs)\n\n\
+         Every page's text as plain text, each tool timed as a process, as an \
+         agent pays for it: the Python libraries' times include starting the \
+         interpreter and importing the library. Times in ms; `-` where a tool \
+         failed.\n\n| File | {} |\n|---|{}\n",
+        names.join(" | "),
+        "---|".repeat(names.len())
+    );
+    for r in rows {
+        let cells: Vec<String> =
+            r.ms.iter()
+                .map(|m| m.map_or("-".into(), |v| format!("{v:.1}")))
+                .collect();
+        let _ = writeln!(out, "| {} | {} |", r.file, cells.join(" | "));
+    }
+    let _ = writeln!(
+        out,
+        "\n| Tool | Files done | Total ms | Geometric mean time vs nupdf |\n|---|---|---|---|"
+    );
+    for (i, name) in names.iter().enumerate() {
+        let done: Vec<&ContextRow> = rows.iter().filter(|r| r.ms[i].is_some()).collect();
+        let total: f64 = done.iter().filter_map(|r| r.ms[i]).sum();
+        let ratio = geomean(
+            done.iter()
+                .filter_map(|r| Some(r.ms[i]? / r.ms[0]?.max(f64::EPSILON))),
+        );
+        let _ = writeln!(
+            out,
+            "| {name} | {} | {total:.0} | {ratio:.2}x |",
+            done.len()
+        );
+    }
+    for n in notes {
+        let _ = writeln!(out, "\nNote: {n}.");
+    }
+    out
 }
 
 /// An evenly spaced sample of `n` of `files`, or all of them.
@@ -328,6 +531,35 @@ mod tests {
     fn median_handles_odd_and_even_counts() {
         assert_eq!(median(&mut [3.0, 1.0, 2.0]), 2.0);
         assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
+    }
+
+    #[test]
+    fn context_totals_leave_out_failures() {
+        let tool = |name: &str| ContextTool {
+            name: name.into(),
+            program: "x".into(),
+            args: Vec::new(),
+        };
+        let rows = [
+            ContextRow {
+                file: "a".into(),
+                ms: vec![Some(2.0), Some(8.0)],
+            },
+            ContextRow {
+                file: "b".into(),
+                ms: vec![Some(4.0), None],
+            },
+        ];
+        let out = render_context(
+            "smoke",
+            1,
+            &[tool("nupdf"), tool("slow")],
+            &rows,
+            &["n".into()],
+        );
+        assert!(out.contains("| b | 4.0 | - |"), "{out}");
+        assert!(out.contains("| slow | 1 | 8 | 4.00x |"), "{out}");
+        assert!(out.contains("Note: n."));
     }
 
     #[test]
