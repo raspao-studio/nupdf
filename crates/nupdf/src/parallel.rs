@@ -153,19 +153,22 @@ fn run_jobs<T: Send>(
     } else {
         let next = AtomicUsize::new(0);
         let fonts = SharedFonts::default();
+        let interrupt = crate::interrupt::current();
         let worker = || {
-            let mut store = Store::sharing_fonts(&fonts);
-            let mut mine = Vec::new();
-            loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= pages.len() {
-                    break;
+            crate::interrupt::within(interrupt.clone(), || {
+                let mut store = Store::sharing_fonts(&fonts);
+                let mut mine = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= pages.len() || crate::interrupt::interrupted() {
+                        break;
+                    }
+                    let (r, next_store) = one(i, std::mem::take(&mut store));
+                    store = next_store;
+                    mine.push((i, r));
                 }
-                let (r, next_store) = one(i, std::mem::take(&mut store));
-                store = next_store;
-                mine.push((i, r));
-            }
-            mine
+                mine
+            })
         };
         std::thread::scope(|s| {
             let workers: Vec<_> = (0..threads)
@@ -286,9 +289,12 @@ pub fn with_workers<T: Send, R>(
         let mut workers = 0;
         if threads > 1 {
             for _ in 0..threads {
+                let interrupt = crate::interrupt::current();
                 let spawned = std::thread::Builder::new()
                     .stack_size(STACK_SIZE)
-                    .spawn_scoped(s, move || worker(doc, shared, job));
+                    .spawn_scoped(s, move || {
+                        crate::interrupt::within(interrupt, || worker(doc, shared, job));
+                    });
                 workers += usize::from(spawned.is_ok());
             }
         }

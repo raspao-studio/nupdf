@@ -729,6 +729,9 @@ impl<'d, 'p> Csi<'d, 'p> {
                     }
                 }
                 RawToken::Keyword => {
+                    if crate::interrupt::interrupted() {
+                        return Err(crate::interrupt::MESSAGE.to_string());
+                    }
                     self.keyword(lx, cstr(&buf))?;
                     self.clear_stack();
                 }

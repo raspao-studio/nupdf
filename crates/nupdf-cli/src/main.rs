@@ -7,6 +7,7 @@
 mod commands;
 mod extract;
 mod inventory;
+mod mcp;
 mod md5;
 mod objects;
 mod redact;
@@ -17,7 +18,6 @@ mod trace;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use nupdf::header::{self, Kind};
@@ -43,6 +43,9 @@ struct Cli {
     /// Password for an encrypted document (user or owner).
     #[arg(long, global = true)]
     password: Option<String>,
+    /// Stop after this many seconds, with exit 5 and `limit.timeout`.
+    #[arg(long, global = true)]
+    timeout: Option<f64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -482,6 +485,18 @@ enum Command {
         #[arg(long, default_value_t = 65536)]
         max_bytes: usize,
     },
+    /// Serve the commands as tools of a Model Context Protocol server, over
+    /// stdin and stdout.
+    Mcp {
+        /// Seconds a call may run before it fails with `limit.timeout`,
+        /// unless the call gives its own `timeout`.
+        #[arg(long, default_value_t = 300.0)]
+        call_timeout: f64,
+        /// Largest output a call may return, in bytes; a call over it fails
+        /// with `limit.output` (use the commands' budgets instead).
+        #[arg(long, default_value_t = 8 << 20)]
+        max_output_bytes: usize,
+    },
 }
 
 /// Exit codes from docs/AGENT-INTERFACE.md. Usage errors (2) come from clap.
@@ -560,15 +575,59 @@ struct Failure {
 /// they are used.
 const STACK_SIZE: usize = 1 << 30;
 
-fn main() -> ExitCode {
+/// A command's exit code: 0, or an [`Exit`] as a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExitCode(u8);
+
+impl ExitCode {
+    const SUCCESS: ExitCode = ExitCode(0);
+
+    fn from(code: u8) -> ExitCode {
+        ExitCode(code)
+    }
+}
+
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    if let Command::Mcp {
+        call_timeout,
+        max_output_bytes,
+    } = &cli.command
+    {
+        return std::process::ExitCode::from(mcp::serve(*call_timeout, *max_output_bytes));
+    }
     match std::thread::Builder::new()
         .stack_size(STACK_SIZE)
-        .spawn(move || run(cli))
+        .spawn(move || run_timed(cli))
         .map(std::thread::JoinHandle::join)
     {
-        Ok(Ok(code)) => code,
-        _ => ExitCode::FAILURE,
+        Ok(Ok(code)) => std::process::ExitCode::from(code.0),
+        _ => std::process::ExitCode::FAILURE,
+    }
+}
+
+/// [`run`] under `--timeout`, if given: a command that runs out of time
+/// writes nothing and fails with exit 5.
+fn run_timed(cli: Cli) -> ExitCode {
+    let deadline = cli.timeout.and_then(|t| {
+        std::time::Instant::now()
+            .checked_add(std::time::Duration::try_from_secs_f64(t.max(0.0)).ok()?)
+    });
+    let pretty = cli.pretty;
+    let interrupt = deadline.map(|d| nupdf::interrupt::Interrupt::new(Some(d)));
+    let code = nupdf::interrupt::within(interrupt.clone(), || run(cli));
+    match interrupt.and_then(|i| i.reason()) {
+        Some(_) => fail(timed_out(), pretty),
+        None => code,
+    }
+}
+
+/// The failure of a call that ran out of time.
+fn timed_out() -> Failure {
+    Failure {
+        exit: Exit::Limit,
+        code: "limit.timeout",
+        message: "the command ran out of time (--timeout)".into(),
     }
 }
 
@@ -1082,6 +1141,11 @@ fn run(cli: Cli) -> ExitCode {
             data,
             max_bytes,
         } => open(file).and_then(|opened| show(opened, target, *data, *max_bytes)),
+        Command::Mcp { .. } => Err(Failure {
+            exit: Exit::Usage,
+            code: "usage.bad_command",
+            message: "the MCP server cannot be started from within a call".into(),
+        }),
     };
     match result {
         Ok(report) => {
@@ -1100,7 +1164,7 @@ fn fail(failure: Failure, pretty: bool) -> ExitCode {
             message: failure.message,
         },
     };
-    emit(&mut std::io::stderr().lock(), &report, pretty);
+    emit(&mut standard_error(), &report, pretty);
     ExitCode::from(failure.exit as u8)
 }
 
@@ -1124,6 +1188,9 @@ fn emit(out: &mut impl Write, value: &impl Serialize, pretty: bool) {
 /// whole report on one thread after the pages are done. Where the
 /// descriptor cannot be duplicated, `Stdout` itself.
 fn standard_output() -> Box<dyn Write> {
+    if let Some(out) = capture::writer(capture::Stream::Out) {
+        return out;
+    }
     let _ = std::io::stdout().flush();
     #[cfg(unix)]
     {
@@ -1133,6 +1200,72 @@ fn standard_output() -> Box<dyn Write> {
         }
     }
     Box::new(std::io::stdout().lock())
+}
+
+/// Standard error, or where a call's errors are kept.
+fn standard_error() -> Box<dyn Write> {
+    capture::writer(capture::Stream::Err).unwrap_or_else(|| Box::new(std::io::stderr()))
+}
+
+/// Where a call's output goes when it does not go to the process's own
+/// streams: the MCP server runs each call with its output kept, and an
+/// interrupted call's output goes nowhere.
+mod capture {
+    use std::cell::RefCell;
+    use std::io::Write;
+    use std::rc::Rc;
+
+    #[derive(Clone, Copy)]
+    pub enum Stream {
+        Out,
+        Err,
+    }
+
+    type Buffer = Rc<RefCell<Vec<u8>>>;
+
+    thread_local! {
+        static KEPT: RefCell<Option<(Buffer, Buffer)>> = const { RefCell::new(None) };
+    }
+
+    /// A writer for `stream` if this thread's output is kept or dropped.
+    pub fn writer(stream: Stream) -> Option<Box<dyn Write>> {
+        if nupdf::interrupt::interrupted() {
+            return Some(Box::new(std::io::sink()));
+        }
+        KEPT.with(|k| {
+            k.borrow().as_ref().map(|(out, err)| {
+                let b = match stream {
+                    Stream::Out => out.clone(),
+                    Stream::Err => err.clone(),
+                };
+                Box::new(Kept(b)) as Box<dyn Write>
+            })
+        })
+    }
+
+    struct Kept(Buffer);
+
+    impl Write for Kept {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `f` with this thread's output kept; gives back what it wrote to
+    /// stdout and to stderr.
+    pub fn keep<R>(f: impl FnOnce() -> R) -> (R, Vec<u8>, Vec<u8>) {
+        let (out, err): (Buffer, Buffer) = Default::default();
+        let before = KEPT.with(|k| k.replace(Some((out.clone(), err.clone()))));
+        let r = f();
+        KEPT.with(|k| *k.borrow_mut() = before);
+        let take = |b: Buffer| std::mem::take(&mut *b.borrow_mut());
+        (r, take(out), take(err))
+    }
 }
 
 /// A `stext` report with its pages already written as JSON.
@@ -1215,7 +1348,7 @@ fn emit_extracted(
             let _ = out.write_all(text.as_bytes());
             let _ = out.flush();
             emit(
-                &mut std::io::stderr().lock(),
+                &mut standard_error(),
                 &report(SCHEMA, facts, doc, body),
                 pretty,
             );
@@ -1233,10 +1366,28 @@ fn to_json(report: InfoReport) -> Result<serde_json::Value, Failure> {
 }
 
 /// What `open` learned about the file before parsing it.
+#[derive(Debug, Clone)]
 struct FileFacts {
     header: Option<header::Header>,
     doc_id: String,
     file_size: usize,
+}
+
+/// A file's bytes and what they say about it, read and hashed once.
+fn read_file(path: &Path) -> Result<(std::sync::Arc<[u8]>, FileFacts), Failure> {
+    let data: std::sync::Arc<[u8]> = std::fs::read(path)
+        .map_err(|e| Failure {
+            exit: Exit::Input,
+            code: "input.unreadable",
+            message: format!("cannot read {}: {e}", path.display()),
+        })?
+        .into();
+    let facts = FileFacts {
+        header: header::find(&data).ok(),
+        doc_id: DocId::of(&data).to_string(),
+        file_size: data.len(),
+    };
+    Ok((data, facts))
 }
 
 fn open(
@@ -1244,15 +1395,9 @@ fn open(
     limits: nupdf::Limits,
     password: Option<&str>,
 ) -> Result<(Document, FileFacts), Failure> {
-    let data = std::fs::read(path).map_err(|e| Failure {
-        exit: Exit::Input,
-        code: "input.unreadable",
-        message: format!("cannot read {}: {e}", path.display()),
-    })?;
-    let facts = FileFacts {
-        header: header::find(&data).ok(),
-        doc_id: DocId::of(&data).to_string(),
-        file_size: data.len(),
+    let (data, facts) = match mcp::cached_file(path) {
+        Some(found) => found,
+        None => read_file(path)?,
     };
     let doc = Document::open_with(data, limits).map_err(|e| Failure {
         exit: if e.code.starts_with("limit.") {
@@ -1388,7 +1533,7 @@ fn previews(doc: &Document, plan: &redact::Plan, dir: &Path, dpi: f32) -> Vec<se
                 .to_pixmap(Some(nupdf::colorspace::ColorSpace::Rgb))
                 .png()
         }) {
-            Ok(png) => match std::fs::write(&path, png) {
+            Ok(png) => match write_file(&path, &png) {
                 Ok(()) => entry["file"] = path.display().to_string().into(),
                 Err(e) => entry["error"] = e.to_string().into(),
             },
@@ -1705,17 +1850,34 @@ fn verify_failure(v: &nupdf::write::Verification) -> String {
     )
 }
 
+/// Writes a file a command makes, unless the call was stopped: what it
+/// made since comes from pages cut short.
+pub(crate) fn write_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    if nupdf::interrupt::interrupted() {
+        return Err(std::io::Error::other(nupdf::interrupt::MESSAGE));
+    }
+    std::fs::write(path, data)
+}
+
 /// Writes `data` next to `path` and renames it into place, so a reader
 /// never sees a partial file.
 fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp_name = format!(".{name}.nupdf-{}.tmp", std::process::id());
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_name = format!(".{name}.nupdf-{}-{n}.tmp", std::process::id());
     let tmp = dir.map_or_else(|| PathBuf::from(&tmp_name), |d| d.join(&tmp_name));
-    let written = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
+    let written = write_file(&tmp, data).and_then(|()| {
+        // A call stopped meanwhile made its output from damaged pages.
+        if nupdf::interrupt::interrupted() {
+            return Err(std::io::Error::other(nupdf::interrupt::MESSAGE));
+        }
+        std::fs::rename(&tmp, path)
+    });
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

@@ -152,16 +152,18 @@ pub fn render_page_banded(
             .iter()
             .map(|&r| {
                 let list = &list;
+                let interrupt = crate::interrupt::current();
                 std::thread::Builder::new()
                     .stack_size(crate::parallel::STACK_SIZE)
                     .spawn_scoped(s, move || {
-                        let mut pix = Pix::new(r, 3, false).ok()?;
-                        pix.clear_with(255);
-                        let mut dev = DrawDevice::new(Some(doc), pix);
-                        dev.cc.icc = icc;
-                        dev.cc.icc = icc;
-                        list.replay(&mut dev);
-                        Some(dev.into_pix())
+                        crate::interrupt::within(interrupt, || {
+                            let mut pix = Pix::new(r, 3, false).ok()?;
+                            pix.clear_with(255);
+                            let mut dev = DrawDevice::new(Some(doc), pix);
+                            dev.cc.icc = icc;
+                            list.replay(&mut dev);
+                            Some(dev.into_pix())
+                        })
                     })
                     .ok()
             })

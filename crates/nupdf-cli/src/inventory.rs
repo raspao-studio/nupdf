@@ -36,7 +36,7 @@ fn page_errors(inv: &Inventory) -> Value {
 }
 
 fn write(dir: &Path, file: &str, data: &[u8]) -> Value {
-    match std::fs::write(dir.join(file), data) {
+    match crate::write_file(&dir.join(file), data) {
         Ok(()) => json!({ "name": file, "file": file }),
         Err(e) => json!({ "name": file, "error": format!("cannot write {file}: {e}") }),
     }

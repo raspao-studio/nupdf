@@ -292,7 +292,7 @@ Exit: ≥98% of standard-tier pages within the pixel threshold of `mutool draw` 
 
 ## M8: Agent surface
 
-- [ ] MCP server over stdio: tools mirror the commands, a document-handle cache avoids reparsing, limits and cancellation apply per call
+- [x] MCP server over stdio: tools mirror the commands, a document-handle cache avoids reparsing, limits and cancellation apply per call. `nupdf mcp` (D42): every command a tool, its schema read from the CLI's arguments; reports byte for byte the CLI's; files' bytes and ids kept between calls, documents parsed per call so warnings match the CLI's; `timeout`, cancellation and an output ceiling per call, and `--timeout` for the CLI
 - [ ] `batch`: globs, parallel execution, JSONL output, resumable runs
 - [ ] `diff`: compare two PDFs by text, structure and pixels
 - [ ] `guide` (compact usage text for models), `schema <command>` (JSON Schema), and a `SKILL.md` for Claude Code
