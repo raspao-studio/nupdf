@@ -301,6 +301,8 @@ Exit: ≥98% of standard-tier pages within the pixel threshold of `mutool draw` 
 
 Exit: both nupdf arms beat every baseline on success rate and on median tokens per solved task.
 
+Exit status, 2026-11-12: not met, and left for later. Eleven graded tasks (the earlier nine's locate, quotes, damaged, merge and redact; invoice fields over six layouts, PII across a bundle, splitting at bookmarks, an amended contract clause, scanned-page triage, a ruled table), on five arms, run headless in Claude Code: two pilots on Opus 5.5 at high effort, and all eleven on Haiku 5.5. Success ties: on Haiku the two nupdf arms, pypdf and PyMuPDF solved all eleven, pdf_oxide eight (it reported leaking files as clean). On tokens nupdf loses: a median of about 11,800 per solved task against PyMuPDF's 8,300 and pypdf's 9,700, spent on reading help, on an outline nupdf had no command for, and over MCP on a call per file. The pilots found and fixed an MCP bug (text output hidden behind its report) and cut the guide from 8 KB to 1.6 KB. Why nupdf spends more is the work to come back to. The tasks, graders and runner are on the `eval/pilot` branch.
+
 ## M9: Coverage
 
 - [ ] Forms: list, fill and flatten AcroForm fields; generate appearances (`pdf-form.c`, `pdf-appearance.c`); detect and strip XFA
