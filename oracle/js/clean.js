@@ -112,8 +112,11 @@ if (scriptArgs[2]) {
     } else if (o.indexOf("rotate=") == 0) {
       check();
       rotate(o.slice(7));
-    } else
+    } else {
+      // mutool clean loads every object before cleaning content streams.
+      if (o == "clean" || o == "sanitize") check();
       rest.push(o);
+    }
   });
   if (rest.length) options += "," + rest.join(",");
 }

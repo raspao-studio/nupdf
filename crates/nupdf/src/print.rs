@@ -333,6 +333,25 @@ pub fn print_encrypted(
     fmt.obj(obj);
 }
 
+/// `pdf_print_encrypted_obj` with a separator, tight and unencrypted, as
+/// the content stream writer calls it: returns whether a separator is
+/// pending after the object. A pending separator going in never shows,
+/// since nothing has been written before it.
+pub fn print_sep(obj: &Object, ascii: bool, out: &mut Vec<u8>) -> bool {
+    let mut fmt = Fmt {
+        out,
+        indent: 0,
+        tight: true,
+        ascii,
+        col: 0,
+        sep: false,
+        last: 0,
+        encrypt: None,
+    };
+    fmt.obj(obj);
+    fmt.sep
+}
+
 /// The object as a string, for tests and diagnostics.
 pub fn to_string(obj: &Object, options: Options) -> String {
     let mut out = Vec::new();

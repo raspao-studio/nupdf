@@ -132,6 +132,29 @@ pub fn rotate_pages(doc: &Document, pages: &[i32], degrees: i32) -> Result<(), S
     Ok(())
 }
 
+/// `f` applied to page `index` (0-based), as `pdf_dict_put` on the page
+/// object changes it: in place, or where a direct page sits in its
+/// parent's /Kids.
+pub fn edit_page(doc: &Document, index: i32, f: &mut dyn FnMut(&mut Dict)) -> Result<(), String> {
+    let page = doc.page(index).map_err(|e| e.0)?;
+    let not_dict = || format!("not a dict (page {})", index + 1);
+    match page {
+        Object::Ref(r) => {
+            let Object::Dict(d) = doc.resolve(&Object::Ref(r)) else {
+                return Err(not_dict());
+            };
+            let mut d = (*d).clone();
+            f(&mut d);
+            doc.alter_object(r.num, Object::Dict(Arc::new(d)));
+        }
+        _ => {
+            let path = doc.page_path(index).ok_or_else(not_dict)?;
+            edit_direct_page(doc, &path, f).ok_or_else(not_dict)?;
+        }
+    }
+    Ok(())
+}
+
 /// Changes the page `path` leads to from the root /Pages node, in the
 /// object that holds it.
 fn edit_direct_page(doc: &Document, path: &[usize], f: &mut dyn FnMut(&mut Dict)) -> Option<()> {

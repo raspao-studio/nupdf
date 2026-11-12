@@ -1528,3 +1528,14 @@ fn stext_pretty_is_the_same_report_laid_out() {
         }
     }
 }
+
+#[test]
+fn clean_sanitize_rewrites_contents() {
+    let input = smoke("minimal.pdf");
+    let run = nupdf(&["clean", "-s", input.to_str().unwrap(), "--dry-run"]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

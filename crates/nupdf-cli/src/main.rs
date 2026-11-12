@@ -306,6 +306,16 @@ enum Command {
         /// `mutool clean -Z`. The version becomes at least 1.5.
         #[arg(short = 'Z', action = clap::ArgAction::Count)]
         objstms: u8,
+        /// Rewrite content streams, as `mutool clean -c`: every page's
+        /// contents become one new stream, and the forms, patterns and
+        /// glyphs they use are rewritten in place.
+        #[arg(short = 'c', action = clap::ArgAction::Count)]
+        clean_contents: u8,
+        /// Sanitize content streams, as `mutool clean -s`: rewritten as
+        /// with -c, with redundant graphics state dropped and the
+        /// resources cut to what the contents use.
+        #[arg(short = 's', action = clap::ArgAction::Count)]
+        sanitize: u8,
         /// Write without encryption, as `mutool clean -D`.
         #[arg(short = 'D', conflicts_with = "encrypt")]
         decrypt: bool,
@@ -700,6 +710,8 @@ fn run(cli: Cli) -> ExitCode {
             effort,
             tight,
             objstms,
+            clean_contents,
+            sanitize,
             decrypt,
             encrypt,
             owner_password,
@@ -737,6 +749,22 @@ fn run(cli: Cli) -> ExitCode {
                 Some(spec) => Some(keep_pages(&doc, spec)?),
                 None => None,
             };
+            if *clean_contents > 0 || *sanitize > 0 {
+                // pdf_clean_file loads every object first, so a repair
+                // cannot lose the rewritten streams.
+                nupdf::write::check_document(&doc);
+                nupdf::content_clean::clean_content_streams(
+                    &doc,
+                    *sanitize > 0,
+                    options.ascii,
+                    options.pretty,
+                )
+                .map_err(|e| Failure {
+                    exit: Exit::Input,
+                    code: "input.content_stream",
+                    message: nupdf::diag::report::strip(&e).to_string(),
+                })?;
+            }
             let plan = Clean {
                 options,
                 output: output.as_deref(),

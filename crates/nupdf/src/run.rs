@@ -285,7 +285,7 @@ fn load_pattern(doc: &Document, obj: &Object) -> Pattern {
 }
 
 /// `pdf_to_matrix`.
-fn to_matrix(doc: &Document, v: &Object) -> Matrix {
+pub(crate) fn to_matrix(doc: &Document, v: &Object) -> Matrix {
     let Object::Array(a) = doc.resolve(v) else {
         return Matrix::IDENTITY;
     };
@@ -555,13 +555,76 @@ struct SoftmaskSave {
     ctm: Option<Matrix>,
 }
 
+/// `pdf_lookup_mcid_in_mcids`: the structure element whose /K holds
+/// marked-content id `id`, at its index in `mcids` or, failing that,
+/// anywhere in it.
+pub fn lookup_mcid_in_mcids(doc: &Document, id: i32, mcids: &Object) -> Option<Object> {
+    let mcids = match doc.resolve(mcids) {
+        Object::Array(a) => a,
+        _ => return None,
+    };
+    let is_id = |o: &Object| matches!(o, Object::Int(_)) && o.to_int() == id;
+    let in_k = |entry: &Object| {
+        let k = doc.dict_get(entry, b"K");
+        match &k {
+            Object::Array(items) => items.iter().any(|o| {
+                let o = doc.resolve(o);
+                if matches!(o, Object::Int(_)) {
+                    is_id(&o)
+                } else {
+                    is_id(&doc.dict_get(&o, b"MCID"))
+                }
+            }),
+            other => is_id(other),
+        }
+    };
+    if let Some(entry) = usize::try_from(id).ok().and_then(|i| mcids.get(i))
+        && in_k(entry)
+    {
+        return Some(entry.clone());
+    }
+    mcids.iter().find(|o| in_k(o)).cloned()
+}
+
+/// A device that ignores everything, for loading fonts outside a run.
+struct NullDevice;
+
+impl Device for NullDevice {}
+
+/// The font `Tf` selects, loaded as the interpreter loads it for any
+/// processor (`pdf_try_load_font`, else the last-resort font), with the
+/// processor's store and resources: a Type 3 font's glyphs are prepared
+/// as they are when drawing.
+pub fn load_font_for(
+    doc: &Document,
+    state: &mut ProcState,
+    font: Option<&Object>,
+) -> Result<Arc<FontDesc>, String> {
+    let mut dev = NullDevice;
+    let store = std::mem::take(&mut state.store);
+    let mut run = Run::with_gstates(
+        doc,
+        &mut dev,
+        Matrix::IDENTITY,
+        Arc::new(DefaultColorSpaces::default()),
+        store,
+        None,
+    );
+    std::mem::swap(&mut run.state, state);
+    let out = run.load_font(font.filter(|f| doc.resolve(f).as_dict().is_some()));
+    std::mem::swap(&mut run.state, state);
+    state.store = run.into_store();
+    out
+}
+
 /// `pdf_run_processor`.
 #[allow(missing_debug_implementations)]
 pub struct Run<'a> {
     doc: &'a Document,
     dev: &'a mut dyn Device,
     state: ProcState,
-    usage: &'static str,
+    /// The usage optional content is shown for; None shows all of it.
+    usage: Option<&'static str>,
     flags: u32,
     default_cs: Arc<DefaultColorSpaces>,
     path: Path,
@@ -665,7 +728,7 @@ impl<'a> Run<'a> {
             doc,
             dev,
             state: ProcState::with_store(store),
-            usage: "View",
+            usage: Some("View"),
             flags: 0,
             default_cs,
             path: Path::new(),
@@ -2113,32 +2176,7 @@ impl<'a> Run<'a> {
         if !mcid.is_number() {
             return None;
         }
-        let id = mcid.to_int();
-        let mcids = match self.mcids.as_ref().map(|m| doc.resolve(m)) {
-            Some(Object::Array(a)) => a,
-            _ => return None,
-        };
-        let is_id = |o: &Object| matches!(o, Object::Int(_)) && o.to_int() == id;
-        let in_k = |entry: &Object| {
-            let k = doc.dict_get(entry, b"K");
-            match &k {
-                Object::Array(items) => items.iter().any(|o| {
-                    let o = doc.resolve(o);
-                    if matches!(o, Object::Int(_)) {
-                        is_id(&o)
-                    } else {
-                        is_id(&doc.dict_get(&o, b"MCID"))
-                    }
-                }),
-                other => is_id(other),
-            }
-        };
-        if let Some(entry) = usize::try_from(id).ok().and_then(|i| mcids.get(i))
-            && in_k(entry)
-        {
-            return Some(entry.clone());
-        }
-        mcids.iter().find(|o| in_k(o)).cloned()
+        lookup_mcid_in_mcids(doc, mcid.to_int(), self.mcids.as_ref()?)
     }
 
     fn pop_structure_to(&mut self, common: Option<&Object>) {
@@ -3102,7 +3140,7 @@ impl Processor for Run<'_> {
     }
 
     fn usage(&self) -> Option<&'static str> {
-        Some(self.usage)
+        self.usage
     }
 
     fn op(&mut self, op: Op<'_>) -> Result<(), String> {
@@ -3795,8 +3833,20 @@ pub fn run_page_contents(
     dev: &mut dyn Device,
     store: Store,
 ) -> PageRun {
+    run_page_contents_for(doc, page, dev, store, Some("View"))
+}
+
+/// [`run_page_contents`] for another usage; None shows all optional
+/// content, hidden or not.
+pub fn run_page_contents_for(
+    doc: &Document,
+    page: &Object,
+    dev: &mut dyn Device,
+    store: Store,
+    usage: Option<&'static str>,
+) -> PageRun {
     let mut store = Some(store);
-    let error = run_page_imp(doc, page, dev, &mut store).err();
+    let error = run_page_imp(doc, page, dev, &mut store, usage).err();
     PageRun {
         error,
         store: store.unwrap_or_default(),
@@ -3808,6 +3858,7 @@ fn run_page_imp(
     page: &Object,
     dev: &mut dyn Device,
     store: &mut Option<Store>,
+    usage: Option<&'static str>,
 ) -> Result<(), String> {
     let inherited = |key: &[u8]| doc.inherited(page, key).map_err(|e| report::line(&e.0));
     let resources = inherited(b"Resources")?;
@@ -3882,6 +3933,7 @@ fn run_page_imp(
             defaults,
             store.take().unwrap_or_default(),
         )?;
+        run.usage = usage;
         let out = run
             .process(resources.as_ref(), contents.as_ref())
             .and_then(|()| run.close());
