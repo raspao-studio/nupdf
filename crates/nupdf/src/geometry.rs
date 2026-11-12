@@ -303,16 +303,18 @@ impl Matrix {
         m
     }
 
-    /// `fz_concat`: `self`, then `two`.
+    /// `fz_concat`: `self`, then `two`. MuPDF is built with clang, which
+    /// fuses `a * b + c * d` into `fma(a, b, c * d)`; so is this, and the
+    /// rest of the matrix and point arithmetic here.
     pub fn concat(self, two: Matrix) -> Matrix {
         let one = self;
         Matrix {
-            a: one.a * two.a + one.b * two.c,
-            b: one.a * two.b + one.b * two.d,
-            c: one.c * two.a + one.d * two.c,
-            d: one.c * two.b + one.d * two.d,
-            e: one.e * two.a + one.f * two.c + two.e,
-            f: one.e * two.b + one.f * two.d + two.f,
+            a: one.a.mul_add(two.a, one.b * two.c),
+            b: one.a.mul_add(two.b, one.b * two.d),
+            c: one.c.mul_add(two.a, one.d * two.c),
+            d: one.c.mul_add(two.b, one.d * two.d),
+            e: one.e.mul_add(two.a, one.f * two.c) + two.e,
+            f: one.e.mul_add(two.b, one.f * two.d) + two.f,
         }
     }
 
@@ -349,8 +351,8 @@ impl Matrix {
 
     /// `fz_pre_translate`.
     pub fn pre_translate(mut self, tx: f32, ty: f32) -> Matrix {
-        self.e += tx * self.a + ty * self.c;
-        self.f += tx * self.b + ty * self.d;
+        self.e += tx.mul_add(self.a, ty * self.c);
+        self.f += tx.mul_add(self.b, ty * self.d);
         self
     }
 
@@ -366,8 +368,8 @@ impl Matrix {
     /// `fz_transform_point_xy`.
     pub fn transform_xy(self, x: f32, y: f32) -> Point {
         Point {
-            x: x * self.a + y * self.c + self.e,
-            y: x * self.b + y * self.d + self.f,
+            x: x.mul_add(self.a, y * self.c) + self.e,
+            y: x.mul_add(self.b, y * self.d) + self.f,
         }
     }
 }
@@ -381,14 +383,14 @@ impl Point {
     /// translation.
     pub fn transform_vector(self, m: Matrix) -> Point {
         Point {
-            x: self.x * m.a + self.y * m.c,
-            y: self.x * m.b + self.y * m.d,
+            x: self.x.mul_add(m.a, self.y * m.c),
+            y: self.x.mul_add(m.b, self.y * m.d),
         }
     }
 
     /// `fz_normalize_vector`.
     pub fn normalize(self) -> Point {
-        let len = self.x * self.x + self.y * self.y;
+        let len = self.x.mul_add(self.x, self.y * self.y);
         if len != 0.0 {
             let len = len.sqrt();
             Point {

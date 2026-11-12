@@ -431,3 +431,9 @@ By default, blocks come in the order MuPDF gives them: the order the content str
 - **It is an option, not the default** (D5): the default stays MuPDF's, and the harness keeps comparing it.
 - **It is scored against people, not MuPDF.** `corpus/reading-order/truth.json` holds hand-labeled pages: for each, distinctive fragments of its text in the order a person reads them. `cargo xtask reading-order` scores both orders by the share of fragment pairs that come in the labeled order. The pages include ones MuPDF's order already gets right (two-column papers, a one-column book page), so the option is shown not to make them worse, and ones it gets wrong (a sheet of notes in four columns, two forms). At introduction: MuPDF's order 0.880, `reading-order` 0.995.
 - **MuPDF does not know the option name** and would reject it; nupdf accepts it alongside MuPDF's options.
+
+## D39. Arithmetic is fused as MuPDF's build fuses it
+
+*2026-11-11*
+
+The oracle is MuPDF built by clang at `-O2`, whose default `-ffp-contract=on` turns `a * b + c * d` into `fma(a, b, c * d)` and `a * b - c * d` into `fma(a, b, -(c * d))` within an expression. Content streams written back (`clean -s`, redaction) print matrices and text moves at the shortest round-trip digits, so a last-bit difference changes the bytes. `geometry` (matrix concatenation, translation, point and vector transforms), the text matrix updates in `run` and the sanitize filter's text moves use `mul_add` in the same places, which is what disassembling MuPDF's code shows clang does. A MuPDF built without contraction (gcc on x86-64 without `-mfma`) would round differently; the harness's oracle is the build in `target/oracle`.
