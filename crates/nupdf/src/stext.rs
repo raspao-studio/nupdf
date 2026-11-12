@@ -52,6 +52,10 @@ pub mod flags {
     /// nupdf's own: blocks put in reading order (DECISIONS D38). MuPDF
     /// has no such option.
     pub const READING_ORDER: u32 = 1 << 30;
+
+    /// nupdf's own: optional content runs whether shown or hidden, so
+    /// text in hidden layers is gathered too.
+    pub const ALL_LAYERS: u32 = 1 << 29;
 }
 
 /// Vector block flags (`FZ_STEXT_VECTOR_IS_STROKED` and the rest).
@@ -149,6 +153,8 @@ impl Options {
                 "paragraph-break" => flags::PARAGRAPH_BREAK,
                 "table-hunt" => flags::TABLE_HUNT,
                 "reading-order" => flags::READING_ORDER,
+
+                "all-layers" => flags::ALL_LAYERS,
                 _ => return Err(format!("unknown stext option: {key}")),
             };
             if on {
@@ -1922,7 +1928,8 @@ pub fn extract_page(
         Err(e) => return (Err(crate::diag::report::line(&e.0)), store),
     };
     let mut dev = StextDevice::new(mediabox, opts).with_doc(doc);
-    let run = crate::run::run_page_contents(doc, page, &mut dev, store);
+    let usage = (opts.flags & flags::ALL_LAYERS == 0).then_some("View");
+    let run = crate::run::run_page_contents_for(doc, page, &mut dev, store, usage);
     let page = match run.error {
         Some(e) => Err(e),
         None => Ok(dev.finish()),

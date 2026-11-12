@@ -96,7 +96,10 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `content_write` (content stream writer) | `pdf/pdf-op-buffer.c` (`pdf_new_output_processor`), `pdf/pdf-stream.c` (`build_compression_params`) | M6 |
 | `content_filter` (sanitize filter) | `pdf/pdf-op-filter.c` (`pdf_new_sanitize_filter`) | M6 |
 | `content_clean` (`clean -c` and `-s`) | `pdf/pdf-clean.c` (`pdf_filter_page_contents` and helpers), `pdf/pdf-write.c` (`clean_content_streams`) | M6 |
-| `redact` | `pdf/pdf-clean.c`, `pdf/pdf-image-rewriter.c`, `pdf/pdf-annot.c` | M6 |
+| `redact` | `pdf/pdf-clean.c` (`pdf_redact_page` and its filters) | M6 |
+| `redact_image` | `pdf/pdf-clean.c` (`pdf_redact_image_filter_pixels`), `pdf/pdf-image.c` (`pdf_add_image`), `fitz/geometry.c` (quad tests) | M6 |
+| `scrub` (document scrub after redaction) | none; nupdf's own | M6 |
+| `verify` (leak classes) | none; nupdf's own | M6 |
 | `verify` | new | M6 |
 | `render` | `fitz/draw-*.c`, `fitz/colorspace.c`, `fitz/color-lcms.c`, `fitz/separation.c` | M7 |
 | `forms`, `annot`, `appearance` | `pdf/pdf-form.c`, `pdf-annot.c`, `pdf-appearance.c` | M9 |
