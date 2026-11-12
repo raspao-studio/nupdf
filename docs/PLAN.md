@@ -294,7 +294,7 @@ Exit: ≥98% of standard-tier pages within the pixel threshold of `mutool draw` 
 
 - [x] MCP server over stdio: tools mirror the commands, a document-handle cache avoids reparsing, limits and cancellation apply per call. `nupdf mcp` (D42): every command a tool, its schema read from the CLI's arguments; reports byte for byte the CLI's; files' bytes and ids kept between calls, documents parsed per call so warnings match the CLI's; `timeout`, cancellation and an output ceiling per call, and `--timeout` for the CLI
 - [x] `batch`: globs, parallel execution, JSONL output, resumable runs. `nupdf batch` (D43): files, directories and globs; `--jobs` at once with lines in input order, the same at every count; `-o` and `--resume` take a run up again, rerunning files that changed; `{stem}`/`{name}`/`{n}` name outputs; `--item-timeout`
-- [ ] `diff`: compare two PDFs by text, structure and pixels
+- [x] `diff`: compare two PDFs by text, structure and pixels. `nupdf diff` (D44): pages lined up by their text, then lines with content ids on each side; structure as named parts; pixels with counts and boxes in points
 - [ ] `guide` (compact usage text for models), `schema <command>` (JSON Schema), and a `SKILL.md` for Claude Code
 - [ ] Freeze schemas at v1, with a changelog
 - [ ] Agent eval: about 30 graded tasks (extract invoice fields, redact PII across a bundle, split by bookmarks, fill a form, find a clause, triage scanned pages). Arms: nupdf CLI, nupdf MCP, the default Python PDF skill, pymupdf4llm-mcp and pdf_oxide. Measure success, wall time, tool calls and tokens

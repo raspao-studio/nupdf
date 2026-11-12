@@ -496,3 +496,15 @@ At introduction, on the standard tier: with color management on, 98.98% of 19,79
 - **`--item-timeout`** bounds each file as a call's `timeout` does; the global `--timeout` bounds the batch, which then starts no more files.
 - `batch` is not an MCP tool: an agent calls tools at once itself, and a batch's lines are a stream, not one report.
 
+## D44. `diff` lines pages up by their text, then lines within the pages that changed
+
+*2026-11-12*
+
+`nupdf diff <a> <b>` compares two documents by `--by text,structure` (the default), and `pixels` on request; the report has a part for each, null when not asked for, and `identical` when every part asked for is the same.
+
+- **Text: pages first, then lines.** Each page's lines are its stext lines with text, with the content ids `extract` gives them (`p3.b2.l1`). The pages of the two documents are lined up by the shortest edit script over their whole text (Myers), so a page taken out or put in is one page deleted or inserted, not every page after it changed. A run of pages gone next to a run of pages new is taken as pages changed, paired in order, and what is left over is pages deleted or inserted. Each pair of changed pages gets the edit script of its lines: `delete` with the id in `a`, `insert` with the id in `b`, and the line's text. Past 2,000 edits between two pages, the page is `replaced` instead; past 2,000 between the documents' pages, pages are paired by position.
+- **Structure: named parts, each compared whole.** The page count; each page's size (its bounds after rotation, to 0.01 pt), rotation, annotation count and image count; each Info entry (`info.Title`); the outline, as titles indented by level; the form's field count; and the fonts the text is drawn in (from the text, not from `fonts`, which follows `mutool info` and misses fonts it does not look for). A difference names the part and gives `a` and `b`, or for the fonts and the outline what is only in each.
+- **Pixels: each page drawn at `--dpi` (36 by default) on both sides**, in the same pixels as `render`, compared exactly: the pixels that differ, their share of the page, the largest difference in a channel, and their bounding box in points. Pages are compared by position, as far as the shorter document goes.
+- **`--max-items`** (500) bounds each kind's list, with `truncated` on the text.
+- Diagnostics from both documents are reported, each with `document`: `a` or `b`. The report's `doc_id` is `a`'s.
+
