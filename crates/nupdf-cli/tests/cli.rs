@@ -1529,6 +1529,91 @@ fn stext_pretty_is_the_same_report_laid_out() {
     }
 }
 
+fn redaction(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/redaction")
+        .join(name)
+}
+
+#[test]
+fn redact_removes_the_target_and_verify_agrees() {
+    let input = redaction("content-text.pdf");
+    let out = scratch("content-text-redacted.pdf");
+    let run = nupdf(&[
+        "redact",
+        input.to_str().unwrap(),
+        "--text",
+        "SECRET-4711",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(report["schema"], "nupdf.redact/v0");
+    assert_eq!(report["verified"], true);
+    assert_eq!(report["targets"][0]["hits_before"], 1);
+    assert_eq!(report["targets"][0]["hits_after"], 0);
+    assert_eq!(report["pages"][0]["page"], 1);
+    // The rest of the text is still there.
+    let text = nupdf(&["extract", out.to_str().unwrap(), "--format", "text"]);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("Account") && text.contains("closed"),
+        "{text}"
+    );
+    assert!(!text.contains("SECRET-4711"));
+    // The input leaks; the output does not.
+    let leaks = nupdf(&["verify", input.to_str().unwrap(), "--text", "SECRET-4711"]);
+    assert_eq!(leaks.status.code(), Some(4));
+    let clean = nupdf(&["verify", out.to_str().unwrap(), "--text", "SECRET-4711"]);
+    assert!(
+        clean.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clean.stdout)
+    );
+}
+
+#[test]
+fn redact_dry_run_gives_the_plan_and_writes_nothing() {
+    let input = redaction("split-text.pdf");
+    let run = nupdf(&[
+        "redact",
+        input.to_str().unwrap(),
+        "--text",
+        "SECRET-4711",
+        "--dry-run",
+    ]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(report["applied"], false);
+    assert_eq!(report["targets"][0]["hits_before"], 2);
+    assert!(report["pages"][0]["quads"].as_array().unwrap().len() >= 2);
+    assert_eq!(report["output"], Value::Null);
+}
+
+#[test]
+fn redact_refuses_hits_of_another_document() {
+    let input = redaction("content-text.pdf");
+    let hits = scratch("other-hits.json");
+    std::fs::write(&hits, r#"{"doc_id":"b3:00","hits":[]}"#).unwrap();
+    let run = nupdf(&[
+        "redact",
+        input.to_str().unwrap(),
+        "--hits",
+        hits.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(run.status.code(), Some(2));
+}
+
 #[test]
 fn segment_gathers_blocks_into_structures() {
     let path = smoke("stext.pdf");

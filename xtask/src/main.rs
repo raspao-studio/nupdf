@@ -3,6 +3,7 @@
 
 //! `cargo xtask <command>`: everything that compares nupdf against MuPDF.
 
+mod adversarial;
 mod arlington;
 mod bench;
 mod corpus;
@@ -14,6 +15,8 @@ mod jpeg;
 mod oracle;
 mod proc;
 mod reading_order;
+
+mod redaction;
 mod tables;
 
 use std::path::{Path, PathBuf};
@@ -37,7 +40,8 @@ enum Cmd {
         #[command(subcommand)]
         action: OracleCmd,
     },
-    /// Regenerate corpus/smoke, or verify it is up to date with --check.
+    /// Regenerate corpus/smoke and corpus/redaction, or verify they are
+    /// up to date with --check.
     Fixtures {
         #[arg(long)]
         check: bool,
@@ -74,6 +78,20 @@ enum Cmd {
         /// Bench an evenly spaced sample of this many files.
         #[arg(long)]
         sample: Option<usize>,
+    },
+    /// The redaction tier: each adversarial fixture checked to leak, then
+    /// redacted and judged by `nupdf verify`, MuPDF and pdftotext.
+    Redaction {
+        /// The nupdf to run.
+        #[arg(long, default_value = "target/release/nupdf")]
+        nupdf: std::path::PathBuf,
+        /// Another directory of fixtures (default corpus/redaction).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Score the pdf-redaction-benchmarks cases instead, generating
+        /// them first if need be.
+        #[arg(long)]
+        benchmarks: bool,
     },
     /// Check files against the Arlington rules the harness applies, and
     /// print each one's violations.
@@ -115,6 +133,22 @@ fn main() -> Result<()> {
         Cmd::Fixtures { check } => fixtures::run(&root, check),
         Cmd::Tables { check } => tables::run(&root, check),
         Cmd::Arlington { files } => arlington::report(&files),
+        Cmd::Redaction {
+            nupdf,
+            dir,
+            benchmarks,
+        } => {
+            let nupdf = if nupdf.is_absolute() {
+                nupdf
+            } else {
+                root.join(nupdf)
+            };
+            if benchmarks {
+                redaction::benchmarks(&root, &nupdf, &oracle::mutool(&root)?)
+            } else {
+                redaction::run(&root, &nupdf, &oracle::mutool(&root)?, dir)
+            }
+        }
         Cmd::Harness {
             tier,
             check,

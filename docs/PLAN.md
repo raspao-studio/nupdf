@@ -270,10 +270,10 @@ MuPDF reference: `pdf-clean.c` (`pdf_redact_page` and helpers), `pdf-op-filter.c
 - [x] Annotations, widgets and links inside redacted regions; optional overlay boxes
 - [x] Document scrub: Info, XMP, outline titles, named destinations, embedded files, form values, JavaScript, ActualText, Alt and structure tree, hidden optional content, thumbnails, unused objects, incremental history (always a full rewrite)
 - [x] `verify`: an independent pass over the output that checks every leak class in [AGENT-INTERFACE](AGENT-INTERFACE.md#redaction-contract)
-- [ ] Adversarial fixture generator, one fixture per leak class; the `redaction` corpus tier (pdf-redaction-benchmarks)
+- [x] Adversarial fixture generator, one fixture per leak class; the `redaction` corpus tier (pdf-redaction-benchmarks). `cargo xtask redaction`: 23 fixtures in `corpus/redaction`, each seen leaking in its class before and judged clean after by `nupdf verify`, MuPDF and pdftotext; `--benchmarks`: the generator's 20 cases for seeds 1 to 10 (about 1,400 probes, text and text drawn as images), zero leaks and every distractor kept
 - [x] `--dry-run`: the redaction plan as quads now, with rendered previews after M7
 
-Exit: zero leaks on the adversarial suite and the redaction tier, as judged by `nupdf verify`, MuPDF extraction and `pdftotext`. Remaining-text parity with MuPDF's redaction ≥99%. Tests seeded with deliberately leaky outputs prove `verify` fails them.
+Exit: zero leaks on the adversarial suite and the redaction tier, as judged by `nupdf verify`, MuPDF extraction and `pdftotext`. Remaining-text parity with MuPDF's redaction ≥99%. Tests seeded with deliberately leaky outputs prove `verify` fails them. Measured: zero leaks on both; `redact-text` 99.7% (5,052 / 5,066).
 
 ## M7: Rendering
 
