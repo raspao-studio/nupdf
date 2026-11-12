@@ -9,6 +9,9 @@
 pub mod cmap;
 pub mod colorspace;
 pub mod content;
+pub mod content_clean;
+pub mod content_filter;
+pub mod content_write;
 pub mod crypt;
 pub mod dct;
 pub mod deflate;

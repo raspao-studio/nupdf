@@ -331,6 +331,16 @@ impl ProcState {
         })
     }
 
+    /// `pdf_processor_push_resources`, without the processor's hook.
+    pub fn push_resources(&mut self, res: Object) {
+        self.rstack.push(res);
+    }
+
+    /// `pdf_processor_pop_resources`, without the processor's hook.
+    pub fn pop_resources(&mut self) -> Option<Object> {
+        self.rstack.pop()
+    }
+
     /// The innermost resource dictionary (`proc->rstack->resources`).
     pub fn resources(&self) -> Option<&Object> {
         self.rstack.last()
@@ -446,6 +456,16 @@ pub fn process_glyph(
         Some(rest) => report::format(rest),
         None => line,
     })
+}
+
+/// `pdf_process_raw_contents`: `contents` with the resources already on
+/// the processor's stack.
+pub fn process_raw_contents(
+    doc: &Document,
+    contents: &Object,
+    proc: &mut dyn Processor,
+) -> Result<(), String> {
+    process_raw(doc, contents, proc)
 }
 
 /// `pdf_process_raw_contents`.
