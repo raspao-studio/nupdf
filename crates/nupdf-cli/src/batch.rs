@@ -28,7 +28,7 @@ pub struct Args<'a> {
 }
 
 /// Commands `batch` does not run: they take no single file, or run others.
-const NOT_BATCHED: &[&str] = &["batch", "mcp", "merge", "help"];
+const NOT_BATCHED: &[&str] = &["batch", "mcp", "merge", "guide", "help"];
 
 fn usage(message: String) -> Failure {
     Failure {
@@ -146,7 +146,7 @@ fn done_before(output: &Path) -> HashSet<(String, u64, String)> {
         .lines()
         .map_while(Result::ok)
         .filter_map(|l| serde_json::from_str::<Value>(&l).ok())
-        .filter(|v| v["schema"] == "nupdf.batch.item/v0")
+        .filter(|v| v["schema"] == "nupdf.batch.item/v1")
         .filter_map(|v| {
             Some((
                 v["file"].as_str()?.to_string(),
@@ -165,7 +165,7 @@ fn item(
     timed_out: bool,
 ) -> Value {
     let mut line = json!({
-        "schema": "nupdf.batch.item/v0",
+        "schema": "nupdf.batch.item/v1",
         "file": file.to_string_lossy(),
         "size": size,
         "modified": modified,
@@ -174,7 +174,7 @@ fn item(
         Ok(v @ Value::Object(_)) => Some(v),
         _ => None,
     };
-    let failure = |f: &Failure| json!({"schema": "nupdf.error/v0", "error": {"code": f.code, "message": f.message}});
+    let failure = |f: &Failure| json!({"schema": "nupdf.error/v1", "error": {"code": f.code, "message": f.message}});
     match ran {
         _ if timed_out => {
             let f = Failure {

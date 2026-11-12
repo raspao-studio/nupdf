@@ -17,6 +17,7 @@ mod proc;
 mod reading_order;
 
 mod redaction;
+mod schemas;
 mod tables;
 mod triage;
 
@@ -53,6 +54,18 @@ enum Cmd {
     Tables {
         #[arg(long)]
         check: bool,
+    },
+    /// Regenerate the JSON Schemas of the reports from what the commands
+    /// print on the smoke tier, or verify they are up to date with --check.
+    Schemas {
+        #[arg(long)]
+        check: bool,
+        /// Instead, check the reports on this tier's files against them.
+        #[arg(long)]
+        validate: Option<String>,
+        /// How many of the tier's files --validate runs on.
+        #[arg(long, default_value_t = 200)]
+        sample: usize,
     },
     /// Run differential checks of nupdf against the oracle.
     Harness {
@@ -146,6 +159,14 @@ fn main() -> Result<()> {
         },
         Cmd::Fixtures { check } => fixtures::run(&root, check),
         Cmd::Tables { check } => tables::run(&root, check),
+        Cmd::Schemas {
+            check,
+            validate,
+            sample,
+        } => match validate {
+            Some(tier) => schemas::validate(&root, &tier, sample),
+            None => schemas::run(&root, check),
+        },
         Cmd::Arlington { files } => arlington::report(&files),
         Cmd::Triage {
             file,

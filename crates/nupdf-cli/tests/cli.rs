@@ -10,6 +10,9 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
+#[path = "support/schema_check.rs"]
+mod schema_check;
+
 fn smoke(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/smoke")
@@ -37,7 +40,7 @@ fn info(name: &str) -> Value {
 #[test]
 fn info_reports_document_facts() {
     let report = info("minimal.pdf");
-    assert_eq!(report["schema"], "nupdf.info/v0");
+    assert_eq!(report["schema"], "nupdf.info/v1");
     assert_eq!(report["kind"], "pdf");
     assert_eq!(report["pdf_version"], "1.7");
     assert_eq!(report["header_offset"], 0);
@@ -124,7 +127,7 @@ fn unreadable_file_is_an_input_error_on_stderr() {
     assert_eq!(out.status.code(), Some(3));
     assert!(out.stdout.is_empty());
     let err: Value = serde_json::from_slice(&out.stderr).unwrap();
-    assert_eq!(err["schema"], "nupdf.error/v0");
+    assert_eq!(err["schema"], "nupdf.error/v1");
     assert_eq!(err["error"]["code"], "input.unreadable");
 }
 
@@ -209,7 +212,7 @@ fn every_report_carries_the_envelope() {
 fn show_prints_one_object_and_its_stream() {
     let path = smoke("flate-content.pdf");
     let report = run_json(&["show", path.to_str().unwrap(), "4 0 R", "--data"]);
-    assert_eq!(report["schema"], "nupdf.show/v0");
+    assert_eq!(report["schema"], "nupdf.show/v1");
     assert_eq!(report["object"], "4 0 R");
     assert_eq!(report["value"]["d"]["Filter"]["n"], "FlateDecode");
     assert!(
@@ -384,7 +387,7 @@ fn objects_report_decrypted_strings() {
 fn streams_report_decoded_lengths_and_hashes() {
     let path = smoke("flate-content.pdf");
     let report = run_json(&["streams", path.to_str().unwrap()]);
-    assert_eq!(report["schema"], "nupdf.streams/v0");
+    assert_eq!(report["schema"], "nupdf.streams/v1");
     let content = &report["streams"]["4"];
     let data = b"BT /F1 24 Tf 72 720 Td (Compressed) Tj ET";
     assert_eq!(content["len"], data.len());
@@ -443,7 +446,7 @@ fn clean_writes_a_verified_copy_atomically() {
         "-o",
         output.to_str().unwrap(),
     ]);
-    assert_eq!(report["schema"], "nupdf.clean/v0");
+    assert_eq!(report["schema"], "nupdf.clean/v1");
     assert_eq!(report["applied"], true);
     assert_eq!(report["verification"]["verified"], true);
     let written = std::fs::read(&output).unwrap();
@@ -731,7 +734,7 @@ fn meta_reads_sets_and_strips_the_information_dictionary() {
     let input = smoke("incremental-update.pdf");
     let file = input.to_str().unwrap();
     let report = run_json(&["meta", file]);
-    assert_eq!(report["schema"], "nupdf.meta/v0");
+    assert_eq!(report["schema"], "nupdf.meta/v1");
     assert_eq!(report["info"]["Title"], "Revision 2");
     assert_eq!(report["xmp"], false);
 
@@ -812,7 +815,7 @@ fn pages_selects_deletes_and_rotates() {
     let report = run_json(&[
         "pages", file, "--select", "4,1", "--rotate", "-90", "-o", out,
     ]);
-    assert_eq!(report["schema"], "nupdf.pages/v0");
+    assert_eq!(report["schema"], "nupdf.pages/v1");
     assert_eq!(report["kept"], serde_json::json!([4, 1]));
     assert_eq!(report["page_count"], 2);
     assert_eq!(report["verification"]["verified"], true);
@@ -853,7 +856,7 @@ fn split_writes_each_range_to_its_own_file() {
     let out = dir.to_str().unwrap();
 
     let report = run_json(&["split", file, "-o", out, "--dry-run"]);
-    assert_eq!(report["schema"], "nupdf.split/v0");
+    assert_eq!(report["schema"], "nupdf.split/v1");
     assert_eq!(report["applied"], false);
     assert_eq!(report["parts"].as_array().unwrap().len(), 4);
     assert!(!dir.exists());
@@ -898,7 +901,7 @@ fn encrypt_and_decrypt_round_trip() {
         "-o",
         locked.to_str().unwrap(),
     ]);
-    assert_eq!(report["schema"], "nupdf.encrypt/v0");
+    assert_eq!(report["schema"], "nupdf.encrypt/v1");
     assert_eq!(report["encryption"]["method"], "aes-128");
     assert_eq!(report["verification"]["verified"], true);
     let facts = info_at(&locked);
@@ -914,7 +917,7 @@ fn encrypt_and_decrypt_round_trip() {
         "-o",
         open.to_str().unwrap(),
     ]);
-    assert_eq!(report["schema"], "nupdf.decrypt/v0");
+    assert_eq!(report["schema"], "nupdf.decrypt/v1");
     assert_eq!(report["encryption"], "none");
     let facts = info_at(&open);
     assert_eq!(facts["encrypted"], false);
@@ -943,7 +946,7 @@ fn merge_grafts_each_inputs_pages_into_a_new_document() {
         b.to_str().unwrap(),
         "3-2",
     ]);
-    assert_eq!(report["schema"], "nupdf.merge/v0");
+    assert_eq!(report["schema"], "nupdf.merge/v1");
     assert_eq!(report["doc_id"], info("minimal.pdf")["doc_id"]);
     assert_eq!(report["page_count"], 3);
     assert_eq!(report["inputs"][0]["pages"], serde_json::json!([1]));
@@ -1092,7 +1095,7 @@ fn fonts_list_load_and_extract() {
         "--extract",
         dir.to_str().unwrap(),
     ]);
-    assert_eq!(report["schema"], "nupdf.fonts/v0");
+    assert_eq!(report["schema"], "nupdf.fonts/v1");
     let fonts = report["fonts"].as_array().unwrap();
     let helvetica = fonts.iter().find(|f| f["name"] == "Helvetica").unwrap();
     assert_eq!(helvetica["page"], 1);
@@ -1124,7 +1127,7 @@ fn images_list_decode_and_extract() {
         "--extract",
         dir.to_str().unwrap(),
     ]);
-    assert_eq!(report["schema"], "nupdf.images/v0");
+    assert_eq!(report["schema"], "nupdf.images/v1");
     let images = report["images"].as_array().unwrap();
     // The image in a pattern on page 2 is found there.
     let in_pattern = images.iter().find(|i| i["object"] == 55).unwrap();
@@ -1177,7 +1180,7 @@ fn stext_lines(page: &Value) -> Vec<Vec<String>> {
 fn stext_gathers_lines_blocks_and_characters() {
     let path = smoke("stext.pdf");
     let report = run_json(&["stext", path.to_str().unwrap()]);
-    assert_eq!(report["schema"], "nupdf.stext/v0");
+    assert_eq!(report["schema"], "nupdf.stext/v1");
     assert_eq!(report["page_count"], 2);
     let page = &report["pages"][0];
     let blocks = stext_lines(page);
@@ -1243,7 +1246,7 @@ fn stext_options_follow_mupdf() {
 fn extract_gives_ids_spans_and_fonts() {
     let path = smoke("stext.pdf");
     let report = run_json(&["extract", path.to_str().unwrap()]);
-    assert_eq!(report["schema"], "nupdf.extract/v0");
+    assert_eq!(report["schema"], "nupdf.extract/v1");
     assert_eq!(report["truncated"], false);
     let block = &report["pages"][0]["blocks"][0];
     assert_eq!(block["id"], "p1.b1");
@@ -1366,7 +1369,7 @@ fn extract_writes_text_jsonl_and_markdown() {
     assert!(text.starts_with("Hello world!\na line that ends in a hyphen-\nated word\n\n"));
     assert_eq!(text.matches("\u{c}\n").count(), 2);
     let report: Value = serde_json::from_slice(&out.stderr).unwrap();
-    assert_eq!(report["schema"], "nupdf.extract/v0");
+    assert_eq!(report["schema"], "nupdf.extract/v1");
     // Joined hyphens, with dehyphenate.
     let out = nupdf(&[
         "extract",
@@ -1386,9 +1389,9 @@ fn extract_writes_text_jsonl_and_markdown() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     assert_eq!(lines.len(), 3);
-    assert_eq!(lines[0]["schema"], "nupdf.extract.page/v0");
+    assert_eq!(lines[0]["schema"], "nupdf.extract.page/v1");
     assert_eq!(lines[1]["id"], "p2");
-    assert_eq!(lines[2]["schema"], "nupdf.extract/v0");
+    assert_eq!(lines[2]["schema"], "nupdf.extract/v1");
     // Markdown: a comment per page, list items, escaped syntax.
     let out = nupdf(&["extract", file, "--format", "markdown"]);
     let md = String::from_utf8(out.stdout).unwrap();
@@ -1402,7 +1405,7 @@ fn search_finds_hits_with_quads_and_ids() {
     let path = smoke("stext.pdf");
     let file = path.to_str().unwrap();
     let report = run_json(&["search", file, "world"]);
-    assert_eq!(report["schema"], "nupdf.search/v0");
+    assert_eq!(report["schema"], "nupdf.search/v1");
     let hits = report["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["page"], 1);
@@ -1596,7 +1599,7 @@ fn redact_removes_the_target_and_verify_agrees() {
         String::from_utf8_lossy(&run.stderr)
     );
     let report: Value = serde_json::from_slice(&run.stdout).unwrap();
-    assert_eq!(report["schema"], "nupdf.redact/v0");
+    assert_eq!(report["schema"], "nupdf.redact/v1");
     assert_eq!(report["verified"], true);
     assert_eq!(report["targets"][0]["hits_before"], 1);
     assert_eq!(report["targets"][0]["hits_after"], 0);
@@ -1746,7 +1749,7 @@ fn render_writes_each_page_at_its_size() {
         String::from_utf8_lossy(&run.stderr)
     );
     let report: Value = serde_json::from_slice(&run.stdout).unwrap();
-    assert_eq!(report["schema"], "nupdf.render/v0");
+    assert_eq!(report["schema"], "nupdf.render/v1");
     assert_eq!(report["page_count"], 5);
     let first = &report["pages"][0];
     // A 90-point page at 144 dpi.
@@ -2077,7 +2080,7 @@ fn mcp_tools_give_the_cli_reports() {
         );
         assert_eq!(
             result["structuredContent"]["schema"],
-            format!("nupdf.{tool}/v0")
+            format!("nupdf.{tool}/v1")
         );
     }
     // Text output: the text, then the report.
@@ -2091,7 +2094,7 @@ fn mcp_tools_give_the_cli_reports() {
         result["content"][0]["text"].as_str().unwrap(),
         String::from_utf8_lossy(&cli.stdout).trim_end()
     );
-    assert_eq!(result["structuredContent"]["schema"], "nupdf.extract/v0");
+    assert_eq!(result["structuredContent"]["schema"], "nupdf.extract/v1");
     // Failures are tool errors with nupdf's error report.
     let result = mcp.call(21, "info", serde_json::json!({"file": "/no/such.pdf"}));
     assert_eq!(result["isError"], true);
@@ -2230,7 +2233,7 @@ fn batch_runs_a_command_on_each_file_in_order() {
     assert!(out.status.success());
     let lines = lines(&out.stdout);
     let (summary, items) = lines.split_last().unwrap();
-    assert_eq!(summary["schema"], "nupdf.batch/v0");
+    assert_eq!(summary["schema"], "nupdf.batch/v1");
     assert_eq!(summary["files"], items.len());
     let files: Vec<&str> = items.iter().map(|l| l["file"].as_str().unwrap()).collect();
     let mut sorted = files.clone();
@@ -2371,7 +2374,7 @@ fn diff_finds_what_an_edit_changed() {
     let file = smoke("multipage-inherit.pdf");
     let file = file.to_str().unwrap();
     let same = diff(file, file, &["--by", "text,structure,pixels"]);
-    assert_eq!(same["schema"], "nupdf.diff/v0");
+    assert_eq!(same["schema"], "nupdf.diff/v1");
     assert_eq!(same["identical"], true);
     assert_eq!(same["a"]["doc_id"], same["b"]["doc_id"]);
 
@@ -2459,4 +2462,99 @@ fn diff_names_the_lines_and_pixels_that_changed() {
     // A budget stops the list.
     let d = diff(file, redacted.to_str().unwrap(), &["--max-items", "1"]);
     assert_eq!(d["text"]["truncated"], true);
+}
+
+#[test]
+fn every_report_fits_its_schema() {
+    let listed = nupdf(&["schema"]);
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let names: Vec<String> = listed["schemas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str().map(String::from))
+        .collect();
+    for want in [
+        "info",
+        "extract",
+        "extract.page",
+        "search",
+        "redact",
+        "verify",
+        "diff",
+        "batch.item",
+        "error",
+    ] {
+        assert!(names.iter().any(|n| n == want), "{want}");
+    }
+    let schema = |id: &str| -> Value {
+        let out = nupdf(&["schema", id]);
+        assert!(out.status.success(), "{id}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let work = scratch("schema-work");
+    let _ = std::fs::remove_dir_all(&work);
+    for name in [
+        "stext.pdf",
+        "multipage-inherit.pdf",
+        "fonts-images.pdf",
+        "truncated.pdf",
+        "encrypted-aes-256.pdf",
+    ] {
+        let file = smoke(name);
+        let file = file.to_str().unwrap();
+        let out = work.join(name);
+        let runs: Vec<Vec<&str>> = vec![
+            vec!["info", file],
+            vec!["pages", file],
+            vec!["extract", file],
+            vec!["extract", file, "--format", "jsonl"],
+            vec!["extract", file, "--format", "markdown"],
+            vec!["search", file, "e"],
+            vec!["stext", file],
+            vec!["fonts", file],
+            vec!["images", file],
+            vec!["redact", file, "--text", "e", "--dry-run"],
+            vec!["verify", file, "--text", "e"],
+            vec!["diff", file, file],
+            vec!["render", file, "-o", out.to_str().unwrap(), "--dpi", "10"],
+            vec!["clean", file, "--dry-run"],
+        ];
+        for args in runs {
+            let ran = nupdf(&args);
+            for line in String::from_utf8_lossy(&ran.stdout)
+                .lines()
+                .chain(String::from_utf8_lossy(&ran.stderr).lines())
+            {
+                let Ok(report) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let Some(id) = report["schema"].as_str() else {
+                    continue;
+                };
+                let problems = schema_check::violations(&schema(id), &report);
+                assert!(problems.is_empty(), "{name} {args:?} {id}: {problems:?}");
+            }
+        }
+    }
+    // A name it does not know, as the report's own id or not.
+    assert_eq!(nupdf(&["schema", "nope"]).status.code(), Some(2));
+    assert_eq!(
+        schema("nupdf.extract/v1")["title"],
+        schema("extract")["title"]
+    );
+}
+
+#[test]
+fn the_guide_is_text_for_models() {
+    let out = nupdf(&["guide"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("# nupdf") && text.contains("- `extract <file>`"));
+    let one = nupdf(&["guide", "redact"]);
+    assert!(String::from_utf8_lossy(&one.stdout).contains("--preset"));
+    assert_eq!(nupdf(&["guide", "nope"]).status.code(), Some(2));
+    let skill = nupdf(&["guide", "--skill"]);
+    assert!(String::from_utf8_lossy(&skill.stdout).starts_with("---\nname: nupdf\n"));
 }
