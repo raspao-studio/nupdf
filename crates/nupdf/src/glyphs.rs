@@ -18,6 +18,33 @@ fn agl(name: &[u8]) -> Option<u32> {
         .map(|i| u32::from(tables::AGL_CODES[i]))
 }
 
+/// MuPDF's `FROM_UNICODE`: the code of `u` in an 8-bit encoding, ASCII
+/// (and anything below it) as itself, -1 where it has none.
+fn from_unicode(table: &[(u16, u8)], u: i32) -> i32 {
+    if u < 128 {
+        return u;
+    }
+    u16::try_from(u)
+        .ok()
+        .and_then(|u| table.binary_search_by_key(&u, |&(k, _)| k).ok())
+        .map_or(-1, |i| i32::from(table[i].1))
+}
+
+/// `fz_windows_1252_from_unicode`.
+pub fn windows_1252_from_unicode(u: i32) -> i32 {
+    from_unicode(&tables::WINDOWS_1252_FROM_UNICODE, u)
+}
+
+/// `fz_iso8859_7_from_unicode`.
+pub fn iso8859_7_from_unicode(u: i32) -> i32 {
+    from_unicode(&tables::ISO8859_7_FROM_UNICODE, u)
+}
+
+/// `fz_koi8u_from_unicode`.
+pub fn koi8u_from_unicode(u: i32) -> i32 {
+    from_unicode(&tables::KOI8U_FROM_UNICODE, u)
+}
+
 /// `fz_unicode_from_glyph_name_strict`: 0 for a name not in the list.
 pub fn unicode_strict(name: &[u8]) -> u32 {
     agl(name).unwrap_or(0)

@@ -210,6 +210,8 @@ fn tables(source: &Path) -> Result<String> {
         ("MAC_ROMAN", "fz_glyph_name_from_mac_roman"),
         ("MAC_EXPERT", "fz_glyph_name_from_mac_expert"),
         ("WIN_ANSI", "fz_glyph_name_from_win_ansi"),
+        ("ISO8859_7", "fz_glyph_name_from_iso8859_7"),
+        ("KOI8U", "fz_glyph_name_from_koi8u"),
     ] {
         let names = items(array(&encodings, c)?)?;
         if names.len() != 256 {
@@ -241,6 +243,30 @@ fn tables(source: &Path) -> Result<String> {
         let _ = writeln!(out, "pub static {rust}: [u16; {}] = [", codes.len());
         for chunk in codes.chunks(12) {
             let line: Vec<String> = chunk.iter().map(|c| format!("{c}")).collect();
+            let _ = writeln!(out, "    {},", line.join(", "));
+        }
+        let _ = writeln!(out, "];\n");
+    }
+    for (rust, c) in [
+        ("WINDOWS_1252_FROM_UNICODE", "windows_1252_from_unicode"),
+        ("ISO8859_7_FROM_UNICODE", "iso8859_7_from_unicode"),
+        ("KOI8U_FROM_UNICODE", "koi8u_from_unicode"),
+    ] {
+        let n = numbers(&array(&encodings, c)?.replace(['{', '}'], ","))?;
+        if !n.len().is_multiple_of(2) {
+            bail!("{c} is not a list of pairs");
+        }
+        let _ = writeln!(
+            out,
+            "/// `{c}` (source/fitz/encodings.h): code points above 127, sorted,\n\
+             /// and their codes."
+        );
+        let _ = writeln!(out, "pub static {rust}: [(u16, u8); {}] = [", n.len() / 2);
+        for chunk in n.chunks(16) {
+            let line: Vec<String> = chunk
+                .chunks(2)
+                .map(|p| format!("(0x{:04x}, {})", p[0], p[1]))
+                .collect();
             let _ = writeln!(out, "    {},", line.join(", "));
         }
         let _ = writeln!(out, "];\n");
@@ -322,10 +348,31 @@ fn bidi_classes(db: &str, out: &mut String) -> Result<()> {
             .copied()
             .context("ucdn record out of range")
     };
+    let script = |code: u32| -> Result<u32> {
+        let get = |v: &[u32], i: u32| {
+            v.get(i as usize)
+                .copied()
+                .context("ucdn index out of range")
+        };
+        let index = get(&index0, code >> (shift1 + shift2))? << shift1;
+        let offset = (code >> shift2) & ((1 << shift1) - 1);
+        let index = get(&index1, index + offset)? << shift2;
+        let offset = code & ((1 << shift2) - 1);
+        let record = get(&index2, index + offset)? as usize;
+        records
+            .get(record * 6 + 4)
+            .copied()
+            .context("ucdn record out of range")
+    };
+    let mut scripts: Vec<(u32, u32)> = Vec::new();
     let mut runs: Vec<(u32, u32)> = Vec::new();
     let mut categories: Vec<(u32, u32)> = Vec::new();
     let mut classes: Vec<(u32, u32)> = Vec::new();
     for code in 0..0x110000u32 {
+        let sc = script(code)?;
+        if scripts.last().is_none_or(|&(_, last)| last != sc) {
+            scripts.push((code, sc));
+        }
         let k = combining(code)?;
         if classes.last().is_none_or(|&(_, last)| last != k) {
             classes.push((code, k));
@@ -388,6 +435,19 @@ fn bidi_classes(db: &str, out: &mut String) -> Result<()> {
         classes.len()
     );
     for chunk in classes.chunks(6) {
+        let line: Vec<String> = chunk
+            .iter()
+            .map(|(s, c)| format!("(0x{s:x}, {c})"))
+            .collect();
+        let _ = writeln!(out, "    {},", line.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+    let _ = writeln!(
+        out,
+        "/// `ucdn_get_script` as runs of code points, as `BIDI_CLASS`."
+    );
+    let _ = writeln!(out, "pub static SCRIPT: [(u32, u8); {}] = [", scripts.len());
+    for chunk in scripts.chunks(6) {
         let line: Vec<String> = chunk
             .iter()
             .map(|(s, c)| format!("(0x{s:x}, {c})"))

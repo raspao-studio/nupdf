@@ -40,6 +40,10 @@ The color profiles in [crates/nupdf/icc](crates/nupdf/icc) (gray, sRGB, SWOP CMY
 
 The fonts in [crates/nupdf/fonts/urw](crates/nupdf/fonts/urw) are the URW++ base fonts MuPDF uses for the standard 14 fonts and their substitutes (resources/fonts/urw in MuPDF 1.28.6), unmodified. They are Copyright 2016 by (URW)++ Design & Development and licensed under the SIL Open Font License 1.1, whose text is in [OFL.txt](crates/nupdf/fonts/urw/OFL.txt).
 
+## Glyphless font
+
+[crates/nupdf/fonts/glyphless/pdf.ttf](crates/nupdf/fonts/glyphless/pdf.ttf) is Tesseract's glyphless font (tessdata/pdf.ttf in Tesseract 5.5.4), unmodified, which `ocr` embeds for its invisible text. It is Copyright Google Inc. and the Tesseract authors, licensed under the Apache License 2.0, whose text is in [LICENSE-APACHE](crates/nupdf/fonts/glyphless/LICENSE-APACHE).
+
 ## UCDN
 
 The bidi classes in [crates/nupdf/src/tables.rs](crates/nupdf/src/tables.rs) are generated from MuPDF's copy of UCDN's Unicode database (source/fitz/ucdn_db.h, Unicode 16.0.0). UCDN is Copyright (C) 2012 Grigori Goronzy and is used under the ISC license: permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies. The data comes from the Unicode Character Database, Copyright (C) 1991-2024 Unicode, Inc., under the Unicode License.

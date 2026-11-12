@@ -996,6 +996,17 @@ impl Document {
         }
     }
 
+    /// What loading a page does to a page tree that claims more pages than
+    /// it has, in MuPDF: /Count is rewritten in the document, edited or not
+    /// (`pdf_load_page_tree_internal`). Elsewhere nupdf keeps the count to
+    /// itself until the first edit, as MuPDF's commands that load no page
+    /// see the object unchanged.
+    pub fn settle_page_count(&self) {
+        if let Some(&n) = self.current().page_count_override.get() {
+            self.rewrite_page_count(n);
+        }
+    }
+
     /// Keeps the page map until the next edit.
     pub(crate) fn cache_page_map(&self, map: Option<crate::page::PageMap>) {
         if let Ok(mut e) = self.edits.write() {
@@ -1162,6 +1173,20 @@ impl Document {
                     }
                 }
             }
+        }
+    }
+
+    /// `pdf_load_unencrypted_object`: object `num` parsed from the file as
+    /// it is there, not decrypted and not cached; None for an object that
+    /// is not in the file itself (in an object stream, free, missing).
+    pub fn load_unencrypted(&self, num: i32) -> Option<Object> {
+        let st = self.current();
+        if num <= 0 || num as usize >= st.xref_len() || st.entries.get(num).kind != Kind::InFile {
+            return None;
+        }
+        match self.load_slot(&st, num, false) {
+            Loaded::Obj(o) => Some(o),
+            _ => None,
         }
     }
 
