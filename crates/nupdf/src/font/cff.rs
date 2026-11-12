@@ -650,6 +650,42 @@ impl Cff {
         }))
     }
 
+    /// The unhinted outline of glyph `index` (a CID in a CID-keyed
+    /// font) in font units, with the top dictionary's units per em and
+    /// the glyph's font dictionary's.
+    pub fn outline(&self, index: u32) -> Result<(outline::Outline, u32, u32), LoadError> {
+        let gid = if self.is_cid {
+            if index == 0 {
+                0
+            } else {
+                let g = self.gid_of_cid(index);
+                if g == 0 {
+                    return Err(LoadError);
+                }
+                g
+            }
+        } else if index >= self.num_glyphs() {
+            return Err(LoadError);
+        } else {
+            index
+        };
+        let &(s, e) = self.charstrings.items.get(gid as usize).ok_or(LoadError)?;
+        let cs = self.data.get(s..e).ok_or(LoadError)?;
+        let private = self
+            .privates
+            .get(self.fd_of(gid as usize))
+            .cloned()
+            .unwrap_or_default();
+        let o = outline::charstring_outline(
+            &Glyph {
+                font: self,
+                private: &private,
+            },
+            cs,
+        )?;
+        Ok((o, self.units_per_em, private.units_per_em))
+    }
+
     fn item<'a>(&'a self, index: &Index, n: i64) -> Option<&'a [u8]> {
         let i = usize::try_from(n + bias(index.len())).ok()?;
         let &(s, e) = index.items.get(i)?;

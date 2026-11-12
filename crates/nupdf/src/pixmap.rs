@@ -162,8 +162,23 @@ fn chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
 /// An image's pixmap, as `fz_get_pixmap_from_image` decodes it with no
 /// scaling (`Image.toPixmap()` in MuPDF's scripts).
 pub fn from_image(doc: &Document, image: &Image) -> Result<Pixmap, String> {
-    if image.is_jpx {
-        return Err("unsupported error: JPEG 2000 images are not decoded yet".into());
+    if image.stream.is_none()
+        && let Some((dict, data)) = &image.inline
+    {
+        let (w, h) = (image.width.max(0) as u64, image.height.max(0) as u64);
+        let row = (image.bpc.max(0) as u64 * image.n as u64 * w).div_ceil(8);
+        let len = row.saturating_mul(h);
+        if len > doc.limits().max_decoded_bytes as u64 {
+            return Err("limit error: image too large".into());
+        }
+        let resolve = |o: &Object| doc.resolve(o);
+        let raw = crate::stream::Stream::memory(data, doc.diagnostics());
+        let mut st = crate::filter::open_filters(raw, dict, &resolve, None, None, true)
+            .map_err(|e| e.report())?;
+        let mut out = vec![0; len as usize];
+        let n = st.read(&mut out);
+        out.truncate(n);
+        return decomp(doc, image, &out);
     }
     let Some(stream) = &image.stream else {
         return Err(report::format("image has no data"));
@@ -171,6 +186,10 @@ pub fn from_image(doc: &Document, image: &Image) -> Result<Pixmap, String> {
     let Object::Stream(s) = doc.resolve(stream) else {
         return Err(report::format("object is not a stream"));
     };
+    if image.is_jpx {
+        let data = doc.stream_data(&s).map_err(|e| e.report())?;
+        return jpx_pixmap(doc, image, &data);
+    }
     // What the read of each row needs, whole rows of packed samples.
     let (w, h) = (image.width.max(0) as u64, image.height.max(0) as u64);
     let row = (image.bpc.max(0) as u64 * image.n as u64 * w).div_ceil(8);
@@ -523,6 +542,55 @@ fn unblend_masked_tile(tile: &mut Pixmap, mask: &Pixmap, n: usize, key: &[i32]) 
             };
         }
     }
+}
+
+/// `fz_load_jpx`: a JPEG 2000 image decoded (by hayro-jpeg2000 where MuPDF
+/// uses OpenJPEG) into the image's colorspace, alpha premultiplied.
+fn jpx_pixmap(doc: &Document, image: &Image, data: &[u8]) -> Result<Pixmap, String> {
+    let settings = hayro_jpeg2000::DecodeSettings::default();
+    let jpx = hayro_jpeg2000::Image::new(data, &settings)
+        .map_err(|e| format!("library error: cannot decode JPX image: {e:?}"))?;
+    let (w, h) = (jpx.width() as usize, jpx.height() as usize);
+    let limit = doc.limits().max_decoded_bytes;
+    if w.saturating_mul(h).saturating_mul(5) > limit {
+        return Err("limit error: image too large".into());
+    }
+    let mut ctx = hayro_jpeg2000::DecoderContext::default();
+    let decoded = jpx
+        .decode(&mut ctx)
+        .map_err(|e| format!("library error: cannot decode JPX image: {e:?}"))?;
+    let comps = decoded.components().len();
+    if comps == 0 {
+        return Err("library error: JPX image has no components".into());
+    }
+    let samples = decoded.data_u8();
+    let cs_n = image.colorspace.as_ref().map_or(0, ColorSpace::n);
+    let alpha = image.colorspace.is_none() || comps > cs_n;
+    let colors = if image.colorspace.is_none() { 0 } else { cs_n };
+    let mut out = Pixmap::new(image.colorspace.clone(), w, h, alpha)?;
+    let n = out.n;
+    for (i, px) in out.samples.chunks_mut(n).enumerate() {
+        let src = &samples[(i * comps).min(samples.len())..];
+        let get = |k: usize| src.get(k.min(comps - 1)).copied().unwrap_or(0);
+        if colors == 0 {
+            px[0] = get(0);
+            continue;
+        }
+        for (k, v) in px.iter_mut().enumerate().take(colors) {
+            *v = get(k);
+        }
+        if alpha {
+            let a = get(colors);
+            for v in px.iter_mut().take(colors) {
+                *v = ((u32::from(*v) * u32::from(a)
+                    + 128
+                    + ((u32::from(*v) * u32::from(a) + 128) >> 8))
+                    >> 8) as u8;
+            }
+            px[colors] = a;
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

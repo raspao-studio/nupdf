@@ -7,6 +7,7 @@
 //! `docs/ARCHITECTURE.md`.
 
 pub mod cmap;
+pub mod cms;
 pub mod colorspace;
 pub mod content;
 pub mod content_clean;
@@ -19,6 +20,7 @@ pub mod device;
 pub mod diag;
 mod doc_id;
 pub mod document;
+pub mod draw;
 pub mod edit;
 pub mod extract;
 pub mod fax;

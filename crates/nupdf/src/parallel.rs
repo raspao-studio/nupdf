@@ -90,6 +90,97 @@ pub fn extract_pages(
     map_pages(doc, indices, opts, threads, &|_, r| r)
 }
 
+/// What a page job gets: its position among the pages, the document, the
+/// page object (or the error finding it) and the thread's store, which it
+/// gives back.
+pub type Job<'j, T> =
+    dyn Fn(usize, &Document, &Result<Object, String>, Store) -> (T, Store) + Sync + 'j;
+
+/// `job` on each page at `indices`, on up to `threads` threads, in page
+/// order, with diagnostics and repair handled as for [`map_pages`].
+pub fn run_pages<T: Send>(
+    doc: &Document,
+    indices: &[i32],
+    threads: usize,
+    job: &Job<'_, T>,
+) -> Vec<T> {
+    let pages: Vec<Result<Object, String>> = indices.iter().map(|&i| page_object(doc, i)).collect();
+    let repaired = doc.repair_attempted();
+    let (results, diagnostics) = run_jobs(doc, &pages, threads, job);
+    if !repaired
+        && doc.repair_attempted()
+        && let Some(fresh) = doc.reopen()
+    {
+        drop(results);
+        let ((results, mut diagnostics), tree) = diag::capture(|| {
+            let pages: Vec<_> = indices.iter().map(|&i| page_object(&fresh, i)).collect();
+            run_jobs(&fresh, &pages, 1, job)
+        });
+        diagnostics.extend(tree);
+        report(doc, diagnostics);
+        return results;
+    }
+    report(doc, diagnostics);
+    results
+}
+
+fn run_jobs<T: Send>(
+    doc: &Document,
+    pages: &[Result<Object, String>],
+    threads: usize,
+    job: &Job<'_, T>,
+) -> (Vec<T>, Vec<Diagnostic>) {
+    let one = |i: usize, store: Store| {
+        let ((r, store), d) = diag::capture(|| job(i, doc, &pages[i], store));
+        ((r, d), store)
+    };
+    let threads = threads.clamp(1, pages.len().max(1));
+    let mut done: Vec<Option<Done<T>>> = if threads == 1 {
+        let mut store = Store::default();
+        (0..pages.len())
+            .map(|i| {
+                let (r, next) = one(i, std::mem::take(&mut store));
+                store = next;
+                Some(r)
+            })
+            .collect()
+    } else {
+        let next = AtomicUsize::new(0);
+        let slots: Mutex<Vec<Option<Done<T>>>> =
+            Mutex::new((0..pages.len()).map(|_| None).collect());
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                let spawned = std::thread::Builder::new()
+                    .stack_size(STACK_SIZE)
+                    .spawn_scoped(s, || {
+                        let mut store = Store::default();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::SeqCst);
+                            if i >= pages.len() {
+                                break;
+                            }
+                            let (r, next_store) = one(i, std::mem::take(&mut store));
+                            store = next_store;
+                            if let Ok(mut slots) = slots.lock() {
+                                slots[i] = Some(r);
+                            }
+                        }
+                    });
+                drop(spawned);
+            }
+        });
+        slots.into_inner().unwrap_or_default()
+    };
+    let mut results = Vec::with_capacity(pages.len());
+    let mut diagnostics = Vec::new();
+    for (i, slot) in done.iter_mut().enumerate() {
+        let (r, d) = slot.take().unwrap_or_else(|| one(i, Store::default()).0);
+        results.push(r);
+        diagnostics.extend(d);
+    }
+    (results, diagnostics)
+}
+
 /// `f` of each page at `indices` (its position among them and its
 /// result), on up to `threads` threads, in page order. `f` runs on the
 /// threads too, so the work of turning pages into output is shared.

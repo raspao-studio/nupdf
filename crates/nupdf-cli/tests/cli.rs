@@ -1671,3 +1671,200 @@ fn clean_sanitize_rewrites_contents() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+fn ppm_pixels(path: &std::path::Path) -> (usize, usize, Vec<u8>) {
+    let data = std::fs::read(path).unwrap();
+    let mut parts = data.splitn(4, |&b| b == b'\n');
+    assert_eq!(parts.next().unwrap(), b"P6");
+    let size = String::from_utf8(parts.next().unwrap().to_vec()).unwrap();
+    let mut wh = size.split(' ').map(|v| v.parse::<usize>().unwrap());
+    let (w, h) = (wh.next().unwrap(), wh.next().unwrap());
+    parts.next();
+    (w, h, parts.next().unwrap().to_vec())
+}
+
+#[test]
+fn render_writes_each_page_at_its_size() {
+    let dir = scratch("render-pages");
+    let input = smoke("content-run.pdf");
+    let run = nupdf(&[
+        "render",
+        input.to_str().unwrap(),
+        "-o",
+        dir.to_str().unwrap(),
+        "--format",
+        "ppm",
+        "--dpi",
+        "144",
+    ]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(report["schema"], "nupdf.render/v0");
+    assert_eq!(report["page_count"], 5);
+    let first = &report["pages"][0];
+    // A 90-point page at 144 dpi.
+    assert_eq!(
+        (first["width"].as_u64(), first["height"].as_u64()),
+        (Some(180 * 2), Some(180 * 2))
+    );
+    let (w, h, px) = ppm_pixels(std::path::Path::new(first["file"].as_str().unwrap()));
+    assert_eq!((w, h), (360, 360));
+    // The page is drawn on white and has something on it.
+    assert!(px.contains(&255) && px.iter().any(|&v| v < 128));
+}
+
+#[test]
+fn render_threads_and_bands_do_not_change_the_pixels() {
+    let input = smoke("stext.pdf");
+    let mut images = Vec::new();
+    for threads in ["1", "8"] {
+        let dir = scratch(&format!("render-threads-{threads}"));
+        let run = nupdf(&[
+            "render",
+            input.to_str().unwrap(),
+            "-o",
+            dir.to_str().unwrap(),
+            "--format",
+            "ppm",
+            "--dpi",
+            "300",
+            "--pages",
+            "1",
+            "--threads",
+            threads,
+        ]);
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        images.push(std::fs::read(dir.join("page-0001.ppm")).unwrap());
+    }
+    assert_eq!(images[0], images[1]);
+}
+
+#[test]
+fn render_region_and_pixel_budget() {
+    let input = smoke("stext.pdf");
+    let dir = scratch("render-region");
+    let run = nupdf(&[
+        "render",
+        input.to_str().unwrap(),
+        "-o",
+        dir.to_str().unwrap(),
+        "--pages",
+        "1",
+        "--region",
+        "0,0,100,50",
+        "--dpi",
+        "144",
+    ]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(report["pages"][0]["width"], 200);
+    assert_eq!(report["pages"][0]["height"], 100);
+    let run = nupdf(&[
+        "render",
+        input.to_str().unwrap(),
+        "-o",
+        dir.to_str().unwrap(),
+        "--pages",
+        "1",
+        "--max-pixels",
+        "1000",
+    ]);
+    assert!(run.status.success());
+    let report: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert!(
+        report["pages"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("limit error")
+    );
+    let bad = nupdf(&[
+        "render",
+        input.to_str().unwrap(),
+        "-o",
+        dir.to_str().unwrap(),
+        "--region",
+        "1,2,3",
+    ]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn render_without_color_management_uses_mupdfs_formulas() {
+    // 0 0 1 1 k: cyan through the SWOP profile, or 1 - c, 1 - m, 1 - y.
+    let input = smoke("content-run.pdf");
+    let mut cyan = Vec::new();
+    for flag in [None, Some("--no-icc")] {
+        let dir = scratch(&format!("render-icc-{}", flag.is_some()));
+        let mut args = vec![
+            "render",
+            input.to_str().unwrap(),
+            "-o",
+            dir.to_str().unwrap(),
+            "--format",
+            "ppm",
+            "--pages",
+            "1",
+        ];
+        args.extend(flag);
+        let run = nupdf(&args);
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let (w, _, px) = ppm_pixels(&dir.join("page-0001.ppm"));
+        // Inside the clipped triangle the page fills with 0 0 1 1 k.
+        let at = (180 - 30) * w + 50;
+        cyan.push(px[at * 3..at * 3 + 3].to_vec());
+    }
+    assert_ne!(cyan[0], cyan[1]);
+}
+
+#[test]
+fn redact_dry_run_previews_the_areas() {
+    let input = redaction("split-text.pdf");
+    let dir = scratch("redact-preview");
+    let run = nupdf(&[
+        "redact",
+        input.to_str().unwrap(),
+        "--text",
+        "SECRET-4711",
+        "--dry-run",
+        "--preview",
+        dir.to_str().unwrap(),
+    ]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let report: Value = serde_json::from_slice(&run.stdout).unwrap();
+    let previews = report["previews"].as_array().unwrap();
+    assert_eq!(previews.len(), 1);
+    let file = previews[0]["file"].as_str().unwrap();
+    assert!(std::fs::read(file).unwrap().starts_with(b"\x89PNG"));
+    // --preview needs --dry-run.
+    let run = nupdf(&[
+        "redact",
+        input.to_str().unwrap(),
+        "--text",
+        "x",
+        "--preview",
+        dir.to_str().unwrap(),
+        "-o",
+        "/dev/null",
+    ]);
+    assert_eq!(run.status.code(), Some(2));
+}

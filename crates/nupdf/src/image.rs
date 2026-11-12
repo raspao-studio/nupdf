@@ -38,6 +38,8 @@ pub struct Image {
     /// The XObject whose stream holds the samples; None for an inline
     /// image.
     pub stream: Option<Object>,
+    /// An inline image's dictionary and its still encoded data.
+    pub inline: Option<(crate::object::Dict, std::sync::Arc<[u8]>)>,
 }
 
 /// `fz_lookup_rendering_intent` of an image's /Intent.
@@ -163,6 +165,7 @@ fn load_imp(doc: &Document, obj: &Object, forcemask: bool) -> Result<Image, Stri
         intent: intent(doc, get(b"Intent").as_ref()),
         is_jpx: false,
         stream: Some(obj.clone()),
+        inline: None,
     })
 }
 
@@ -310,6 +313,7 @@ fn load_jpx_data(
         intent: None,
         is_jpx: true,
         stream: Some(obj.clone()),
+        inline: None,
     };
     img.decode = decode_with_default(doc, &Object::Null, img.colorspace.as_ref(), 8, n, false);
     if forcemask {
@@ -400,7 +404,10 @@ fn jpx_colorspace(
         match colorspace::icc_colorspace(doc, icc, None) {
             Ok(family) => {
                 if family.n() == n {
-                    cs = Some(ColorSpace::Icc(family));
+                    cs = Some(ColorSpace::Icc(
+                        family,
+                        colorspace::IccData(Some(std::sync::Arc::from(icc))),
+                    ));
                 } else {
                     diag.warn(
                         "image.jpx_icc",
@@ -605,6 +612,7 @@ pub fn from_inline(doc: &Document, image: &InlineImage) -> Image {
         intent: intent(doc, get(b"Intent").as_ref()),
         is_jpx: false,
         stream: None,
+        inline: Some((image.dict.clone(), std::sync::Arc::from(image.data))),
     }
 }
 
@@ -635,7 +643,7 @@ fn decode_with_default(
     let lab = cs.is_some_and(|c| {
         matches!(
             c,
-            ColorSpace::Lab | ColorSpace::Icc(colorspace::Family::Lab)
+            ColorSpace::Lab | ColorSpace::Icc(colorspace::Family::Lab, _)
         )
     });
     let mut d: Vec<f32> = match obj {

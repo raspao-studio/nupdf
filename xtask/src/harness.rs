@@ -89,7 +89,17 @@ pub enum Compare {
     /// font, flags and direction equal, its origin and size close and its
     /// box overlapping the oracle's by an IoU of at least 0.98.
     Stext,
+    /// Each page's pixels (`/pages/*/file`, PPM files each side wrote):
+    /// the same size, and at most `PIXEL_SHARE` of the pixels off by more
+    /// than `PIXEL_TOLERANCE` in a channel. Errors must agree.
+    Pixels,
 }
+
+/// A channel this far from MuPDF's counts as a different pixel.
+pub const PIXEL_TOLERANCE: u8 = 8;
+/// A page is within the threshold with at most this share of its pixels
+/// different.
+pub const PIXEL_SHARE: f64 = 0.005;
 
 pub const CHECKS: &[Check] = &[
     Check {
@@ -535,6 +545,36 @@ pub const CHECKS: &[Check] = &[
         nupdf_fixup: None,
         reread: Some(Reader::Mutool("oracle/js/objects.js")),
         oracle_args: &[],
+    },
+    render_check(
+        "render-72",
+        &["72"],
+        &[
+            "render", "--no-icc", "--format", "ppm", "--dpi", "72", "-o", "{dir}",
+        ],
+    ),
+    render_check(
+        "render-150",
+        &["150"],
+        &[
+            "render", "--no-icc", "--format", "ppm", "--dpi", "150", "-o", "{dir}",
+        ],
+    ),
+    Check {
+        about: "each page's contents drawn as Page.runPageContents draws them, color management on (MuPDF's lcms2 against nupdf's moxcms): pixels within the threshold",
+        ..render_check(
+            "render-72-icc",
+            &["72", "icc"],
+            &["render", "--format", "ppm", "--dpi", "72", "-o", "{dir}"],
+        )
+    },
+    Check {
+        about: "each page's contents drawn as Page.runPageContents draws them, color management on (MuPDF's lcms2 against nupdf's moxcms): pixels within the threshold",
+        ..render_check(
+            "render-150-icc",
+            &["150", "icc"],
+            &["render", "--format", "ppm", "--dpi", "150", "-o", "{dir}"],
+        )
     },
     Check {
         name: "redact-text",
@@ -1025,6 +1065,25 @@ const fn clean_streams(
 }
 
 /// `clean` with garbage collection at one level, compared as `clean` is.
+const fn render_check(
+    name: &'static str,
+    oracle_args: &'static [&'static str],
+    nupdf_args: &'static [&'static str],
+) -> Check {
+    Check {
+        name,
+        about: "each page's contents drawn as Page.runPageContents draws them, color management off: pixels within the threshold",
+        oracle_script: "oracle/js/render.js",
+        nupdf_args,
+        compare: Compare::Pixels,
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args,
+    }
+}
+
 const fn clean_gc(
     name: &'static str,
     nupdf_args: &'static [&'static str],
@@ -1183,6 +1242,22 @@ pub fn run(
             serde_json::to_string_pretty(&results)?,
         )?;
         summary.push_str(&summary_row(check.name, &results));
+        if let Compare::Pixels = check.compare {
+            let mut m = StextMetrics::default();
+            for r in &results {
+                m += r.stext.unwrap_or_default();
+            }
+            let pct = if m.pages == 0 {
+                0.0
+            } else {
+                100.0 * m.pages_same_text as f64 / m.pages as f64
+            };
+            let _ = writeln!(
+                notes,
+                "- `{}` measures: {} of {} pages ({:.2}%) within the pixel threshold",
+                check.name, m.pages_same_text, m.pages, pct
+            );
+        }
         if let Compare::Stext = check.compare {
             let mut m = StextMetrics::default();
             for r in &results {
@@ -1330,7 +1405,9 @@ fn run_sides(
     }
     oracle_args.extend(check.oracle_args.iter().map(std::ffi::OsStr::new));
     let mut oracle = side(mutool, &oracle_args, timeout);
+    let pixels = matches!(check.compare, Compare::Pixels);
     if check.oracle_writes_files
+        && !pixels
         && let Some(json) = &mut oracle.json
     {
         hash_written_files(json, dir, check.oracle_file_fixup);
@@ -1341,8 +1418,11 @@ fn run_sides(
     }
     let args = nupdf_argv(check, file, &ours_dir);
     let mut ours = side(nupdf, &args, timeout);
+    if pixels && let (Some(a), Some(b)) = (&mut oracle.json, &mut ours.json) {
+        diff_written_pixels(a, dir, b, &ours_dir);
+    }
     if let Some(json) = &mut ours.json {
-        if check.nupdf_args.contains(&"{dir}") {
+        if check.nupdf_args.contains(&"{dir}") && !pixels {
             hash_written_files(json, &ours_dir, None);
         }
         if let Some(f) = check.nupdf_fixup {
@@ -1553,6 +1633,9 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
     if let (Compare::Stext, Some(a)) = (check.compare, &oracle.json) {
         result.stext = Some(stext_metrics(a, ours.json.as_ref().unwrap_or(&Value::Null)));
     }
+    if let (Compare::Pixels, Some(a)) = (check.compare, &oracle.json) {
+        result.stext = Some(pixel_metrics(a, ours.json.as_ref().unwrap_or(&Value::Null)));
+    }
     let failure = |side: &Side, who: &str| -> Option<String> {
         if side.json.is_some() {
             return None;
@@ -1593,6 +1676,7 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
                     Compare::Warnings => compare_warnings(&oracle.stderr, b),
                     Compare::Trace => compare_trace(a, b),
                     Compare::Stext => compare_stext(a, b),
+                    Compare::Pixels => compare_pixels(a, b),
                 };
                 if result.diffs.is_empty() {
                     Outcome::Match
@@ -1610,6 +1694,167 @@ fn judge(check: &Check, file: &str, oracle: Side, ours: Side) -> FileResult {
         result.detail = Some(details.join("; "));
     }
     result
+}
+
+/// A PPM file's size and samples.
+pub fn read_ppm_file(path: &Path) -> Option<(usize, usize, Vec<u8>)> {
+    read_ppm(path)
+}
+
+fn read_ppm(path: &Path) -> Option<(usize, usize, Vec<u8>)> {
+    let data = std::fs::read(path).ok()?;
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while fields.len() < 4 {
+        while data.get(at)?.is_ascii_whitespace() {
+            at += 1;
+        }
+        let start = at;
+        while !data.get(at)?.is_ascii_whitespace() {
+            at += 1;
+        }
+        fields.push(std::str::from_utf8(&data[start..at]).ok()?.to_string());
+    }
+    if fields[0] != "P6" || fields[3] != "255" {
+        return None;
+    }
+    let (w, h) = (fields[1].parse().ok()?, fields[2].parse().ok()?);
+    let samples = data.get(at + 1..)?.to_vec();
+    (samples.len() == w * h * 3).then_some((w, h, samples))
+}
+
+/// For pages each side wrote, takes the files out of both reports and
+/// puts how the pixels differ into nupdf's: `/pages/i/pixels` is
+/// `{"different": n, "max": m}`, or a reason they cannot be compared.
+fn diff_written_pixels(oracle: &mut Value, dir: &Path, ours: &mut Value, ours_dir: &Path) {
+    let (Some(a), Some(b)) = (
+        oracle.get_mut("pages").and_then(Value::as_array_mut),
+        ours.get_mut("pages").and_then(Value::as_array_mut),
+    ) else {
+        return;
+    };
+    for (x, y) in a.iter_mut().zip(b.iter_mut()) {
+        let fa = x.as_object_mut().and_then(|m| m.remove("file"));
+        let fb = y.as_object_mut().and_then(|m| m.remove("file"));
+        let (Some(Value::String(fa)), Some(Value::String(fb))) = (fa, fb) else {
+            continue;
+        };
+        let result = match (read_ppm(&dir.join(fa)), read_ppm(&ours_dir.join(fb))) {
+            (Some((wa, ha, pa)), Some((wb, hb, pb))) if (wa, ha) == (wb, hb) => {
+                let mut different = 0u64;
+                let mut max = 0u8;
+                for (p, q) in pa.as_chunks::<3>().0.iter().zip(pb.as_chunks::<3>().0) {
+                    let d = p
+                        .iter()
+                        .zip(q)
+                        .map(|(u, v)| u.abs_diff(*v))
+                        .max()
+                        .unwrap_or(0);
+                    max = max.max(d);
+                    if d > PIXEL_TOLERANCE {
+                        different += 1;
+                    }
+                }
+                json!({ "different": different, "max": max, "pixels": wa * ha })
+            }
+            (Some(_), Some(_)) => json!("sizes differ"),
+            _ => json!("unreadable"),
+        };
+        y["pixels"] = result;
+    }
+}
+
+/// Pages MuPDF rendered, and of those the ones within the threshold (as
+/// `pages` and `pages_same_text`).
+pub fn pixel_metrics(oracle: &Value, ours: &Value) -> StextMetrics {
+    let mut m = StextMetrics::default();
+    let pages = |v: &Value| {
+        v.get("pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (a, b) = (pages(oracle), pages(ours));
+    for (i, x) in a.iter().enumerate() {
+        if x.get("error").is_some() {
+            continue;
+        }
+        m.pages += 1;
+        let y = b.get(i).unwrap_or(&Value::Null);
+        if pixel_page_diff("", x, y).is_none() {
+            m.pages_same_text += 1;
+        }
+    }
+    m
+}
+
+/// Pages that are not within the pixel threshold, or whose error,
+/// width or height differ.
+pub fn compare_pixels(oracle: &Value, ours: &Value) -> Vec<FieldDiff> {
+    const MAX_REPORTED: usize = 5;
+    let mut diffs = compare(&["/page_count"], oracle, ours);
+    let pages = |v: &Value| {
+        v.get("pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (a, b) = (pages(oracle), pages(ours));
+    let mut differing = 0;
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).unwrap_or(&Value::Null);
+        let y = b.get(i).unwrap_or(&Value::Null);
+        if let Some(d) = pixel_page_diff(&format!("/pages/{i}"), x, y) {
+            differing += 1;
+            if diffs.len() < MAX_REPORTED {
+                diffs.push(d);
+            }
+        }
+    }
+    if differing > MAX_REPORTED {
+        diffs.push(FieldDiff {
+            field: "/pages (more)".into(),
+            oracle: Value::Null,
+            nupdf: Value::from(format!("{differing} pages differ in total")),
+        });
+    }
+    diffs
+}
+
+fn pixel_page_diff(at: &str, x: &Value, y: &Value) -> Option<FieldDiff> {
+    let diff = |field: &str, o: Value, n: Value| {
+        Some(FieldDiff {
+            field: format!("{at}{field}"),
+            oracle: o,
+            nupdf: n,
+        })
+    };
+    let err = |v: &Value| v.get("error").is_some();
+    if err(x) || err(y) {
+        if err(x) && err(y) {
+            return None;
+        }
+        return diff(
+            "/error",
+            x.get("error").cloned().unwrap_or(Value::Null),
+            y.get("error").cloned().unwrap_or(Value::Null),
+        );
+    }
+    for k in ["/width", "/height"] {
+        if x.pointer(k) != y.pointer(k) {
+            return diff(
+                k,
+                x.pointer(k).cloned().unwrap_or(Value::Null),
+                y.pointer(k).cloned().unwrap_or(Value::Null),
+            );
+        }
+    }
+    let p = y.get("pixels").cloned().unwrap_or(Value::Null);
+    let num = |k: &str| p.get(k).and_then(Value::as_f64);
+    match (num("different"), num("pixels")) {
+        (Some(d), Some(n)) if d <= n * PIXEL_SHARE => None,
+        _ => diff("/pixels", Value::Null, p),
+    }
 }
 
 /// Replaces every `"file": name` with `"blake3": <hash of dir/name>`, or

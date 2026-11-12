@@ -101,7 +101,18 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `scrub` (document scrub after redaction) | none; nupdf's own | M6 |
 | `verify` (leak classes) | none; nupdf's own | M6 |
 | `verify` | new | M6 |
-| `render` | `fitz/draw-*.c`, `fitz/colorspace.c`, `fitz/color-lcms.c`, `fitz/separation.c` | M7 |
+| `draw::edge` (the edge list and its anti-aliased scan conversion) | `fitz/draw-edge.c` | M7 |
+| `draw::path` (path flattening, strokes with joins, caps and dashes) | `fitz/draw-path.c` | M7 |
+| `draw::paint` (pixmaps; spans, glyphs and pixmaps painted with MuPDF's 8-bit arithmetic; blend modes) | `fitz/draw-paint.c`, `fitz/paint-glyph.h`, `fitz/draw-blend.c`, `fitz/pixmap.c` | M7 |
+| `draw::device` (the draw device: clips, groups, soft masks, tiles, text, images, shadings) | `fitz/draw-device.c`, `fitz/draw-glyph.c` (`draw_glyph`) | M7 |
+| `draw::glyph` (subpixel placement, FreeType-rendered glyphs and their cache, glyph outlines as paths) | `fitz/draw-glyph.c` (`fz_subpixel_adjust`, `fz_render_glyph`), `fitz/font.c` (`do_ft_render_glyph`, `fz_outline_ft_glyph`) | M7 |
+| `draw::grays` (FreeType's smooth rasterizer, which MuPDF draws glyphs with) | FreeType `src/smooth/ftgrays.c`, `ftsmooth.c`, `src/base/ftoutln.c`, `ftobjs.c` (`ft_glyphslot_preset_bitmap`) | M7 |
+| `draw::image` (subsampling, the scaler, the affine image painter) | `fitz/draw-affine.c`, `fitz/draw-scale-simple.c`, `fitz/pixmap.c` (`fz_subsample_pixmap`), `fitz/image.c` (the subsampling factor) | M7 |
+| `draw::shade` (shadings as triangles) | `fitz/shade.c` (`fz_process_shade`), `fitz/draw-mesh.c` | M7 |
+| `draw::list` (display lists, for band rendering) | `fitz/list-device.c` | M7 |
+| `draw::color` (colors into the page's RGB, with and without color management) | `fitz/colorspace.c` (`fz_convert_color`, `fz_default_colorspace`), `fitz/color-fast.c` | M7 |
+| `cms` (ICC profiles through moxcms, with lcms2's black point compensation) | `fitz/color-lcms.c`; lcms2 `cmscnvrt.c` and `cmssamp.c` (black points) | M7 |
+| `font::outline` (glyph outlines for rendering: TrueType loading at a scale, charstring contours) | FreeType `src/truetype/ttgload.c`, `src/cff/cffgload.c`, `src/type1/t1gload.c` | M4, M7 |
 | `forms`, `annot`, `appearance` | `pdf/pdf-form.c`, `pdf-annot.c`, `pdf-appearance.c` | M9 |
 | `signature` | `pdf/pdf-signature.c` | M9 |
 

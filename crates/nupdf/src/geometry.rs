@@ -421,6 +421,99 @@ impl Matrix {
     }
 }
 
+/// `fz_irect`: a box in whole pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IRect {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl IRect {
+    /// `fz_infinite_irect`.
+    pub const INFINITE: IRect = IRect {
+        x0: i32::MIN,
+        y0: i32::MIN,
+        x1: i32::MAX,
+        y1: i32::MAX,
+    };
+    /// `fz_empty_irect`.
+    pub const EMPTY: IRect = IRect {
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0,
+    };
+
+    pub const fn new(x0: i32, y0: i32, x1: i32, y1: i32) -> IRect {
+        IRect { x0, y0, x1, y1 }
+    }
+
+    /// `fz_is_infinite_irect`.
+    pub fn is_infinite(&self) -> bool {
+        *self == IRect::INFINITE
+    }
+
+    /// `fz_is_empty_irect`.
+    pub fn is_empty(&self) -> bool {
+        self.x0 >= self.x1 || self.y0 >= self.y1
+    }
+
+    /// `fz_intersect_irect`.
+    pub fn intersect(self, b: IRect) -> IRect {
+        if b.is_infinite() {
+            return self;
+        }
+        if self.is_infinite() {
+            return b;
+        }
+        IRect {
+            x0: self.x0.max(b.x0),
+            y0: self.y0.max(b.y0),
+            x1: self.x1.min(b.x1),
+            y1: self.y1.min(b.y1),
+        }
+    }
+
+    /// `fz_irect_from_rect`: the pixels the rect touches.
+    pub fn from_rect(r: Rect) -> IRect {
+        if r.is_infinite() {
+            return IRect::INFINITE;
+        }
+        if !r.is_valid() {
+            return IRect::new(0, 0, -1, -1);
+        }
+        let c = |v: f32| v.clamp(-16777216.0, 16777216.0) as i32;
+        IRect::new(
+            c(r.x0.floor()),
+            c(r.y0.floor()),
+            c(r.x1.ceil()),
+            c(r.y1.ceil()),
+        )
+    }
+
+    /// `fz_round_rect`: as [`IRect::from_rect`], forgiving 0.001 of a
+    /// pixel on each side.
+    pub fn round(r: Rect) -> IRect {
+        let c = |v: f32| v.clamp(-16777216.0, 16777216.0) as i32;
+        IRect::new(
+            c((r.x0 + 0.001).floor()),
+            c((r.y0 + 0.001).floor()),
+            c((r.x1 - 0.001).ceil()),
+            c((r.y1 - 0.001).ceil()),
+        )
+    }
+
+    pub fn width(&self) -> i32 {
+        (self.x1 - self.x0).max(0)
+    }
+
+    pub fn height(&self) -> i32 {
+        (self.y1 - self.y0).max(0)
+    }
+}
+
 /// `fz_quad`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Quad {

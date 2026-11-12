@@ -30,8 +30,8 @@ pub enum ColorSpace {
     Rgb,
     Cmyk,
     Lab,
-    /// An ICCBased space, of the family its profile has.
-    Icc(Family),
+    /// An ICCBased space, of the family its profile has, and the profile.
+    Icc(Family, IccData),
     Indexed {
         base: Box<ColorSpace>,
         high: u8,
@@ -52,7 +52,7 @@ impl ColorSpace {
             ColorSpace::Gray => 1,
             ColorSpace::Rgb | ColorSpace::Lab => 3,
             ColorSpace::Cmyk => 4,
-            ColorSpace::Icc(f) => f.n(),
+            ColorSpace::Icc(f, _) => f.n(),
             ColorSpace::Indexed { .. } => 1,
             ColorSpace::Separation { n, .. } => *n,
         }
@@ -65,10 +65,43 @@ impl ColorSpace {
     /// black). Distinct colors stay distinct, which is what the stext
     /// device's comparisons of colors need.
     pub fn to_rgb(&self, doc: Option<&Document>, color: &[f32]) -> [f32; 3] {
-        self.to_rgb_at(doc, color, 0)
+        self.to_rgb_at(doc, color, 0, &|cs, c| cs.device_to_rgb(c))
     }
 
-    fn to_rgb_at(&self, doc: Option<&Document>, color: &[f32], depth: usize) -> [f32; 3] {
+    /// [`ColorSpace::to_rgb`] with `leaf` converting the device, ICC and
+    /// Lab colors that indexed and separation spaces come down to.
+    pub fn to_rgb_with(
+        &self,
+        doc: Option<&Document>,
+        color: &[f32],
+        leaf: &dyn Fn(&ColorSpace, &[f32]) -> [f32; 3],
+    ) -> [f32; 3] {
+        self.to_rgb_at(doc, color, 0, leaf)
+    }
+
+    /// A device, calibrated, ICC or Lab color by its family's formula.
+    pub fn device_to_rgb(&self, color: &[f32]) -> [f32; 3] {
+        let v = |i: usize| color.get(i).copied().unwrap_or(0.0);
+        match self.family() {
+            Some(Family::Gray) => [v(0), v(0), v(0)],
+            Some(Family::Rgb) => [v(0), v(1), v(2)],
+            Some(Family::Cmyk) => [
+                1.0 - (v(0) + v(3)).min(1.0),
+                1.0 - (v(1) + v(3)).min(1.0),
+                1.0 - (v(2) + v(3)).min(1.0),
+            ],
+            Some(Family::Lab) => lab_to_srgb(v(0), v(1), v(2)),
+            None => [0.0, 0.0, 0.0],
+        }
+    }
+
+    fn to_rgb_at(
+        &self,
+        doc: Option<&Document>,
+        color: &[f32],
+        depth: usize,
+        leaf: &dyn Fn(&ColorSpace, &[f32]) -> [f32; 3],
+    ) -> [f32; 3] {
         let v = |i: usize| color.get(i).copied().unwrap_or(0.0);
         if depth > MAX_DEPTH {
             return [0.0, 0.0, 0.0];
@@ -88,7 +121,7 @@ impl ColorSpace {
                         *x = at(k) / 255.0;
                     }
                 }
-                base.to_rgb_at(doc, &b, depth + 1)
+                base.to_rgb_at(doc, &b, depth + 1, leaf)
             }
             ColorSpace::Separation { base, tint, .. } => {
                 let Some(doc) = doc else {
@@ -97,19 +130,9 @@ impl ColorSpace {
                 let mut b = [0.0f32; MAX_COLORS];
                 let n = base.n().min(MAX_COLORS);
                 tint.eval(doc, color, &mut b[..n]);
-                base.to_rgb_at(Some(doc), &b[..n], depth + 1)
+                base.to_rgb_at(Some(doc), &b[..n], depth + 1, leaf)
             }
-            _ => match self.family() {
-                Some(Family::Gray) => [v(0), v(0), v(0)],
-                Some(Family::Rgb) => [v(0), v(1), v(2)],
-                Some(Family::Cmyk) => [
-                    1.0 - (v(0) + v(3)).min(1.0),
-                    1.0 - (v(1) + v(3)).min(1.0),
-                    1.0 - (v(2) + v(3)).min(1.0),
-                ],
-                Some(Family::Lab) => lab_to_srgb(v(0), v(1), v(2)),
-                None => [0.0, 0.0, 0.0],
-            },
+            _ => leaf(self, color),
         }
     }
 
@@ -133,9 +156,21 @@ impl ColorSpace {
             ColorSpace::Rgb => Some(Family::Rgb),
             ColorSpace::Cmyk => Some(Family::Cmyk),
             ColorSpace::Lab => Some(Family::Lab),
-            ColorSpace::Icc(f) => Some(*f),
+            ColorSpace::Icc(f, _) => Some(*f),
             _ => None,
         }
+    }
+}
+
+/// An ICC profile's bytes, kept for color management. Colorspaces that
+/// differ only in their profile compare equal, as before profiles were
+/// kept.
+#[derive(Debug, Clone, Default)]
+pub struct IccData(pub Option<std::sync::Arc<[u8]>>);
+
+impl PartialEq for IccData {
+    fn eq(&self, _: &IccData) -> bool {
+        true
     }
 }
 
@@ -281,9 +316,9 @@ fn load_icc_based(doc: &Document, dict: &Object, cycle: &mut Cycle) -> Result<Co
         Object::Stream(s) => doc.stream_data(&s).map_err(|e| e.report()),
         _ => Err(report::format("object is not a stream")),
     }
-    .and_then(|data| icc_colorspace(doc, &data, alt.as_ref()));
+    .and_then(|data| icc_colorspace(doc, &data, alt.as_ref()).map(|f| (f, data)));
     match profile {
-        Ok(family) => {
+        Ok((family, data)) => {
             let pn = family.n() as i32;
             if pn > n {
                 diag.warn(
@@ -301,7 +336,10 @@ fn load_icc_based(doc: &Document, dict: &Object, cycle: &mut Cycle) -> Result<Co
                         ),
                     );
                 }
-                cs = Some(ColorSpace::Icc(family));
+                cs = Some(ColorSpace::Icc(
+                    family,
+                    IccData(Some(std::sync::Arc::from(data))),
+                ));
             }
         }
         Err(line) => {

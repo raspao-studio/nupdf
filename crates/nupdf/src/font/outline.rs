@@ -52,8 +52,90 @@ impl Points {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadError;
 
+/// `FT_CURVE_TAG_CONIC`, `_ON` and `_CUBIC`.
+pub const TAG_CONIC: u8 = 0;
+pub const TAG_ON: u8 = 1;
+pub const TAG_CUBIC: u8 = 2;
+
+/// `FT_Outline`: points (26.6 once scaled, font units before), a tag a
+/// point, the last point of each contour.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Outline {
+    pub points: Vec<(i64, i64)>,
+    pub tags: Vec<u8>,
+    pub contours: Vec<usize>,
+    pub even_odd: bool,
+    /// `FT_OUTLINE_OVERLAP`: rendered oversampled, so overlapping
+    /// contours do not darken each other.
+    pub overlap: bool,
+}
+
+impl Outline {
+    /// `FT_Outline_Get_CBox`: the box of every point, off-curve too.
+    pub fn cbox(&self) -> (i64, i64, i64, i64) {
+        let mut it = self.points.iter();
+        let Some(&(x, y)) = it.next() else {
+            return (0, 0, 0, 0);
+        };
+        let mut b = (x, y, x, y);
+        for &(x, y) in it {
+            b.0 = b.0.min(x);
+            b.1 = b.1.min(y);
+            b.2 = b.2.max(x);
+            b.3 = b.3.max(y);
+        }
+        b
+    }
+
+    /// `FT_Outline_Transform` by a 16.16 matrix.
+    pub fn transform(&mut self, xx: i64, xy: i64, yx: i64, yy: i64) {
+        for p in &mut self.points {
+            let (x, y) = *p;
+            *p = (
+                mul_fix(x, xx) + mul_fix(y, xy),
+                mul_fix(x, yx) + mul_fix(y, yy),
+            );
+        }
+    }
+
+    /// `FT_Outline_Translate`.
+    pub fn translate(&mut self, dx: i64, dy: i64) {
+        for p in &mut self.points {
+            p.0 += dx;
+            p.1 += dy;
+        }
+    }
+
+    /// The scaling `cff_slot_load` and `T1_Load_Glyph` apply to an
+    /// unhinted outline: each point by `FT_MulFix`.
+    pub fn scale(&mut self, x_scale: i64, y_scale: i64) {
+        for p in &mut self.points {
+            *p = (mul_fix(p.0, x_scale), mul_fix(p.1, y_scale));
+        }
+    }
+
+    /// Ends the contour being built, if it has points.
+    fn end_contour(&mut self) {
+        let start = self.contours.last().map_or(0, |&l| l + 1);
+        if self.points.len() > start {
+            self.contours.push(self.points.len() - 1);
+        }
+    }
+}
+
+/// `FT_DivFix`: `a * 65536 / b`, rounded.
+pub fn div_fix_int(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0x7FFF_FFFF;
+    }
+    let s = (a < 0) != (b < 0);
+    let (a, b) = (a.unsigned_abs(), b.unsigned_abs());
+    let q = ((a << 16) + (b >> 1)) / b;
+    if s { -(q as i64) } else { q as i64 }
+}
+
 /// `FT_MulFix`: rounds half away from zero.
-pub(crate) fn mul_fix(a: i64, b: i64) -> i64 {
+pub fn mul_fix(a: i64, b: i64) -> i64 {
     let c = a * b;
     (c + 0x8000 - i64::from(c < 0)) >> 16
 }
@@ -73,6 +155,16 @@ const MORE_COMPONENTS: u16 = 0x0020;
 const WE_HAVE_AN_XY_SCALE: u16 = 0x0040;
 const WE_HAVE_A_2X2: u16 = 0x0080;
 const SCALED_COMPONENT_OFFSET: u16 = 0x0800;
+const OVERLAP_COMPOUND: u16 = 0x0400;
+const OVERLAP_SIMPLE: u8 = 0x40;
+
+/// What a TrueType glyph loads into: the outline, and the scale its
+/// points take as they load (None for font units).
+pub(crate) struct Acc {
+    pub out: Outline,
+    pub scale: Option<(i64, i64)>,
+    pub overlap: bool,
+}
 
 /// What the TrueType loader reads a glyph from.
 pub(crate) struct Glyf<'a> {
@@ -144,25 +236,24 @@ impl Glyf<'_> {
         (pos1, size)
     }
 
-    /// `load_truetype_glyph`: the glyph's points appended to `points`.
-    /// `budget` bounds the glyphs loaded for one outline: FreeType has no
-    /// such bound, but nesting composites of many components would
-    /// otherwise take exponential time.
+    /// `load_truetype_glyph`: the glyph's points appended to `acc`,
+    /// scaled as they load when `acc` has a scale. The glyph header's
+    /// xMin, for the phantom point, or None for an empty glyph.
     fn load(
         &self,
         gid: u32,
-        points: &mut Vec<(i64, i64)>,
+        acc: &mut Acc,
         composites: &mut Vec<u32>,
         depth: usize,
         budget: &mut u32,
-    ) -> Result<(), LoadError> {
+    ) -> Result<Option<i64>, LoadError> {
         *budget = budget.checked_sub(1).ok_or(LoadError)?;
         if depth > 100 || gid >= self.num_glyphs {
             return Err(LoadError);
         }
         let (offset, len) = self.location(gid);
         if len == 0 {
-            return Ok(());
+            return Ok(None);
         }
         let start = self.glyf.0.checked_add(offset).ok_or(LoadError)?;
         let glyph = self
@@ -173,12 +264,14 @@ impl Glyf<'_> {
             return Err(LoadError);
         }
         let n_contours = i16::from_be_bytes([glyph[0], glyph[1]]);
+        let x_min = i64::from(i16::from_be_bytes([glyph[2], glyph[3]]));
         let body = &glyph[10..];
         if n_contours > 0 {
-            return simple_glyph(body, n_contours as usize, points);
+            simple_glyph(body, n_contours as usize, acc)?;
+            return Ok(Some(x_min));
         }
         if n_contours == 0 {
-            return Ok(());
+            return Ok(Some(x_min));
         }
         // A composite: its index stands at this depth; an ancestor's index
         // again is a loop.
@@ -187,16 +280,23 @@ impl Glyf<'_> {
             return Err(LoadError);
         }
         composites.push(gid);
-        let start_point = points.len();
-        for sub in self.components(body)? {
-            let base = points.len();
-            self.load(u32::from(sub.index), points, composites, depth + 1, budget)?;
-            if points.len() == base {
+        let start_point = acc.out.points.len();
+        let subs = self.components(body)?;
+        if subs
+            .first()
+            .is_some_and(|s| s.flags & OVERLAP_COMPOUND != 0)
+        {
+            acc.overlap = true;
+        }
+        for sub in subs {
+            let base = acc.out.points.len();
+            self.load(u32::from(sub.index), acc, composites, depth + 1, budget)?;
+            if acc.out.points.len() == base {
                 continue;
             }
-            component(points, start_point, base, &sub)?;
+            component(&mut acc.out.points, start_point, base, &sub, acc.scale)?;
         }
-        Ok(())
+        Ok(Some(x_min))
     }
 
     /// `TT_Load_Composite_Glyph`.
@@ -283,26 +383,25 @@ struct SubGlyph {
 }
 
 /// `TT_Load_Simple_Glyph`.
-fn simple_glyph(
-    body: &[u8],
-    n_contours: usize,
-    points: &mut Vec<(i64, i64)>,
-) -> Result<(), LoadError> {
+fn simple_glyph(body: &[u8], n_contours: usize, acc: &mut Acc) -> Result<(), LoadError> {
+    let base = acc.out.points.len();
     if n_contours >= 0xFFF || 2 * n_contours + 2 > body.len() {
         return Err(LoadError);
     }
     let mut last: i64 = -1;
+    let mut ends = Vec::with_capacity(n_contours);
     for i in 0..n_contours {
         let e = i64::from(be16(body, 2 * i).ok_or(LoadError)?);
         if e <= last {
             return Err(LoadError);
         }
         last = e;
+        ends.push(e as usize);
     }
     let n_points = (last + 1) as usize;
     // FT_GLYPHLOADER_CHECK_POINTS: the outline, with its four phantom
     // points, within FT_OUTLINE_POINTS_MAX.
-    if points.len() + n_points + 4 > 0xFFFF {
+    if base + n_points + 4 > 0xFFFF {
         return Err(LoadError);
     }
     let mut p = 2 * n_contours;
@@ -348,7 +447,18 @@ fn simple_glyph(
     };
     let xs = coords(X_SHORT, X_SAME, &mut p)?;
     let ys = coords(Y_SHORT, Y_SAME, &mut p)?;
-    points.extend(xs.into_iter().zip(ys));
+    if flags.first().is_some_and(|f| f & OVERLAP_SIMPLE != 0) {
+        acc.overlap = true;
+    }
+    let scale = acc.scale;
+    acc.out
+        .points
+        .extend(xs.into_iter().zip(ys).map(|(x, y)| match scale {
+            Some((sx, sy)) => (mul_fix(x, sx), mul_fix(y, sy)),
+            None => (x, y),
+        }));
+    acc.out.tags.extend(flags.iter().map(|f| f & 1));
+    acc.out.contours.extend(ends.into_iter().map(|e| e + base));
     Ok(())
 }
 
@@ -358,6 +468,7 @@ fn component(
     start_point: usize,
     base: usize,
     sub: &SubGlyph,
+    scale: Option<(i64, i64)>,
 ) -> Result<(), LoadError> {
     let [xx, xy, yx, yy] = sub.matrix;
     let have_scale = sub.flags & (WE_HAVE_A_SCALE | WE_HAVE_AN_XY_SCALE | WE_HAVE_A_2X2) != 0;
@@ -387,6 +498,10 @@ fn component(
             x = mul_fix(x, hypot(xx, xy));
             y = mul_fix(y, hypot(yy, yx));
         }
+        if let Some((sx, sy)) = scale {
+            x = mul_fix(x, sx);
+            y = mul_fix(y, sy);
+        }
         (x, y)
     };
     if x != 0 || y != 0 {
@@ -401,9 +516,39 @@ fn component(
 /// A TrueType glyph's points, in font units, or an empty list for a
 /// glyph with no outline.
 pub(crate) fn truetype_points(g: &Glyf<'_>, gid: u32) -> Result<Vec<(i64, i64)>, LoadError> {
-    let mut points = Vec::new();
-    g.load(gid, &mut points, &mut Vec::new(), 0, &mut (1 << 16))?;
-    Ok(points)
+    let mut acc = Acc {
+        out: Outline::default(),
+        scale: None,
+        overlap: false,
+    };
+    g.load(gid, &mut acc, &mut Vec::new(), 0, &mut (1 << 16))?;
+    Ok(acc.out.points)
+}
+
+/// `TT_Load_Glyph` without hinting at `scale` (16.16, the size's x and y
+/// scale): the outline in 26.6, moved so the phantom point `pp1` (the
+/// header's xMin less `lsb`) is the origin.
+pub(crate) fn truetype_outline(
+    g: &Glyf<'_>,
+    gid: u32,
+    scale: (i64, i64),
+    lsb: i64,
+) -> Result<Outline, LoadError> {
+    let mut acc = Acc {
+        out: Outline::default(),
+        scale: Some(scale),
+        overlap: false,
+    };
+    let x_min = g.load(gid, &mut acc, &mut Vec::new(), 0, &mut (1 << 16))?;
+    let mut out = acc.out;
+    out.overlap = acc.overlap;
+    if let Some(x_min) = x_min {
+        let pp1 = mul_fix(x_min - lsb, scale.0);
+        if pp1 != 0 {
+            out.translate(-pp1, 0);
+        }
+    }
+    Ok(out)
 }
 
 // CFF and Type 1 charstrings, as FreeType's Adobe engine runs them.
@@ -436,6 +581,9 @@ struct Num {
 /// reach the outline.
 struct Path<'p> {
     points: &'p mut Points,
+    /// The outline itself, when it is wanted: contours, and each point
+    /// with its tag.
+    outline: Option<&'p mut Outline>,
     start: (f64, f64),
     cur: (f64, f64),
     move_pending: bool,
@@ -449,11 +597,23 @@ fn device(v: f64) -> f64 {
 
 impl Path<'_> {
     fn point(&mut self, x: f64, y: f64) {
-        self.points.add(device(x), device(y));
+        self.tagged(x, y, TAG_ON);
+    }
+
+    fn tagged(&mut self, x: f64, y: f64, tag: u8) {
+        let (x, y) = (device(x), device(y));
+        self.points.add(x, y);
+        if let Some(o) = self.outline.as_deref_mut() {
+            o.points.push((x as i64, y as i64));
+            o.tags.push(tag);
+        }
     }
 
     fn begin(&mut self) {
         if self.move_pending {
+            if let Some(o) = self.outline.as_deref_mut() {
+                o.end_contour();
+            }
             let (x, y) = self.start;
             self.point(x, y);
             self.move_pending = false;
@@ -480,8 +640,8 @@ impl Path<'_> {
     #[allow(clippy::too_many_arguments)]
     fn curve_to(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) {
         self.begin();
-        self.point(x1, y1);
-        self.point(x2, y2);
+        self.tagged(x1, y1, TAG_CUBIC);
+        self.tagged(x2, y2, TAG_CUBIC);
         self.point(x3, y3);
         self.cur = (x3, y3);
     }
@@ -1367,8 +1527,29 @@ pub(crate) fn charstring_cbox(
     cs: &[u8],
 ) -> Result<Option<CBox>, LoadError> {
     let mut points = Points::default();
+    run_charstring(font, cs, &mut points, None)?;
+    Ok(points.cbox())
+}
+
+/// A charstring's outline in font units, as the Adobe engine hands it to
+/// `cff_slot_load` and `T1_Load_Glyph` unhinted (before their scaling).
+pub(crate) fn charstring_outline(font: &dyn Charstrings, cs: &[u8]) -> Result<Outline, LoadError> {
+    let mut points = Points::default();
+    let mut out = Outline::default();
+    run_charstring(font, cs, &mut points, Some(&mut out))?;
+    out.end_contour();
+    Ok(out)
+}
+
+fn run_charstring(
+    font: &dyn Charstrings,
+    cs: &[u8],
+    points: &mut Points,
+    outline: Option<&mut Outline>,
+) -> Result<(), LoadError> {
     let mut path = Path {
-        points: &mut points,
+        points,
+        outline,
         start: (0.0, 0.0),
         cur: (0.0, 0.0),
         move_pending: true,
@@ -1398,8 +1579,7 @@ pub(crate) fn charstring_cbox(
         instructions: &mut instructions,
         doing_seac: false,
     };
-    interp.run(cs)?;
-    Ok(points.cbox())
+    interp.run(cs)
 }
 
 #[cfg(test)]
