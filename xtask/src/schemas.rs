@@ -296,6 +296,7 @@ fn runs(file: &str, work: &Path) -> Vec<Vec<String>> {
         vec!["redact", file, "--text", "e", "--dry-run"],
         vec!["verify", file, "--text", "e"],
         vec!["outline", file],
+        vec!["tables", file],
         vec!["links", file],
         vec!["labels", file],
         vec!["attachments", file],
