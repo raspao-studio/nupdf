@@ -39,6 +39,7 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `object` | `pdf/pdf-object.c` | M1 |
 | `xref` | `pdf/pdf-xref.c` (loading), `fitz/filter-basic.c` (endstream filter) | M1 |
 | `slots` (sparse xref storage) | new; MuPDF allocates every declared slot | M1 |
+| `interrupt` (stopping a call at a deadline or when cancelled) | new | M8 |
 | `crypt` (standard security handler) | `pdf/pdf-crypt.c`, `fitz/crypt-arc4.c`, `fitz/filter-basic.c` (RC4 and AES filters) | M1 |
 | `repair` (scanner) | `pdf/pdf-repair.c` | M1 |
 | `document` (state, loading, object streams, repair rebuild, version, page count; the edit overlay, new documents) | `pdf/pdf-xref.c` (also `pdf_update_object`, `pdf_xref_ensure_incremental_object`, `pdf_create_object`, `pdf_delete_object`, `pdf_update_stream`, `pdf_create_document`), `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1, M3 |
@@ -152,7 +153,7 @@ MuPDF needs a cloned `fz_context` per thread and serializes access to a document
 - `Document: Send + Sync`. Object resolution is lazy. Loaded objects go into a cache split into 64 shards, each behind an `RwLock`, so readers rarely contend. Two threads that race to load the same object may both parse it, and the first result stored wins. A repair builds a new `State` and swaps it in; readers holding the old one finish against it.
 - Shared caches (fonts, decoded images, glyphs) are concurrent maps with size bounds and are keyed by `ObjRef`.
 - Page-level operations (extract, search, render, redaction planning) fan out over pages on scoped threads (`parallel`, D37). Each page has its own resource store and its diagnostics are captured, then reported deduplicated in a fixed order; results are collected by page index. Output is identical at every thread count, and tests enforce that.
-- `batch` adds file-level parallelism on top. The MCP server keeps open documents in a handle cache, so repeated calls do not reparse.
+- `batch` adds file-level parallelism on top. The MCP server runs each call on a thread of its own and keeps files' bytes and ids between calls (D42); documents are parsed for each call, so reports equal the CLI's.
 - Rendering adds band-level parallelism within a page in M7.
 
 ## Safety and limits

@@ -127,7 +127,7 @@ fn page_entry(
             entry["height"] = r.pix.h.into();
             entry["x"] = r.pix.x.into();
             entry["y"] = r.pix.y.into();
-            match bytes.and_then(|b| std::fs::write(path, b).map_err(|e| e.to_string())) {
+            match bytes.and_then(|b| crate::write_file(path, &b).map_err(|e| e.to_string())) {
                 Ok(()) => entry["file"] = path.display().to_string().into(),
                 Err(e) => entry["error"] = e.into(),
             }

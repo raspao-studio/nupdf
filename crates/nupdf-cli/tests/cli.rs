@@ -1911,3 +1911,296 @@ fn redact_dry_run_previews_the_areas() {
     ]);
     assert_eq!(run.status.code(), Some(2));
 }
+
+/// A PDF whose one page draws `ops` lines: slow to run when `ops` is large.
+fn heavy_pdf(name: &str, ops: usize) -> PathBuf {
+    let mut content = Vec::new();
+    for i in 0..ops {
+        content.extend_from_slice(format!("{} 0 m 100 {} l S\n", i % 97, i % 89).as_bytes());
+    }
+    let objects = [
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R>>".to_string(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    offsets.push(out.len());
+    out.extend_from_slice(format!("4 0 obj\n<</Length {}>>\nstream\n", content.len()).as_bytes());
+    out.extend_from_slice(&content);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<</Size 5/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    let path = scratch(name);
+    std::fs::write(&path, out).unwrap();
+    path
+}
+
+/// A running `nupdf mcp`, spoken to a line at a time.
+struct Mcp {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    lines: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Mcp {
+    fn start() -> Mcp {
+        use std::io::BufRead;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nupdf"))
+            .arg("mcp")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("nupdf mcp runs");
+        let stdout = child.stdout.take().unwrap();
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                let _ = tx.send(serde_json::from_str(&line).unwrap());
+            }
+        });
+        let stdin = child.stdin.take();
+        let mut mcp = Mcp {
+            child,
+            stdin,
+            lines,
+        };
+        mcp.send(
+            serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "test", "version": "1"}}}),
+        );
+        assert_eq!(mcp.next()["result"]["serverInfo"]["name"], "nupdf");
+        mcp.send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        mcp
+    }
+
+    fn send(&mut self, message: Value) {
+        use std::io::Write;
+        let stdin = self.stdin.as_mut().unwrap();
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    fn next(&self) -> Value {
+        self.lines
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("an answer")
+    }
+
+    fn call(&mut self, id: u64, tool: &str, args: Value) -> Value {
+        self.send(
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": tool, "arguments": args}}),
+        );
+        let answer = self.next();
+        assert_eq!(answer["id"], id);
+        answer["result"].clone()
+    }
+
+    /// Closes stdin and waits for the server to finish.
+    fn close(mut self) -> std::process::ExitStatus {
+        drop(self.stdin.take());
+        self.child.wait().unwrap()
+    }
+}
+
+#[test]
+fn mcp_tools_give_the_cli_reports() {
+    let mut mcp = Mcp::start();
+    mcp.send(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
+    let tools = mcp.next()["result"]["tools"].clone();
+    let names: Vec<&str> = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    for name in [
+        "info", "stext", "extract", "search", "render", "redact", "clean",
+    ] {
+        assert!(names.contains(&name), "{name}");
+    }
+    let file = smoke("stext.pdf");
+    let file = file.to_str().unwrap();
+    let cases: [(&str, Value, Vec<&str>); 4] = [
+        (
+            "info",
+            serde_json::json!({"file": file}),
+            vec!["info", file],
+        ),
+        (
+            "extract",
+            serde_json::json!({"file": file, "max_chars": 20, "fields": "blocks,lines"}),
+            vec![
+                "extract",
+                file,
+                "--max-chars",
+                "20",
+                "--fields",
+                "blocks,lines",
+            ],
+        ),
+        (
+            "search",
+            serde_json::json!({"file": file, "needle": "word", "options": "ignore-case"}),
+            vec!["search", file, "word", "--options", "ignore-case"],
+        ),
+        (
+            "stext",
+            serde_json::json!({"file": file, "threads": 2}),
+            vec!["stext", file, "--threads", "2"],
+        ),
+    ];
+    for (i, (tool, args, line)) in cases.into_iter().enumerate() {
+        let result = mcp.call(10 + i as u64, tool, args);
+        let cli = nupdf(&line);
+        assert_eq!(result["isError"], false, "{tool}: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert_eq!(
+            text,
+            String::from_utf8_lossy(&cli.stdout).trim_end(),
+            "{tool}"
+        );
+        assert_eq!(
+            result["structuredContent"]["schema"],
+            format!("nupdf.{tool}/v0")
+        );
+    }
+    // Text output: the text, then the report.
+    let result = mcp.call(
+        20,
+        "extract",
+        serde_json::json!({"file": file, "format": "text"}),
+    );
+    let cli = nupdf(&["extract", file, "--format", "text"]);
+    assert_eq!(
+        result["content"][0]["text"].as_str().unwrap(),
+        String::from_utf8_lossy(&cli.stdout).trim_end()
+    );
+    assert_eq!(result["structuredContent"]["schema"], "nupdf.extract/v0");
+    // Failures are tool errors with nupdf's error report.
+    let result = mcp.call(21, "info", serde_json::json!({"file": "/no/such.pdf"}));
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "input.unreadable"
+    );
+    let result = mcp.call(22, "extract", serde_json::json!({"file": file, "nope": 1}));
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "usage.bad_argument"
+    );
+    mcp.send(serde_json::json!({"jsonrpc": "2.0", "id": 23, "method": "no/such"}));
+    assert_eq!(mcp.next()["error"]["code"], -32601);
+    assert!(mcp.close().success());
+}
+
+#[test]
+fn mcp_calls_stop_at_their_timeout_or_when_cancelled() {
+    let heavy = heavy_pdf("mcp-heavy.pdf", 200_000);
+    let heavy = heavy.to_str().unwrap();
+    let mut mcp = Mcp::start();
+    let result = mcp.call(
+        1,
+        "stext",
+        serde_json::json!({"file": heavy, "timeout": 0.05}),
+    );
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["structuredContent"]["error"]["code"],
+        "limit.timeout"
+    );
+
+    // A cancelled call gets no answer, and the server goes on answering.
+    let start = std::time::Instant::now();
+    mcp.send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "render", "arguments": {"file": heavy, "output": scratch("mcp-render").to_str().unwrap()}}}));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    mcp.send(
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+        "params": {"requestId": 2, "reason": "test"}}),
+    );
+    mcp.send(serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}));
+    let answer = mcp.next();
+    assert_eq!(answer["id"], 3, "{answer}");
+    assert!(mcp.close().success());
+    let stopped = start.elapsed();
+    // The cancelled call stopped rather than ran to its end.
+    let full = {
+        let t = std::time::Instant::now();
+        nupdf(&[
+            "render",
+            heavy,
+            "-o",
+            scratch("mcp-render-full").to_str().unwrap(),
+        ]);
+        t.elapsed()
+    };
+    assert!(stopped < full / 2, "{stopped:?} against {full:?}");
+    assert!(!scratch("mcp-render").join("page-1.png").exists());
+}
+
+#[test]
+fn mcp_sees_a_file_that_changed() {
+    let path = scratch("mcp-changing.pdf");
+    std::fs::copy(smoke("stext.pdf"), &path).unwrap();
+    let file = path.to_str().unwrap();
+    let mut mcp = Mcp::start();
+    let first = mcp.call(1, "info", serde_json::json!({"file": file}));
+    std::fs::copy(smoke("multipage-inherit.pdf"), &path).unwrap();
+    let second = mcp.call(2, "info", serde_json::json!({"file": file}));
+    assert_ne!(
+        first["structuredContent"]["doc_id"],
+        second["structuredContent"]["doc_id"]
+    );
+    let cli = nupdf(&["info", file]);
+    assert_eq!(
+        second["content"][0]["text"].as_str().unwrap(),
+        String::from_utf8_lossy(&cli.stdout).trim_end()
+    );
+    assert!(mcp.close().success());
+}
+
+#[test]
+fn a_command_out_of_time_writes_nothing() {
+    let heavy = heavy_pdf("timeout-heavy.pdf", 200_000);
+    let heavy = heavy.to_str().unwrap();
+    let out = nupdf(&["--timeout", "0.01", "stext", heavy]);
+    assert_eq!(out.status.code(), Some(5));
+    assert!(out.stdout.is_empty());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "limit.timeout");
+    let written = scratch("timeout-clean.pdf");
+    let _ = std::fs::remove_file(&written);
+    let out = nupdf(&[
+        "--timeout",
+        "0",
+        "clean",
+        "-c",
+        heavy,
+        "-o",
+        written.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(5));
+    assert!(!written.exists());
+    // Without a timeout the same commands succeed.
+    assert!(
+        nupdf(&["stext", smoke("stext.pdf").to_str().unwrap()])
+            .status
+            .success()
+    );
+}

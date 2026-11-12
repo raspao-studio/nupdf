@@ -12,7 +12,7 @@ The contract that agents program against. The CLI and the MCP server (M8) expose
 6. **Inputs are never modified.** Mutating commands need `-o <path>` (or an explicit `--in-place`), write atomically, and report the output's `doc_id`, size and verification block.
 7. **Every mutation has `--dry-run`.** It returns the plan, writes nothing, and uses the same schema with `"applied": false`.
 8. **Budgets are explicit.** `--max-chars`, `--max-items`, `--fields <list>`, and pagination through `next_cursor`. Large outputs are truncated deliberately, with `"truncated": true` and a cursor, never cut off mid-object.
-9. **Limits are explicit.** `--timeout`, `--max-memory` and the decompression limits have safe defaults. Hitting one is an error with a `limit.*` code, not a hang.
+9. **Limits are explicit.** `--timeout`, `--max-memory` and the decompression limits have safe defaults. Hitting one is an error with a `limit.*` code, not a hang. A command out of time (`--timeout SECONDS`) writes nothing, not its report and not its output files, and fails with exit 5 and `limit.timeout`.
 10. **Deterministic.** Same file, same arguments, same nupdf version: byte-identical output.
 11. **Discoverable.** `nupdf guide` prints compact usage written for models. `nupdf schema <command>` prints the JSON Schema of a report.
 
@@ -110,7 +110,8 @@ Each editing command makes one edit, then writes the document as `clean` writes 
 | `search` | Hits of a needle as MuPDF's search finds them (`fz_match_stext_page_cb`): `--options` takes MuPDF's search options (`ignore-case`, `ignore-diacritics`, `regexp`, `keep-lines`, `keep-paragraphs`, `keep-hyphens`), `--stext-options` the stext options. Each hit has its page, its quads, its text and the content ids of its characters: `id` (`p3.b2.l4.s1:5-12`) when it lies in one span, otherwise `begin` and `end` (`p3.b2.l4.s1:5`). A pattern that does not compile is a page error, as in MuPDF. `--pages` and `--max-items` as for `extract` | M5 |
 | `redact`, `verify` | Remove content and prove it is gone: see the redaction contract below | M6 |
 | `render` | Pages drawn as `mutool draw` draws them (the page contents, without annotations) into `page-NNNN.png` (or `--format ppm`) in `-o DIR`: `--pages`, `--dpi` (72 by default), `--region x0,y0,x1,y1` (points from the page's top left), `--max-pixels` (a larger page is an error for that page, not the command), `--threads N` (pages on N threads, and a large page in bands, with the same pixels at every count). Color management is on, as in `mutool draw` (MuPDF's ICC profiles, with moxcms where MuPDF has lcms2); `--no-icc` converts by MuPDF's formulas, as `-N`. Each page reports its size, its offset, the file it went to, and `run_error` when the content stream broke off | M7 |
-| `mcp`, `batch`, `diff`, `guide`, `schema` | Agent surface | M8 |
+| `mcp` | The commands as tools of an MCP server over stdio: each tool is a command, its arguments the command's options (`file`, `max_chars`, ...), plus `password`, the limits and `timeout`; the result is the command's report as text and as `structuredContent`, a failure a tool error with nupdf's error report. `--call-timeout` (300 s) bounds every call, `--max-output-bytes` (8 MB) the report; a cancelled call stops and gets no answer (D42) | M8 |
+| `batch`, `diff`, `guide`, `schema` | Agent surface | M8 |
 | `forms`, `annots`, `ocr`, `tables`, `attachments`, `outline`, `sanitize`, `signatures` | Coverage | M9 |
 
 ## Examples
