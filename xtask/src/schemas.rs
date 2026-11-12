@@ -376,9 +376,17 @@ fn abouts(nupdf: &Path) -> Result<BTreeMap<String, String>> {
         let help = proc::run(nupdf, &[name.as_str(), "--help"], Duration::from_secs(30))?;
         let text = String::from_utf8_lossy(&help.stdout).into_owned();
         // The about: the lines before the first blank one, as one sentence.
-        let first: Vec<&str> = text.lines().take_while(|l| !l.trim().is_empty()).map(str::trim).collect();
+        let first: Vec<&str> = text
+            .lines()
+            .take_while(|l| !l.trim().is_empty())
+            .map(str::trim)
+            .collect();
         let about = first.join(" ");
-        let sentence = about.split(". ").next().unwrap_or(&about).trim_end_matches('.');
+        let sentence = about
+            .split(". ")
+            .next()
+            .unwrap_or(&about)
+            .trim_end_matches('.');
         if !sentence.is_empty() {
             out.insert(name, format!("{sentence}."));
         }
