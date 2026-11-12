@@ -293,7 +293,7 @@ Exit: ≥98% of standard-tier pages within the pixel threshold of `mutool draw` 
 ## M8: Agent surface
 
 - [x] MCP server over stdio: tools mirror the commands, a document-handle cache avoids reparsing, limits and cancellation apply per call. `nupdf mcp` (D42): every command a tool, its schema read from the CLI's arguments; reports byte for byte the CLI's; files' bytes and ids kept between calls, documents parsed per call so warnings match the CLI's; `timeout`, cancellation and an output ceiling per call, and `--timeout` for the CLI
-- [ ] `batch`: globs, parallel execution, JSONL output, resumable runs
+- [x] `batch`: globs, parallel execution, JSONL output, resumable runs. `nupdf batch` (D43): files, directories and globs; `--jobs` at once with lines in input order, the same at every count; `-o` and `--resume` take a run up again, rerunning files that changed; `{stem}`/`{name}`/`{n}` name outputs; `--item-timeout`
 - [ ] `diff`: compare two PDFs by text, structure and pixels
 - [ ] `guide` (compact usage text for models), `schema <command>` (JSON Schema), and a `SKILL.md` for Claude Code
 - [ ] Freeze schemas at v1, with a changelog

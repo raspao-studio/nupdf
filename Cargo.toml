@@ -19,6 +19,7 @@ blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+glob = "0.3"
 
 # Product crates opt in with `[lints] workspace = true`. xtask does not: it is
 # dev tooling and needs a little unsafe for wait4().
