@@ -9,7 +9,10 @@ use nupdf::Document;
 use nupdf::content::Store;
 use nupdf::extract::{self as ex, Span};
 use nupdf::geometry::{Point, Quad, Rect};
+use nupdf::object::Object;
 use nupdf::stext::{self, Block, Options, StextLine, StextPage};
+use serde::ser::{Serialize, SerializeMap, Serializer};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
 /// How `extract` writes.
@@ -31,18 +34,163 @@ pub struct Args<'a> {
     pub cursor: Option<&'a str>,
     pub fields: Option<&'a str>,
     pub threads: Option<usize>,
+    /// Whether the JSON is laid out again: pages written on the threads
+    /// are then kept as values, not as compact text.
+    pub pretty: bool,
 }
 
 /// What `extract` gives back: for JSON, the report's body; for JSON
 /// lines, a line per page and the body for the last; for text and
 /// Markdown, the text and the body (without pages) for stderr.
 pub enum Extracted {
-    Json(Value),
-    Lines(Vec<Value>, Value),
+    Json(Body),
+    Lines(Vec<PageOut>, Value),
     Text(String, Value),
 }
 
-/// How many pages `--threads` works on ahead.
+/// The JSON report's body: the page count, the pages, then whether the
+/// budget cut them short and where to go on.
+pub struct Body {
+    page_count: Value,
+    pages: Vec<PageOut>,
+    tail: Map<String, Value>,
+}
+
+/// A JSON report: `schema`, `doc_id`, the body, `diagnostics`.
+pub struct Report<'a> {
+    pub schema: &'a str,
+    pub doc_id: &'a str,
+    pub body: &'a Body,
+    pub diagnostics: Value,
+}
+
+impl Serialize for Report<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("schema", self.schema)?;
+        m.serialize_entry("doc_id", self.doc_id)?;
+        m.serialize_entry("page_count", &self.body.page_count)?;
+        m.serialize_entry("pages", &self.body.pages)?;
+        for (k, v) in &self.body.tail {
+            m.serialize_entry(k, v)?;
+        }
+        m.serialize_entry("diagnostics", &self.diagnostics)?;
+        m.end()
+    }
+}
+
+/// A JSON line: `schema`, `doc_id`, then the page's fields.
+pub struct Line<'a> {
+    pub schema: &'a str,
+    pub doc_id: &'a str,
+    pub page: &'a PageOut,
+}
+
+impl Serialize for Line<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("schema", self.schema)?;
+        m.serialize_entry("doc_id", self.doc_id)?;
+        self.page.entries(&mut m)?;
+        m.end()
+    }
+}
+
+/// A page of JSON output: its id and page-level fields, then its blocks
+/// as they were written on the thread that extracted the page.
+pub struct PageOut {
+    head: Map<String, Value>,
+    blocks: Option<Vec<Piece>>,
+}
+
+impl PageOut {
+    fn entries<M: SerializeMap>(&self, m: &mut M) -> Result<(), M::Error> {
+        for (k, v) in &self.head {
+            m.serialize_entry(k, v)?;
+        }
+        if let Some(blocks) = &self.blocks {
+            m.serialize_entry("blocks", blocks)?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for PageOut {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut m = s.serialize_map(None)?;
+        self.entries(&mut m)?;
+        m.end()
+    }
+}
+
+/// What a block is written as: its text, or its JSON, compact or (for
+/// output laid out again) as a value.
+enum Piece {
+    None,
+    Text(String),
+    Value(Value),
+    Raw(Box<RawValue>),
+}
+
+impl Serialize for Piece {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Piece::None => s.serialize_unit(),
+            Piece::Text(t) => s.serialize_str(t),
+            Piece::Value(v) => v.serialize(s),
+            Piece::Raw(r) => r.serialize(s),
+        }
+    }
+}
+
+/// A page made ready on the thread that extracted it, so that the page
+/// loop only fits blocks into the budget: each block's length and output,
+/// and for Markdown the page's Markdown with every block.
+struct Prepared {
+    page: Result<StextPage, String>,
+    blocks: Vec<(usize, Piece)>,
+    markdown: String,
+}
+
+fn prepare(n: usize, page: Result<StextPage, String>, f: &Fields, args: &Args) -> Prepared {
+    let mut blocks = Vec::new();
+    let mut markdown = String::new();
+    if let Ok(p) = &page {
+        for (k, b) in p.blocks.iter().enumerate() {
+            let piece = match args.format {
+                Format::Text => Piece::Text(blocks_text(&[b])),
+                Format::Markdown => Piece::None,
+                Format::Json | Format::Jsonl if f.depth == 0 => {
+                    if f.has("text") {
+                        Piece::Text(blocks_text(&[b]))
+                    } else {
+                        Piece::None
+                    }
+                }
+                Format::Json | Format::Jsonl => {
+                    let v = block_value(b, &format!("p{n}.b{}", k + 1), f);
+                    if args.pretty {
+                        Piece::Value(v)
+                    } else {
+                        serde_json::value::to_raw_value(&v).map_or(Piece::Value(v), Piece::Raw)
+                    }
+                }
+            };
+            blocks.push((ex::block_len(b), piece));
+        }
+        if args.format == Format::Markdown {
+            let all: Vec<&Block> = p.blocks.iter().collect();
+            markdown = ex::markdown(&all, ex::body_size(&all));
+        }
+    }
+    Prepared {
+        page,
+        blocks,
+        markdown,
+    }
+}
+
+/// How many pages `--threads` works on ahead when a budget may stop it.
 const WINDOW: usize = 64;
 
 /// Every field, in the order levels nest.
@@ -309,12 +457,66 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
             .ok_or("the cursor's page is not among the pages asked for")?;
         first_block = block - 1;
     }
+    let ready = Ready {
+        doc,
+        doc_id,
+        args,
+        fields: &fields,
+        indices: &indices,
+        page_count,
+    };
+    match args.threads {
+        Some(threads) => {
+            // Each page is made ready on the thread that extracted it.
+            let job = |index: i32, doc: &Document, page: &Result<Object, String>, store: Store| {
+                let (r, store) = nupdf::parallel::run_page(doc, page, args.options, store);
+                (prepare(index as usize + 1, r, &fields, args), store)
+            };
+            nupdf::parallel::with_workers(doc, threads, &job, |run| {
+                walk(&ready, pos, first_block, Some(run))
+            })
+        }
+        None => walk(&ready, pos, first_block, None),
+    }
+}
+
+/// What the page loop works from.
+struct Ready<'a> {
+    doc: &'a Document,
+    doc_id: &'a str,
+    args: &'a Args<'a>,
+    fields: &'a Fields,
+    indices: &'a [i32],
+    page_count: Result<i32, nupdf::PageCountError>,
+}
+
+/// Runs a window of pages on the kept threads.
+type Windows<'a> = dyn FnMut(&[i32]) -> Vec<Prepared> + 'a;
+
+/// The page loop: from the page at `pos` (and its block `first_block`),
+/// each page in turn while the budget lasts. With `run`, pages are worked
+/// on ahead in windows by it; else one after another, as MuPDF does.
+fn walk(
+    ready: &Ready,
+    mut pos: usize,
+    mut first_block: usize,
+    mut run: Option<&mut Windows>,
+) -> Result<Extracted, String> {
+    let Ready {
+        doc,
+        doc_id,
+        args,
+        fields,
+        indices,
+        ..
+    } = *ready;
+    let page_count = ready.page_count.clone();
     // Text and Markdown go block by block, as JSON with blocks does.
     let by_block = fields.depth >= 1 || matches!(args.format, Format::Text | Format::Markdown);
     let (mut chars, mut items) = (0usize, 0usize);
     let mut truncated = false;
     let mut next = None;
-    let mut pages: Vec<Value> = Vec::new();
+    let mut pages: Vec<PageOut> = Vec::new();
     let mut text = String::new();
     let mut errors = Vec::new();
     let mut store = Store::default();
@@ -330,23 +532,26 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
         let id = format!("p{n}");
         let skip = std::mem::take(&mut first_block);
         pos += 1;
-        let extracted = if let Some(threads) = args.threads {
+        let prepared = if let Some(run) = run.as_mut() {
             // Pages are worked on ahead in windows of the same size at
             // every thread count, so the report does not depend on it.
             if ahead.is_empty() {
-                let window = &indices[pos - 1..indices.len().min(pos - 1 + WINDOW)];
-                ahead.extend(nupdf::parallel::extract(
-                    doc,
-                    window,
-                    args.options,
-                    Some(threads),
-                ));
+                // Without a budget every page is wanted, so all go at once.
+                let size = if args.max_chars.is_some() || args.max_items.is_some() {
+                    WINDOW
+                } else {
+                    indices.len()
+                };
+                let window = &indices[pos - 1..indices.len().min(pos - 1 + size)];
+                ahead.extend(run(window));
             }
-            ahead
-                .pop_front()
-                .unwrap_or_else(|| Err("page was not extracted".to_string()))
+            ahead.pop_front().unwrap_or_else(|| Prepared {
+                page: Err("page was not extracted".to_string()),
+                blocks: Vec::new(),
+                markdown: String::new(),
+            })
         } else {
-            match doc.page(index) {
+            let extracted = match doc.page(index) {
                 Ok(obj) if doc.resolve(&obj).as_dict().is_none() => {
                     Err("page object is not a dictionary".to_string())
                 }
@@ -356,9 +561,15 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
                     result.map_err(|e| nupdf::diag::report::strip(&e).to_string())
                 }
                 Err(e) => Err(e.0),
-            }
+            };
+            prepare(n, extracted, fields, args)
         };
-        let page: StextPage = match extracted {
+        let Prepared {
+            page,
+            blocks: mut pieces,
+            markdown,
+        } = prepared;
+        let page: StextPage = match page {
             Ok(p) => p,
             Err(e) => {
                 if !fits(chars, items, 0) {
@@ -368,17 +579,19 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
                 }
                 items += 1;
                 errors.push(json!({ "page": n, "error": e }));
-                pages.push(json!({ "id": id, "error": e }));
+                let mut head = Map::new();
+                head.insert("id".into(), id.into());
+                head.insert("error".into(), e.into());
+                pages.push(PageOut { head, blocks: None });
                 continue;
             }
         };
         let all: Vec<&Block> = page.blocks.iter().collect();
-        let mut taken: Vec<(usize, &Block)> = Vec::new();
+        let mut taken: Vec<usize> = Vec::new();
         let mut complete = true;
         if by_block {
-            for (k, b) in all.iter().enumerate().skip(skip) {
-                let len = ex::block_len(b);
-                if !fits(chars, items, len) {
+            for (k, (len, _)) in pieces.iter().enumerate().skip(skip) {
+                if !fits(chars, items, *len) {
                     truncated = true;
                     complete = false;
                     next = Some(cursor(n, Some(k + 1), doc_id));
@@ -386,10 +599,10 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
                 }
                 chars += len;
                 items += 1;
-                taken.push((k, b));
+                taken.push(k);
             }
         } else {
-            let len: usize = all.iter().map(|b| ex::block_len(b)).sum();
+            let len: usize = pieces.iter().map(|(len, _)| len).sum();
             if !fits(chars, items, len) {
                 truncated = true;
                 next = Some(cursor(n, None, doc_id));
@@ -397,45 +610,56 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
             }
             chars += len;
             items += 1;
-            taken = all.iter().copied().enumerate().collect();
+            taken = (0..pieces.len()).collect();
         }
-        let blocks: Vec<&Block> = taken.iter().map(|&(_, b)| b).collect();
+        let mut take = |k: usize| std::mem::replace(&mut pieces[k].1, Piece::None);
+        let joined = |take: &mut dyn FnMut(usize) -> Piece| {
+            let mut out = String::new();
+            for &k in &taken {
+                if let Piece::Text(t) = take(k) {
+                    out.push_str(&t);
+                }
+            }
+            out
+        };
         match args.format {
             Format::Text => {
-                text.push_str(&blocks_text(&blocks));
+                text.push_str(&joined(&mut take));
                 if complete {
                     text.push_str("\u{c}\n");
                 }
             }
             Format::Markdown => {
                 text.push_str(&format!("<!-- {id} -->\n\n"));
-                let md = ex::markdown(&blocks, ex::body_size(&all));
+                let md = if taken.len() == all.len() {
+                    markdown
+                } else {
+                    let blocks: Vec<&Block> = taken.iter().map(|&k| all[k]).collect();
+                    ex::markdown(&blocks, ex::body_size(&all))
+                };
                 if !md.is_empty() {
                     text.push_str(&md);
                     text.push_str("\n\n");
                 }
             }
             Format::Json | Format::Jsonl if !taken.is_empty() || complete => {
-                let mut m = Map::new();
-                m.insert("id".into(), id.clone().into());
+                let mut head = Map::new();
+                head.insert("id".into(), id.clone().into());
                 if fields.has("page") {
-                    m.insert("page".into(), n.into());
+                    head.insert("page".into(), n.into());
                 }
                 if fields.has("bbox") {
-                    m.insert("bbox".into(), rect(page.mediabox));
+                    head.insert("bbox".into(), rect(page.mediabox));
                 }
+                let mut blocks = None;
                 if fields.depth == 0 {
                     if fields.has("text") {
-                        m.insert("text".into(), blocks_text(&blocks).into());
+                        head.insert("text".into(), joined(&mut take).into());
                     }
                 } else {
-                    let values: Vec<Value> = taken
-                        .iter()
-                        .map(|&(k, b)| block_value(b, &format!("{id}.b{}", k + 1), &fields))
-                        .collect();
-                    m.insert("blocks".into(), values.into());
+                    blocks = Some(taken.iter().map(|&k| take(k)).collect());
                 }
-                pages.push(Value::Object(m));
+                pages.push(PageOut { head, blocks });
             }
             Format::Json | Format::Jsonl => {}
         }
@@ -443,17 +667,19 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
             break;
         }
     }
+    let page_count = page_count.map_or(Value::Null, |c| json!(c));
     let mut body = Map::new();
-    body.insert(
-        "page_count".into(),
-        page_count.map_or(Value::Null, |c| json!(c)),
-    );
+    body.insert("page_count".into(), page_count.clone());
     match args.format {
         Format::Json => {
-            body.insert("pages".into(), pages.into());
-            body.insert("truncated".into(), truncated.into());
-            body.insert("next_cursor".into(), next.map_or(Value::Null, Value::from));
-            Ok(Extracted::Json(Value::Object(body)))
+            let mut tail = Map::new();
+            tail.insert("truncated".into(), truncated.into());
+            tail.insert("next_cursor".into(), next.map_or(Value::Null, Value::from));
+            Ok(Extracted::Json(Body {
+                page_count,
+                pages,
+                tail,
+            }))
         }
         Format::Jsonl => {
             body.insert("truncated".into(), truncated.into());

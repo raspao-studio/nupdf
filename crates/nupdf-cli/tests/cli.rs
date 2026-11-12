@@ -1496,6 +1496,49 @@ fn threads_do_not_change_the_output() {
     }
 }
 
+/// More pages than `extract` works on at a time, so that it goes through
+/// several windows on the same threads.
+#[test]
+fn threads_do_not_change_long_output() {
+    let long = scratch("threads-long.pdf");
+    let mut args = vec!["merge", "-o", long.to_str().unwrap()];
+    let parts: Vec<String> = ["stext.pdf", "fonts-images.pdf", "multipage-inherit.pdf"]
+        .iter()
+        .map(|n| smoke(n).to_str().unwrap().to_string())
+        .collect();
+    for _ in 0..25 {
+        args.extend(parts.iter().map(String::as_str));
+    }
+    assert!(nupdf(&args).status.success());
+    let file = long.to_str().unwrap();
+    let commands: [&[&str]; 5] = [
+        &["stext"],
+        &["extract"],
+        &["extract", "--format", "text"],
+        &["extract", "--format", "markdown", "--max-chars", "3000"],
+        &["extract", "--format", "jsonl", "--max-items", "150"],
+    ];
+    for command in commands {
+        let at = |threads: Option<&str>| {
+            let mut args: Vec<&str> = command.to_vec();
+            args.insert(1, file);
+            if let Some(t) = threads {
+                args.extend(["--threads", t]);
+            }
+            let out = nupdf(&args);
+            assert!(out.status.success(), "{command:?}");
+            (out.stdout, out.stderr)
+        };
+        let one = at(Some("1"));
+        for t in ["3", "8"] {
+            assert!(at(Some(t)) == one, "{command:?} --threads {t}");
+        }
+        if command[0] == "extract" {
+            assert!(at(None) == one, "{command:?} without threads");
+        }
+    }
+}
+
 #[test]
 fn stext_pretty_is_the_same_report_laid_out() {
     // Compact output writes each page on its thread; --pretty writes them

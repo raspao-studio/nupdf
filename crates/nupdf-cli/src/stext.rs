@@ -23,7 +23,7 @@ pub struct Body {
 enum Pages {
     /// Each page as compact JSON; `None` only if it could not be written,
     /// which a page of finite numbers and strings never fails to be.
-    Written(Vec<Option<String>>),
+    Written(Vec<Option<Vec<u8>>>),
     Kept(Vec<PageResult>),
 }
 
@@ -50,7 +50,7 @@ impl Body {
                     if i > 0 {
                         out.write_all(b",")?;
                     }
-                    out.write_all(page.as_deref().unwrap_or("null").as_bytes())?;
+                    out.write_all(page.as_deref().unwrap_or(b"null"))?;
                 }
             }
             Pages::Kept(pages) => {
@@ -82,7 +82,8 @@ impl Body {
                     .iter()
                     .map(|p| {
                         p.as_ref()
-                            .and_then(|p| serde_json::value::RawValue::from_string(p.clone()).ok())
+                            .and_then(|p| String::from_utf8(p.clone()).ok())
+                            .and_then(|p| serde_json::value::RawValue::from_string(p).ok())
                     })
                     .collect();
                 map.serialize_entry("pages", &pages)
@@ -122,7 +123,7 @@ pub fn stext(doc: &Document, opts: Options, threads: Option<usize>, keep: bool) 
 /// A page as compact JSON. Each thread writes into one buffer it keeps,
 /// and the page is copied out at its size: growing a fresh buffer for
 /// every page copied the larger pages over and over.
-fn write_page(page: &PageResult) -> Option<String> {
+fn write_page(page: &PageResult) -> Option<Vec<u8>> {
     thread_local! {
         static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
@@ -130,7 +131,7 @@ fn write_page(page: &PageResult) -> Option<String> {
         let mut buf = buf.try_borrow_mut().ok()?;
         buf.clear();
         serde_json::to_writer(&mut *buf, &PageJson(page)).ok()?;
-        String::from_utf8(buf.as_slice().to_vec()).ok()
+        Some(buf.as_slice().to_vec())
     })
 }
 
@@ -321,7 +322,7 @@ impl Serialize for CharJson<'_> {
         let mut t = s.serialize_tuple(7)?;
         t.serialize_element(&char_text(c.c))?;
         t.serialize_element(&point(c.origin))?;
-        t.serialize_element(&crate::trace::script_string(&c.font.name))?;
+        t.serialize_element(&*crate::trace::script_str(&c.font.name))?;
         t.serialize_element(&Number(c.size))?;
         t.serialize_element(&quad(c.quad))?;
         t.serialize_element(&c.flags)?;

@@ -714,6 +714,7 @@ fn run(cli: Cli) -> ExitCode {
                 cursor: cursor.as_deref(),
                 fields: fields.as_deref(),
                 threads: *threads,
+                pretty: cli.pretty,
             };
             let extracted = match extract::extract(&doc, &facts.doc_id, &args) {
                 Ok(e) => e,
@@ -878,7 +879,7 @@ fn run(cli: Cli) -> ExitCode {
                 Ok(out)
             } else {
                 // The report goes to stdout before the failure.
-                emit(&mut std::io::stdout().lock(), &out, false);
+                emit(&mut standard_output(), &out, false);
                 Err(Failure {
                     exit: Exit::Verify,
                     code: "verify.failed",
@@ -907,7 +908,7 @@ fn run(cli: Cli) -> ExitCode {
                 Err(failure) => return fail(failure, cli.pretty),
             };
             let body = stext::stext(&doc, opts, *threads, cli.pretty);
-            let stdout = &mut std::io::stdout().lock();
+            let stdout = &mut standard_output();
             if cli.pretty {
                 let report = StextReport {
                     facts: &facts,
@@ -1084,7 +1085,7 @@ fn run(cli: Cli) -> ExitCode {
     };
     match result {
         Ok(report) => {
-            emit(&mut std::io::stdout().lock(), &report, cli.pretty);
+            emit(&mut standard_output(), &report, cli.pretty);
             ExitCode::SUCCESS
         }
         Err(failure) => fail(failure, cli.pretty),
@@ -1116,6 +1117,22 @@ fn emit(out: &mut impl Write, value: &impl Serialize, pretty: bool) {
         let _ = writeln!(out);
     }
     let _ = out.flush();
+}
+
+/// Standard output without `Stdout`'s line buffering, which looks for the
+/// last newline in everything written: for compact JSON, a pass over the
+/// whole report on one thread after the pages are done. Where the
+/// descriptor cannot be duplicated, `Stdout` itself.
+fn standard_output() -> Box<dyn Write> {
+    let _ = std::io::stdout().flush();
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        if let Ok(fd) = std::io::stdout().as_fd().try_clone_to_owned() {
+            return Box::new(std::fs::File::from(fd));
+        }
+    }
+    Box::new(std::io::stdout().lock())
 }
 
 /// A `stext` report with its pages already written as JSON.
@@ -1158,11 +1175,7 @@ fn stream_objects(doc: &Document, facts: &FileFacts, pretty: bool) -> ExitCode {
             map.end()
         }
     }
-    emit(
-        &mut std::io::stdout().lock(),
-        &Report { facts, doc },
-        pretty,
-    );
+    emit(&mut standard_output(), &Report { facts, doc }, pretty);
     ExitCode::SUCCESS
 }
 
@@ -1176,27 +1189,28 @@ fn emit_extracted(
     const SCHEMA: &str = "nupdf.extract/v0";
     match extracted {
         extract::Extracted::Json(body) => {
-            emit(
-                &mut std::io::stdout().lock(),
-                &report(SCHEMA, facts, doc, body),
-                pretty,
-            );
+            let report = extract::Report {
+                schema: SCHEMA,
+                doc_id: &facts.doc_id,
+                body: &body,
+                diagnostics: diagnostics(doc),
+            };
+            emit(&mut standard_output(), &report, pretty);
         }
         extract::Extracted::Lines(pages, body) => {
-            let mut out = std::io::stdout().lock();
-            for page in pages {
-                let mut line = serde_json::Map::new();
-                line.insert("schema".into(), "nupdf.extract.page/v0".into());
-                line.insert("doc_id".into(), facts.doc_id.clone().into());
-                if let serde_json::Value::Object(fields) = page {
-                    line.extend(fields);
-                }
-                emit(&mut out, &serde_json::Value::Object(line), false);
+            let mut out = standard_output();
+            for page in &pages {
+                let line = extract::Line {
+                    schema: "nupdf.extract.page/v0",
+                    doc_id: &facts.doc_id,
+                    page,
+                };
+                emit(&mut out, &line, false);
             }
             emit(&mut out, &report(SCHEMA, facts, doc, body), false);
         }
         extract::Extracted::Text(text, body) => {
-            let mut out = std::io::stdout().lock();
+            let mut out = standard_output();
             // A closed pipe is not ours to report.
             let _ = out.write_all(text.as_bytes());
             let _ = out.flush();
