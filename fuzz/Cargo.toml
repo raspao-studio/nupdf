@@ -142,3 +142,9 @@ name = "navigation"
 path = "fuzz_targets/navigation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "forms"
+path = "fuzz_targets/forms.rs"
+test = false
+doc = false
