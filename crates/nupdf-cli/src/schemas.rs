@@ -5,6 +5,7 @@
 //! The JSON Schema of every report, by name (`extract`, `extract.page`).
 
 pub const SCHEMAS: &[(&str, &str)] = &[
+    ("attachments", include_str!("../schemas/attachments.json")),
     ("batch", include_str!("../schemas/batch.json")),
     ("batch.item", include_str!("../schemas/batch.item.json")),
     ("clean", include_str!("../schemas/clean.json")),
@@ -17,10 +18,13 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ("fonts", include_str!("../schemas/fonts.json")),
     ("images", include_str!("../schemas/images.json")),
     ("info", include_str!("../schemas/info.json")),
+    ("labels", include_str!("../schemas/labels.json")),
+    ("links", include_str!("../schemas/links.json")),
     ("merge", include_str!("../schemas/merge.json")),
     ("meta", include_str!("../schemas/meta.json")),
     ("objects", include_str!("../schemas/objects.json")),
     ("operators", include_str!("../schemas/operators.json")),
+    ("outline", include_str!("../schemas/outline.json")),
     ("pages", include_str!("../schemas/pages.json")),
     ("redact", include_str!("../schemas/redact.json")),
     ("render", include_str!("../schemas/render.json")),

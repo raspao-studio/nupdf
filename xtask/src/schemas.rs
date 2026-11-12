@@ -295,6 +295,10 @@ fn runs(file: &str, work: &Path) -> Vec<Vec<String>> {
         vec!["decrypt", file, "--dry-run"],
         vec!["redact", file, "--text", "e", "--dry-run"],
         vec!["verify", file, "--text", "e"],
+        vec!["outline", file],
+        vec!["links", file],
+        vec!["labels", file],
+        vec!["attachments", file],
         vec!["diff", file, file],
         vec![
             "diff",
@@ -353,19 +357,33 @@ fn collect(out: &[u8], into: &mut BTreeMap<String, Vec<Value>>) {
     }
 }
 
-/// Each command's first sentence, as `nupdf guide` lists it.
+/// Each command's first sentence, from its own `--help`; the commands are
+/// those `nupdf guide` names.
 fn abouts(nupdf: &Path) -> Result<BTreeMap<String, String>> {
     let r = proc::run(nupdf, &["guide"], Duration::from_secs(30))?;
-    Ok(String::from_utf8_lossy(&r.stdout)
-        .lines()
-        .filter_map(|l| {
-            let rest = l.strip_prefix("- `")?;
-            let (usage, about) = rest.split_once("`: ")?;
-            let name = usage.split(' ').next()?;
-            let about = about.split(" Options: ").next()?.to_string();
-            Some((name.to_string(), about))
-        })
-        .collect())
+    let guide = String::from_utf8_lossy(&r.stdout).into_owned();
+    let names: Vec<String> = guide
+        .split("## Commands")
+        .nth(1)
+        .unwrap_or("")
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    let mut out = BTreeMap::new();
+    for name in names {
+        let help = proc::run(nupdf, &[name.as_str(), "--help"], Duration::from_secs(30))?;
+        let text = String::from_utf8_lossy(&help.stdout).into_owned();
+        // The about: the lines before the first blank one, as one sentence.
+        let first: Vec<&str> = text.lines().take_while(|l| !l.trim().is_empty()).map(str::trim).collect();
+        let about = first.join(" ");
+        let sentence = about.split(". ").next().unwrap_or(&about).trim_end_matches('.');
+        if !sentence.is_empty() {
+            out.insert(name, format!("{sentence}."));
+        }
+    }
+    Ok(out)
 }
 
 /// `nupdf.extract.page/v1` → `extract.page`.

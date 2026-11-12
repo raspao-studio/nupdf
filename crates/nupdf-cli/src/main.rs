@@ -12,6 +12,7 @@ mod guide;
 mod inventory;
 mod mcp;
 mod md5;
+mod navigation;
 mod objects;
 mod redact;
 mod render;
@@ -369,6 +370,24 @@ enum Command {
         /// as `mutool draw -N`.
         #[arg(long)]
         no_icc: bool,
+    },
+    /// The outline (bookmarks): each entry's title, link, whether it is
+    /// open, the page it leads to, and the entries below it.
+    Outline { file: PathBuf },
+    /// Each page's links: their boxes, where they lead (a URI, and the
+    /// page for a link inside the document).
+    Links { file: PathBuf },
+    /// Each page's label, as a viewer shows it (`iv`, `A-3`), from the
+    /// document's page labels or else its number.
+    Labels { file: PathBuf },
+    /// The embedded files: name, file name, type, size, dates, and whether
+    /// the data matches its checksum; --extract writes each one out.
+    Attachments {
+        file: PathBuf,
+        /// Write each embedded file into this directory, as
+        /// attachment-NNNN-<name>.
+        #[arg(long)]
+        extract: Option<PathBuf>,
     },
     /// List the fonts the pages use, as `mutool info` finds them, with
     /// what each loads as; --extract writes the embedded font programs as
@@ -1100,6 +1119,37 @@ fn run(cli: Cli) -> ExitCode {
             }
             return ExitCode::SUCCESS;
         }
+        Command::Outline { file } => open(file).and_then(|(doc, facts)| {
+            let body = navigation::outline(&doc).map_err(|e| Failure {
+                exit: Exit::Input,
+                code: "input.outline",
+                message: nupdf::diag::report::strip(&e).to_string(),
+            })?;
+            Ok(report("nupdf.outline/v1", &facts, &doc, body))
+        }),
+        Command::Links { file } | Command::Labels { file } => {
+            open(file).and_then(|(doc, facts)| {
+                let (schema, body) = match &cli.command {
+                    Command::Links { .. } => ("nupdf.links/v1", navigation::links(&doc)),
+                    _ => ("nupdf.labels/v1", navigation::labels(&doc)),
+                };
+                let body = body.map_err(|e| Failure {
+                    exit: Exit::Input,
+                    code: "input.page_tree",
+                    message: e,
+                })?;
+                Ok(report(schema, &facts, &doc, body))
+            })
+        }
+        Command::Attachments { file, extract } => open(file).and_then(|(doc, facts)| {
+            let dir = extract.as_deref().map(output_dir).transpose()?;
+            Ok(report(
+                "nupdf.attachments/v1",
+                &facts,
+                &doc,
+                navigation::attachments(&doc, dir),
+            ))
+        }),
         Command::Fonts { file, extract } => open(file).and_then(|(doc, facts)| {
             let dir = extract.as_deref().map(output_dir).transpose()?;
             Ok(report(

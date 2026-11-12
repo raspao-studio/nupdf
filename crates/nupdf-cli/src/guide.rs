@@ -18,7 +18,7 @@ PDF toolkit for agents. `nupdf <command> <file> [options]` prints one JSON repor
 - Triage: `info <file>`.
 - Read: `extract <file> --format markdown` (or `text`); add `--options reading-order` when text comes out of order (columns, forms). `--format json` gives ids (`p3.b2.l4`), boxes and fonts. Long files: `--max-chars 8000`, then `--cursor <next_cursor>`; `--pages 3-5`.
 - Find: `search <file> <needle> [--options ignore-case,regexp]`: page, quads, text, ids.
-- Look: `render <file> -o dir --pages 2 --dpi 72`.
+- Look: `render <file> -o dir --pages 2 --dpi 72`. Find your way: `outline` (bookmarks, with pages), `links`, `labels` (page labels), `attachments [--extract dir]`.
 - Write (input never changed; `-o out` or `--dry-run`): `redact <file> -o out --text|--regex|--preset pii|--region|--id` removes it everywhere and re-checks, exit 4 if anything is left; `verify <file> --text`; `merge a.pdf b.pdf 1-3 -o out`; `split <file> -o dir --ranges "1-3;4-N"`; `pages --select|--delete|--rotate`; `meta --set Title=...`; `clean`, `encrypt`, `decrypt`.
 - Compare: `diff a.pdf b.pdf`. Many files: `batch <files|dirs|globs> -- <command> [args]`.
 - Pages are 1-based (`N` is the last); coordinates are points, origin top left. `--password` for encrypted files, `--timeout S` on anything.

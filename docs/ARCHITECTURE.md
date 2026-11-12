@@ -66,7 +66,10 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `insert` (putting a page into the page tree, page labels shifted) | `pdf/pdf-page.c` (`pdf_insert_page`, `pdf_adjust_page_labels`), `pdf/pdf-repair.c` (`pdf_walk_parent`) | M3 |
 | `geometry` (points, rectangles, matrices in single precision) | `fitz/geometry.c` | M3 |
 | `link` (links read as URIs and written back: destinations, actions, file specifications, `pdf_create_link`) | `pdf/pdf-link.c`, `pdf/pdf-annot.c` (`pdf_create_link`), `pdf/pdf-nametree.c` (`pdf_lookup_dest`), `pdf/pdf-page.c` (`pdf_lookup_page_number`), `fitz/link.c`, `fitz/string.c` (URI encoding, `fz_cleanname`) | M3 |
-| `outline` (MuPDF's outline iterator, repair pass included) | `pdf/pdf-outline.c` | M3 |
+| `outline` (MuPDF's outline iterator, repair pass included; the whole outline as `fz_load_outline` reads it) | `pdf/pdf-outline.c`, `fitz/outline.c` (`fz_load_outline_from_iterator`) | M3, M9 |
+| `page_label` (page labels from the /PageLabels number tree) | `pdf/pdf-page.c` (`pdf_lookup_page_label`, `pdf_format_page_label`, `pdf_page_label`) | M9 |
+| `embedded` (embedded files: the name tree, file specifications, contents, checksums) | `pdf/pdf-link.c` (`get_file_stream_and_name`, `pdf_get_filespec_params` and the rest), `tools/murun.c` (`getEmbeddedFiles`) | M9 |
+| `date` (PDF dates as seconds since 1970) | `pdf/pdf-parse.c` (`pdf_parse_date`) | M9 |
 | `merge` (`mutool merge`: pages, external links, outline items) | `tools/pdfmerge.c` | M3 |
 | `content` (content streams lexed and handed to a processor: the operand stack, ExtGState entries, inline images, contents arrays) | `pdf/pdf-interpret.c` (`pdf_process_stream`, `pdf_process_keyword`, `pdf_process_extgstate`), `pdf/pdf-image.c` (inline images), `pdf/pdf-stream.c` (`pdf_open_contents_stream`, `pdf_open_object_array`, `pdf_load_compressed_inline_image`), `fitz/filter-basic.c` (`fz_open_concat`), `fitz/filter-leech.c`, `fitz/image.c` (`fz_decomp_image_from_stream`) | M4 |
 | `colorspace` (colorspace definitions: families, components, indexed and separation bases; ICC profiles judged by their header as lcms opens it) | `pdf/pdf-colorspace.c`, `fitz/colorspace.c` (`fz_new_indexed_colorspace`, `fz_new_icc_colorspace`), `thirdparty/lcms2/src/cmsio0.c` (`_cmsReadHeader`), `cmspcs.c` (`cmsChannelsOf`) | M4 |
