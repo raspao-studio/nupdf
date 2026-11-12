@@ -8,6 +8,7 @@
 //! have fitted on the line before, and the short lines of justified text;
 //! titles marked as `H` and list items as `LI`, as MuPDF does it.
 
+use crate::fma::Madd;
 use std::sync::Arc;
 
 use crate::fontdesc::Font;
@@ -542,7 +543,7 @@ impl Justify {
         }
         let n = self.gap_count_this_line as f32;
         // Fused, as clang compiles MuPDF's `size * n + gap`.
-        self.gap_size_this_line = self.gap_size_this_line.mul_add(n, gap) / (n + 1.0);
+        self.gap_size_this_line = self.gap_size_this_line.madd(n, gap) / (n + 1.0);
         self.gap_count_this_line += 1;
     }
 }

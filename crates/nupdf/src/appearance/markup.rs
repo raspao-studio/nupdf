@@ -8,6 +8,7 @@
 //! Text markup, redactions, carets and icons.
 
 use super::{Writer, len, pt, real_at};
+use crate::fma::Madd;
 use crate::geometry::{Point, Rect};
 use crate::object::Object;
 
@@ -44,7 +45,7 @@ fn extract_quad(w: &Writer, qp: &Object, i: usize) -> ([Point; 4], f32) {
     ];
     let dx = quad[UL].x - quad[LL].x;
     let dy = quad[UL].y - quad[LL].y;
-    (quad, dx.mul_add(dx, dy * dy).sqrt())
+    (quad, dx.madd(dx, dy * dy).sqrt())
 }
 
 /// `union_quad`: `rect` grown to cover the quad's box expanded by `lw`.
@@ -60,7 +61,7 @@ fn union_quad(rect: Rect, quad: &[Point; 4], lw: f32) -> Rect {
 
 /// `lerp_point`.
 fn lerp_point(a: Point, b: Point, t: f32) -> Point {
-    pt(t.mul_add(b.x - a.x, a.x), t.mul_add(b.y - a.y, a.y))
+    pt(t.madd(b.x - a.x, a.x), t.madd(b.y - a.y, a.y))
 }
 
 /// The annotation's /QuadPoints and how many numbers it has.
@@ -82,7 +83,7 @@ pub(super) fn highlight(w: &mut Writer, rect: &mut Rect) -> Result<(), String> {
         let m = h / 4.2425;
         let dx = quad[LR].x - quad[LL].x;
         let dy = quad[LR].y - quad[LL].y;
-        let vn = dx.mul_add(dx, dy * dy).sqrt();
+        let vn = dx.madd(dx, dy * dy).sqrt();
         let v = pt(dx * m / vn, dy * m / vn);
 
         let mut mquad = [pt(0.0, 0.0); 4];
@@ -171,7 +172,7 @@ pub(super) fn squiggly(w: &mut Writer, rect: &mut Rect) -> Result<(), String> {
         let mut up = true;
         let (quad, h) = extract_quad(w, &qp, i);
         let v = pt(quad[LR].x - quad[LL].x, quad[LR].y - quad[LL].y);
-        let width = v.x.mul_add(v.x, v.y * v.y).sqrt();
+        let width = v.x.madd(v.x, v.y * v.y).sqrt();
         let mut x = 0.0f32;
 
         w.op(&[h / 16.0], "w");

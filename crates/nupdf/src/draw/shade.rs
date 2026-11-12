@@ -10,6 +10,7 @@
 
 use crate::colorspace::{ColorSpace, MAX_COLORS};
 use crate::document::Document;
+use crate::fma::Madd;
 use crate::geometry::{IRect, Matrix, Point, Rect};
 use crate::shade::{Shade, ShadeData};
 
@@ -96,13 +97,13 @@ fn prepare_edge(vtop: &Vert, vbot: &Vert, y: f32, n: usize) -> Edge {
     let t = (y - vtop[1]) * r;
     let diff = vbot[0] - vtop[0];
     let mut e = Edge {
-        x: diff.mul_add(t, vtop[0]),
+        x: diff.madd(t, vtop[0]),
         dx: diff * r,
         v: [0; 2 * MAXN],
     };
     for i in 0..n {
         let diff = vbot[i + 2] - vtop[i + 2];
-        e.v[i] = (65536.0f32 * diff.mul_add(t, vtop[i + 2])) as i32;
+        e.v[i] = (65536.0f32 * diff.madd(t, vtop[i + 2])) as i32;
         e.v[i + MAXN] = (65536.0f32 * diff * r) as i32;
     }
     e

@@ -17,6 +17,7 @@ use super::text::layout::{self, TextBox};
 use super::text::{rotate, text_needs_rich_layout};
 use super::{Writer, len};
 use crate::document::Document;
+use crate::fma::Madd;
 use crate::form;
 use crate::geometry::{Matrix, Rect};
 use crate::object::{Dict, Object};
@@ -167,7 +168,7 @@ fn tx(
         if has_bc && max_len > 1 {
             let cell_w = (bw - 2.0 * b) / max_len as f32;
             for i in 1..max_len {
-                let x = cell_w.mul_add(i as f32, b);
+                let x = cell_w.madd(i as f32, b);
                 w.op(&[x, b], "m");
                 w.buf.pop();
                 w.buf.push(b' ');

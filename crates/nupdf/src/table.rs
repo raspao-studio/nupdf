@@ -11,6 +11,7 @@
 //! are transcribed into `Table`, `TR` and `TD` structures with a grid
 //! block.
 
+use crate::fma::Madd;
 use crate::geometry::Rect;
 use crate::stext::{
     Block, GridBlock, GridDivider, GridPositions, StextLine, StextPage, TextBlock, char_flags,
@@ -421,7 +422,7 @@ impl Grid {
                     // Close to where it was reinforced before.
                     let l = &mut self.pos_mut(row).list;
                     // Fused, as clang compiles MuPDF's `pos * n + x`.
-                    l[i].pos = l[i].pos.mul_add(l[i].reinforcement as f32, x);
+                    l[i].pos = l[i].pos.madd(l[i].reinforcement as f32, x);
                     l[i].reinforcement += 1;
                     l[i].pos /= l[i].reinforcement as f32;
                     return Some(i);
@@ -2233,7 +2234,7 @@ fn hunt(t: &mut Lists, mut list: Vec<Potential>, limit: f32) {
                 let cells = (c.w - 1) * (c.h - 1);
                 if cells > 0 {
                     // Fused, as clang compiles MuPDF's `+= score * cells`.
-                    overlapped = list[k].data.score.mul_add(cells as f32, overlapped);
+                    overlapped = list[k].data.score.madd(cells as f32, overlapped);
                 }
                 num_overlaps += cells;
             }

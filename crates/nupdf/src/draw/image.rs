@@ -11,6 +11,7 @@
 //! smaller still, then mapped pixel by pixel in 14-bit fixed point,
 //! nearest or bilinear.
 
+use crate::fma::Madd;
 use crate::geometry::{IRect, Matrix, Rect};
 
 use super::paint::{Pix, blend, combine, expand, mul255};
@@ -847,8 +848,8 @@ pub fn paint_image(
     let (fa, fb, fc, fd) = (ia as i64, ib as i64, ic as i64, id as i64);
     let (xf, yf) = (x as f32, y as f32);
     // Clang fuses these multiply-adds (DECISIONS D39).
-    let mut u0 = (ia + ic).mul_add(0.5, ia.mul_add(xf, ic * yf) + ie) as i32 as i64;
-    let mut v0 = (ib + id).mul_add(0.5, ib.mul_add(xf, id * yf) + iff) as i32 as i64;
+    let mut u0 = (ia + ic).madd(0.5, ia.madd(xf, ic * yf) + ie) as i32 as i64;
+    let mut v0 = (ib + id).madd(0.5, ib.madd(xf, id * yf) + iff) as i32 as i64;
     let mut sw = i64::from(img.w);
     let mut sh = i64::from(img.h);
     if sw >= LIMIT || sh >= LIMIT {

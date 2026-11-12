@@ -34,6 +34,7 @@ pub mod fax;
 pub mod fax_encode;
 pub mod fill;
 pub mod filter;
+pub mod fma;
 pub mod font;
 pub mod fontdesc;
 pub mod form;

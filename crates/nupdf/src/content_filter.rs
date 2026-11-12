@@ -11,6 +11,7 @@
 //! on them. `TJ` arrays are split around dropped glyphs so the rest keep
 //! their positions.
 
+use crate::fma::Madd;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -365,8 +366,8 @@ fn same_arc<T>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
 /// The text-space move `(tx, ty)` that takes `tm` by `(x, y)` in user
 /// space, `scale` being 1/det: MuPDF's formula, fused as clang fuses it.
 fn untransform(tm: Matrix, x: f32, y: f32, scale: f32) -> (f32, f32) {
-    let tx = scale * x.mul_add(tm.d, -(y * tm.c));
-    let ty = scale * x.mul_add(-tm.b, y * tm.a);
+    let tx = scale * x.madd(tm.d, -(y * tm.c));
+    let ty = scale * x.madd(-tm.b, y * tm.a);
     (tx, ty)
 }
 
@@ -878,7 +879,7 @@ impl<'a, 'h> Sanitize<'a, 'h> {
             if tm.a == tlm.a && tm.b == tlm.b && tm.c == tlm.c && tm.d == tlm.d {
                 let x = tm.e - tlm.e;
                 let y = tm.f - tlm.f;
-                let det = tm.a.mul_add(tm.d, -(tm.b * tm.c));
+                let det = tm.a.madd(tm.d, -(tm.b * tm.c));
                 if !(-0.001..=0.001).contains(&det) {
                     let scale = 1.0 / det;
                     let (tx, ty) = untransform(tm, x, y, scale);
@@ -917,15 +918,15 @@ impl<'a, 'h> Sanitize<'a, 'h> {
         if fd.wmode == 0 {
             let h = fd.lookup_hmtx(cid);
             let w0 = h.w as f32 * 0.001;
-            self.tos.char_tx = w0.mul_add(size, char_space) * scale;
+            self.tos.char_tx = w0.madd(size, char_space) * scale;
             self.tos.char_ty = 0.0;
         } else {
             let v = fd.lookup_vmtx(cid);
             let w1 = v.w as f32 * 0.001;
-            tsm.e = (-(v.x as f32 * size * scale)).mul_add(0.001, tsm.e);
-            tsm.f = (-(v.y as f32 * size)).mul_add(0.001, tsm.f);
+            tsm.e = (-(v.x as f32 * size * scale)).madd(0.001, tsm.e);
+            tsm.f = (-(v.y as f32 * size)).madd(0.001, tsm.f);
             self.tos.char_tx = 0.0;
-            self.tos.char_ty = w1.mul_add(size, char_space);
+            self.tos.char_ty = w1.madd(size, char_space);
         }
         self.tos.gid = fd.cid_to_gid(cid);
         tsm.concat(self.tos.tm)
@@ -1136,7 +1137,7 @@ impl<'a, 'h> Sanitize<'a, 'h> {
         let x = tm.e - self.sent_tm.e;
         let y = tm.f - self.sent_tm.f;
         let mut adjust = 0.0;
-        let det = tm.a.mul_add(tm.d, -(tm.b * tm.c));
+        let det = tm.a.madd(tm.d, -(tm.b * tm.c));
         if !(-0.001..=0.001).contains(&det) {
             let scale = 1.0 / det;
             let (tx, ty) = untransform(tm, x, y, scale);

@@ -11,6 +11,7 @@
 //! written as `Tj` runs. Free text and line captions write it; text
 //! widgets will write and lay it out with the same code.
 
+use crate::fma::Madd;
 use std::sync::Arc;
 
 use super::super::Writer;
@@ -177,7 +178,7 @@ pub fn break_string(lang: i32, font: &Font, size: f32, text: &str, maxw: f32) ->
         if walk.u == i32::from(b' ') {
             space = Some((walk.next_pos(), x));
         }
-        x = walk.w.mul_add(size, x);
+        x = walk.w.madd(size, x);
         if let Some((at, space_x)) = space
             && x > maxw
         {
@@ -341,7 +342,7 @@ pub fn write_comb_string(
             w.buf.push(b'[');
             last = Some(walk.enc);
         }
-        let pad = (-walk.w).mul_add(1000.0, cell_w) / 2.0;
+        let pad = (-walk.w).madd(1000.0, cell_w) / 2.0;
         w.g(-(carry + pad));
         carry = pad;
         if walk.enc.is_cjk() {
@@ -403,8 +404,8 @@ fn fit(lang: i32, font: &Font, text: &str, b: &TextBox) -> Fitted {
     let mut baseline = size * b.baseline;
     if b.adjust_baseline {
         // Make sure the baseline is inside the rectangle.
-        if 0.2f32.mul_add(size, baseline) > h {
-            baseline = (-0.2f32).mul_add(size, h);
+        if 0.2f32.madd(size, baseline) > h {
+            baseline = (-0.2f32).madd(size, h);
         }
     }
     Fitted {
@@ -529,7 +530,7 @@ fn layout_string(
     let mut walk = Walk::new(lang, font, &text[a..], Some(b - a));
     while walk.advance() {
         out.char(x, walk.w * size, a + walk.pos);
-        x = walk.w.mul_add(size, x);
+        x = walk.w.madd(size, x);
     }
 }
 

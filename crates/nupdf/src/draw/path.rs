@@ -8,6 +8,7 @@
 //! dashes (`fz_flatten_fill_path`, `fz_flatten_stroke_path`).
 
 use super::edge::Gel;
+use crate::fma::Madd;
 use crate::geometry::{IRect, Matrix, Rect};
 use crate::path::{FullWalker, Path, StrokeState, Walker};
 
@@ -187,17 +188,17 @@ impl FullWalker for Flatten<'_> {
         let m = self.ctm;
         // The gel's anti-dropout rectangles, for axis-aligned ones.
         if m.b == 0.0 && m.c == 0.0 {
-            let tx0 = m.a.mul_add(x0, m.e);
-            let ty0 = m.d.mul_add(y0, m.f);
-            let tx1 = m.a.mul_add(x1, m.e);
-            let ty1 = m.d.mul_add(y1, m.f);
+            let tx0 = m.a.madd(x0, m.e);
+            let ty0 = m.d.madd(y0, m.f);
+            let tx1 = m.a.madd(x1, m.e);
+            let ty1 = m.d.madd(y1, m.f);
             self.gel.insert_rect(tx0, ty0, tx1, ty1);
             return;
         } else if m.a == 0.0 && m.d == 0.0 {
-            let tx0 = m.c.mul_add(y0, m.e);
-            let ty0 = m.b.mul_add(x0, m.f);
-            let tx1 = m.c.mul_add(y1, m.e);
-            let ty1 = m.b.mul_add(x1, m.f);
+            let tx0 = m.c.madd(y0, m.e);
+            let ty0 = m.b.madd(x0, m.f);
+            let tx1 = m.c.madd(y1, m.e);
+            let ty1 = m.b.madd(x1, m.f);
             self.gel.insert_rect(tx0, ty1, tx1, ty0);
             return;
         }
@@ -292,7 +293,7 @@ fn normal(dx: f32, dy: f32, w: f32) -> Option<(f32, f32)> {
             Some((0.0, w))
         }
     } else {
-        let sq = dx.mul_add(dx, dy * dy);
+        let sq = dx.madd(dx, dy * dy);
         if sq < f32::EPSILON {
             return None;
         }
@@ -309,16 +310,16 @@ impl Stroker<'_> {
     fn add_horiz_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
         let m = self.ctm;
         if m.b == 0.0 && m.c == 0.0 {
-            let tx0 = m.a.mul_add(x0, m.e);
-            let ty0 = m.d.mul_add(y0, m.f);
-            let tx1 = m.a.mul_add(x1, m.e);
-            let ty1 = m.d.mul_add(y1, m.f);
+            let tx0 = m.a.madd(x0, m.e);
+            let ty0 = m.d.madd(y0, m.f);
+            let tx1 = m.a.madd(x1, m.e);
+            let ty1 = m.d.madd(y1, m.f);
             self.gel.insert_rect(tx1, ty1, tx0, ty0);
         } else if m.a == 0.0 && m.d == 0.0 {
-            let tx0 = m.c.mul_add(y0, m.e);
-            let ty0 = m.b.mul_add(x0, m.f);
-            let tx1 = m.c.mul_add(y1, m.e);
-            let ty1 = m.b.mul_add(x1, m.f);
+            let tx0 = m.c.madd(y0, m.e);
+            let ty0 = m.b.madd(x0, m.f);
+            let tx1 = m.c.madd(y1, m.e);
+            let ty1 = m.b.madd(x1, m.f);
             self.gel.insert_rect(tx1, ty0, tx0, ty1);
         } else {
             self.add_line(x0, y0, x1, y0);
@@ -388,7 +389,7 @@ impl Stroker<'_> {
         let mut dy0 = by - ay;
         let mut dx1 = cx - bx;
         let mut dy1 = cy - by;
-        let mut cross = dx1.mul_add(dy0, -(dx0 * dy1));
+        let mut cross = dx1.madd(dy0, -(dx0 * dy1));
         let mut rev = false;
         if cross < 0.0 {
             let t = dx1;
@@ -410,8 +411,8 @@ impl Stroker<'_> {
         });
         let mut dmx = (dlx0 + dlx1) * 0.5;
         let mut dmy = (dly0 + dly1) * 0.5;
-        let dmr2 = dmx.mul_add(dmx, dmy * dmy);
-        if cross * cross < f32::EPSILON && dx0.mul_add(dx1, dy0 * dy1) >= 0.0 {
+        let dmr2 = dmx.madd(dmx, dmy * dmy);
+        if cross * cross < f32::EPSILON && dx0.madd(dx1, dy0 * dy1) >= 0.0 {
             linejoin = LINEJOIN_BEVEL;
         }
         if linejoin == LINEJOIN_MITER_XPS {
@@ -479,8 +480,8 @@ impl Stroker<'_> {
                 for i in 1..n {
                     let theta = PI * i as f32 / n as f32;
                     let (cth, sth) = (theta.cos(), theta.sin());
-                    let nx = (-dly).mul_add(sth, (-dlx).mul_add(cth, bx));
-                    let ny = dlx.mul_add(sth, (-dly).mul_add(cth, by));
+                    let nx = (-dly).madd(sth, (-dlx).madd(cth, bx));
+                    let ny = dlx.madd(sth, (-dly).madd(cth, by));
                     self.add_line(ox, oy, nx, ny);
                     ox = nx;
                     oy = ny;
@@ -509,7 +510,7 @@ impl Stroker<'_> {
     fn add_line_cap(&mut self, ax: f32, ay: f32, bx: f32, by: f32, linecap: i32) {
         let dx = bx - ax;
         let dy = by - ay;
-        let scale = self.linewidth / dx.mul_add(dx, dy * dy).sqrt();
+        let scale = self.linewidth / dx.madd(dx, dy * dy).sqrt();
         self.do_linecap(bx, by, linecap, dy * scale, -dx * scale);
     }
 
@@ -522,7 +523,7 @@ impl Stroker<'_> {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
-        let scale = self.linewidth / dx.mul_add(dx, dy * dy).sqrt();
+        let scale = self.linewidth / dx.madd(dx, dy * dy).sqrt();
         self.do_linecap(ax, ay, linecap, dy * scale, -dx * scale);
     }
 
@@ -533,8 +534,8 @@ impl Stroker<'_> {
         for i in 1..n {
             let theta = PI * 2.0 * i as f32 / n as f32;
             let (cth, sth) = (theta.cos(), theta.sin());
-            let nx = (-cth).mul_add(w, ax);
-            let ny = sth.mul_add(w, ay);
+            let nx = (-cth).madd(w, ax);
+            let ny = sth.madd(w, ay);
             self.add_line(ox, oy, nx, ny);
             ox = nx;
             oy = ny;
@@ -734,7 +735,7 @@ impl Stroker<'_> {
         let mut used = 0.0f32;
         let mut tail = 0.0f32;
         let (mut old_bx, mut old_by) = (0.0f32, 0.0f32);
-        let mut total = dx.mul_add(dx, dy * dy).sqrt();
+        let mut total = dx.madd(dx, dy * dy).sqrt();
         let r = self.rect;
         let mut off_screen = false;
         // a brought onto the screen, horizontally then vertically.
@@ -864,8 +865,8 @@ impl Stroker<'_> {
             while total - used > self.dash_list(self.offset) - self.phase && guard < 1 << 20 {
                 used += self.dash_list(self.offset) - self.phase;
                 let ratio = used / total;
-                let mx = ratio.mul_add(dx, ax);
-                let my = ratio.mul_add(dy, ay);
+                let mx = ratio.madd(dx, ax);
+                let my = ratio.madd(dy, ay);
                 if self.toggle {
                     self.lineto_aux(mx, my, from_bezier, (dx, dy));
                 } else {
