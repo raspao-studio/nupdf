@@ -82,7 +82,7 @@ fn matches(pattern: &str, any_case: bool) -> Result<Vec<PathBuf>, Failure> {
 }
 
 /// The command line for one file: the command, the file, the rest of the
-/// arguments with `{stem}`, `{name}` and `{n}` filled in.
+/// arguments with `{stem}`, `{name}` and `{index}` filled in.
 fn line_for(command: &[String], file: &Path, n: usize, width: usize) -> Vec<String> {
     let stem = file
         .file_stem()
@@ -102,7 +102,7 @@ fn line_for(command: &[String], file: &Path, n: usize, width: usize) -> Vec<Stri
     line.extend(words.map(|w| {
         w.replace("{stem}", &stem)
             .replace("{name}", &name)
-            .replace("{n}", &number)
+            .replace("{index}", &number)
     }));
     line
 }
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn each_file_gets_its_line() {
-        let command: Vec<String> = ["clean", "-g", "-o", "out/{stem}-{n}.pdf"]
+        let command: Vec<String> = ["clean", "-g", "-o", "out/{stem}-{index}.pdf"]
             .map(String::from)
             .into();
         assert_eq!(
