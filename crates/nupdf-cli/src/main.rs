@@ -19,6 +19,7 @@ mod render;
 mod schemas;
 mod search;
 mod stext;
+mod tables;
 mod trace;
 
 use std::io::Write;
@@ -371,6 +372,25 @@ enum Command {
         #[arg(long)]
         no_icc: bool,
     },
+    /// Each page's tables as rows of cells, found as MuPDF's table hunting
+    /// finds them (`stext --options table-hunt`).
+    Tables {
+        file: PathBuf,
+        /// Pages to look at, as for `extract`.
+        #[arg(long)]
+        pages: Option<String>,
+        /// MuPDF's stext options, as for `stext`; table hunting is always on.
+        #[arg(long, default_value = "")]
+        options: String,
+        /// `json` (the report, with each cell's box) or `csv` (the tables'
+        /// rows, a blank line between tables; the report goes to stderr).
+        #[arg(long, value_enum, default_value = "json")]
+        format: TableFormat,
+        /// Work on this many threads, a page per thread at a time; the
+        /// output is the same at every count.
+        #[arg(long)]
+        threads: Option<usize>,
+    },
     /// The outline (bookmarks): each entry's title, link, whether it is
     /// open, the page it leads to, and the entries below it.
     Outline { file: PathBuf },
@@ -585,6 +605,13 @@ enum Command {
         #[arg(long, default_value_t = 8 << 20)]
         max_output_bytes: usize,
     },
+}
+
+/// How `tables` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum TableFormat {
+    Json,
+    Csv,
 }
 
 /// Exit codes from docs/AGENT-INTERFACE.md. Usage errors (2) come from clap.
@@ -1118,6 +1145,55 @@ fn run(cli: Cli) -> ExitCode {
                 let _ = out.flush();
             }
             return ExitCode::SUCCESS;
+        }
+        Command::Tables {
+            file,
+            pages,
+            options,
+            format,
+            threads,
+        } => {
+            let opts = match nupdf::stext::Options::parse(options) {
+                Ok(o) => o,
+                Err(e) => {
+                    return fail(
+                        Failure {
+                            exit: Exit::Usage,
+                            code: "usage.bad_option",
+                            message: e,
+                        },
+                        cli.pretty,
+                    );
+                }
+            };
+            let (doc, facts) = match open(file) {
+                Ok(v) => v,
+                Err(failure) => return fail(failure, cli.pretty),
+            };
+            // Counted before any page loads: loading one can repair the document.
+            let page_count = doc.page_count().ok();
+            let count = page_count.unwrap_or(0);
+            let indices: Vec<i32> = match pages {
+                Some(spec) => nupdf::rearrange::parse_page_ranges(spec, count, &doc),
+                None => (0..count).collect(),
+            };
+            let body = tables::tables(&doc, page_count, &indices, opts, *threads);
+            if *format == TableFormat::Csv {
+                let mut out = standard_output();
+                let _ = out.write_all(tables::csv(&body).as_bytes());
+                let _ = out.flush();
+                let mut body = body;
+                if let Some(m) = body.as_object_mut() {
+                    m.remove("pages");
+                }
+                emit(
+                    &mut standard_error(),
+                    &report("nupdf.tables/v1", &facts, &doc, body),
+                    cli.pretty,
+                );
+                return ExitCode::SUCCESS;
+            }
+            Ok(report("nupdf.tables/v1", &facts, &doc, body))
         }
         Command::Outline { file } => open(file).and_then(|(doc, facts)| {
             let body = navigation::outline(&doc).map_err(|e| Failure {
