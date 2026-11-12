@@ -2287,7 +2287,7 @@ fn batch_names_outputs_and_takes_up_where_it_stopped() {
     std::fs::write(work.join("in/broken.pdf"), b"not a pdf").unwrap();
     let journal = work.join("run.jsonl");
     let inputs = work.join("in");
-    let out_pattern = work.join("out/{stem}-{n}.pdf");
+    let out_pattern = work.join("out/{stem}-{index}.pdf");
     std::fs::create_dir_all(work.join("out")).unwrap();
     let run = |resume: bool| {
         let mut args = vec![

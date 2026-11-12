@@ -513,7 +513,7 @@ enum Command {
     },
     /// Run a command on many files: each as `nupdf <command> <file> ...`,
     /// several at once, a JSON line per file in the order given, then the
-    /// summary. `{stem}`, `{name}` and `{n}` in the command's arguments
+    /// summary. `{stem}`, `{name}` and `{index}` in the command's arguments
     /// become each file's name without extension, its name and its number.
     Batch {
         /// Files, directories (their PDFs, at any depth) and glob patterns
