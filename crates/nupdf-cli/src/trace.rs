@@ -176,6 +176,19 @@ fn image(img: &Image) -> Value {
 /// A C string as the script engine reads it: mujs decodes the bytes as
 /// UTF-8, a byte that does not decode as U+FFFD.
 pub(crate) fn script_string(bytes: &[u8]) -> String {
+    script_str(bytes).into_owned()
+}
+
+/// [`script_string`], borrowed when the bytes before any NUL are ASCII,
+/// as font names nearly always are: `stext` writes one per character.
+pub(crate) fn script_str(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let head = &bytes[..end];
+    if head.is_ascii()
+        && let Ok(s) = std::str::from_utf8(head)
+    {
+        return std::borrow::Cow::Borrowed(s);
+    }
     let mut out = String::new();
     let mut s = bytes;
     while let Some(&c) = s.first() {
@@ -190,7 +203,7 @@ pub(crate) fn script_string(bytes: &[u8]) -> String {
         s = &s[len.min(s.len())..];
         out.push(char::from_u32(rune).unwrap_or('\u{fffd}'));
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// Text as the script walks it: per span, the font's name, the matrix
@@ -487,6 +500,11 @@ mod tests {
         assert_eq!(script_string(b"ab\0cd"), "ab");
         assert_eq!(script_string(b"a\xffb"), "a\u{fffd}b");
         assert_eq!(script_string("é".as_bytes()), "é");
+        assert!(matches!(
+            script_str(b"Times-Roman\0x"),
+            std::borrow::Cow::Borrowed("Times-Roman")
+        ));
+        assert_eq!(script_str(b"a\xffb"), "a\u{fffd}b");
     }
 
     #[test]
