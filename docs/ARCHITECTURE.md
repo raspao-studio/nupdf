@@ -119,8 +119,18 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `draw::color` (colors into the page's RGB, with and without color management) | `fitz/colorspace.c` (`fz_convert_color`, `fz_default_colorspace`), `fitz/color-fast.c` | M7 |
 | `cms` (ICC profiles through moxcms, with lcms2's black point compensation) | `fitz/color-lcms.c`; lcms2 `cmscnvrt.c` and `cmssamp.c` (black points) | M7 |
 | `font::outline` (glyph outlines for rendering: TrueType loading at a scale, charstring contours) | FreeType `src/truetype/ttgload.c`, `src/cff/cffgload.c`, `src/type1/t1gload.c` | M4, M7 |
-| `forms`, `annot`, `appearance` | `pdf/pdf-form.c`, `pdf-annot.c`, `pdf-appearance.c` | M9 |
-| `signature` | `pdf/pdf-signature.c` | M9 |
+| `annot` (a page's annotations as `pdf_sync_annots` lists them, and the getters) | `pdf/pdf-annot.c` (`pdf_sync_annots`, `pdf_annot_*`), `pdf/pdf-appearance.c` (`pdf_annot_rect_diff`) | M9 |
+| `appearance` (appearance synthesis: `pdf_update_appearance`'s rules and the shared writers), `::shapes` (ink, polygons, lines, squares, circles, clouds), `::markup` (text markup, redactions, carets, icons) | `pdf/pdf-appearance.c`, `pdf/pdf-annot.c` (`pdf_annot_ap`, the border dash getters), `pdf/annotation-icons.h` | M9 |
+| `form` (fields as the widget getters read them: type, flags, value, options, name, label) | `pdf/pdf-form.c` (`pdf_field_type`, `pdf_field_value`, `load_field_name` and the rest) | M9 |
+| `bake` (flattening: appearances drawn into the page, `pdf_bake_document`) | `pdf/pdf-form.c` (`pdf_bake_document`, `pdf_bake_page`, `pdf_bake_annot`), `pdf/pdf-op-buffer.c` (`pdf_count_q_balance`), `pdf/pdf-xobject.c` (`pdf_new_xobject`) | M9 |
+| `signature` (byte ranges, changes since signing, the digest check and signatory), `der` (DER and BER), `rsa` (PKCS #1 v1.5 verification) | `pdf/pdf-form.c` (`pdf_signature_byte_range`, `validate_byte_ranges`, `pdf_signature_incremental_change_since_signing`), `pdf/pdf-signature.c`, `helpers/pkcs7/pkcs7-openssl.c` (`check_digest`, `get_signatory`); `der` and `rsa` are nupdf's own | M9 |
+| `sanitize` (JavaScript, launch, submit, remote and web actions, XFA, attachments removed) | nupdf's own (D48) | M9 |
+| `ocr` (an invisible text layer from Tesseract's TSV) | nupdf's own (D50) | M9 |
+| `annot_edit` (annotations added and deleted, each type's defaults, the setters, the new appearances made on update) | `pdf/pdf-annot.c` (`pdf_create_annot`, `pdf_create_annot_raw`, `pdf_delete_annot`, `pdf_set_annot_*`), `pdf/pdf-appearance.c` (`pdf_update_appearance`), `pdf/pdf-font-add.c` (font objects shared by digest) | M9 |
+| `appearance::text` (free text, stamps, line captions), `::layout` (the text walk, line breaking, `write_variable_text`), `::fonts` (DA parsing, the annotation's language, base-14 and CJK font resources) | `pdf/pdf-appearance.c`; `pdf/pdf-annot.c` (`pdf_parse_default_appearance`, `pdf_annot_language`); `pdf/pdf-font-add.c` (`pdf_add_simple_font`, `pdf_add_cjk_font`); `fitz/text.c` | M9 |
+| `appearance::commit` (a synthesized appearance written into the document: font objects first, one per font and encoding, then the form, then /AP) | `pdf/pdf-annot.c` (`pdf_set_annot_appearance`); `pdf/pdf-xobject.c` (`pdf_new_xobject`); `pdf/pdf-font-add.c`; `pdf/pdf-resources.c` (`pdf_find_font_resource`) | M9 |
+| `fill` (form filling as the widget API fills, JavaScript off: values, check boxes and radio groups, dirty fields made again on every page) | `pdf/pdf-form.c` (`pdf_set_text_field_value`, `pdf_set_field_value`, `update_field_value`, `pdf_field_mark_dirty`, `pdf_toggle_widget`, `set_check_grp`, `pdf_update_page`); `pdf/pdf-page.c` (`pdf_load_page`'s failures) | M9 |
+| `appearance::widget` (text, choice and signature widgets; push buttons, check boxes and radio buttons, a stream per state) | `pdf/pdf-appearance.c` (`pdf_write_widget_appearance`, `pdf_update_button_appearance`); `pdf/pdf-annot.c` (`pdf_annot_MK_BG`, `pdf_annot_MK_BC`); `pdf/pdf-form.c` (`pdf_button_field_on_state`) | M9 |
 
 ## Core data model
 
