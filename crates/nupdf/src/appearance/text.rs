@@ -13,6 +13,7 @@
 //! `Synthesis::resources`, where MuPDF adds indirect objects; the image
 //! stamp's image stays the reference the file has.
 
+use crate::fma::Madd;
 use std::sync::Arc;
 
 use super::{Writer, len, pt, real_at};
@@ -345,8 +346,8 @@ pub(super) fn line_caption(
 
     let angle = (f64::from(dy).atan2(f64::from(dx)) * 180.0 / std::f64::consts::PI) as f32;
     let mut tm = rotate(angle);
-    tm.e = (-dx).mul_add(tw / 2.0, (a.x + b.x) / 2.0);
-    tm.f = (-dy).mul_add(tw / 2.0, (a.y + b.y) / 2.0);
+    tm.e = (-dx).madd(tw / 2.0, (a.x + b.x) / 2.0);
+    tm.f = (-dy).madd(tw / 2.0, (a.y + b.y) / 2.0);
 
     if co.x != 0.0 || co.y != 0.0 {
         // An offset caption is never inline.
@@ -354,15 +355,15 @@ pub(super) fn line_caption(
         if co.y < 0.0 {
             co.y -= size;
         }
-        tm.e += co.x.mul_add(dx, -(co.y * dy));
-        tm.f += co.x.mul_add(dy, co.y * dx);
+        tm.e += co.x.madd(dx, -(co.y * dy));
+        tm.f += co.x.madd(dy, co.y * dx);
     } else if top {
         // `e -= dy * size * 0.2f`: the last product fused.
-        tm.e = (-(dy * size)).mul_add(0.2, tm.e);
-        tm.f = (dx * size).mul_add(0.2, tm.f);
+        tm.e = (-(dy * size)).madd(0.2, tm.e);
+        tm.f = (dx * size).madd(0.2, tm.f);
     } else {
-        tm.e = (dy * size).mul_add(0.3, tm.e);
-        tm.f = (-(dx * size)).mul_add(0.3, tm.f);
+        tm.e = (dy * size).madd(0.3, tm.e);
+        tm.f = (-(dx * size)).madd(0.3, tm.f);
     }
 
     w.s("q\n");
@@ -560,12 +561,12 @@ fn rubber_stamp(w: &mut Writer, rect: &mut Rect, matrix: &mut Matrix) -> Result<
 
     if xs > ys {
         let xc = (rect.x1 + rect.x0) / 2.0;
-        rect.x0 = (-95.0f32).mul_add(ys, xc);
-        rect.x1 = 95.0f32.mul_add(ys, xc);
+        rect.x0 = (-95.0f32).madd(ys, xc);
+        rect.x1 = 95.0f32.madd(ys, xc);
     } else {
         let yc = (rect.y1 + rect.y0) / 2.0;
-        rect.y0 = (-25.0f32).mul_add(xs, yc);
-        rect.y1 = 25.0f32.mul_add(xs, yc);
+        rect.y0 = (-25.0f32).madd(xs, yc);
+        rect.y1 = 25.0f32.madd(xs, yc);
     }
     *matrix = Matrix::IDENTITY;
     Ok(Rect::new(0.0, 0.0, 190.0, 50.0))

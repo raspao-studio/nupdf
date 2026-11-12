@@ -11,8 +11,9 @@
 //! As in the rest of the module, arithmetic follows C's order on `f32`,
 //! and `a * b + c` within one C expression is a `mul_add`: clang emits
 //! `llvm.fmuladd` for it, taking the left product when both sides are
-//! products, so `a * b - c * d` is `a.mul_add(b, -(c * d))`.
+//! products, so `a * b - c * d` is `a.madd(b, -(c * d))`.
 
+use crate::fma::Madd;
 use std::f32::consts::PI;
 
 use super::{Writer, len, pt, real_at};
@@ -56,23 +57,23 @@ fn draw_circle(w: &mut Writer, rx: f32, ry: f32, cx: f32, cy: f32) {
 /// `draw_arc_seg`: one Bézier for the arc from `th0` to `th1`.
 #[allow(clippy::too_many_arguments)]
 fn draw_arc_seg(w: &mut Writer, r: f32, xc: f32, yc: f32, th0: f32, th1: f32, mv: bool) {
-    let x1 = r.mul_add(th0.cos(), xc);
-    let y1 = r.mul_add(th0.sin(), yc);
-    let x4 = r.mul_add(th1.cos(), xc);
-    let y4 = r.mul_add(th1.sin(), yc);
+    let x1 = r.madd(th0.cos(), xc);
+    let y1 = r.madd(th0.sin(), yc);
+    let x4 = r.madd(th1.cos(), xc);
+    let y4 = r.madd(th1.sin(), yc);
 
     let ax = x1 - xc;
     let ay = y1 - yc;
     let bx = x4 - xc;
     let by = y4 - yc;
-    let q1 = ax.mul_add(ax, ay * ay);
-    let q2 = ay.mul_add(by, ax.mul_add(bx, q1));
-    let k2 = (4.0f32 / 3.0) * ((2.0 * q1 * q2).sqrt() - q2) / ax.mul_add(by, -(ay * bx));
+    let q1 = ax.madd(ax, ay * ay);
+    let q2 = ay.madd(by, ax.madd(bx, q1));
+    let k2 = (4.0f32 / 3.0) * ((2.0 * q1 * q2).sqrt() - q2) / ax.madd(by, -(ay * bx));
 
-    let x2 = (-k2).mul_add(ay, xc + ax);
-    let y2 = k2.mul_add(ax, yc + ay);
-    let x3 = k2.mul_add(by, xc + bx);
-    let y3 = (-k2).mul_add(bx, yc + by);
+    let x2 = (-k2).madd(ay, xc + ax);
+    let y2 = k2.madd(ax, yc + ay);
+    let x3 = k2.madd(by, xc + bx);
+    let y3 = (-k2).madd(bx, yc + by);
 
     if mv {
         w.op(&[x1, y1], "m");
@@ -105,7 +106,7 @@ fn draw_arc_tail(w: &mut Writer, r: f32, xc: f32, yc: f32, th0: f32, th1: f32, f
 fn rotate_vector(angle: f32, x: f32, y: f32) -> Point {
     let ca = angle.cos();
     let sa = angle.sin();
-    pt(x.mul_add(ca, -(y * sa)), x.mul_add(sa, y * ca))
+    pt(x.madd(ca, -(y * sa)), x.madd(sa, y * ca))
 }
 
 /// `pdf_write_arrow_appearance`.
@@ -151,7 +152,7 @@ pub(super) fn line_cap(
     ic: bool,
     cap: &Object,
 ) {
-    let l = dx.mul_add(dx, dy * dy).sqrt();
+    let l = dx.madd(dx, dy * dy).sqrt();
     let dx = dx / l;
     let dy = dy / l;
 
@@ -188,8 +189,8 @@ pub(super) fn line_cap(
         }
         b"Butt" => {
             let r = fmax(3.0, lw * 3.0);
-            let a = pt((-dy).mul_add(r, x), dx.mul_add(r, y));
-            let b = pt(dy.mul_add(r, x), (-dx).mul_add(r, y));
+            let a = pt((-dy).madd(r, x), dx.madd(r, y));
+            let b = pt(dy.madd(r, x), (-dx).madd(r, y));
             w.op(&[a.x, a.y], "m");
             w.op(&[b.x, b.y], "l");
             w.stroke(sc);
@@ -319,7 +320,7 @@ struct Cloud {
 fn intersect_cloud(p0: Point, p1: Point, r: f32, sel: i32) -> f32 {
     let dx = p1.x - p0.x;
     let dy = p1.y - p0.y;
-    let d = dx.mul_add(dx, dy * dy).sqrt();
+    let d = dx.madd(dx, dy * dy).sqrt();
 
     if d >= r + r {
         return 0.0;
@@ -329,7 +330,7 @@ fn intersect_cloud(p0: Point, p1: Point, r: f32, sel: i32) -> f32 {
     }
 
     let a = d / 2.0;
-    let h = r.mul_add(r, -(a * a)).sqrt();
+    let h = r.madd(r, -(a * a)).sqrt();
 
     let x2 = (p0.x + p1.x) / 2.0;
     let y2 = (p0.y + p1.y) / 2.0;
@@ -355,8 +356,8 @@ impl Cloud {
             len: 0,
             first: true,
             fill,
-            spacing: intensity.mul_add(6.666667, border * 0.8333333),
-            radius: intensity.mul_add(4.0, border * 0.5),
+            spacing: intensity.madd(6.666667, border * 0.8333333),
+            radius: intensity.madd(4.0, border * 0.5),
             phase: 0.0,
         };
         w.s("2 j\n"); // bevel join
@@ -409,7 +410,7 @@ impl Cloud {
         while total - used > self.spacing - self.phase {
             used += self.spacing - self.phase;
             let t = used / total;
-            self.add(w, dx.mul_add(t, x0), dy.mul_add(t, y0));
+            self.add(w, dx.madd(t, x0), dy.madd(t, y0));
             self.phase = 0.0;
             check_size(w)?;
         }
@@ -426,10 +427,10 @@ impl Cloud {
         let ry = (y1 - y0) / 2.0;
         let da = -PI * 2.0 / 32.0;
         for i in 1..=32 {
-            let ax = (((i - 1) as f32) * da).cos().mul_add(rx, cx);
-            let ay = (((i - 1) as f32) * da).sin().mul_add(ry, cy);
-            let bx = ((i as f32) * da).cos().mul_add(rx, cx);
-            let by = ((i as f32) * da).sin().mul_add(ry, cy);
+            let ax = (((i - 1) as f32) * da).cos().madd(rx, cx);
+            let ay = (((i - 1) as f32) * da).sin().madd(ry, cy);
+            let bx = ((i as f32) * da).cos().madd(rx, cx);
+            let by = ((i as f32) * da).sin().madd(ry, cy);
             self.line(w, ax, ay, bx, by)?;
         }
         Ok(())
@@ -638,7 +639,7 @@ fn polygon_winding(w: &Writer, v: &Object, n: usize) -> bool {
         if (r.y > mid_y && mid_y > q.y) || (r.y < mid_y && mid_y < q.y) {
             let wn: f32 = if r.y > mid_y { 1.0 } else { -1.0 };
             let x = r.x + (q.x - r.x) * (r.y - mid_y) / (r.y - q.y);
-            area = (x - min_x).mul_add(wn, area);
+            area = (x - min_x).madd(wn, area);
         }
         q = r;
     }
@@ -762,14 +763,14 @@ pub(super) fn line(w: &mut Writer, rect: &mut Rect) -> Result<(), String> {
             llo = -llo;
         }
 
-        let aa = pt((-dy).mul_add(llo, a.x), dx.mul_add(llo, a.y));
-        let ba = pt((-dy).mul_add(llo, b.x), dx.mul_add(llo, b.y));
+        let aa = pt((-dy).madd(llo, a.x), dx.madd(llo, a.y));
+        let ba = pt((-dy).madd(llo, b.x), dx.madd(llo, b.y));
         let far = llo + ll + lle;
-        let ab = pt((-dy).mul_add(far, a.x), dx.mul_add(far, a.y));
-        let bb = pt((-dy).mul_add(far, b.x), dx.mul_add(far, b.y));
+        let ab = pt((-dy).madd(far, a.x), dx.madd(far, a.y));
+        let bb = pt((-dy).madd(far, b.x), dx.madd(far, b.y));
         let off = llo + ll;
-        a = pt((-dy).mul_add(off, a.x), dx.mul_add(off, a.y));
-        b = pt((-dy).mul_add(off, b.x), dx.mul_add(off, b.y));
+        a = pt((-dy).madd(off, a.x), dx.madd(off, a.y));
+        b = pt((-dy).madd(off, b.x), dx.madd(off, b.y));
 
         w.op(&[aa.x, aa.y], "m");
         w.op(&[ab.x, ab.y], "l");
@@ -790,8 +791,8 @@ pub(super) fn line(w: &mut Writer, rect: &mut Rect) -> Result<(), String> {
     };
     if gap > 0.0 {
         let m = pt((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-        let ca = pt((-dx).mul_add(gap, m.x), (-dy).mul_add(gap, m.y));
-        let cb = pt(dx.mul_add(gap, m.x), dy.mul_add(gap, m.y));
+        let ca = pt((-dx).madd(gap, m.x), (-dy).madd(gap, m.y));
+        let cb = pt(dx.madd(gap, m.x), dy.madd(gap, m.y));
         w.op(&[a.x, a.y], "m");
         w.op(&[ca.x, ca.y], "l");
         w.op(&[cb.x, cb.y], "m");

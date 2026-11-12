@@ -13,6 +13,7 @@
 //! the top left, y down), and go into the document through the inverse of
 //! the page transform, as MuPDF's setters take them.
 
+use crate::fma::Madd;
 use std::sync::Arc;
 
 use crate::appearance;
@@ -388,10 +389,10 @@ impl<'a> Editor<'a> {
                 b.x = a.x + (rect.y1 - a.y) / m;
                 b.y = rect.y1;
             } else if b.x < rect.x0 {
-                b.y = (rect.x0 - a.x).mul_add(m, a.y);
+                b.y = (rect.x0 - a.x).madd(m, a.y);
                 b.x = rect.x0;
             } else if b.x > rect.x1 {
-                b.y = (rect.x1 - a.x).mul_add(m, a.y);
+                b.y = (rect.x1 - a.x).madd(m, a.y);
                 b.x = rect.x1;
             } else {
                 break;

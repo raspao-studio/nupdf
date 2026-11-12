@@ -8,6 +8,7 @@
 
 /// `FZ_MIN_INF_RECT` and `FZ_MAX_INF_RECT`: the corners of the infinite
 /// rectangle, as floats.
+use crate::fma::Madd;
 const MIN_INF: f32 = -2_147_483_648.0;
 const MAX_INF: f32 = 2_147_483_520.0;
 
@@ -309,12 +310,12 @@ impl Matrix {
     pub fn concat(self, two: Matrix) -> Matrix {
         let one = self;
         Matrix {
-            a: one.a.mul_add(two.a, one.b * two.c),
-            b: one.a.mul_add(two.b, one.b * two.d),
-            c: one.c.mul_add(two.a, one.d * two.c),
-            d: one.c.mul_add(two.b, one.d * two.d),
-            e: one.e.mul_add(two.a, one.f * two.c) + two.e,
-            f: one.e.mul_add(two.b, one.f * two.d) + two.f,
+            a: one.a.madd(two.a, one.b * two.c),
+            b: one.a.madd(two.b, one.b * two.d),
+            c: one.c.madd(two.a, one.d * two.c),
+            d: one.c.madd(two.b, one.d * two.d),
+            e: one.e.madd(two.a, one.f * two.c) + two.e,
+            f: one.e.madd(two.b, one.f * two.d) + two.f,
         }
     }
 
@@ -351,8 +352,8 @@ impl Matrix {
 
     /// `fz_pre_translate`.
     pub fn pre_translate(mut self, tx: f32, ty: f32) -> Matrix {
-        self.e += tx.mul_add(self.a, ty * self.c);
-        self.f += tx.mul_add(self.b, ty * self.d);
+        self.e += tx.madd(self.a, ty * self.c);
+        self.f += tx.madd(self.b, ty * self.d);
         self
     }
 
@@ -379,8 +380,8 @@ impl Matrix {
     /// `fz_transform_point_xy`.
     pub fn transform_xy(self, x: f32, y: f32) -> Point {
         Point {
-            x: x.mul_add(self.a, y * self.c) + self.e,
-            y: x.mul_add(self.b, y * self.d) + self.f,
+            x: x.madd(self.a, y * self.c) + self.e,
+            y: x.madd(self.b, y * self.d) + self.f,
         }
     }
 }
@@ -394,14 +395,14 @@ impl Point {
     /// translation.
     pub fn transform_vector(self, m: Matrix) -> Point {
         Point {
-            x: self.x.mul_add(m.a, self.y * m.c),
-            y: self.x.mul_add(m.b, self.y * m.d),
+            x: self.x.madd(m.a, self.y * m.c),
+            y: self.x.madd(m.b, self.y * m.d),
         }
     }
 
     /// `fz_normalize_vector`.
     pub fn normalize(self) -> Point {
-        let len = self.x.mul_add(self.x, self.y * self.y);
+        let len = self.x.madd(self.x, self.y * self.y);
         if len != 0.0 {
             let len = len.sqrt();
             Point {

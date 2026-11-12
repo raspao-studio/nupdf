@@ -11,11 +11,12 @@
 //!
 //! Each type's writer follows its `pdf_write_*_appearance`. Arithmetic is
 //! kept in C's order on `f32`, `a * b + c` in one C expression as
-//! `mul_add` (clang contracts it to a fused multiply-add), so the numbers
+//! `madd` (fused where MuPDF's build fuses it: see `fma`), so the numbers
 //! printed are MuPDF's.
 
 #![allow(dead_code)] // Until every writer is ported.
 
+use crate::fma::Madd;
 use std::sync::Arc;
 
 use crate::annot;
@@ -318,9 +319,9 @@ impl Writer<'_> {
         let c = annot::color(self.doc, &self.annot);
         let gray = match c.len() {
             1 => c[0],
-            3 => c[2].mul_add(0.11, c[0].mul_add(0.3, c[1] * 0.59)),
+            3 => c[2].madd(0.11, c[0].madd(0.3, c[1] * 0.59)),
             4 => {
-                let g = c[2].mul_add(0.11, c[0].mul_add(0.3, c[1] * 0.59)) + c[3];
+                let g = c[2].madd(0.11, c[0].madd(0.3, c[1] * 0.59)) + c[3];
                 1.0 - g.min(1.0)
             }
             _ => 1.0,

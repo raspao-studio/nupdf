@@ -11,6 +11,7 @@
 //! and the annotation removed, as `pdf_bake_document` does it. Links stay.
 //! With widgets baked, the form (/AcroForm) goes too.
 
+use crate::fma::Madd;
 use std::sync::Arc;
 
 use crate::appearance;
@@ -156,8 +157,8 @@ fn annot_transform(doc: &Document, annot: &Object, ap: &Object) -> Matrix {
     let w = (rect.x1 - rect.x0) / (bbox.x1 - bbox.x0);
     let h = (rect.y1 - rect.y0) / (bbox.y1 - bbox.y0);
     // `rect.x0 - bbox.x0 * w`, contracted.
-    let x = (-bbox.x0).mul_add(w, rect.x0);
-    let y = (-bbox.y0).mul_add(h, rect.y0);
+    let x = (-bbox.x0).madd(w, rect.x0);
+    let y = (-bbox.y0).madd(h, rect.y0);
     Matrix {
         a: w,
         b: 0.0,
