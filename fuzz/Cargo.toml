@@ -130,3 +130,9 @@ name = "redact"
 path = "fuzz_targets/redact.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "render"
+path = "fuzz_targets/render.rs"
+test = false
+doc = false

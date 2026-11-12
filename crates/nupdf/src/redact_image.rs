@@ -91,7 +91,7 @@ fn subtractive(cs: Option<&ColorSpace>) -> bool {
     matches!(
         cs,
         Some(ColorSpace::Cmyk)
-            | Some(ColorSpace::Icc(crate::colorspace::Family::Cmyk))
+            | Some(ColorSpace::Icc(crate::colorspace::Family::Cmyk, _))
             | Some(ColorSpace::Separation { .. })
     )
 }

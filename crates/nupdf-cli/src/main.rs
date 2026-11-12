@@ -10,6 +10,7 @@ mod inventory;
 mod md5;
 mod objects;
 mod redact;
+mod render;
 mod search;
 mod stext;
 mod trace;
@@ -293,6 +294,14 @@ enum Command {
         /// Report the plan, the quads on each page, and write nothing.
         #[arg(long)]
         dry_run: bool,
+        /// With --dry-run: write each page that has targets as
+        /// page-NNNN.png into this directory, the areas to be removed
+        /// shaded red.
+        #[arg(long, value_name = "DIR", requires = "dry_run")]
+        preview: Option<PathBuf>,
+        /// The previews' resolution.
+        #[arg(long, default_value_t = 72.0)]
+        preview_dpi: f32,
         /// Write the output even when the check finds targets left; the
         /// report still gives what it found. For comparisons, such as
         /// with MuPDF's redaction, which leaves what this check catches.
@@ -321,6 +330,38 @@ enum Command {
         /// Match ignoring case.
         #[arg(long)]
         ignore_case: bool,
+    },
+    /// Render pages as `mutool draw` paints them (page contents, without
+    /// annotations), into page-NNNN.png (or .ppm) files.
+    Render {
+        file: PathBuf,
+        /// Where to write the images.
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+        /// The pages, in MuPDF's syntax (`1-3,7`, `N` for the last); all
+        /// without it.
+        #[arg(long)]
+        pages: Option<String>,
+        /// Resolution in dots per inch.
+        #[arg(long, default_value_t = 72.0)]
+        dpi: f32,
+        #[arg(long, value_enum, default_value = "png")]
+        format: render::Format,
+        /// A page larger than this many pixels is not rendered.
+        #[arg(long, default_value_t = 100_000_000)]
+        max_pixels: u64,
+        /// Only this part of each page, `x0,y0,x1,y1` in points from the
+        /// page's top left.
+        #[arg(long)]
+        region: Option<String>,
+        /// Render pages on this many threads; the images do not depend on
+        /// it.
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
+        /// Convert colors by MuPDF's formulas instead of its ICC profiles,
+        /// as `mutool draw -N`.
+        #[arg(long)]
+        no_icc: bool,
     },
     /// List the fonts the pages use, as `mutool info` finds them, with
     /// what each loads as; --extract writes the embedded font programs as
@@ -732,12 +773,23 @@ fn run(cli: Cli) -> ExitCode {
             line_art,
             output,
             dry_run,
+            preview,
+            preview_dpi,
             no_verify,
         } => open(file).and_then(|(doc, facts)| {
             let usage = |message: String| Failure {
                 exit: Exit::Usage,
                 code: "usage.bad_option",
                 message,
+            };
+            if !(*preview_dpi > 0.0 && *preview_dpi <= 1200.0) {
+                return Err(usage(format!(
+                    "bad --preview-dpi {preview_dpi}: expected more than 0, at most 1200"
+                )));
+            }
+            let preview = match preview {
+                Some(dir) => Some((output_dir(dir)?, *preview_dpi)),
+                None => None,
             };
             let mut targets: Vec<redact::Target> = Vec::new();
             targets.extend(text.iter().cloned().map(redact::Target::Text));
@@ -780,6 +832,7 @@ fn run(cli: Cli) -> ExitCode {
                 output.as_deref(),
                 (*dry_run, *no_verify),
                 password,
+                preview,
             )
         }),
         Command::Verify {
@@ -886,6 +939,50 @@ fn run(cli: Cli) -> ExitCode {
                 &doc,
                 inventory::fonts(&doc, dir),
             ))
+        }),
+        Command::Render {
+            file,
+            output,
+            pages,
+            dpi,
+            format,
+            max_pixels,
+            region,
+            threads,
+            no_icc,
+        } => open(file).and_then(|(doc, facts)| {
+            let region = region
+                .as_deref()
+                .map(render::parse_region)
+                .transpose()
+                .map_err(|message| Failure {
+                    exit: Exit::Usage,
+                    code: "usage.bad_option",
+                    message,
+                })?;
+            if !(*dpi > 0.0 && *dpi <= 9600.0) {
+                return Err(Failure {
+                    exit: Exit::Usage,
+                    code: "usage.bad_option",
+                    message: format!("bad --dpi {dpi}: expected more than 0, at most 9600"),
+                });
+            }
+            let dir = output_dir(output)?;
+            let settings = render::Settings {
+                dpi: *dpi,
+                region,
+                max_pixels: *max_pixels,
+                threads: (*threads).max(1),
+                icc: !*no_icc,
+            };
+            let body = render::render(&doc, pages.as_deref(), dir, *format, &settings).map_err(
+                |message| Failure {
+                    exit: Exit::Input,
+                    code: "input.page_tree",
+                    message,
+                },
+            )?;
+            Ok(report("nupdf.render/v0", &facts, &doc, body))
         }),
         Command::Images {
             file,
@@ -1258,6 +1355,36 @@ fn clean_options(f: &CleanFlags) -> Result<nupdf::write::WriteOptions, Failure> 
 }
 
 /// `redact`: plan, apply, rewrite, check, write.
+/// A preview of each page with targets: the page with its areas shaded,
+/// as page-NNNN.png in `dir`.
+fn previews(doc: &Document, plan: &redact::Plan, dir: &Path, dpi: f32) -> Vec<serde_json::Value> {
+    let ctm = nupdf::geometry::Matrix::scale(dpi / 72.0, dpi / 72.0);
+    let mut out = Vec::new();
+    for (index, quads) in plan.quads.iter().enumerate() {
+        if quads.is_empty() {
+            continue;
+        }
+        let mut entry = serde_json::json!({ "page": index + 1 });
+        let rendered = doc.page(index as i32).map_err(|e| e.0).and_then(|page| {
+            nupdf::draw::render_page_marked(doc, &page, ctm, 100_000_000, quads, true)
+        });
+        let path = dir.join(format!("page-{:04}.png", index + 1));
+        match rendered.and_then(|r| {
+            r.pix
+                .to_pixmap(Some(nupdf::colorspace::ColorSpace::Rgb))
+                .png()
+        }) {
+            Ok(png) => match std::fs::write(&path, png) {
+                Ok(()) => entry["file"] = path.display().to_string().into(),
+                Err(e) => entry["error"] = e.to_string().into(),
+            },
+            Err(e) => entry["error"] = e.into(),
+        }
+        out.push(entry);
+    }
+    out
+}
+
 fn redact_command(
     doc: &Document,
     facts: &FileFacts,
@@ -1265,6 +1392,7 @@ fn redact_command(
     output: Option<&Path>,
     (dry_run, no_verify): (bool, bool),
     password: Option<&str>,
+    preview: Option<(&Path, f32)>,
 ) -> Result<serde_json::Value, Failure> {
     let input = |message: String| Failure {
         exit: Exit::Input,
@@ -1285,6 +1413,9 @@ fn redact_command(
     fields.insert("applied".into(), (!dry_run).into());
     if dry_run {
         fields.extend(redact::describe(args, &plan, None));
+        if let Some((dir, dpi)) = preview {
+            fields.insert("previews".into(), previews(doc, &plan, dir, dpi).into());
+        }
         fields.insert("output".into(), serde_json::Value::Null);
         fields.insert("verification".into(), serde_json::Value::Null);
         return Ok(report("nupdf.redact/v0", facts, doc, fields.into()));

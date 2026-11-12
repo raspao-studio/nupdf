@@ -535,6 +535,43 @@ impl Face {
         })
     }
 
+    /// `FT_Load_Glyph` with `FT_LOAD_NO_HINTING` at the size MuPDF sets
+    /// for rendering (`FT_Set_Char_Size` 65536, at 72 dpi: 1024 pixels an
+    /// em): glyph `gid`'s outline in 26.6. None when the outline cannot be
+    /// read here (CFF inside an sfnt).
+    pub fn glyph_outline(&self, gid: u32) -> Option<Result<outline::Outline, outline::LoadError>> {
+        let upem = i64::from(self.units_per_em.max(1));
+        let scale = outline::div_fix_int(1024 * 64, upem);
+        Some(match &self.program {
+            Program::Sfnt(s) if s.has_glyf || !s.has_cff => match s.glyf() {
+                None => Err(outline::LoadError),
+                Some(g) => outline::truetype_outline(&g, gid, (scale, scale), s.lsb(gid)),
+            },
+            Program::Sfnt(_) => return None,
+            Program::Cff(c) => c.outline(gid).map(|(mut o, top, sub)| {
+                // cff_slot_load: a font dictionary's own units scale its
+                // glyphs to the top dictionary's.
+                let k = if sub != 0 && sub != top {
+                    mul_div(scale, i64::from(top), i64::from(sub))
+                } else {
+                    scale
+                };
+                o.scale(k, k);
+                o
+            }),
+            Program::Type1(t) => {
+                if gid >= self.num_glyphs {
+                    Err(outline::LoadError)
+                } else {
+                    t.outline(gid).map(|mut o| {
+                        o.scale(scale, scale);
+                        o
+                    })
+                }
+            }
+        })
+    }
+
     /// The format string FreeType reports.
     pub fn format_name(&self) -> &'static str {
         match self.format {
@@ -620,6 +657,17 @@ pub fn base14(name: &str) -> Option<&'static [u8]> {
         "ZapfDingbats" => include_bytes!("../../fonts/urw/Dingbats.cff"),
         _ => return None,
     })
+}
+
+/// `FT_MulDiv`: `a * b / c`, rounded.
+fn mul_div(a: i64, b: i64, c: i64) -> i64 {
+    if c == 0 {
+        return 0x7FFF_FFFF;
+    }
+    let s = ((a < 0) != (b < 0)) != (c < 0);
+    let (a, b, c) = (a.unsigned_abs(), b.unsigned_abs(), c.unsigned_abs());
+    let d = (a * b + (c >> 1)) / c;
+    if s { -(d as i64) } else { d as i64 }
 }
 
 #[cfg(test)]

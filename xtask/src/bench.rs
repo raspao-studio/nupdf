@@ -121,6 +121,47 @@ pub const PAIRS: &[Pair] = &[
         ..DEFAULT
     },
     Pair {
+        name: "render",
+        about: "every page at 72 dpi as PPM, color management off, on one thread: `mutool draw -N` (which also draws annotations) against `nupdf render`",
+        oracle: &[
+            "draw",
+            "-q",
+            "-N",
+            "-r",
+            "72",
+            "-o",
+            "{dir}/p%d.ppm",
+            "{file}",
+        ],
+        nupdf: &["render", "{file}", "-o", "{dir}", "--format", "ppm"],
+        ..DEFAULT
+    },
+    Pair {
+        name: "render-threads",
+        about: "every page at 72 dpi as PPM, MuPDF on one thread (the oracle is built without threads) against nupdf on 8",
+        oracle: &[
+            "draw",
+            "-q",
+            "-N",
+            "-r",
+            "72",
+            "-o",
+            "{dir}/p%d.ppm",
+            "{file}",
+        ],
+        nupdf: &[
+            "render",
+            "{file}",
+            "-o",
+            "{dir}",
+            "--format",
+            "ppm",
+            "--threads",
+            THREADS,
+        ],
+        ..DEFAULT
+    },
+    Pair {
         name: "stext-scaling",
         about: "nupdf's structured text on 1 thread against 8, for documents of 50 pages or more",
         baseline: Tool::Nupdf,
@@ -202,6 +243,10 @@ pub fn run(
                         "{out}" => scratch.clone().into_os_string(),
                         "{dir}" => scratch_dir.clone().into_os_string(),
                         a if a.starts_with("oracle/") => root.join(a).into_os_string(),
+                        a if a.starts_with("{dir}/") => {
+                            let _ = std::fs::create_dir_all(&scratch_dir);
+                            scratch_dir.join(&a["{dir}/".len()..]).into_os_string()
+                        }
                         a => OsString::from(a),
                     })
                     .collect()

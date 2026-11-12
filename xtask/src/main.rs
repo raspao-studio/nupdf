@@ -18,6 +18,7 @@ mod reading_order;
 
 mod redaction;
 mod tables;
+mod triage;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -79,6 +80,19 @@ enum Cmd {
         #[arg(long)]
         sample: Option<usize>,
     },
+    /// Render one page with MuPDF, nupdf and hayro (a second reference),
+    /// and report how far each pair is apart.
+    Triage {
+        file: std::path::PathBuf,
+        /// The page, from 1.
+        #[arg(long, default_value_t = 1)]
+        page: usize,
+        #[arg(long, default_value_t = 72.0)]
+        dpi: f32,
+        /// The nupdf to run.
+        #[arg(long, default_value = "target/release/nupdf")]
+        nupdf: std::path::PathBuf,
+    },
     /// The redaction tier: each adversarial fixture checked to leak, then
     /// redacted and judged by `nupdf verify`, MuPDF and pdftotext.
     Redaction {
@@ -133,6 +147,19 @@ fn main() -> Result<()> {
         Cmd::Fixtures { check } => fixtures::run(&root, check),
         Cmd::Tables { check } => tables::run(&root, check),
         Cmd::Arlington { files } => arlington::report(&files),
+        Cmd::Triage {
+            file,
+            page,
+            dpi,
+            nupdf,
+        } => {
+            let nupdf = if nupdf.is_absolute() {
+                nupdf
+            } else {
+                root.join(nupdf)
+            };
+            triage::run(&root, &nupdf, &file, page, dpi)
+        }
         Cmd::Redaction {
             nupdf,
             dir,

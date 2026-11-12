@@ -324,6 +324,26 @@ impl Sfnt {
             .unwrap_or(0)
     }
 
+    /// `tt_face_get_metrics`: the left side bearing in font units.
+    pub fn lsb(&self, gid: u32) -> i64 {
+        let Some((o, l)) = self.hmtx else {
+            return 0;
+        };
+        let n = self.num_hmetrics;
+        let g = gid as usize;
+        let at = if g < n {
+            g * 4 + 2
+        } else if n > 0 {
+            n * 4 + (g - n) * 2
+        } else {
+            return 0;
+        };
+        if at + 2 > l {
+            return 0;
+        }
+        u16_at(&self.data, o + at).map_or(0, |v| i64::from(v as i16))
+    }
+
     /// `tt_face_get_metrics`: the advance in font units.
     pub fn advance(&self, gid: u32) -> u16 {
         let Some((o, l)) = self.hmtx else {

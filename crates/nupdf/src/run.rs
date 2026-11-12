@@ -2967,7 +2967,7 @@ fn clamp_color(cs: &ColorSpace, input: &[f32], out: &mut [f32; MAX_COLORS]) {
             out[1] = clamp(at(1), -128.0, 127.0);
             out[2] = clamp(at(2), -128.0, 127.0);
         }
-        ColorSpace::Icc(colorspace::Family::Lab) => {
+        ColorSpace::Icc(colorspace::Family::Lab, _) => {
             out[0] = clamp(at(0), 0.0, 100.0);
             out[1] = clamp(at(1), -128.0, 127.0);
             out[2] = clamp(at(2), -128.0, 127.0);
@@ -3060,10 +3060,10 @@ fn output_intent(doc: &Document) -> Option<ColorSpace> {
         Object::Stream(s) => doc.stream_data(&s).map_err(|e| e.report()),
         _ => Err(report::format("object is not a stream")),
     }
-    .and_then(|data| colorspace::icc_colorspace(doc, &data, None));
+    .and_then(|data| colorspace::icc_colorspace(doc, &data, None).map(|f| (f, data)));
     let n = doc.dict_get(&profile, b"N").to_int();
     match loaded {
-        Ok(family) => {
+        Ok((family, data)) => {
             let pn = family.n() as i32;
             if pn > n {
                 diag.warn(
@@ -3081,7 +3081,10 @@ fn output_intent(doc: &Document) -> Option<ColorSpace> {
                         ),
                     );
                 }
-                return Some(ColorSpace::Icc(family));
+                return Some(ColorSpace::Icc(
+                    family,
+                    colorspace::IccData(Some(Arc::from(data))),
+                ));
             }
         }
         Err(line) => {
@@ -3754,6 +3757,47 @@ impl Device for GlyphProbe {
     }
 }
 
+/// `fz_run_t3_glyph`: glyph `gid` of a Type 3 font through `trm` onto
+/// `dev`. False when the font has no such glyph or its procedure fails.
+pub fn run_type3_glyph(
+    doc: &Document,
+    font: &Font,
+    gid: i32,
+    trm: Matrix,
+    dev: &mut dyn Device,
+) -> bool {
+    let Some(t3) = &font.t3 else {
+        return false;
+    };
+    let Some(Some(proc)) = usize::try_from(gid).ok().and_then(|g| t3.procs.get(g)) else {
+        return false;
+    };
+    let ctm = t3.matrix.concat(trm);
+    let (out, _) = run_glyph(
+        doc,
+        dev,
+        ctm,
+        0,
+        t3.resources.as_ref(),
+        proc,
+        None,
+        Arc::new(DefaultColorSpaces::default()),
+        Store::default(),
+    );
+    out.is_ok()
+}
+
+/// Whether a Type 3 glyph says it is a mask (`d1`) or colored (`d0`).
+pub fn type3_glyph_colored(font: &Font, gid: i32) -> bool {
+    let flags = font
+        .t3
+        .as_ref()
+        .and_then(|t| usize::try_from(gid).ok().and_then(|g| t.flags.get(g)))
+        .copied()
+        .unwrap_or(0);
+    flags & DEVFLAG_MASK == 0 && flags & DEVFLAG_COLOR != 0
+}
+
 /// `pdf_run_glyph`: a Type 3 glyph's procedure in a processor of its own.
 /// Gives back the device flags it left and its `d1` box, and the store
 /// whatever happened.
@@ -3845,8 +3889,21 @@ pub fn run_page_contents_for(
     store: Store,
     usage: Option<&'static str>,
 ) -> PageRun {
+    run_page_contents_with(doc, page, dev, store, usage, Matrix::IDENTITY)
+}
+
+/// `pdf_run_page_contents_with_usage` with `ctm` after the page's own
+/// transform, as `fz_run_page` takes it (a scale for a resolution).
+pub fn run_page_contents_with(
+    doc: &Document,
+    page: &Object,
+    dev: &mut dyn Device,
+    store: Store,
+    usage: Option<&'static str>,
+    user: Matrix,
+) -> PageRun {
     let mut store = Some(store);
-    let error = run_page_imp(doc, page, dev, &mut store, usage).err();
+    let error = run_page_imp(doc, page, dev, &mut store, usage, user).err();
     PageRun {
         error,
         store: store.unwrap_or_default(),
@@ -3859,6 +3916,7 @@ fn run_page_imp(
     dev: &mut dyn Device,
     store: &mut Option<Store>,
     usage: Option<&'static str>,
+    user: Matrix,
 ) -> Result<(), String> {
     let inherited = |key: &[u8]| doc.inherited(page, key).map_err(|e| report::line(&e.0));
     let resources = inherited(b"Resources")?;
@@ -3866,6 +3924,7 @@ fn run_page_imp(
     dev.set_default_colorspaces(&defaults);
 
     let (fitzbox, ctm) = doc.page_transform(page).map_err(|e| report::line(&e.0))?;
+    let ctm = ctm.concat(user);
     let fitzbox = fitzbox.transform(ctm);
     let contents = stored(doc, page, b"Contents");
     let mediabox = doc.to_rect(inherited(b"MediaBox")?.as_ref());

@@ -180,6 +180,24 @@ impl<'a> Scanner<'a> {
     }
 }
 
+/// The numbers of the array the scanner is at: a `{...}` token, or the
+/// tokens from `[` to `]`.
+fn array_numbers(s: &mut Scanner<'_>) -> Vec<f64> {
+    let tok = s.token().unwrap_or_default();
+    if tok != b"[" {
+        return numbers(tok);
+    }
+    let mut out = Vec::new();
+    // An array of more than a few dozen numbers is not a matrix or box.
+    for _ in 0..64 {
+        match s.token() {
+            None | Some(b"]") => break,
+            Some(t) => out.extend(numbers(t)),
+        }
+    }
+    out
+}
+
 fn numbers(tok: &[u8]) -> Vec<f64> {
     let inner = tok
         .strip_prefix(b"[")
@@ -277,7 +295,7 @@ impl Type1 {
         while let Some(tok) = s.token() {
             match tok {
                 b"/FontMatrix" => {
-                    let m = numbers(s.token().unwrap_or_default());
+                    let m = array_numbers(&mut s);
                     if m.len() >= 4 {
                         let t = m[3].abs() * 1000.0;
                         if t == 0.0 {
@@ -300,7 +318,7 @@ impl Type1 {
                 }
                 b"/isFixedPitch" => font.fixed_pitch = s.token() == Some(b"true"),
                 b"/FontBBox" => {
-                    let b = numbers(s.token().unwrap_or_default());
+                    let b = array_numbers(&mut s);
                     if b.len() >= 4 {
                         font.bbox = [
                             b[0].floor() as i32,
@@ -470,6 +488,12 @@ impl Type1 {
     }
 
     /// The control box of glyph `gid`, in font units.
+    /// The unhinted outline of glyph `gid`, in font units.
+    pub fn outline(&self, gid: u32) -> Result<outline::Outline, LoadError> {
+        let cs = self.charstrings.get(gid as usize).ok_or(LoadError)?;
+        outline::charstring_outline(self, cs)
+    }
+
     pub fn outline_cbox(&self, gid: u32) -> Result<Option<CBox>, LoadError> {
         let cs = self.charstrings.get(gid as usize).ok_or(LoadError)?;
         outline::charstring_cbox(self, cs)
@@ -574,5 +598,25 @@ impl Charstrings for Type1 {
         let name = super::names::SID_NAMES.get(usize::from(sid))?.as_bytes();
         let gid = self.names.iter().position(|n| n == name)?;
         self.charstrings.get(gid).map(Vec::as_slice)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bracketed_and_braced_arrays_read_whole() {
+        let mut s = Scanner {
+            d: b" [0.00048828 0 0 0.00048828 0 0] readonly def {0 -10 500 700}",
+            at: 0,
+        };
+        assert_eq!(
+            array_numbers(&mut s),
+            vec![0.00048828, 0.0, 0.0, 0.00048828, 0.0, 0.0]
+        );
+        assert_eq!(s.token(), Some(&b"readonly"[..]));
+        s.token();
+        assert_eq!(array_numbers(&mut s), vec![0.0, -10.0, 500.0, 700.0]);
     }
 }

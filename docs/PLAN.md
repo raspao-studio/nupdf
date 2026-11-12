@@ -14,8 +14,8 @@ Related docs: [ARCHITECTURE](ARCHITECTURE.md) · [AGENT-INTERFACE](AGENT-INTERFA
 | M3 | Writer and structural editing | ~10k | done |
 | M4 | Content streams, resources, fonts | ~25k | done |
 | M5 | Text extraction and search | ~15k | |
-| M6 | Redaction and verification | ~5k plus verifier | |
-| M7 | Rendering | ~30k | |
+| M6 | Redaction and verification | ~5k plus verifier | done |
+| M7 | Rendering | ~30k | done |
 | M8 | Agent surface: MCP, batch, eval | new | |
 | M9 | Forms, annotations, OCR, tables, signatures | ~15k | |
 | M10 | Hardening and public release | — | |
@@ -279,14 +279,14 @@ Exit: zero leaks on the adversarial suite and the redaction tier, as judged by `
 
 MuPDF reference: `fitz/draw-*.c`, `colorspace.c`, `color-lcms.c`, `separation.c`, `pdf-shade.c`, glyph caching in `fitz/font.c`.
 
-- [ ] Rasterizer decision: vello_cpu, tiny-skia, or a port of `draw-edge`/`draw-paint`, chosen by measured pixel parity and speed
-- [ ] Paths and strokes (joins, caps, dashes), clipping, glyphs (outlines and Type3), images (every color space, decode arrays, stencil and soft masks, interpolation), shadings 1–7, patterns, transparency groups, soft masks, blend modes, knockout, overprint simulation, ICC through moxcms
-- [ ] Band-parallel rendering within a page, and page-parallel across pages
-- [ ] `render`: PNG output for a page or region, set DPI, and `--max-pixels` to fit vision-model budgets
-- [ ] Redaction previews for `--dry-run`
-- [ ] hayro as a second reference renderer, for triaging MuPDF disagreements
+- [x] Rasterizer decision: vello_cpu, tiny-skia, or a port of `draw-edge`/`draw-paint`, chosen by measured pixel parity and speed. A port (DECISIONS D41): MuPDF's anti-aliasing, FreeType's glyph rasterizer and MuPDF's 8-bit painters put any other rasterizer outside the threshold on most text
+- [x] Paths and strokes (joins, caps, dashes), clipping, glyphs (outlines and Type3), images (every color space, decode arrays, stencil and soft masks, interpolation), shadings 1–7, patterns, transparency groups, soft masks, blend modes, knockout, overprint simulation, ICC through moxcms. Overprint: MuPDF simulates it only for subtractive destinations, and `render` draws RGB, so there is nothing to simulate; ICC: moxcms with lcms2's black point compensation, within 1 of MuPDF on SWOP CMYK. Known differences in D41
+- [x] Band-parallel rendering within a page, and page-parallel across pages: `--threads` runs pages in parallel and plays a large page's display list into bands, with identical pixels
+- [x] `render`: PNG output for a page or region, set DPI, and `--max-pixels` to fit vision-model budgets (also PPM, and `--no-icc` for `mutool draw -N`)
+- [x] Redaction previews for `--dry-run`: `--preview DIR` draws each page with targets, the areas shaded red
+- [x] hayro as a second reference renderer, for triaging MuPDF disagreements: `cargo xtask triage FILE --page N` renders with MuPDF, nupdf and hayro and gives each pair's distance
 
-Exit: ≥98% of standard-tier pages within the pixel threshold of `mutool draw` at 72 and 150 dpi. Single-threaded time ≤1.2× MuPDF's, and faster than MuPDF on multiple cores.
+Exit: ≥98% of standard-tier pages within the pixel threshold of `mutool draw` at 72 and 150 dpi. Single-threaded time ≤1.2× MuPDF's, and faster than MuPDF on multiple cores. Measured (a pixel off by more than 8 of 255 in a channel, at most 0.5% of a page's pixels off; page contents without annotations): with color management on, as `mutool draw` has it, 98.98% of 19,790 pages at 72 dpi and 98.40% of 9,790 at 150 dpi (the pages MuPDF renders within the harness's time limit); with it off on both sides, 99.30% and 99.03%. Speed against `mutool draw -N` at 72 dpi on 200 standard-tier files: one thread, geometric mean 1.25× MuPDF's speed (total 1,293 ms against 1,357 ms); eight threads, 1.28× (the oracle is built without threads, so MuPDF runs on one).
 
 ## M8: Agent surface
 
