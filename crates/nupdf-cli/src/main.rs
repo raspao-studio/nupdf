@@ -4,6 +4,7 @@
 //! `nupdf`: JSON reports on stdout, JSON errors on stderr, meaningful exit
 //! codes. The contract is specified in docs/AGENT-INTERFACE.md.
 
+mod batch;
 mod commands;
 mod extract;
 mod inventory;
@@ -485,6 +486,34 @@ enum Command {
         #[arg(long, default_value_t = 65536)]
         max_bytes: usize,
     },
+    /// Run a command on many files: each as `nupdf <command> <file> ...`,
+    /// several at once, a JSON line per file in the order given, then the
+    /// summary. `{stem}`, `{name}` and `{n}` in the command's arguments
+    /// become each file's name without extension, its name and its number.
+    Batch {
+        /// Files, directories (their PDFs, at any depth) and glob patterns
+        /// (`docs/**/*.pdf`).
+        #[arg(required = true)]
+        inputs: Vec<String>,
+        /// Files worked on at once; 0 for one per core.
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+        /// Write the files' lines here instead of to stdout; the summary
+        /// still goes to stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Take up an earlier run: skip the files --output already has a
+        /// line for, if they have not changed, and add to it.
+        #[arg(long)]
+        resume: bool,
+        /// Seconds each file may take, after which it fails with
+        /// `limit.timeout`.
+        #[arg(long)]
+        item_timeout: Option<f64>,
+        /// The command and its arguments, after `--`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Serve the commands as tools of a Model Context Protocol server, over
     /// stdin and stdout.
     Mcp {
@@ -619,6 +648,46 @@ fn run_timed(cli: Cli) -> ExitCode {
     match interrupt.and_then(|i| i.reason()) {
         Some(_) => fail(timed_out(), pretty),
         None => code,
+    }
+}
+
+/// What a command run in-process wrote, and its exit code.
+struct Ran {
+    code: ExitCode,
+    out: Vec<u8>,
+    err: Vec<u8>,
+}
+
+/// The command `line` (`nupdf` and its arguments) run as the CLI runs it,
+/// on a thread of its own under `interrupt`, with what it writes kept: the
+/// MCP server's calls and `batch`'s files.
+fn run_line(
+    line: &[String],
+    interrupt: Option<std::sync::Arc<nupdf::interrupt::Interrupt>>,
+) -> Result<Ran, Failure> {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(line).map_err(|e| Failure {
+        exit: Exit::Usage,
+        code: "usage.bad_argument",
+        message: e.render().to_string().trim().to_string(),
+    })?;
+    let ran = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            capture::keep(|| {
+                nupdf::interrupt::within(interrupt, || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli)))
+                })
+            })
+        })
+        .map(std::thread::JoinHandle::join);
+    match ran {
+        Ok(Ok((Ok(code), out, err))) => Ok(Ran { code, out, err }),
+        _ => Err(Failure {
+            exit: Exit::Internal,
+            code: "internal.panic",
+            message: "the command stopped on a bug in nupdf".into(),
+        }),
     }
 }
 
@@ -1141,6 +1210,31 @@ fn run(cli: Cli) -> ExitCode {
             data,
             max_bytes,
         } => open(file).and_then(|opened| show(opened, target, *data, *max_bytes)),
+        Command::Batch {
+            inputs,
+            jobs,
+            output,
+            resume,
+            item_timeout,
+            command,
+        } => batch::run(&batch::Args {
+            inputs,
+            jobs: *jobs,
+            output: output.as_deref(),
+            resume: *resume,
+            item_timeout: *item_timeout,
+            command,
+        })
+        .map(|summary| {
+            let mut out = serde_json::Map::new();
+            out.insert("schema".into(), "nupdf.batch/v0".into());
+            out.insert("doc_id".into(), serde_json::Value::Null);
+            if let serde_json::Value::Object(fields) = summary {
+                out.extend(fields);
+            }
+            out.insert("diagnostics".into(), serde_json::json!([]));
+            serde_json::Value::Object(out)
+        }),
         Command::Mcp { .. } => Err(Failure {
             exit: Exit::Usage,
             code: "usage.bad_command",

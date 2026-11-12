@@ -482,3 +482,17 @@ At introduction, on the standard tier: with color management on, 98.98% of 19,79
 - **A call stops at its time or when cancelled, where its work next checks.** Each call has an `Interrupt` (`nupdf::interrupt`), a flag and a deadline (`--call-timeout`, 300 s by default, or the call's `timeout` if shorter), which the threads it starts carry too. Content streams check it at every operator and page threads before every page, so a long call stops within a few operators of the deadline or of `notifications/cancelled`. Interrupted work breaks off as a damaged content stream would, so nothing it made is kept: its output goes nowhere, files it would write are not written (`clean` and the other writers check before the output is renamed into place), and a call out of time fails with exit 5's `limit.timeout`; a cancelled call gets no answer, as the protocol asks. The CLI takes the same `--timeout`. When stdin closes, the calls still running finish, each within its time, and are answered.
 - **Output has a ceiling.** A report larger than `--max-output-bytes` (8 MB by default) is a `limit.output` error that points to the budgets (`pages`, `fields`, `max_chars`, `max_items`), rather than a message the client may not take.
 
+## D43. `batch` runs a command on each file in-process, writing a line per file in the order given
+
+*2026-11-12*
+
+`nupdf batch <inputs>... -- <command> [args]` runs `nupdf <command> <file> [args]` for each file, as the MCP server runs a call (D42): in-process, on a thread of its own, with what it writes kept.
+
+- **Inputs** are files, directories (their `*.pdf`, any case, at any depth) and glob patterns, each file once, in name order within an input and the inputs in the order given. A pattern that matches nothing is a usage error. A command whose first argument is not a file (`merge`, `batch`, `mcp`) is refused.
+- **Files run several at once** (`--jobs`, one per core by default), each command with its own threads if it takes `--threads`. Their lines go out in the order the files were given, each as soon as the ones before it are out, so the output is the same at every `--jobs`.
+- **A line per file**: `nupdf.batch.item/v0` with the file, its size and modification time, the exit code, and the command's report (`report`; for text output, `text` and the report from stderr) or its error report (`error`). The summary, `nupdf.batch/v0`, counts the files, those that succeeded, failed, were skipped and were not run. A file that fails does not fail the batch: its line says why, and `batch` exits 0.
+- **Runs can be taken up again.** With `-o FILE`, the lines go to the file, each written as soon as it is in order, and the summary to stdout. `--resume` reads the lines already there and skips every file they report with the same size and modification time; a file changed since runs again, and its new line is added after the old one, so the last line for a file is the one that counts. A line cut off by a killed run is ended before adding.
+- **Arguments can name each file's output**: `{stem}`, `{name}` and `{n}` (the file's number, zero-padded) in the command's arguments, as in `-- clean -g -o out/{stem}.pdf`.
+- **`--item-timeout`** bounds each file as a call's `timeout` does; the global `--timeout` bounds the batch, which then starts no more files.
+- `batch` is not an MCP tool: an agent calls tools at once itself, and a batch's lines are a stream, not one report.
+

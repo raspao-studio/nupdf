@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use clap::{ArgAction, CommandFactory, Parser};
+use clap::{ArgAction, CommandFactory};
 use nupdf::interrupt::{Interrupt, Reason};
 use serde_json::{Map, Value, json};
 
@@ -40,7 +40,7 @@ const TIMEOUT: &str = "timeout";
 const NOT_TOOL_OPTIONS: &[&str] = &["pretty", "help", "version", TIMEOUT];
 
 /// Commands that are not tools.
-const NOT_TOOLS: &[&str] = &["mcp", "help"];
+const NOT_TOOLS: &[&str] = &["mcp", "batch", "help"];
 
 // ---- files ---------------------------------------------------------------
 
@@ -313,33 +313,17 @@ fn call(tool: &str, args: &Map<String, Value>, interrupt: &Arc<Interrupt>) -> Ou
         Ok(l) => l,
         Err(e) => return usage(e),
     };
-    let cli = match Cli::try_parse_from(&line) {
-        Ok(c) => c,
-        Err(e) => return usage(e.render().to_string().trim().to_string()),
-    };
-    let i = Some(interrupt.clone());
-    let ran = std::thread::Builder::new()
-        .stack_size(crate::STACK_SIZE)
-        .spawn(move || {
-            crate::capture::keep(|| {
-                nupdf::interrupt::within(i, || {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::run(cli)))
-                })
-            })
-        })
-        .map(std::thread::JoinHandle::join);
-    match (ran, interrupt.reason()) {
+    match (
+        crate::run_line(&line, Some(interrupt.clone())),
+        interrupt.reason(),
+    ) {
         (_, Some(Reason::Cancelled)) => Outcome::Cancelled,
         (_, Some(Reason::TimedOut)) => Outcome::Failed(Failure {
             message: "the call ran out of time (timeout)".into(),
             ..crate::timed_out()
         }),
-        (Ok(Ok((Ok(code), out, err))), None) => Outcome::Ran(code, out, err),
-        _ => Outcome::Failed(Failure {
-            exit: crate::Exit::Internal,
-            code: "internal.panic",
-            message: "the command stopped on a bug in nupdf".into(),
-        }),
+        (Ok(ran), None) => Outcome::Ran(ran.code, ran.out, ran.err),
+        (Err(f), None) => Outcome::Failed(f),
     }
 }
 

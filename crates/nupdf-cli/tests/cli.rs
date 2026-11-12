@@ -2204,3 +2204,152 @@ fn a_command_out_of_time_writes_nothing() {
             .success()
     );
 }
+
+fn lines(out: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(out)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn batch_runs_a_command_on_each_file_in_order() {
+    let dir = smoke("stext.pdf").parent().unwrap().to_path_buf();
+    let pattern = dir.join("s*.pdf");
+    let pattern = pattern.to_str().unwrap();
+    let out = nupdf(&[
+        "batch",
+        pattern,
+        "--jobs",
+        "3",
+        "--",
+        "extract",
+        "--max-chars",
+        "40",
+    ]);
+    assert!(out.status.success());
+    let lines = lines(&out.stdout);
+    let (summary, items) = lines.split_last().unwrap();
+    assert_eq!(summary["schema"], "nupdf.batch/v0");
+    assert_eq!(summary["files"], items.len());
+    let files: Vec<&str> = items.iter().map(|l| l["file"].as_str().unwrap()).collect();
+    let mut sorted = files.clone();
+    sorted.sort_unstable();
+    assert_eq!(files, sorted);
+    // Each line carries the command's own report.
+    for item in items {
+        let cli = nupdf(&[
+            "extract",
+            item["file"].as_str().unwrap(),
+            "--max-chars",
+            "40",
+        ]);
+        let report: Value = serde_json::from_slice(&cli.stdout).unwrap();
+        assert_eq!(item["report"], report, "{}", item["file"]);
+    }
+    // The same at one file at a time.
+    let one = nupdf(&[
+        "batch",
+        pattern,
+        "--jobs",
+        "1",
+        "--",
+        "extract",
+        "--max-chars",
+        "40",
+    ]);
+    assert_eq!(one.stdout, out.stdout);
+    // Commands that take no single file are refused.
+    assert_eq!(
+        nupdf(&["batch", pattern, "--", "merge"]).status.code(),
+        Some(2)
+    );
+    assert_eq!(
+        nupdf(&["batch", "/no/such/*.pdf", "--", "info"])
+            .status
+            .code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn batch_names_outputs_and_takes_up_where_it_stopped() {
+    let work = scratch("batch-work");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(work.join("in/sub")).unwrap();
+    for (name, to) in [
+        ("stext.pdf", "in/a.pdf"),
+        ("minimal.pdf", "in/sub/b.pdf"),
+        ("multipage-inherit.pdf", "in/c.pdf"),
+    ] {
+        std::fs::copy(smoke(name), work.join(to)).unwrap();
+    }
+    std::fs::write(work.join("in/broken.pdf"), b"not a pdf").unwrap();
+    let journal = work.join("run.jsonl");
+    let inputs = work.join("in");
+    let out_pattern = work.join("out/{stem}-{n}.pdf");
+    std::fs::create_dir_all(work.join("out")).unwrap();
+    let run = |resume: bool| {
+        let mut args = vec![
+            "batch",
+            inputs.to_str().unwrap(),
+            "-o",
+            journal.to_str().unwrap(),
+        ];
+        if resume {
+            args.push("--resume");
+        }
+        args.extend(["--", "clean", "-g", "-o", out_pattern.to_str().unwrap()]);
+        let out = nupdf(&args);
+        assert!(out.status.success());
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let first = run(false);
+    assert_eq!(
+        (
+            first["files"].as_u64(),
+            first["ok"].as_u64(),
+            first["failed"].as_u64()
+        ),
+        (Some(4), Some(3), Some(1))
+    );
+    for made in ["a-1.pdf", "c-3.pdf", "b-4.pdf"] {
+        assert!(work.join("out").join(made).exists(), "{made}");
+    }
+    let items = lines(&std::fs::read(&journal).unwrap());
+    assert_eq!(items.len(), 4);
+    assert_eq!(items[1]["error"]["error"]["code"], "input.not_pdf");
+    // Nothing changed: nothing to do.
+    let again = run(true);
+    assert_eq!(
+        (again["skipped"].as_u64(), again["ok"].as_u64()),
+        (Some(4), Some(0))
+    );
+    // A changed file runs again, and its new line is added.
+    std::fs::copy(smoke("fonts-images.pdf"), work.join("in/c.pdf")).unwrap();
+    let changed = run(true);
+    assert_eq!(
+        (changed["skipped"].as_u64(), changed["ok"].as_u64()),
+        (Some(3), Some(1))
+    );
+    assert_eq!(lines(&std::fs::read(&journal).unwrap()).len(), 5);
+}
+
+#[test]
+fn batch_files_stop_at_their_timeout() {
+    let heavy = heavy_pdf("batch-heavy.pdf", 200_000);
+    let out = nupdf(&[
+        "batch",
+        heavy.to_str().unwrap(),
+        smoke("stext.pdf").to_str().unwrap(),
+        "--item-timeout",
+        "0.05",
+        "--",
+        "stext",
+    ]);
+    assert!(out.status.success());
+    let lines = lines(&out.stdout);
+    assert_eq!(lines[0]["exit"], 5);
+    assert_eq!(lines[0]["error"]["error"]["code"], "limit.timeout");
+    assert_eq!(lines[2]["failed"], 2);
+}
