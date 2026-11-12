@@ -49,6 +49,9 @@ pub mod flags {
     pub const ACCURATE_SIDE_BEARINGS: u32 = 1 << 19;
     pub const LAZY_VECTORS: u32 = 1 << 20;
     pub const FUZZY_VECTORS: u32 = 1 << 21;
+    /// nupdf's own: optional content runs whether shown or hidden, so
+    /// text in hidden layers is gathered too.
+    pub const ALL_LAYERS: u32 = 1 << 29;
 }
 
 /// Vector block flags (`FZ_STEXT_VECTOR_IS_STROKED` and the rest).
@@ -142,6 +145,7 @@ impl Options {
                 "vectors" => flags::COLLECT_VECTORS,
                 "lazy-vectors" => flags::LAZY_VECTORS,
                 "fuzzy-vectors" => flags::FUZZY_VECTORS,
+                "all-layers" => flags::ALL_LAYERS,
                 _ => return Err(format!("unknown stext option: {key}")),
             };
             if on {
@@ -1820,7 +1824,8 @@ pub fn extract_page(
         Err(e) => return (Err(crate::diag::report::line(&e.0)), store),
     };
     let mut dev = StextDevice::new(mediabox, opts);
-    let run = crate::run::run_page_contents(doc, page, &mut dev, store);
+    let usage = (opts.flags & flags::ALL_LAYERS == 0).then_some("View");
+    let run = crate::run::run_page_contents_for(doc, page, &mut dev, store, usage);
     let page = match run.error {
         Some(e) => Err(e),
         None => Ok(dev.finish()),

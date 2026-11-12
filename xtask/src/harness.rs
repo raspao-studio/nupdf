@@ -461,6 +461,31 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &[],
     },
     Check {
+        name: "redact-text",
+        about: "the text left after redacting every run of digits, as MuPDF's pdf_redact_page leaves it (images and line art kept): each page's text as MuPDF reads the output back",
+        oracle_script: "oracle/js/redact.js",
+        nupdf_args: &[
+            "redact",
+            "--regex",
+            "[0-9]+",
+            "--stext-options",
+            "clip=yes",
+            "--images",
+            "none",
+            "--line-art",
+            "none",
+            // MuPDF's redaction leaves what nupdf's check catches (clipped
+            // and hidden digits, dates in metadata).
+            "--no-verify",
+        ],
+        compare: Compare::Fields(&["/page_count", "/pages"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: Some(Reader::Mutool("oracle/js/roundtrip-text.js")),
+        oracle_args: &["[0-9]+", "regexp"],
+    },
+    Check {
         name: "roundtrip-text",
         about: "the `clean` output of each side as MuPDF reads it back: each page's text (fz_print_stext_page_as_text)",
         oracle_script: "oracle/js/clean.js",
