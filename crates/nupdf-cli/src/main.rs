@@ -6,6 +6,7 @@
 
 mod batch;
 mod commands;
+mod diff;
 mod extract;
 mod inventory;
 mod mcp;
@@ -485,6 +486,30 @@ enum Command {
         /// Cap on the bytes of stream data included with --data.
         #[arg(long, default_value_t = 65536)]
         max_bytes: usize,
+    },
+    /// Compare two PDFs: their text (pages lined up, then lines, with
+    /// content ids), their structure (pages, sizes, metadata, outline,
+    /// fonts, annotations) and, on request, their pixels.
+    Diff {
+        a: PathBuf,
+        b: PathBuf,
+        /// What to compare, comma-separated.
+        #[arg(
+            long,
+            value_enum,
+            value_delimiter = ',',
+            default_value = "text,structure"
+        )]
+        by: Vec<diff::By>,
+        /// MuPDF's stext options for the text, as for `stext`.
+        #[arg(long, default_value = "")]
+        options: String,
+        /// Resolution pages are drawn at for `pixels`.
+        #[arg(long, default_value_t = 36.0)]
+        dpi: f32,
+        /// Most differences reported of each kind; past it, `truncated`.
+        #[arg(long, default_value_t = 500)]
+        max_items: usize,
     },
     /// Run a command on many files: each as `nupdf <command> <file> ...`,
     /// several at once, a JSON line per file in the order given, then the
@@ -1210,6 +1235,55 @@ fn run(cli: Cli) -> ExitCode {
             data,
             max_bytes,
         } => open(file).and_then(|opened| show(opened, target, *data, *max_bytes)),
+        Command::Diff {
+            a,
+            b,
+            by,
+            options,
+            dpi,
+            max_items,
+        } => nupdf::stext::Options::parse(options)
+            .map_err(|e| Failure {
+                exit: Exit::Usage,
+                code: "usage.bad_option",
+                message: e,
+            })
+            .and_then(|options| Ok((options, open(a)?, open(b)?)))
+            .map(|(options, (da, fa), (db, fb))| {
+                let args = diff::Args {
+                    by,
+                    options,
+                    dpi: dpi.clamp(1.0, 600.0),
+                    max_items: *max_items,
+                };
+                let body = diff::diff(&da, &db, &args);
+                let side = |path: &Path, doc: &Document, facts: &FileFacts| {
+                    serde_json::json!({
+                        "file": path.to_string_lossy(),
+                        "doc_id": facts.doc_id,
+                        "page_count": doc.page_count().ok(),
+                    })
+                };
+                let mut out = serde_json::Map::new();
+                out.insert("schema".into(), "nupdf.diff/v0".into());
+                out.insert("doc_id".into(), fa.doc_id.clone().into());
+                out.insert("a".into(), side(a, &da, &fa));
+                out.insert("b".into(), side(b, &db, &fb));
+                if let serde_json::Value::Object(fields) = body {
+                    out.extend(fields);
+                }
+                let mut diags = Vec::new();
+                for (which, doc) in [("a", &da), ("b", &db)] {
+                    if let serde_json::Value::Array(list) = diagnostics(doc) {
+                        for mut d in list {
+                            d["document"] = which.into();
+                            diags.push(d);
+                        }
+                    }
+                }
+                out.insert("diagnostics".into(), diags.into());
+                serde_json::Value::Object(out)
+            }),
         Command::Batch {
             inputs,
             jobs,

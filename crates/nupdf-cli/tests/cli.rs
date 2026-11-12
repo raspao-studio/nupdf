@@ -2353,3 +2353,110 @@ fn batch_files_stop_at_their_timeout() {
     assert_eq!(lines[0]["error"]["error"]["code"], "limit.timeout");
     assert_eq!(lines[2]["failed"], 2);
 }
+
+fn diff(a: &str, b: &str, extra: &[&str]) -> Value {
+    let mut args = vec!["diff", a, b];
+    args.extend(extra);
+    let out = nupdf(&args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn diff_finds_what_an_edit_changed() {
+    let file = smoke("multipage-inherit.pdf");
+    let file = file.to_str().unwrap();
+    let same = diff(file, file, &["--by", "text,structure,pixels"]);
+    assert_eq!(same["schema"], "nupdf.diff/v0");
+    assert_eq!(same["identical"], true);
+    assert_eq!(same["a"]["doc_id"], same["b"]["doc_id"]);
+
+    let titled = scratch("diff-titled.pdf");
+    assert!(
+        nupdf(&[
+            "meta",
+            file,
+            "--set",
+            "Title=New title",
+            "-o",
+            titled.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    let d = diff(file, titled.to_str().unwrap(), &[]);
+    assert_eq!(d["identical"], false);
+    assert_eq!(d["text"]["same"], true);
+    assert_eq!(d["structure"]["differences"][0]["what"], "info.Title");
+    assert_eq!(d["structure"]["differences"][0]["b"], "New title");
+    assert_eq!(d["pixels"], Value::Null);
+
+    // A page taken out is a page deleted, not every later page changed.
+    let shorter = scratch("diff-shorter.pdf");
+    assert!(
+        nupdf(&[
+            "pages",
+            file,
+            "--delete",
+            "2",
+            "-o",
+            shorter.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    let d = diff(file, shorter.to_str().unwrap(), &[]);
+    let pages = d["text"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1, "{pages:?}");
+    assert_eq!(pages[0]["a_page"], 2);
+    assert_eq!(pages[0]["op"], "delete");
+    assert!(
+        d["structure"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["what"] == "page_count" && x["a"] == 3 && x["b"] == 2)
+    );
+}
+
+#[test]
+fn diff_names_the_lines_and_pixels_that_changed() {
+    let file = smoke("stext.pdf");
+    let file = file.to_str().unwrap();
+    let redacted = scratch("diff-redacted.pdf");
+    assert!(
+        nupdf(&[
+            "redact",
+            file,
+            "--text",
+            "world",
+            "-o",
+            redacted.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    let d = diff(file, redacted.to_str().unwrap(), &["--by", "text,pixels"]);
+    let changes = d["text"]["pages"][0]["changes"].as_array().unwrap();
+    assert!(
+        changes
+            .iter()
+            .any(|c| c["op"] == "delete" && c["a"] == "p1.b1.l1" && c["text"] == "Hello world!")
+    );
+    assert!(
+        changes
+            .iter()
+            .all(|c| c["a"].is_string() || c["b"].is_string())
+    );
+    let pixels = &d["pixels"]["pages"][0];
+    assert_eq!(pixels["page"], 1);
+    assert!(pixels["differing"].as_u64().unwrap() > 0);
+    assert_eq!(d["structure"], Value::Null);
+    // A budget stops the list.
+    let d = diff(file, redacted.to_str().unwrap(), &["--max-items", "1"]);
+    assert_eq!(d["text"]["truncated"], true);
+}
