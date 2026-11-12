@@ -568,6 +568,22 @@ pub const CHECKS: &[Check] = &[
         &["clean", "-gggg", "--dry-run", "--no-verify"],
         &["garbage=4"],
     ),
+    Check {
+        about: "content streams rewritten as `mutool clean -c` rewrites them: BLAKE3 of the output",
+        ..clean_gc(
+            "clean-c",
+            &["clean", "-c", "--dry-run", "--no-verify"],
+            &["clean"],
+        )
+    },
+    Check {
+        about: "content streams sanitized as `mutool clean -s` sanitizes them: BLAKE3 of the output",
+        ..clean_gc(
+            "clean-s",
+            &["clean", "-s", "--dry-run", "--no-verify"],
+            &["sanitize"],
+        )
+    },
     // mutool clean turns pretty printing on for -a and -d without -z; the
     // write options MuPDF's script interface takes do not.
     clean_streams(

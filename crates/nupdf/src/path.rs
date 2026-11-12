@@ -96,6 +96,18 @@ pub trait Walker {
     fn close_path(&mut self);
 }
 
+/// `fz_path_walker` with every callback: curves with an implied control
+/// point and rectangles are seen as they were built.
+pub trait FullWalker {
+    fn move_to(&mut self, x: f32, y: f32);
+    fn line_to(&mut self, x: f32, y: f32);
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32);
+    fn close_path(&mut self);
+    fn curve_to_v(&mut self, x2: f32, y2: f32, x3: f32, y3: f32);
+    fn curve_to_y(&mut self, x1: f32, y1: f32, x3: f32, y3: f32);
+    fn rect_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32);
+}
+
 impl Path {
     /// `fz_new_path`.
     pub fn new() -> Path {
@@ -409,6 +421,62 @@ impl Path {
                 (x, y) = (sx, sy);
             }
         }
+    }
+
+    /// `fz_walk_path` with a walker that has every callback.
+    pub fn walk_full(&self, w: &mut dyn FullWalker) {
+        let c = &self.coords;
+        let (mut x, mut y) = (0.0f32, 0.0f32);
+        let mut k = 0;
+        for item in &self.items {
+            match item.cmd {
+                Cmd::Curve => {
+                    w.curve_to(c[k], c[k + 1], c[k + 2], c[k + 3], c[k + 4], c[k + 5]);
+                    (x, y) = (c[k + 4], c[k + 5]);
+                    k += 6;
+                }
+                Cmd::CurveV => {
+                    w.curve_to_v(c[k], c[k + 1], c[k + 2], c[k + 3]);
+                    (x, y) = (c[k + 2], c[k + 3]);
+                    k += 4;
+                }
+                Cmd::CurveY => {
+                    w.curve_to_y(c[k], c[k + 1], c[k + 2], c[k + 3]);
+                    (x, y) = (c[k + 2], c[k + 3]);
+                    k += 4;
+                }
+                Cmd::Move => {
+                    (x, y) = (c[k], c[k + 1]);
+                    w.move_to(x, y);
+                    k += 2;
+                }
+                Cmd::Line => {
+                    (x, y) = (c[k], c[k + 1]);
+                    w.line_to(x, y);
+                    k += 2;
+                }
+                Cmd::Horiz => {
+                    x = c[k];
+                    w.line_to(x, y);
+                    k += 1;
+                }
+                Cmd::Vert => {
+                    y = c[k];
+                    w.line_to(x, y);
+                    k += 1;
+                }
+                Cmd::Degen => w.line_to(x, y),
+                Cmd::Rect => {
+                    w.rect_to(c[k], c[k + 1], c[k + 2], c[k + 3]);
+                    (x, y) = (c[k], c[k + 1]);
+                    k += 4;
+                }
+            }
+            if item.close {
+                w.close_path();
+            }
+        }
+        let _ = (x, y);
     }
 
     /// `fz_bound_path`: with a stroke state, widened for the stroke.

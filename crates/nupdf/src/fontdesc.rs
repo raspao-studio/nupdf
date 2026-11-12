@@ -578,6 +578,41 @@ pub fn bound_glyph(font: &Font, gid: i32, trm: Matrix) -> Rect {
     r.transform(trm)
 }
 
+/// `fz_advance_glyph`: the glyph's advance in ems, horizontal or (with
+/// `wmode` 1) vertical. A substitute font stretched to the PDF's widths
+/// takes them; a Type 3 font its /Widths. FreeType's vertical advance
+/// for a font without vertical metrics is its line height.
+pub fn advance_glyph(font: &Font, gid: i32, wmode: i32) -> f32 {
+    if let Some(face) = &font.face {
+        let default = font.width_table.as_ref().map_or(0, |t| t.1);
+        if gid < 0 {
+            return default as f32 / 1000.0;
+        }
+        if font.ft_stretch
+            && let Some(table) = font.width_table.as_deref()
+        {
+            return table
+                .0
+                .get(gid as usize)
+                .map_or(table.1 as f32, |&w| f32::from(w))
+                / 1000.0;
+        }
+        let upem = f32::from(face.units_per_em.max(1));
+        if wmode != 0 {
+            return (f32::from(face.ascender) - f32::from(face.descender)) / upem;
+        }
+        return face.advance(gid as u32).unwrap_or(0) as f32 / upem;
+    }
+    match &font.t3 {
+        Some(t3) => usize::try_from(gid)
+            .ok()
+            .filter(|&g| g < 256)
+            .and_then(|g| t3.widths.get(g).copied())
+            .unwrap_or(0.0),
+        None => 0.0,
+    }
+}
+
 /// `fz_bound_ft_glyph`: the control box of the glyph's outline, in ems,
 /// stretched to the PDF's width for a substitute font; empty for a glyph
 /// that does not load. A font program whose outlines are not read here

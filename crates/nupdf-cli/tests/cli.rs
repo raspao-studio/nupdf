@@ -1575,3 +1575,14 @@ fn segment_gathers_blocks_into_structures() {
     assert_eq!(first["id"], "p1.b1");
     assert_eq!(first["blocks"][0]["id"], "p1.b1.b1");
 }
+
+#[test]
+fn clean_sanitize_rewrites_contents() {
+    let input = smoke("minimal.pdf");
+    let run = nupdf(&["clean", "-s", input.to_str().unwrap(), "--dry-run"]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

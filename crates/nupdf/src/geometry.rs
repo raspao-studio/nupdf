@@ -257,7 +257,7 @@ impl Matrix {
         }
     }
 
-    const ZERO: Matrix = Matrix {
+    pub const ZERO: Matrix = Matrix {
         a: 0.0,
         b: 0.0,
         c: 0.0,
@@ -353,6 +353,17 @@ impl Matrix {
     pub fn pre_translate(mut self, tx: f32, ty: f32) -> Matrix {
         self.e += tx.mul_add(self.a, ty * self.c);
         self.f += tx.mul_add(self.b, ty * self.d);
+        self
+    }
+
+    /// `fz_post_scale`.
+    pub fn post_scale(mut self, sx: f32, sy: f32) -> Matrix {
+        self.a *= sx;
+        self.b *= sy;
+        self.c *= sx;
+        self.d *= sy;
+        self.e *= sx;
+        self.f *= sy;
         self
     }
 

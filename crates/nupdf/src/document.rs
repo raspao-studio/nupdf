@@ -910,6 +910,29 @@ impl Document {
         });
     }
 
+    /// Object `num` becomes a stream with `dict` and `data` (already as it
+    /// is to be stored), changed in place as `alter_object` changes it.
+    pub fn replace_stream(&self, num: i32, dict: Dict, data: Vec<u8>) {
+        let entry = self.xref_entry(num);
+        let generation = match entry.kind {
+            Kind::InStream => 0,
+            _ => entry.generation,
+        };
+        self.edit_mut(|e| {
+            let stream = Stream {
+                dict,
+                data_start: 0,
+                num,
+            };
+            e.objects.insert(num, Object::Stream(Arc::new(stream)));
+            e.gens.entry(num).or_insert(generation);
+            e.data.insert(num, data);
+            if let Ok(n) = usize::try_from(num) {
+                e.len = e.len.max(n + 1);
+            }
+        });
+    }
+
     /// Replaces the trailer.
     pub fn set_trailer(&self, trailer: Dict) {
         self.edit_mut(|e| e.trailer = Some(trailer));

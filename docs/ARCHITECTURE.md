@@ -93,7 +93,10 @@ The module names are targets; they appear as the milestones land. "MuPDF" lists 
 | `search` (search in structured text: flattening, text transforms, finders, quads) | `fitz/stext-search.c`, `fitz/util.c` (`fz_new_buffer_from_flattened_stext_page`) | M5 |
 | `regexp` (MuPDF's regular expressions) | `fitz/regexp.c` | M5 |
 | `unicode` (categories, combining classes, decomposition, composition, case) | `fitz/ucdn.c`, `fitz/string.c` (`fz_toupper`, `fz_tolower`, `fz_isalpha`) | M5 |
-| `redact`, `content::filter` | `pdf/pdf-clean.c`, `pdf/pdf-op-filter.c`, `pdf/pdf-image-rewriter.c`, `pdf/pdf-annot.c` | M6 |
+| `content_write` (content stream writer) | `pdf/pdf-op-buffer.c` (`pdf_new_output_processor`), `pdf/pdf-stream.c` (`build_compression_params`) | M6 |
+| `content_filter` (sanitize filter) | `pdf/pdf-op-filter.c` (`pdf_new_sanitize_filter`) | M6 |
+| `content_clean` (`clean -c` and `-s`) | `pdf/pdf-clean.c` (`pdf_filter_page_contents` and helpers), `pdf/pdf-write.c` (`clean_content_streams`) | M6 |
+| `redact` | `pdf/pdf-clean.c`, `pdf/pdf-image-rewriter.c`, `pdf/pdf-annot.c` | M6 |
 | `verify` | new | M6 |
 | `render` | `fitz/draw-*.c`, `fitz/colorspace.c`, `fitz/color-lcms.c`, `fitz/separation.c` | M7 |
 | `forms`, `annot`, `appearance` | `pdf/pdf-form.c`, `pdf-annot.c`, `pdf-appearance.c` | M9 |
