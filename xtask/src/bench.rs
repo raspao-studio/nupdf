@@ -49,6 +49,10 @@ pub struct Pair {
     pub nupdf: &'static [&'static str],
     /// Only files with at least this many pages.
     pub min_pages: usize,
+    /// Only files on which the baseline takes at least this long: a file
+    /// that is mostly starting the process shows nothing of what threads
+    /// do.
+    pub min_baseline_ms: f64,
 }
 
 const DEFAULT: Pair = Pair {
@@ -58,10 +62,14 @@ const DEFAULT: Pair = Pair {
     oracle: &[],
     nupdf: &[],
     min_pages: 0,
+    min_baseline_ms: 0.0,
 };
 
 /// The threads the parallel pairs use: the 8 cores of M5's exit criterion.
 const THREADS: &str = "8";
+
+/// The single-thread time a scaling pair needs of a file to count it.
+const SCALING_MIN_MS: f64 = 100.0;
 
 pub const PAIRS: &[Pair] = &[
     Pair {
@@ -163,19 +171,21 @@ pub const PAIRS: &[Pair] = &[
     },
     Pair {
         name: "stext-scaling",
-        about: "nupdf's structured text on 1 thread against 8, for documents of 50 pages or more",
+        about: "nupdf's structured text on 1 thread against 8, for documents of 50 pages or more that take 100 ms or more on one",
         baseline: Tool::Nupdf,
         oracle: &["stext", "--threads", "1", "{file}"],
         nupdf: &["stext", "--threads", THREADS, "{file}"],
         min_pages: 50,
+        min_baseline_ms: SCALING_MIN_MS,
     },
     Pair {
         name: "extract-scaling",
-        about: "nupdf's `extract` of every page as JSON on 1 thread against 8, for documents of 50 pages or more",
+        about: "nupdf's `extract` of every page as JSON on 1 thread against 8, for documents of 50 pages or more that take 100 ms or more on one",
         baseline: Tool::Nupdf,
         oracle: &["extract", "--threads", "1", "{file}"],
         nupdf: &["extract", "--threads", THREADS, "{file}"],
         min_pages: 50,
+        min_baseline_ms: SCALING_MIN_MS,
     },
 ];
 
@@ -235,6 +245,7 @@ pub fn run(
             Tool::Nupdf => &nupdf,
         };
         let mut rows = Vec::new();
+        let mut short = 0;
         for file in files {
             let expand = |args: &[&str]| -> Vec<OsString> {
                 args.iter()
@@ -252,6 +263,10 @@ pub fn run(
                     .collect()
             };
             let (oracle_ms, oracle_rss) = measure(baseline, &expand(pair.oracle), runs)?;
+            if oracle_ms < pair.min_baseline_ms {
+                short += 1;
+                continue;
+            }
             let (nupdf_ms, nupdf_rss) = measure(&nupdf, &expand(pair.nupdf), runs)?;
             rows.push(Row {
                 file: file.name.clone(),
@@ -262,7 +277,7 @@ pub fn run(
                 nupdf_rss_mb: nupdf_rss as f64 / 1_048_576.0,
             });
         }
-        let report = render(pair, tier, runs, &rows);
+        let report = render(pair, tier, runs, &rows, short);
         std::fs::write(
             out_dir.join(format!("{}.json", pair.name)),
             serde_json::to_string_pretty(&rows)?,
@@ -539,7 +554,9 @@ fn geomean(values: impl Iterator<Item = f64>) -> f64 {
     }
 }
 
-fn render(pair: &Pair, tier: &str, runs: usize, rows: &[Row]) -> String {
+/// The report; `short` files were left out for taking less than the
+/// pair's `min_baseline_ms`.
+fn render(pair: &Pair, tier: &str, runs: usize, rows: &[Row], short: usize) -> String {
     let base = match pair.baseline {
         Tool::Nupdf => "baseline",
         tool => tool.label(),
@@ -557,20 +574,53 @@ fn render(pair: &Pair, tier: &str, runs: usize, rows: &[Row]) -> String {
         );
     }
     let total = |f: fn(&Row) -> f64| rows.iter().map(f).sum::<f64>();
+    let (base_ms, nupdf_ms) = (total(|r| r.oracle_ms), total(|r| r.nupdf_ms));
     let _ = writeln!(
         out,
-        "\nFiles: {}. Geometric mean speedup: {:.2}x. Total time: {base} {:.0} ms, nupdf {:.0} ms.",
+        "\nFiles: {}. Geometric mean speedup: {:.2}x. Total time: {base} {base_ms:.0} ms, nupdf {nupdf_ms:.0} ms ({:.2}x).",
         rows.len(),
         geomean(rows.iter().map(|r| r.speedup)),
-        total(|r| r.oracle_ms),
-        total(|r| r.nupdf_ms),
+        base_ms / nupdf_ms.max(f64::EPSILON),
     );
+    if short > 0 {
+        let _ = writeln!(
+            out,
+            "\nLeft out: {short} file(s) on which {base} takes less than {} ms.",
+            pair.min_baseline_ms
+        );
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_give_the_total_speedup_and_what_was_left_out() {
+        let pair = PAIRS.iter().find(|p| p.name == "stext-scaling").unwrap();
+        let row = |oracle_ms, nupdf_ms| Row {
+            file: "f".into(),
+            oracle_ms,
+            nupdf_ms,
+            speedup: oracle_ms / nupdf_ms,
+            oracle_rss_mb: 1.0,
+            nupdf_rss_mb: 1.0,
+        };
+        let out = render(
+            pair,
+            "standard",
+            3,
+            &[row(400.0, 50.0), row(200.0, 50.0)],
+            2,
+        );
+        assert!(
+            out.contains("Total time: baseline 600 ms, nupdf 100 ms (6.00x)"),
+            "{out}"
+        );
+        assert!(out.contains("Left out: 2 file(s) on which baseline takes less than 100 ms"));
+        assert!(!render(pair, "standard", 3, &[row(400.0, 50.0)], 0).contains("Left out"));
+    }
 
     #[test]
     fn median_handles_odd_and_even_counts() {
