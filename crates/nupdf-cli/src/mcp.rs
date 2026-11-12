@@ -354,15 +354,23 @@ fn call_result(outcome: Outcome, max_output: usize) -> Option<Value> {
         }
     }
     let mut result = json!({"content": content, "isError": code != ExitCode::SUCCESS});
-    // The report: stdout's, or for text output and failures stderr's.
-    let report = [&out, &err]
-        .into_iter()
-        .skip(usize::from(code != ExitCode::SUCCESS))
-        .find_map(|b| match serde_json::from_slice::<Value>(b) {
-            Ok(v @ Value::Object(_)) => Some(v),
-            _ => None,
-        });
-    if let Some(v) = report {
+    // The report, when it is the whole of what the call gave: stdout's, or
+    // a failure's from stderr. Text and Markdown output has none: clients
+    // show a model the structured content in place of the text, and the
+    // text is what was asked for.
+    let main = if code == ExitCode::SUCCESS {
+        &out
+    } else {
+        &err
+    };
+    let extra = if code == ExitCode::SUCCESS {
+        &err
+    } else {
+        &out
+    };
+    if extra.is_empty()
+        && let Ok(v @ Value::Object(_)) = serde_json::from_slice::<Value>(main)
+    {
         result["structuredContent"] = v;
     }
     Some(result)

@@ -2094,7 +2094,15 @@ fn mcp_tools_give_the_cli_reports() {
         result["content"][0]["text"].as_str().unwrap(),
         String::from_utf8_lossy(&cli.stdout).trim_end()
     );
-    assert_eq!(result["structuredContent"]["schema"], "nupdf.extract/v1");
+    // The text alone: a client shows a model structured content in place of
+    // the text, so a report there would hide it.
+    assert_eq!(result["structuredContent"], Value::Null);
+    assert!(
+        result["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("nupdf.extract/v1")
+    );
     // Failures are tool errors with nupdf's error report.
     let result = mcp.call(21, "info", serde_json::json!({"file": "/no/such.pdf"}));
     assert_eq!(result["isError"], true);
