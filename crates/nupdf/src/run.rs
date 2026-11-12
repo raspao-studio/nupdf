@@ -1363,6 +1363,14 @@ impl<'a> Run<'a> {
         if let Some(fd) = cached {
             return Ok(fd);
         }
+        let shared = self.state.store.shared_fonts.clone();
+        if let (Some(n), Some(shared)) = (num, &shared)
+            && let Some(fd) = shared.lock().ok().and_then(|f| f.get(&n).cloned())
+        {
+            let fd = Arc::new(fd.copy_for_thread());
+            self.state.store.fonts.insert(n, fd.clone());
+            return Ok(fd);
+        }
         let resources = self.state.resources().cloned();
         let mut fd = fontdesc::Loader { doc: self.doc }.load(obj, resources.as_ref())?;
         let type3 = fd.font.t3.is_some();
@@ -1385,6 +1393,11 @@ impl<'a> Run<'a> {
         let fd = Arc::new(fd);
         match num {
             Some(n) => {
+                if let Some(shared) = shared.filter(|_| !type3)
+                    && let Ok(mut shared) = shared.lock()
+                {
+                    shared.entry(n).or_insert_with(|| fd.clone());
+                }
                 self.state.store.fonts.insert(n, fd.clone());
             }
             None => self

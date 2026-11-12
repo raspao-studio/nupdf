@@ -66,60 +66,72 @@ struct ObjStm {
     error: Option<String>,
 }
 
-/// Loaded objects, keyed by number. Sharded so concurrent readers rarely
-/// contend, and sparse so memory follows what was actually loaded rather
-/// than how many slots the file declares.
+/// Loaded objects, keyed by number, in chunks of slots made when an
+/// object in their range is first cached: memory follows what was loaded
+/// rather than how many slots the file declares. Each slot is set once,
+/// so readers on many threads take no lock and write nothing shared.
 #[derive(Debug)]
 struct Cache {
-    shards: Vec<RwLock<HashMap<i32, Loaded>>>,
+    chunks: Box<[OnceLock<Chunk>]>,
 }
 
-impl Cache {
-    const SHARDS: usize = 64;
+/// [`Cache::CHUNK`] slots.
+type Chunk = Box<[OnceLock<Loaded>]>;
 
-    fn new() -> Self {
+impl Cache {
+    const CHUNK: usize = 256;
+
+    /// A cache with slots for objects numbered below `len`, rounded up to
+    /// a whole chunk.
+    fn new(len: usize) -> Self {
         Cache {
-            shards: (0..Self::SHARDS)
-                .map(|_| RwLock::new(HashMap::new()))
+            chunks: (0..len.div_ceil(Self::CHUNK))
+                .map(|_| OnceLock::new())
                 .collect(),
         }
     }
 
-    fn shard(&self, num: i32) -> &RwLock<HashMap<i32, Loaded>> {
-        &self.shards[num.unsigned_abs() as usize % Self::SHARDS]
+    fn slot(&self, num: i32, make: bool) -> Option<&OnceLock<Loaded>> {
+        let n = usize::try_from(num).ok()?;
+        let chunk = self.chunks.get(n / Self::CHUNK)?;
+        let slots = if make {
+            chunk.get_or_init(|| (0..Self::CHUNK).map(|_| OnceLock::new()).collect())
+        } else {
+            chunk.get()?
+        };
+        slots.get(n % Self::CHUNK)
     }
 
     fn get(&self, num: i32) -> Option<Loaded> {
-        self.shard(num).read().ok()?.get(&num).cloned()
+        self.slot(num, false)?.get().cloned()
     }
 
-    fn clear(&self) {
-        for shard in &self.shards {
-            if let Ok(mut s) = shard.write() {
-                s.clear();
-            }
+    fn clear(&mut self) {
+        for chunk in &mut self.chunks {
+            *chunk = OnceLock::new();
         }
     }
 
     /// Stores `value` unless another thread got there first; returns the
     /// value that is now cached.
     fn insert_if_absent(&self, num: i32, value: Loaded) -> Loaded {
-        match self.shard(num).write() {
-            Ok(mut shard) => shard.entry(num).or_insert(value).clone(),
-            Err(_) => value,
+        match self.slot(num, true) {
+            Some(slot) => slot.get_or_init(|| value).clone(),
+            None => value,
         }
     }
 
     fn all(&self) -> Vec<(i32, Loaded)> {
-        self.shards
-            .iter()
-            .filter_map(|s| {
-                s.read()
-                    .ok()
-                    .map(|m| m.iter().map(|(&n, v)| (n, v.clone())).collect::<Vec<_>>())
-            })
-            .flatten()
-            .collect()
+        let mut out = Vec::new();
+        for (c, chunk) in self.chunks.iter().enumerate() {
+            let Some(slots) = chunk.get() else { continue };
+            for (i, slot) in slots.iter().enumerate() {
+                if let (Some(v), Ok(num)) = (slot.get(), i32::try_from(c * Self::CHUNK + i)) {
+                    out.push((num, v.clone()));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -132,6 +144,9 @@ pub(crate) struct State {
     /// Object streams that failed to load. MuPDF marks their entry free, so
     /// from then on the object still resolves but is no longer a stream.
     demoted: Mutex<std::collections::HashSet<i32>>,
+    /// Whether `demoted` has anything in it, so that looking up a stream
+    /// does not take its lock on every thread.
+    any_demoted: AtomicBool,
     trailer: Dict,
     revisions: usize,
     repaired: bool,
@@ -159,10 +174,11 @@ impl State {
     fn new(bias: usize, entries: Slots, trailer: Dict, revisions: usize, repaired: bool) -> Self {
         State {
             bias,
+            cache: Cache::new(entries.len()),
             entries,
-            cache: Cache::new(),
             objstms: Mutex::new(HashMap::new()),
             demoted: Mutex::new(std::collections::HashSet::new()),
+            any_demoted: AtomicBool::new(false),
             trailer,
             revisions,
             repaired,
@@ -188,6 +204,11 @@ impl State {
 
     fn xref_len(&self) -> usize {
         self.entries.len()
+    }
+
+    fn is_demoted(&self, num: i32) -> bool {
+        self.any_demoted.load(Ordering::Acquire)
+            && self.demoted.lock().is_ok_and(|d| d.contains(&num))
     }
 }
 
@@ -1015,10 +1036,7 @@ impl Document {
     /// Whether `num` is an object stream that failed to load, whose entry
     /// MuPDF has marked free.
     pub(crate) fn is_demoted(&self, num: i32) -> bool {
-        self.current()
-            .demoted
-            .lock()
-            .is_ok_and(|d| d.contains(&num))
+        self.current().is_demoted(num)
     }
 
     /// Whether MuPDF's `pdf_get_xref_entry` finds an entry for `num`, which
@@ -1523,6 +1541,7 @@ impl Document {
             && let Ok(mut demoted) = st.demoted.lock()
         {
             demoted.insert(stm);
+            st.any_demoted.store(true, Ordering::Release);
         }
         if let Ok(mut map) = st.objstms.lock() {
             return Arc::clone(map.entry(stm).or_insert(computed));
@@ -1937,9 +1956,7 @@ impl Document {
 
 fn demote_if_failed(st: &State, num: i32, obj: Object) -> Object {
     match obj {
-        Object::Stream(s) if st.demoted.lock().is_ok_and(|d| d.contains(&num)) => {
-            Object::Dict(Arc::new(s.dict.clone()))
-        }
+        Object::Stream(s) if st.is_demoted(num) => Object::Dict(Arc::new(s.dict.clone())),
         other => other,
     }
 }
@@ -2042,6 +2059,46 @@ mod tests {
     }
 
     const SIMPLE: &[u8] = b"%PDF-1.4\n1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\ntrailer <</Root 1 0 R>>\n";
+
+    #[test]
+    fn the_cache_keeps_the_first_value_and_only_numbers_it_has_slots_for() {
+        let mut cache = Cache::new(2 * Cache::CHUNK);
+        assert!(cache.get(5).is_none() && cache.get(-1).is_none());
+        assert!(matches!(
+            cache.insert_if_absent(5, Loaded::Obj(Object::Int(1))),
+            Loaded::Obj(Object::Int(1))
+        ));
+        // A second thread's value for the same object loses to the first.
+        assert!(matches!(
+            cache.insert_if_absent(5, Loaded::Obj(Object::Int(2))),
+            Loaded::Obj(Object::Int(1))
+        ));
+        cache.insert_if_absent(511, Loaded::Missing);
+        // Past the slots, or negative: handed back, not kept.
+        assert!(matches!(
+            cache.insert_if_absent(512, Loaded::Obj(Object::Int(3))),
+            Loaded::Obj(Object::Int(3))
+        ));
+        cache.insert_if_absent(-4, Loaded::Missing);
+        assert!(cache.get(512).is_none() && cache.get(-4).is_none());
+        let mut all: Vec<i32> = cache.all().into_iter().map(|(n, _)| n).collect();
+        all.sort_unstable();
+        assert_eq!(all, [5, 511]);
+        cache.clear();
+        assert!(cache.get(5).is_none() && cache.all().is_empty());
+    }
+
+    #[test]
+    fn threads_loading_the_same_objects_see_one_value() {
+        let d = doc(SIMPLE);
+        let objects: Vec<Vec<String>> = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| s.spawn(|| (1..3).map(|n| format!("{:?}", d.object(n))).collect()))
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        assert!(objects.windows(2).all(|w| w[0] == w[1]));
+    }
 
     #[test]
     fn repair_keeps_generations_as_mupdf_does() {

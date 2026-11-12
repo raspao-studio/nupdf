@@ -235,7 +235,7 @@ fn build_filter<'a>(
         b"FlateDecode" | b"Fl" => predictor(Stream::new(
             Flate {
                 chain,
-                z: Decompress::new(true),
+                z: Some(inflater()),
                 bad: None,
                 done: false,
             },
@@ -505,22 +505,56 @@ impl Source for AesFilter<'_> {
 
 // ---- Flate ---------------------------------------------------------------
 
+thread_local! {
+    /// Inflaters this thread has finished with, reset for the next stream.
+    /// Making one allocates zlib's state and window, which on many threads
+    /// at once waits on the allocator.
+    static INFLATERS: std::cell::RefCell<Vec<Decompress>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many finished inflaters a thread keeps.
+const KEPT_INFLATERS: usize = 4;
+
+/// A zlib inflater as `inflateInit` leaves it.
+fn inflater() -> Decompress {
+    INFLATERS
+        .with(|kept| kept.try_borrow_mut().ok().and_then(|mut k| k.pop()))
+        .unwrap_or_else(|| Decompress::new(true))
+}
+
 /// `fz_open_flated`: fills a 4096-byte buffer per call, feeding zlib
 /// whatever the stage below has buffered.
 struct Flate<'a> {
     chain: Stream<'a>,
-    z: Decompress,
+    /// Always there until the filter is dropped, when it is kept for the
+    /// next stream.
+    z: Option<Decompress>,
     /// zlib's message after an error it was told to ignore: zlib keeps
     /// failing the same way afterwards.
     bad: Option<String>,
     done: bool,
 }
 
+impl Drop for Flate<'_> {
+    fn drop(&mut self) {
+        if let Some(mut z) = self.z.take() {
+            z.reset(true);
+            INFLATERS.with(|kept| {
+                if let Ok(mut kept) = kept.try_borrow_mut()
+                    && kept.len() < KEPT_INFLATERS
+                {
+                    kept.push(z);
+                }
+            });
+        }
+    }
+}
+
 impl Source for Flate<'_> {
     fn next(&mut self, _: usize, out: &mut Vec<u8>, diag: &Diagnostics) -> Result<Next, String> {
-        if self.done {
+        let Some(z) = self.z.as_mut().filter(|_| !self.done) else {
             return Ok(Next::Eof);
-        }
+        };
         out.resize(4096, 0);
         let mut produced = 0;
         while produced < out.len() {
@@ -528,14 +562,14 @@ impl Source for Flate<'_> {
             let (result, consumed, made) = match &self.bad {
                 Some(msg) => (Err(Some(msg.clone())), 0, 0),
                 None => {
-                    let (in0, out0) = (self.z.total_in(), self.z.total_out());
-                    let r = self.z.decompress(
+                    let (in0, out0) = (z.total_in(), z.total_out());
+                    let r = z.decompress(
                         &self.chain.data()[..avail],
                         &mut out[produced..],
                         FlushDecompress::Sync,
                     );
-                    let consumed = (self.z.total_in() - in0) as usize;
-                    let made = (self.z.total_out() - out0) as usize;
+                    let consumed = (z.total_in() - in0) as usize;
+                    let made = (z.total_out() - out0) as usize;
                     let r = r.map_err(|e| {
                         if e.needs_dictionary().is_some() {
                             None
@@ -1331,6 +1365,31 @@ mod tests {
         let partial = run("Fl", None, cut, &diag).unwrap();
         assert!(!partial.is_empty() && data.starts_with(&partial));
         assert!(diag.has("filter.flate_truncated"));
+    }
+
+    #[test]
+    fn kept_inflaters_decode_the_next_stream_afresh() {
+        // Streams on one thread reuse the inflaters of those before them,
+        // whatever state those ended in: whole, cut short or broken.
+        let data: Vec<u8> = (0..20000u32).map(|i| (i * 7 % 253) as u8).collect();
+        let packed = zlib(&data);
+        let other = zlib(b"another stream, read after the rest");
+        let diag = Diagnostics::new();
+        for _ in 0..3 {
+            let _ = run("FlateDecode", None, &packed[..packed.len() / 3], &diag);
+            let _ = run("FlateDecode", None, b"not zlib at all", &diag);
+            let mut bad = packed.clone();
+            bad[packed.len() / 2] ^= 0x55;
+            let _ = run("FlateDecode", None, &bad, &diag);
+            let fresh = Diagnostics::new();
+            assert_eq!(run("FlateDecode", None, &packed, &fresh).unwrap(), data);
+            assert_eq!(
+                run("FlateDecode", None, &other, &fresh).unwrap(),
+                b"another stream, read after the rest"
+            );
+            assert!(fresh.snapshot().is_empty());
+        }
+        assert!(INFLATERS.with(|k| k.borrow().len()) <= KEPT_INFLATERS);
     }
 
     #[test]
