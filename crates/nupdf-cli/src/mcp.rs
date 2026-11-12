@@ -40,7 +40,7 @@ const TIMEOUT: &str = "timeout";
 const NOT_TOOL_OPTIONS: &[&str] = &["pretty", "help", "version", TIMEOUT];
 
 /// Commands that are not tools.
-const NOT_TOOLS: &[&str] = &["mcp", "batch", "help"];
+const NOT_TOOLS: &[&str] = &["mcp", "batch", "guide", "help"];
 
 // ---- files ---------------------------------------------------------------
 
@@ -297,7 +297,7 @@ enum Outcome {
 }
 
 fn error_json(f: &Failure) -> String {
-    json!({"schema": "nupdf.error/v0", "error": {"code": f.code, "message": f.message}}).to_string()
+    json!({"schema": "nupdf.error/v1", "error": {"code": f.code, "message": f.message}}).to_string()
 }
 
 /// Runs `tool` with `args`, stopped by `interrupt`.

@@ -77,7 +77,7 @@ pub fn meta(
     password: Option<&str>,
 ) -> Result<serde_json::Value, Failure> {
     if set.is_empty() && !strip {
-        return Ok(report("nupdf.meta/v0", facts, doc, info_json(doc)));
+        return Ok(report("nupdf.meta/v1", facts, doc, info_json(doc)));
     }
     let mut pairs = Vec::new();
     for entry in set {
@@ -102,7 +102,7 @@ pub fn meta(
     if let serde_json::Value::Object(b) = &mut body {
         b.insert("stripped".into(), strip.into());
     }
-    write_document(doc, facts, &plan, "nupdf.meta/v0", body)
+    write_document(doc, facts, &plan, "nupdf.meta/v1", body)
 }
 
 /// The /Info entries as text, and whether the catalog has XMP metadata.
@@ -185,7 +185,7 @@ pub fn edit_pages(
         "rotated": edits.rotate,
         "page_count": doc.page_count().ok(),
     });
-    write_document(doc, facts, &plan, "nupdf.pages/v0", body)
+    write_document(doc, facts, &plan, "nupdf.pages/v1", body)
 }
 
 /// A document opened as every command opens it, with its file facts.
@@ -252,7 +252,7 @@ pub fn split(
         }));
     }
     let body = serde_json::json!({ "applied": !dry_run, "parts": parts });
-    Ok(report("nupdf.split/v0", &facts, &doc, body))
+    Ok(report("nupdf.split/v1", &facts, &doc, body))
 }
 
 /// `encrypt` and `decrypt`: `clean -E` and `clean -D` under their own names.
@@ -264,8 +264,8 @@ pub fn encryption(
     password: Option<&str>,
 ) -> Result<serde_json::Value, Failure> {
     let schema = match encrypt {
-        nupdf::write::Encrypt::Remove => "nupdf.decrypt/v0",
-        _ => "nupdf.encrypt/v0",
+        nupdf::write::Encrypt::Remove => "nupdf.decrypt/v1",
+        _ => "nupdf.encrypt/v1",
     };
     let body = serde_json::json!({ "encryption": super::encryption_json(&encrypt) });
     let options = nupdf::write::WriteOptions {
@@ -371,7 +371,7 @@ pub fn merge(
         "inputs": reports,
         "page_count": dst.page_count().ok(),
     });
-    write_document(&dst, &facts, &plan, "nupdf.merge/v0", body)
+    write_document(&dst, &facts, &plan, "nupdf.merge/v1", body)
 }
 
 /// `merge_range` for one input: its facts once it opened, the pages merged

@@ -8,12 +8,14 @@ mod batch;
 mod commands;
 mod diff;
 mod extract;
+mod guide;
 mod inventory;
 mod mcp;
 mod md5;
 mod objects;
 mod redact;
 mod render;
+mod schemas;
 mod search;
 mod stext;
 mod trace;
@@ -539,6 +541,19 @@ enum Command {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// The JSON Schema of a report: a command's (`extract`), or one of its
+    /// parts (`extract.page`, `batch.item`, `error`); without a name, the
+    /// names there are.
+    Schema { name: Option<String> },
+    /// How to use nupdf, written for models: conventions, where to start,
+    /// and every command with its options. Plain text, not JSON.
+    Guide {
+        /// One command's options in full.
+        command: Option<String>,
+        /// The Claude Code skill (SKILL.md) made of the guide.
+        #[arg(long, conflicts_with = "command")]
+        skill: bool,
+    },
     /// Serve the commands as tools of a Model Context Protocol server, over
     /// stdin and stdout.
     Mcp {
@@ -759,7 +774,7 @@ fn run(cli: Cli) -> ExitCode {
                 if edits.any() {
                     commands::edit_pages(&doc, &facts, &edits, write, password)
                 } else {
-                    Ok(report("nupdf.pages/v0", &facts, &doc, objects::pages(&doc)))
+                    Ok(report("nupdf.pages/v1", &facts, &doc, objects::pages(&doc)))
                 }
             })
         }
@@ -818,7 +833,7 @@ fn run(cli: Cli) -> ExitCode {
         }),
         Command::Streams { file, images } => open(file).map(|(doc, facts)| {
             report(
-                "nupdf.streams/v0",
+                "nupdf.streams/v1",
                 &facts,
                 &doc,
                 objects::streams(&doc, *images),
@@ -826,14 +841,14 @@ fn run(cli: Cli) -> ExitCode {
         }),
         Command::Operators { file, no_resources } => open(file).map(|(doc, facts)| {
             report(
-                "nupdf.operators/v0",
+                "nupdf.operators/v1",
                 &facts,
                 &doc,
                 objects::operators(&doc, *no_resources),
             )
         }),
         Command::Trace { file } => open(file)
-            .map(|(doc, facts)| report("nupdf.trace/v0", &facts, &doc, trace::trace(&doc))),
+            .map(|(doc, facts)| report("nupdf.trace/v1", &facts, &doc, trace::trace(&doc))),
         Command::Extract {
             file,
             format,
@@ -908,7 +923,7 @@ fn run(cli: Cli) -> ExitCode {
                     };
                     search::search(&doc, &args)
                         .map_err(usage)
-                        .map(|body| report("nupdf.search/v0", &facts, &doc, body))
+                        .map(|body| report("nupdf.search/v1", &facts, &doc, body))
                 })
         }
         Command::Redact {
@@ -1027,7 +1042,7 @@ fn run(cli: Cli) -> ExitCode {
             let mut body = serde_json::Map::new();
             body.insert("verified".into(), v.verified().into());
             body.insert("verification".into(), redact::verification_json(&v));
-            let out = report("nupdf.verify/v0", &facts, &doc, body.into());
+            let out = report("nupdf.verify/v1", &facts, &doc, body.into());
             if v.verified() {
                 Ok(out)
             } else {
@@ -1074,7 +1089,7 @@ fn run(cli: Cli) -> ExitCode {
                 // A closed pipe is not ours to report.
                 let written = body.write_compact(
                     &mut out,
-                    "nupdf.stext/v0",
+                    "nupdf.stext/v1",
                     &facts.doc_id,
                     &diagnostics(&doc),
                 );
@@ -1088,7 +1103,7 @@ fn run(cli: Cli) -> ExitCode {
         Command::Fonts { file, extract } => open(file).and_then(|(doc, facts)| {
             let dir = extract.as_deref().map(output_dir).transpose()?;
             Ok(report(
-                "nupdf.fonts/v0",
+                "nupdf.fonts/v1",
                 &facts,
                 &doc,
                 inventory::fonts(&doc, dir),
@@ -1136,7 +1151,7 @@ fn run(cli: Cli) -> ExitCode {
                     message,
                 },
             )?;
-            Ok(report("nupdf.render/v0", &facts, &doc, body))
+            Ok(report("nupdf.render/v1", &facts, &doc, body))
         }),
         Command::Images {
             file,
@@ -1146,7 +1161,7 @@ fn run(cli: Cli) -> ExitCode {
         } => open(file).and_then(|(doc, facts)| {
             let dir = extract.as_deref().map(output_dir).transpose()?;
             Ok(report(
-                "nupdf.images/v0",
+                "nupdf.images/v1",
                 &facts,
                 &doc,
                 inventory::images(&doc, *digests, dir, *format),
@@ -1265,7 +1280,7 @@ fn run(cli: Cli) -> ExitCode {
                     })
                 };
                 let mut out = serde_json::Map::new();
-                out.insert("schema".into(), "nupdf.diff/v0".into());
+                out.insert("schema".into(), "nupdf.diff/v1".into());
                 out.insert("doc_id".into(), fa.doc_id.clone().into());
                 out.insert("a".into(), side(a, &da, &fa));
                 out.insert("b".into(), side(b, &db, &fb));
@@ -1301,7 +1316,7 @@ fn run(cli: Cli) -> ExitCode {
         })
         .map(|summary| {
             let mut out = serde_json::Map::new();
-            out.insert("schema".into(), "nupdf.batch/v0".into());
+            out.insert("schema".into(), "nupdf.batch/v1".into());
             out.insert("doc_id".into(), serde_json::Value::Null);
             if let serde_json::Value::Object(fields) = summary {
                 out.extend(fields);
@@ -1309,6 +1324,54 @@ fn run(cli: Cli) -> ExitCode {
             out.insert("diagnostics".into(), serde_json::json!([]));
             serde_json::Value::Object(out)
         }),
+        Command::Schema { name } => match name {
+            None => Ok(serde_json::json!({
+                "schema": "nupdf.schema/v1",
+                "doc_id": null,
+                "schemas": schemas::SCHEMAS.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                "diagnostics": [],
+            })),
+            Some(name) => {
+                // `extract`, or the report's own `nupdf.extract/v1`.
+                let short = name
+                    .strip_prefix("nupdf.")
+                    .map_or(name.as_str(), |n| n.split('/').next().unwrap_or(n));
+                match schemas::SCHEMAS.iter().find(|(n, _)| *n == short) {
+                    Some((_, text)) => {
+                        let mut out = standard_output();
+                        let _ = out.write_all(text.as_bytes());
+                        let _ = out.flush();
+                        return ExitCode::SUCCESS;
+                    }
+                    None => Err(Failure {
+                        exit: Exit::Usage,
+                        code: "usage.bad_command",
+                        message: format!("no report named {name}: `nupdf schema` lists them"),
+                    }),
+                }
+            }
+        },
+        Command::Guide { command, skill } => {
+            let text = match (command, skill) {
+                (_, true) => Some(guide::skill()),
+                (Some(c), false) => guide::command(c),
+                (None, false) => Some(guide::guide()),
+            };
+            let Some(text) = text else {
+                return fail(
+                    Failure {
+                        exit: Exit::Usage,
+                        code: "usage.bad_command",
+                        message: format!("no command named {}", command.as_deref().unwrap_or("")),
+                    },
+                    cli.pretty,
+                );
+            };
+            let mut out = standard_output();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
+            return ExitCode::SUCCESS;
+        }
         Command::Mcp { .. } => Err(Failure {
             exit: Exit::Usage,
             code: "usage.bad_command",
@@ -1326,7 +1389,7 @@ fn run(cli: Cli) -> ExitCode {
 
 fn fail(failure: Failure, pretty: bool) -> ExitCode {
     let report = ErrorReport {
-        schema: "nupdf.error/v0",
+        schema: "nupdf.error/v1",
         error: ErrorBody {
             code: failure.code,
             message: failure.message,
@@ -1447,7 +1510,7 @@ impl Serialize for StextReport<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = s.serialize_map(Some(5))?;
-        map.serialize_entry("schema", "nupdf.stext/v0")?;
+        map.serialize_entry("schema", "nupdf.stext/v1")?;
         map.serialize_entry("doc_id", &self.facts.doc_id)?;
         self.body.serialize_into(&mut map)?;
         map.serialize_entry("diagnostics", &diagnostics(self.doc))?;
@@ -1467,7 +1530,7 @@ fn stream_objects(doc: &Document, facts: &FileFacts, pretty: bool) -> ExitCode {
             use serde::ser::SerializeMap;
             let dump = objects::Dump::new(self.doc);
             let mut map = s.serialize_map(Some(5))?;
-            map.serialize_entry("schema", "nupdf.objects/v0")?;
+            map.serialize_entry("schema", "nupdf.objects/v1")?;
             map.serialize_entry("doc_id", &self.facts.doc_id)?;
             map.serialize_entry("object_count", &dump.count)?;
             map.serialize_entry("objects", &dump)?;
@@ -1487,7 +1550,7 @@ fn emit_extracted(
     doc: &Document,
     pretty: bool,
 ) -> ExitCode {
-    const SCHEMA: &str = "nupdf.extract/v0";
+    const SCHEMA: &str = "nupdf.extract/v1";
     match extracted {
         extract::Extracted::Json(body) => {
             let report = extract::Report {
@@ -1502,7 +1565,7 @@ fn emit_extracted(
             let mut out = standard_output();
             for page in &pages {
                 let line = extract::Line {
-                    schema: "nupdf.extract.page/v0",
+                    schema: "nupdf.extract.page/v1",
                     doc_id: &facts.doc_id,
                     page,
                 };
@@ -1745,7 +1808,7 @@ fn redact_command(
         }
         fields.insert("output".into(), serde_json::Value::Null);
         fields.insert("verification".into(), serde_json::Value::Null);
-        return Ok(report("nupdf.redact/v0", facts, doc, fields.into()));
+        return Ok(report("nupdf.redact/v1", facts, doc, fields.into()));
     }
     let m = redact::matcher(args.targets, args.ignore_case).map_err(input)?;
     let scrubbed = redact::apply(doc, &plan, args.options, &m).map_err(input)?;
@@ -1831,7 +1894,7 @@ fn redact_command(
             message: format!("cannot write {}: {e}", path.display()),
         })?;
     }
-    Ok(report("nupdf.redact/v0", facts, doc, fields.into()))
+    Ok(report("nupdf.redact/v1", facts, doc, fields.into()))
 }
 
 /// `pdf_clean_file`'s page subset: every object loaded first, so a repair
@@ -1876,7 +1939,7 @@ fn clean(doc: &Document, facts: &FileFacts, plan: &Clean) -> Result<serde_json::
         "pages": plan.pages.as_ref().map(|p| p.iter().map(|i| i + 1).collect::<Vec<_>>()),
         "encryption": encryption_json(&plan.options.encrypt),
     });
-    write_document(doc, facts, plan, "nupdf.clean/v0", body)
+    write_document(doc, facts, plan, "nupdf.clean/v1", body)
 }
 
 fn encryption_json(encrypt: &nupdf::write::Encrypt) -> serde_json::Value {
@@ -2065,7 +2128,7 @@ fn show(
             "value".into(),
             objects::encode(&nupdf::Object::Dict(doc.trailer().into())),
         );
-        return Ok(report("nupdf.show/v0", &facts, &doc, body.into()));
+        return Ok(report("nupdf.show/v1", &facts, &doc, body.into()));
     }
     let num = target
         .split_whitespace()
@@ -2115,7 +2178,7 @@ fn show(
         }
         body.insert("stream".into(), info.into());
     }
-    Ok(report("nupdf.show/v0", &facts, &doc, body.into()))
+    Ok(report("nupdf.show/v1", &facts, &doc, body.into()))
 }
 
 /// MuPDF's permission names (`Document.hasPermission`).
@@ -2179,7 +2242,7 @@ fn info((doc, facts): (Document, FileFacts), authenticated: bool) -> Result<Info
         .collect();
 
     Ok(InfoReport {
-        schema: "nupdf.info/v0",
+        schema: "nupdf.info/v1",
         doc_id,
         file_size,
         kind: match header.map(|h| h.kind) {
