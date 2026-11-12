@@ -21,7 +21,7 @@ Each layer only depends on the layers to its left. Consumers never see raw bytes
 | `crates/nupdf-cli` | The `nupdf` binary. Argument parsing, JSON output, exit codes. |
 | `xtask` | Dev tooling run with `cargo xtask`: oracle, fixtures, harness, bench, corpus, and the Arlington rules the validation checks apply, from the definitions vendored in `xtask/data/arlington/`. It may use `unsafe` (it calls `wait4`), and it is never shipped. |
 | `oracle/` | `MUPDF_VERSION` (the pin) and `js/` scripts that run under `mutool run`. |
-| `corpus/` | `smoke/` (generated and committed), `manifest.toml` (public corpora, fetched on demand). |
+| `corpus/` | `smoke/` and `redaction/` (generated and committed), `manifest.toml` (public corpora, fetched on demand). |
 | `harness/baselines/` | Committed per-tier outcomes that the ratchet compares against. |
 | `fuzz/` | cargo-fuzz targets (from M1). |
 | `docs/` | Plan, architecture, interface contract, testing, decisions, prior art. |
