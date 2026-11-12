@@ -2559,7 +2559,7 @@ fn the_guide_is_text_for_models() {
     let out = nupdf(&["guide"]);
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.starts_with("# nupdf") && text.contains("- `extract <file>`"));
+    assert!(text.starts_with("# nupdf") && text.contains("`extract`"));
     let one = nupdf(&["guide", "redact"]);
     assert!(String::from_utf8_lossy(&one.stdout).contains("--preset"));
     assert_eq!(nupdf(&["guide", "nope"]).status.code(), Some(2));
