@@ -258,7 +258,9 @@ MuPDF reference: `fitz/stext-device.c`, `stext-output.c`, `stext-search.c`, `ste
 - [x] Bench pairs: against `mutool draw -F stext.json`, plus, for context, PyMuPDF, pypdf, pdfplumber, pdfminer.six, pdftotext and pdf_oxide
 - [x] `roundtrip-text` check: MuPDF's text of each side's `clean` output, the same on both (moved from M3's exit)
 
-Exit: ≥99% of pages have the same character sequence as MuPDF's stext, and ≥98% of characters have bbox IoU ≥0.98. Single-threaded time ≤1.1× MuPDF's. ≥6× speedup on 8 cores for documents of 50+ pages.
+Exit: ≥99% of pages have the same character sequence as MuPDF's stext, and ≥98% of characters have bbox IoU ≥0.98. Single-threaded time ≤1.1× MuPDF's. ≥6× speedup on 8 cores, in total time, for documents of 50+ pages that take 100 ms or more on one thread (`stext-scaling`, `extract-scaling`; a document that is mostly starting the process shows nothing of what threads do).
+
+Exit status: met for parity and single-threaded time. Scaling on the standard tier, 2026-11-12, on 6 performance and 12 efficiency cores with Finder, fseventsd and Spotlight each holding a core: `stext` 3.4× (one document qualifies), `extract` 2.8× (two).
 
 ## M6: Redaction and verification
 
