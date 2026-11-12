@@ -1029,20 +1029,21 @@ impl<'a> Run<'a> {
             f: ts.rise,
         };
         let adv;
+        // As clang fuses them in MuPDF.
         if fd.wmode == 0 {
             let h = fd.lookup_hmtx(cid);
             let w0 = h.w as f32 * 0.001;
             adv = w0;
-            self.tos.char_tx = (w0 * ts.size + ts.char_space) * ts.scale;
+            self.tos.char_tx = w0.mul_add(ts.size, ts.char_space) * ts.scale;
             self.tos.char_ty = 0.0;
         } else {
             let v = fd.lookup_vmtx(cid);
             let w1 = v.w as f32 * 0.001;
             adv = w1;
-            tsm.e -= v.x as f32 * ts.size * ts.scale * 0.001;
-            tsm.f -= v.y as f32 * ts.size * 0.001;
+            tsm.e = (-(v.x as f32 * ts.size * ts.scale)).mul_add(0.001, tsm.e);
+            tsm.f = (-(v.y as f32 * ts.size)).mul_add(0.001, tsm.f);
             self.tos.char_tx = 0.0;
-            self.tos.char_ty = w1 * ts.size + ts.char_space;
+            self.tos.char_ty = w1.mul_add(ts.size, ts.char_space);
         }
         let trm = tsm.concat(self.tos.tm);
         let gid = fd.cid_to_gid(cid);
