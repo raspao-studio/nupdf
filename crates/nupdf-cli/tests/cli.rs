@@ -2633,3 +2633,95 @@ fn navigation_reports_outline_labels_links_and_attachments() {
     let none = report_of(&["attachments", smoke("minimal.pdf").to_str().unwrap()]);
     assert_eq!(none["attachments"], serde_json::json!([]));
 }
+
+/// A page with a ruled 3x3 table: a header row and two rows of numbers.
+fn table_pdf(name: &str) -> PathBuf {
+    let rows = [
+        ["Name", "Qty", "Price"],
+        ["Apple", "3", "1.20"],
+        ["Pear", "10", "0.85"],
+    ];
+    let mut content = String::from("0.5 w\n");
+    for (r, row) in rows.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            content += &format!(
+                "BT /F1 10 Tf {} {} Td ({cell}) Tj ET\n",
+                76 + c * 100,
+                706 - r * 20
+            );
+        }
+    }
+    for r in 0..=3 {
+        content += &format!("72 {y} m 372 {y} l S\n", y = 720 - r * 20);
+    }
+    for c in 0..=3 {
+        content += &format!("{x} 720 m {x} 660 l S\n", x = 72 + c * 100);
+    }
+    let objects = [
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>".to_string(),
+        format!("<</Length {}>>\nstream\n{content}\nendstream", content.len()),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<</Size 6/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    let path = scratch(name);
+    std::fs::write(&path, out).unwrap();
+    path
+}
+
+#[test]
+fn tables_come_out_as_rows_of_cells() {
+    let file = table_pdf("table.pdf");
+    let file = file.to_str().unwrap();
+    let report = report_of(&["tables", file]);
+    assert_eq!(report["schema"], "nupdf.tables/v1");
+    let table = &report["pages"][0]["tables"][0];
+    assert_eq!(table["columns"], 3);
+    let texts: Vec<Vec<&str>> = table["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r["cells"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["text"].as_str().unwrap())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            ["Name", "Qty", "Price"],
+            ["Apple", "3", "1.20"],
+            ["Pear", "10", "0.85"]
+        ]
+    );
+    let csv = nupdf(&["tables", file, "--format", "csv"]);
+    assert_eq!(
+        String::from_utf8_lossy(&csv.stdout),
+        "Name,Qty,Price\nApple,3,1.20\nPear,10,0.85\n"
+    );
+    let reported: Value = serde_json::from_slice(&csv.stderr).unwrap();
+    assert_eq!(reported["schema"], "nupdf.tables/v1");
+    // Threads do not change the tables.
+    assert_eq!(
+        report_of(&["tables", file, "--threads", "4"])["pages"],
+        report["pages"]
+    );
+}

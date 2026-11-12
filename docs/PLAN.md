@@ -308,7 +308,7 @@ Exit status, 2026-11-12: not met, and left for later. Eleven graded tasks (the e
 - [ ] Forms: list, fill and flatten AcroForm fields; generate appearances (`pdf-form.c`, `pdf-appearance.c`); detect and strip XFA
 - [ ] Annotations: list, add, delete, flatten
 - [ ] OCR: rasterize, run Tesseract as a subprocess (or ocrs), add an invisible text layer; `info` routes scanned pages here
-- [ ] Tables: structured rows from `stext-table` parity
+- [x] Tables: structured rows from `stext-table` parity. `nupdf tables`: MuPDF's `Table`, `TR` and `TD` structures as rows of cells, JSON or CSV, with the vector paths table hunting needs for ruled tables; the `tables` check compares them with MuPDF's on every file
 - [ ] Signatures: list them, check byte-range integrity, preserve them with incremental saves
 - [ ] Attachments, outlines, page labels, links; `sanitize` (JavaScript, actions, launch and URI policy). Reading done (D46): `outline`, `links`, `labels`, `attachments`, each checked against MuPDF; `sanitize` to come
 - [ ] Optional: Python bindings (PyO3) for agents that run Python

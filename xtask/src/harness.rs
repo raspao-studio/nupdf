@@ -239,6 +239,18 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["resources"],
     },
     Check {
+        name: "tables",
+        about: "each page's tables as rows of cells, from MuPDF's table hunting with the vectors it finds ruled tables by",
+        oracle_script: "oracle/js/tables.js",
+        nupdf_args: &["tables"],
+        compare: Compare::Fields(&["/page_count", "/pages"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: Some(drop_table_boxes),
+        reread: None,
+        oracle_args: &[],
+    },
+    Check {
         name: "outline",
         about: "the outline as `fz_load_outline` reads it: each entry's title, link, open state and target page, with its children",
         oracle_script: "oracle/js/navigation.js",
@@ -1964,6 +1976,35 @@ fn search_pages(json: &mut Value) {
 
 /// The `fonts` report's `load` facts: what nupdf loaded each font as,
 /// which MuPDF's scripts cannot see.
+/// The script walker gives no structure boxes: `tables` without them.
+fn drop_table_boxes(json: &mut Value) {
+    let boxes = |v: &mut Value| {
+        if let Value::Object(o) = v {
+            o.remove("bbox");
+        }
+    };
+    let Some(Value::Array(pages)) = json.get_mut("pages") else {
+        return;
+    };
+    for page in pages {
+        let Some(Value::Array(tables)) = page.get_mut("tables") else {
+            continue;
+        };
+        for table in tables {
+            boxes(table);
+            let Some(Value::Array(rows)) = table.get_mut("rows") else {
+                continue;
+            };
+            for row in rows {
+                boxes(row);
+                if let Some(Value::Array(cells)) = row.get_mut("cells") {
+                    cells.iter_mut().for_each(boxes);
+                }
+            }
+        }
+    }
+}
+
 fn drop_font_loads(json: &mut Value) {
     if let Some(Value::Array(fonts)) = json.get_mut("fonts") {
         for f in fonts {

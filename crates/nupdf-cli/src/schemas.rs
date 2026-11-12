@@ -34,6 +34,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ("split", include_str!("../schemas/split.json")),
     ("stext", include_str!("../schemas/stext.json")),
     ("streams", include_str!("../schemas/streams.json")),
+    ("tables", include_str!("../schemas/tables.json")),
     ("trace", include_str!("../schemas/trace.json")),
     ("verify", include_str!("../schemas/verify.json")),
 ];
