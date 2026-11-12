@@ -4,6 +4,7 @@
 //! `nupdf`: JSON reports on stdout, JSON errors on stderr, meaningful exit
 //! codes. The contract is specified in docs/AGENT-INTERFACE.md.
 
+mod annot_edits;
 mod batch;
 mod commands;
 mod diff;
@@ -14,6 +15,7 @@ mod mcp;
 mod md5;
 mod navigation;
 mod objects;
+mod ocr;
 mod redact;
 mod render;
 mod schemas;
@@ -95,6 +97,70 @@ enum Command {
         /// Remove /Info and the catalog's XMP /Metadata, before any --set.
         #[arg(long)]
         strip: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Remove what the document can do besides show itself: JavaScript,
+    /// Launch, SubmitForm and ImportData, GoToR/GoToE actions and XFA,
+    /// and by choice web links and embedded files. The output is scanned
+    /// again before it is written (exit 4 if anything is left).
+    Sanitize {
+        file: PathBuf,
+        /// Keep these (repeatable or comma-separated): javascript, launch,
+        /// data (submit and import), remote, xfa.
+        #[arg(long, value_delimiter = ',')]
+        keep: Vec<String>,
+        /// Web links: keep, remove, or allow:HOST,... (those hosts and
+        /// their subdomains kept, the rest removed).
+        #[arg(long, default_value = "keep")]
+        uri: String,
+        /// Remove embedded files too.
+        #[arg(long)]
+        attachments: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Draw annotations and form fields into their pages and remove them,
+    /// as MuPDF's bake does (links stay; with fields, the form goes). An
+    /// annotation without an appearance gets the one MuPDF makes.
+    Flatten {
+        file: PathBuf,
+        /// Annotations only: leave the form fields.
+        #[arg(long, conflicts_with = "widgets_only")]
+        annots_only: bool,
+        /// Form fields only: leave the annotations.
+        #[arg(long)]
+        widgets_only: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Make scanned pages searchable: each page is drawn, Tesseract reads
+    /// it, and the words go on the page as invisible text. Only the pages
+    /// that look scanned (no text, an image over most of the page) unless
+    /// --all or --pages.
+    Ocr {
+        file: PathBuf,
+        /// These pages, scanned or not (e.g. 1-3,7).
+        #[arg(long)]
+        pages: Option<String>,
+        /// Every page, scanned or not.
+        #[arg(long)]
+        all: bool,
+        /// Tesseract's language codes, joined by + (eng, deu, eng+fra).
+        #[arg(long, default_value = "eng")]
+        lang: String,
+        /// The resolution pages are drawn at for Tesseract.
+        #[arg(long, default_value_t = 300.0)]
+        dpi: f32,
+        /// The Tesseract program.
+        #[arg(long, default_value = "tesseract")]
+        tesseract: PathBuf,
+        /// Leave out words Tesseract is less sure of (0 to 100).
+        #[arg(long, default_value_t = 0.0)]
+        min_confidence: f32,
+        /// Seconds Tesseract may take on a page.
+        #[arg(long, default_value_t = 120)]
+        page_timeout: u64,
         #[command(flatten)]
         write: commands::WriteArgs,
     },
@@ -391,6 +457,67 @@ enum Command {
         #[arg(long)]
         threads: Option<usize>,
     },
+    /// Each page's annotations (links, popups and form widgets aside):
+    /// type, box, text, author, colours, dates, and the points of lines,
+    /// polygons, ink and text markup; or, with --add, --delete or
+    /// --highlight, write the document with annotations added or removed
+    /// as MuPDF's annotation API makes them, appearances included.
+    Annots {
+        file: PathBuf,
+        /// Make every annotation's appearance again and give it (for the
+        /// harness: what MuPDF's appearance synthesis would write).
+        #[arg(long, hide = true)]
+        synthesize: bool,
+        /// Add an annotation (repeatable): JSON in page space with the
+        /// listing's field names, `{"page":1,"type":"Highlight",
+        /// "quad_points":[[8 numbers]]}`; also "rect", "ink_list", "line",
+        /// "vertices", "contents", "author", "subject", "color",
+        /// "interior_color", "opacity", "icon", "border_width", "flags",
+        /// "open" and "popup". A listed annotation with "page" added can be
+        /// given as it is.
+        #[arg(long = "add", value_name = "JSON")]
+        add: Vec<String>,
+        /// Delete an annotation and its popup by listing id (`p1.a2`;
+        /// repeatable). Deletions come first, by the ids of the listing
+        /// before any change.
+        #[arg(long = "delete", value_name = "ID")]
+        delete: Vec<String>,
+        /// Add a Highlight over each hit of a search for this text
+        /// (repeatable): one annotation per hit, with its quads.
+        #[arg(long = "highlight", value_name = "TEXT")]
+        highlight: Vec<String>,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Each page's form widgets: field name, label, type, flags, value,
+    /// options, maximum length, whether read-only or signed; and whether
+    /// the form is an XFA form. With --set or --toggle, fills fields as
+    /// MuPDF's widget API fills them (JavaScript off) and writes the file.
+    Forms {
+        file: PathBuf,
+        /// Make every widget's appearance again and give it (for the
+        /// harness: what MuPDF's appearance synthesis would write).
+        #[arg(long, hide = true)]
+        synthesize: bool,
+        /// Set a field, as `NAME=VALUE` (repeatable), NAME its full name as
+        /// listed. For a check box or radio button, VALUE is the on
+        /// state's name, or Off. Sets go first, in order, then toggles.
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        set: Vec<String>,
+        /// Toggle a check box or radio button (repeatable).
+        #[arg(long, value_name = "NAME")]
+        toggle: Vec<String>,
+        /// Set the first text field to "nupdf" and toggle the first check
+        /// box (for the harness).
+        #[arg(long, hide = true)]
+        fill_first: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Each page's signature fields: signed or not, the signatory, reason,
+    /// time, the byte ranges signed, whether the file changed after signing,
+    /// and whether the signed digest matches the signed bytes.
+    Signatures { file: PathBuf },
     /// The outline (bookmarks): each entry's title, link, whether it is
     /// open, the page it leads to, and the entries below it.
     Outline { file: PathBuf },
@@ -795,9 +922,21 @@ fn run(cli: Cli) -> ExitCode {
     let password = cli.password.as_deref();
     let open = |file: &Path| open(file, limits, password);
     let result = match &cli.command {
-        Command::Info { file } => open(file)
-            .and_then(|opened| info(opened, password.is_some()))
-            .and_then(to_json),
+        Command::Info { file } => open(file).and_then(|opened| {
+            // On a copy of its own, so that drawing the pages to look at
+            // them adds nothing to what `info` says of the file.
+            let text = Document::open(opened.0.data().to_vec())
+                .map(|copy| {
+                    if let Some(pw) = password {
+                        let _ = copy.authenticate(pw);
+                    }
+                    ocr::info_text(&copy)
+                })
+                .unwrap_or(serde_json::Value::Null);
+            let mut v = info(opened, password.is_some()).and_then(to_json)?;
+            v["text"] = text;
+            Ok(v)
+        }),
         Command::Objects { file } => match open(file) {
             Ok((doc, facts)) => return stream_objects(&doc, &facts, cli.pretty),
             Err(failure) => Err(failure),
@@ -831,6 +970,46 @@ fn run(cli: Cli) -> ExitCode {
             write,
         } => open(file)
             .and_then(|(doc, facts)| commands::meta(&doc, &facts, set, *strip, write, password)),
+        Command::Flatten {
+            file,
+            annots_only,
+            widgets_only,
+            write,
+        } => open(file).and_then(|(doc, facts)| {
+            commands::flatten(&doc, &facts, !widgets_only, !annots_only, write, password)
+        }),
+        Command::Ocr {
+            file,
+            pages,
+            all,
+            lang,
+            dpi,
+            tesseract,
+            min_confidence,
+            page_timeout,
+            write,
+        } => open(file).and_then(|(doc, facts)| {
+            let args = ocr::OcrArgs {
+                pages: pages.as_deref(),
+                all: *all,
+                lang,
+                dpi: *dpi,
+                tesseract,
+                min_confidence: *min_confidence,
+                timeout: *page_timeout,
+            };
+            ocr::ocr(&doc, &facts, &args, write, password)
+        }),
+        Command::Sanitize {
+            file,
+            keep,
+            uri,
+            attachments,
+            write,
+        } => commands::sanitize_policy(keep, uri, *attachments).and_then(|policy| {
+            open(file)
+                .and_then(|(doc, facts)| commands::sanitize(&doc, &facts, &policy, write, password))
+        }),
         Command::Split {
             file,
             output,
@@ -1203,20 +1382,58 @@ fn run(cli: Cli) -> ExitCode {
             })?;
             Ok(report("nupdf.outline/v1", &facts, &doc, body))
         }),
-        Command::Links { file } | Command::Labels { file } => {
+        Command::Forms {
+            file,
+            set,
+            toggle,
+            fill_first,
+            write,
+            ..
+        } if !set.is_empty() || !toggle.is_empty() || *fill_first => {
             open(file).and_then(|(doc, facts)| {
-                let (schema, body) = match &cli.command {
-                    Command::Links { .. } => ("nupdf.links/v1", navigation::links(&doc)),
-                    _ => ("nupdf.labels/v1", navigation::labels(&doc)),
-                };
-                let body = body.map_err(|e| Failure {
-                    exit: Exit::Input,
-                    code: "input.page_tree",
-                    message: e,
-                })?;
-                Ok(report(schema, &facts, &doc, body))
+                commands::fill(&doc, &facts, set, toggle, *fill_first, write, password)
             })
         }
+        Command::Annots {
+            file,
+            add,
+            delete,
+            highlight,
+            write,
+            ..
+        } if !(add.is_empty() && delete.is_empty() && highlight.is_empty()) => {
+            open(file).and_then(|(doc, facts)| {
+                let edits = annot_edits::AnnotEdits {
+                    add,
+                    delete,
+                    highlight,
+                };
+                annot_edits::edit_annots(&doc, &facts, &edits, write, password)
+            })
+        }
+        Command::Links { file }
+        | Command::Labels { file }
+        | Command::Forms { file, .. }
+        | Command::Signatures { file }
+        | Command::Annots { file, .. } => open(file).and_then(|(doc, facts)| {
+            let (schema, body) = match &cli.command {
+                Command::Links { .. } => ("nupdf.links/v1", navigation::links(&doc)),
+                Command::Forms { synthesize, .. } => {
+                    ("nupdf.forms/v1", navigation::forms(&doc, *synthesize))
+                }
+                Command::Signatures { .. } => ("nupdf.signatures/v1", navigation::signatures(&doc)),
+                Command::Annots { synthesize, .. } => {
+                    ("nupdf.annots/v1", navigation::annots(&doc, *synthesize))
+                }
+                _ => ("nupdf.labels/v1", navigation::labels(&doc)),
+            };
+            let body = body.map_err(|e| Failure {
+                exit: Exit::Input,
+                code: "input.page_tree",
+                message: e,
+            })?;
+            Ok(report(schema, &facts, &doc, body))
+        }),
         Command::Attachments { file, extract } => open(file).and_then(|(doc, facts)| {
             let dir = extract.as_deref().map(output_dir).transpose()?;
             Ok(report(
@@ -2163,12 +2380,15 @@ fn save_checked(
         })?;
     }
     let hash = blake3::hash(&bytes);
-    let output = serde_json::json!({
+    let mut output = serde_json::json!({
         "path": plan.output.map(|p| p.display().to_string()),
         "doc_id": DocId::from_hash(&hash).to_string(),
         "len": bytes.len(),
         "blake3": hash.to_hex().to_string(),
     });
+    if let Some(signatures) = signatures_kept(doc, &bytes, plan) {
+        output["signatures"] = signatures;
+    }
     let verification = verification.map_or(serde_json::Value::Null, |v| {
         serde_json::json!({
             "verified": true,
@@ -2176,6 +2396,43 @@ fn save_checked(
         })
     });
     Ok((output, verification))
+}
+
+/// For a signed input: each signature's digest check in the input and in
+/// the output, by field name. A signature that held and no longer does is
+/// a warning, since only an incremental save keeps the signed bytes.
+fn signatures_kept(doc: &Document, bytes: &[u8], plan: &Clean) -> Option<serde_json::Value> {
+    let before = nupdf::signature::summary(doc);
+    if before.is_empty() {
+        return None;
+    }
+    let after = Document::open(bytes.to_vec())
+        .map(|out| {
+            if let Some(pw) = plan.password {
+                let _ = out.authenticate(pw);
+            }
+            nupdf::signature::summary(&out)
+        })
+        .unwrap_or_default();
+    let list: Vec<serde_json::Value> = before
+        .iter()
+        .map(|(name, was)| {
+            let now = after
+                .iter()
+                .find(|(n, _)| n == name)
+                .map_or("Not signed.", |(_, s)| s.as_str());
+            if was == nupdf::signature::OK && now != nupdf::signature::OK {
+                doc.diagnostics().warn(
+                    "signature.invalidated",
+                    format!(
+                        "the output breaks signature {name:?} ({now}); --incremental keeps the signed bytes"
+                    ),
+                );
+            }
+            serde_json::json!({ "name": name, "before": was, "after": now })
+        })
+        .collect();
+    Some(list.into())
 }
 
 /// Why the written document failed its self-check.

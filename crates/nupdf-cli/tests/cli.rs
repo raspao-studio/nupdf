@@ -2725,3 +2725,750 @@ fn tables_come_out_as_rows_of_cells() {
         report["pages"]
     );
 }
+
+/// A PDF of `objects`, numbered from 1, the first the catalog.
+fn pdf_of(objects: &[&str]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    let n = objects.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {n}\n0000000000 65535 f \n").as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<</Size {n}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+fn signed_pdf() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/signed.pdf")
+}
+
+#[test]
+fn a_signature_is_checked_against_the_bytes_it_signs() {
+    let report = report_of(&["signatures", signed_pdf().to_str().unwrap()]);
+    assert_eq!(report["schema"], "nupdf.signatures/v1");
+    let s = &report["pages"][0]["signatures"][0];
+    assert_eq!(s["name"], "Approval");
+    assert_eq!(s["signed"], true);
+    assert_eq!(s["digest"], "OK");
+    assert_eq!(s["changed_since_signing"], false);
+    assert_eq!(
+        s["signatory"],
+        "cn=Test Signer, o=nupdf tests, ou=, email=signer@example.org, c=US"
+    );
+    assert_eq!(s["reason"], "Testing");
+    assert_eq!(s["sub_filter"], "adbe.pkcs7.detached");
+
+    // A changed byte inside the signed range breaks the digest.
+    let mut bytes = std::fs::read(signed_pdf()).unwrap();
+    let at = bytes.windows(7).position(|w| w == b"Testing").unwrap();
+    bytes[at] = b'R';
+    let tampered = scratch("signed-tampered.pdf");
+    std::fs::write(&tampered, &bytes).unwrap();
+    let report = report_of(&["signatures", tampered.to_str().unwrap()]);
+    assert_eq!(
+        report["pages"][0]["signatures"][0]["digest"],
+        "Signature invalidated by change to document."
+    );
+
+    // Bytes after the signed ones leave it valid, and say the file changed.
+    let mut bytes = std::fs::read(signed_pdf()).unwrap();
+    bytes.extend_from_slice(b"\n% appended\n");
+    let grown = scratch("signed-grown.pdf");
+    std::fs::write(&grown, &bytes).unwrap();
+    let s = &report_of(&["signatures", grown.to_str().unwrap()])["pages"][0]["signatures"][0];
+    assert_eq!(s["digest"], "OK");
+    assert_eq!(s["changed_since_signing"], true);
+}
+
+#[test]
+fn editing_a_signed_file_says_whether_its_signatures_survive() {
+    let input = signed_pdf();
+    let out = scratch("signed-edited.pdf");
+    let args = |extra: &[&'static str]| {
+        let mut a = vec![
+            "meta",
+            input.to_str().unwrap(),
+            "--set",
+            "Title=Edited",
+            "-o",
+            out.to_str().unwrap(),
+        ];
+        a.extend_from_slice(extra);
+        a.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    };
+    let rewrite = run_json(&args(&[]).iter().map(String::as_str).collect::<Vec<_>>());
+    let sig = &rewrite["output"]["signatures"][0];
+    assert_eq!(sig["before"], "OK");
+    assert_ne!(sig["after"], "OK");
+    assert!(
+        rewrite["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "signature.invalidated")
+    );
+    let kept = run_json(
+        &args(&["--incremental"])
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(kept["output"]["signatures"][0]["after"], "OK");
+    let report = report_of(&["signatures", out.to_str().unwrap()]);
+    let s = &report["pages"][0]["signatures"][0];
+    assert_eq!(
+        (s["digest"].as_str(), s["changed_since_signing"].as_bool()),
+        (Some("OK"), Some(true))
+    );
+}
+
+#[test]
+fn form_fields_read_through_their_parents() {
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R 7 0 R]/NeedAppearances true/XFA 8 0 R>>>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Annots[5 0 R 6 0 R 7 0 R]>>",
+        "<</T(person)/FT/Tx/Kids[5 0 R 6 0 R]/Ff 1>>",
+        "<</Type/Annot/Subtype/Widget/Parent 4 0 R/T(name)/V(Ada)/MaxLen 20/Rect[10 10 90 30]/TU(Your name)>>",
+        "<</Type/Annot/Subtype/Widget/Parent 4 0 R/T(city)/Rect[10 40 90 60]>>",
+        "<</Type/Annot/Subtype/Widget/T(fruit)/FT/Ch/Ff 131072/V(b)/Opt[(a)[(b)(Banana)]]/Rect[10 70 90 90]>>",
+        "<</Length 0>>\nstream\n\nendstream",
+    ]);
+    let file = scratch("form.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let report = report_of(&["forms", file.to_str().unwrap()]);
+    assert_eq!(report["schema"], "nupdf.forms/v1");
+    assert_eq!(
+        (
+            report["xfa"].as_bool(),
+            report["need_appearances"].as_bool()
+        ),
+        (Some(true), Some(true))
+    );
+    let w = report["pages"][0]["widgets"].as_array().unwrap();
+    assert_eq!(w.len(), 3);
+    assert_eq!(w[0]["name"], "person.name");
+    assert_eq!(w[0]["type"], "text");
+    assert_eq!(w[0]["value"], "Ada");
+    assert_eq!(w[0]["max_len"], 20);
+    assert_eq!(w[0]["label"], "Your name");
+    assert_eq!(w[0]["read_only"], true);
+    assert_eq!(w[1]["label"], "city");
+    assert_eq!(w[2]["type"], "combobox");
+    assert_eq!(
+        w[2]["options"],
+        serde_json::json!([{"export": "a", "text": "a"}, {"export": "b", "text": "Banana"}])
+    );
+}
+
+/// A form with a text field of two widgets (one read-only), a combo box, a
+/// check box and a radio group of two, for the filling tests.
+fn fill_form() -> PathBuf {
+    fill_form_with("", "fill-form.pdf")
+}
+
+/// `fill_form` with `extra` in the text field's dictionary.
+fn fill_form_with(extra: &str, name: &str) -> PathBuf {
+    let person = format!("<</T(person)/FT/Tx{extra}/V(Ada)/Kids[5 0 R 6 0 R]>>");
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R 7 0 R 8 0 R 9 0 R]/DA(/Helv 0 Tf 0 g)>>>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Annots[5 0 R 6 0 R 7 0 R 8 0 R 10 0 R 11 0 R]>>",
+        &person,
+        "<</Type/Annot/Subtype/Widget/Parent 4 0 R/Rect[10 10 150 30]/DA(/TiRo 10 Tf)>>",
+        "<</Type/Annot/Subtype/Widget/Parent 4 0 R/Rect[10 40 150 60]/Ff 1>>",
+        "<</Type/Annot/Subtype/Widget/T(fruit)/FT/Ch/Ff 131072/V(a)/Opt[(a)[(b)(Banana)]]/Rect[10 70 150 90]>>",
+        "<</Type/Annot/Subtype/Widget/T(agree)/FT/Btn/AS/Off/Rect[10 100 30 120]/AP<</N<</Off 12 0 R/Sure 12 0 R>>>>>>",
+        "<</T(pick)/FT/Btn/Ff 49152/V/One/Kids[10 0 R 11 0 R]>>",
+        "<</Type/Annot/Subtype/Widget/Parent 9 0 R/AS/One/Rect[10 130 30 150]/AP<</N<</One 12 0 R/Off 12 0 R>>>>>>",
+        "<</Type/Annot/Subtype/Widget/Parent 9 0 R/AS/Off/Rect[40 130 60 150]/AP<</N<</Two 12 0 R/Off 12 0 R>>>>>>",
+        "<</Type/XObject/Subtype/Form/BBox[0 0 1 1]/Length 0>>\nstream\n\nendstream",
+    ]);
+    let file = scratch(name);
+    std::fs::write(&file, pdf).unwrap();
+    file
+}
+
+fn widget<'a>(report: &'a Value, name: &str, i: usize) -> &'a Value {
+    report["pages"][0]["widgets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["name"] == name)
+        .nth(i)
+        .unwrap()
+}
+
+#[test]
+fn forms_set_fills_fields_and_makes_their_appearances() {
+    let file = fill_form();
+    let input = file.to_str().unwrap();
+    let output = scratch("fill-set.pdf");
+    let out = output.to_str().unwrap();
+    let report = report_of(&[
+        "forms",
+        input,
+        "--set",
+        "person=Grace",
+        "--set",
+        "fruit=Cherry",
+        "-o",
+        out,
+    ]);
+    assert_eq!(report["schema"], "nupdf.fill/v1");
+    assert_eq!(report["scripts_run"], false);
+    assert_eq!(report["applied"], true);
+    let f = &report["fields"];
+    assert_eq!(
+        (
+            f[0]["name"].as_str(),
+            f[0]["old"].as_str(),
+            f[0]["new"].as_str()
+        ),
+        (Some("person"), Some("Ada"), Some("Grace"))
+    );
+    assert_eq!(f[0]["changed"], true);
+    // MuPDF sets a choice to a value none of its options has, and says
+    // nothing; the report does.
+    assert_eq!(f[1]["new"], "Cherry");
+    assert_eq!(f[1]["notes"].as_array().unwrap().len(), 1);
+    // Both widgets of the text field and the combo box are made again.
+    let made: Vec<i64> = report["appearances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["object"].as_i64().unwrap())
+        .collect();
+    assert_eq!(made, [5, 6, 7]);
+
+    let written = report_of(&["forms", out, "--synthesize"]);
+    assert_eq!(widget(&written, "person", 0)["value"], "Grace");
+    assert_eq!(widget(&written, "person", 1)["value"], "Grace");
+    // The new appearance shows the value, in the font its DA names.
+    let s = &widget(&written, "person", 0)["synthesis"];
+    assert!(
+        s["content"]
+            .as_str()
+            .unwrap()
+            .contains("/TiRo 10 Tf\n(Grace) Tj")
+    );
+}
+
+#[test]
+fn forms_toggle_turns_radio_groups_together() {
+    let file = fill_form();
+    let input = file.to_str().unwrap();
+    let output = scratch("fill-toggle.pdf");
+    let out = output.to_str().unwrap();
+    let report = report_of(&["forms", input, "--toggle", "agree", "-o", out]);
+    assert_eq!(report["fields"][0]["new"], "Sure");
+    // A toggle changes /AS and /V only: no appearance is made.
+    assert_eq!(report["appearances"], serde_json::json!([]));
+    let written = report_of(&["forms", out]);
+    assert_eq!(widget(&written, "agree", 0)["value"], "Sure");
+
+    // Setting the radio group to the second button's state turns that one
+    // on through /V; the first keeps its /AS, as MuPDF leaves it.
+    let output = scratch("fill-radio.pdf");
+    let out = output.to_str().unwrap();
+    let report = report_of(&["forms", input, "--set", "pick=Two", "-o", out]);
+    assert_eq!(report["fields"][0]["old"], "One");
+    assert_eq!(report["fields"][0]["new"], "Two");
+    // The group may not be turned off (NoToggleToOff): toggling the first
+    // button, which is on, leaves it on.
+    let report = report_of(&["forms", input, "--toggle", "pick", "--dry-run"]);
+    assert_eq!(report["fields"][0]["new"], "One");
+    assert_eq!(report["fields"][0]["changed"], false);
+    assert_eq!(report["applied"], false);
+    // Toggling the second turns it on and the first off.
+    let output = scratch("fill-radio-2.pdf");
+    let out = output.to_str().unwrap();
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R]>>>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Annots[5 0 R 6 0 R]>>",
+        "<</T(pick)/FT/Btn/Ff 32768/V/One/Kids[5 0 R 6 0 R]>>",
+        "<</Type/Annot/Subtype/Widget/Parent 4 0 R/AS/Off/Rect[10 130 30 150]/AP<</N<</Two 7 0 R/Off 7 0 R>>>>>>",
+        "<</Type/Annot/Subtype/Widget/Parent 4 0 R/AS/One/Rect[40 130 60 150]/AP<</N<</One 7 0 R/Off 7 0 R>>>>>>",
+        "<</Type/XObject/Subtype/Form/BBox[0 0 1 1]/Length 0>>\nstream\n\nendstream",
+    ]);
+    let radio = scratch("fill-radio-2-in.pdf");
+    std::fs::write(&radio, pdf).unwrap();
+    let report = report_of(&[
+        "forms",
+        radio.to_str().unwrap(),
+        "--toggle",
+        "pick",
+        "-o",
+        out,
+    ]);
+    assert_eq!(report["fields"][0]["new"], "Two");
+    let objects = report_of(&["objects", out]);
+    assert_eq!(objects["objects"]["5"]["d"]["AS"]["n"], "Two");
+    assert_eq!(objects["objects"]["6"]["d"]["AS"]["n"], "Off");
+    assert_eq!(objects["objects"]["4"]["d"]["V"]["n"], "Two");
+}
+
+#[test]
+fn forms_fill_refuses_unknown_fields_and_notes_read_only_ones() {
+    let file = fill_form();
+    let input = file.to_str().unwrap();
+    for (argv, code) in [
+        (
+            &["forms", input, "--set", "nobody=x", "--dry-run"][..],
+            "usage.unknown_field",
+        ),
+        (&["forms", input, "--set", "person"], "usage.bad_value"),
+        (
+            &["forms", input, "--set", "person=x"],
+            "usage.missing_output",
+        ),
+    ] {
+        let out = nupdf(argv);
+        assert_eq!(out.status.code(), Some(2), "{argv:?}");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["code"], code);
+    }
+    // Read-only: MuPDF's widget API sets it anyway, so nupdf does, and says.
+    let ro = fill_form_with("/Ff 1", "fill-readonly.pdf");
+    let report = report_of(&[
+        "forms",
+        ro.to_str().unwrap(),
+        "--set",
+        "person=x",
+        "--dry-run",
+    ]);
+    assert_eq!(report["fields"][0]["new"], "x");
+    assert!(
+        report["fields"][0]["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("read-only")
+    );
+    // A push button does not toggle.
+    let report = report_of(&["forms", input, "--toggle", "person", "--dry-run"]);
+    assert_eq!(report["fields"][0]["changed"], false);
+}
+
+#[test]
+fn annotations_list_with_what_their_getters_read() {
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Annots[4 0 R 5 0 R 6 0 R]>>",
+        "<</Type/Annot/Subtype/Square/Rect[10 10 50 50]/C[1 0 0]/IC[0 0 1]/BS<</W 2/S/D/D[3]>>/T(Ada)/Contents(Look)/CA 0.5>>",
+        "<</Type/Annot/Subtype/Highlight/Rect[0 0 0 0]/QuadPoints[10 100 60 100 10 90 60 90]/C[1 1 0]>>",
+        "<</Type/Annot/Subtype/Link/Rect[0 0 10 10]>>",
+    ]);
+    let file = scratch("annots.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let report = report_of(&["annots", file.to_str().unwrap()]);
+    assert_eq!(report["schema"], "nupdf.annots/v1");
+    let a = report["pages"][0]["annots"].as_array().unwrap();
+    // Links are not annotations to MuPDF's list.
+    assert_eq!(a.len(), 2);
+    assert_eq!(a[0]["type"], "Square");
+    assert_eq!(a[0]["author"], "Ada");
+    assert_eq!(a[0]["contents"], "Look");
+    assert_eq!(a[0]["opacity"], 0.5);
+    assert_eq!(
+        a[0]["border"],
+        serde_json::json!({"style": "Dashed", "width": 2.0})
+    );
+    assert_eq!(a[0]["interior_color"], serde_json::json!([0.0, 0.0, 1.0]));
+    // Page space, y down from the top of the 200-point page, less the /RD
+    // that making the missing appearance puts in (half the border width).
+    assert_eq!(a[0]["rect"], serde_json::json!([11.0, 151.0, 49.0, 189.0]));
+    assert_eq!(
+        a[1]["quad_points"],
+        serde_json::json!([[10.0, 100.0, 60.0, 100.0, 10.0, 110.0, 60.0, 110.0]])
+    );
+    // --synthesize gives the appearance MuPDF would make.
+    let made = report_of(&["annots", "--synthesize", file.to_str().unwrap()]);
+    let content = made["pages"][0]["annots"][0]["synthesis"]["content"]
+        .as_str()
+        .unwrap();
+    assert!(
+        content.starts_with("/H gs\n[3]0 d\n2 w\n1 0 0 RG\n0 0 1 rg\n"),
+        "{content}"
+    );
+}
+
+#[test]
+fn sanitize_removes_what_runs_and_proves_it() {
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R/OpenAction<</S/JavaScript/JS(app.alert(1))>>/Names<</JavaScript 9 0 R>>/AcroForm<</Fields[6 0 R]/XFA 10 0 R/CO[6 0 R]>>>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Annots[4 0 R 5 0 R 6 0 R 7 0 R]/AA<</O 8 0 R>>>>",
+        "<</Type/Annot/Subtype/Link/Rect[0 0 10 10]/A<</S/URI/URI(https://evil.example.com/x)>>>>",
+        "<</Type/Annot/Subtype/Link/Rect[0 20 10 30]/A<</S/URI/URI(https://docs.good.org/)/Next[<</S/Launch/F(calc.exe)>>]>>>>",
+        "<</Type/Annot/Subtype/Widget/FT/Tx/T(f)/Rect[0 40 10 50]/AA<</K<</S/JavaScript/JS(event.rc=1)>>>>>>",
+        "<</Type/Annot/Subtype/Link/Rect[0 60 10 70]/A<</S/GoToR/F(other.pdf)/D[0/Fit]>>>>",
+        "<</S/SubmitForm/F(https://collect.example.com)>>",
+        "<</Names[(init)<</S/JavaScript/JS(this.print())>>]>>",
+        "<</Length 0>>\nstream\n\nendstream",
+    ]);
+    let file = scratch("risky.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let out = scratch("risky-clean.pdf");
+    let report = run_json(&[
+        "sanitize",
+        file.to_str().unwrap(),
+        "--uri",
+        "allow:good.org",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.sanitize/v1");
+    assert_eq!(report["clean"], true);
+    let counts = &report["counts"];
+    assert_eq!(counts["javascript"], 4, "{report}");
+    assert_eq!(counts["launch"], 1);
+    assert_eq!(counts["submit"], 1);
+    assert_eq!(counts["remote"], 1);
+    assert_eq!(counts["uri"], 1);
+    assert_eq!(counts["xfa"], 1);
+    // Nothing is left to find, and the allowed link still leads somewhere.
+    let again = run_json(&[
+        "sanitize",
+        out.to_str().unwrap(),
+        "--uri",
+        "allow:good.org",
+        "--dry-run",
+    ]);
+    assert_eq!(again["removed"], serde_json::json!([]));
+    let links = report_of(&["links", out.to_str().unwrap()]);
+    let uris: Vec<&Value> = links["pages"][0]["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| &l["uri"])
+        .collect();
+    assert!(
+        uris.contains(&&Value::from("https://docs.good.org/")),
+        "{links}"
+    );
+    assert!(!links.to_string().contains("evil.example.com"));
+    // --keep keeps; a bad policy is a usage error.
+    let kept = run_json(&[
+        "sanitize",
+        file.to_str().unwrap(),
+        "--keep",
+        "javascript,xfa",
+        "--dry-run",
+    ]);
+    assert!(kept["counts"].get("javascript").is_none());
+    assert_eq!(
+        nupdf(&[
+            "sanitize",
+            file.to_str().unwrap(),
+            "--uri",
+            "maybe",
+            "--dry-run"
+        ])
+        .status
+        .code(),
+        Some(2)
+    );
+}
+
+/// A page that is one gray image and no text, as a scanner makes them.
+fn scanned_pdf(name: &str) -> PathBuf {
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents 4 0 R/Resources<</XObject<</Im0 5 0 R>>>>>>",
+        "<</Length 26>>\nstream\nq 200 0 0 100 0 0 cm /Im0 Do Q\nendstream",
+        "<</Type/XObject/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceGray/BitsPerComponent 8/Length 4>>\nstream\n\u{80}\u{90}\u{a0}\u{b0}\nendstream",
+    ]);
+    let file = scratch(name);
+    std::fs::write(&file, pdf).unwrap();
+    file
+}
+
+#[test]
+fn ocr_puts_what_tesseract_reads_on_scanned_pages() {
+    let file = scanned_pdf("scanned.pdf");
+    let info = run_json(&["info", file.to_str().unwrap()]);
+    assert_eq!(info["text"]["scanned_pages"], serde_json::json!([1]));
+    assert_eq!(info["text"]["pages_with_text"], 0);
+
+    // A stand-in for Tesseract: two words, wherever it is pointed.
+    let fake = scratch("fake-tesseract.sh");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'tesseract 5.0.0 (stand-in)'; exit 0; fi\n\
+         printf 'level\\tpage_num\\tblock_num\\tpar_num\\tline_num\\tword_num\\tleft\\ttop\\twidth\\theight\\tconf\\ttext\\n'\n\
+         printf '5\\t1\\t1\\t1\\t1\\t1\\t100\\t100\\t200\\t60\\t95\\tScanned\\n'\n\
+         printf '5\\t1\\t1\\t1\\t1\\t2\\t320\\t100\\t150\\t60\\t40\\twords\\n'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = scratch("scanned-ocr.pdf");
+    let report = run_json(&[
+        "ocr",
+        file.to_str().unwrap(),
+        "--tesseract",
+        fake.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.ocr/v1");
+    assert_eq!(report["tesseract"], "tesseract 5.0.0 (stand-in)");
+    assert_eq!(report["pages"][0]["words"], 2);
+    let text = nupdf(&["extract", out.to_str().unwrap(), "--format", "text"]);
+    assert!(
+        String::from_utf8_lossy(&text.stdout).contains("Scanned words"),
+        "{}",
+        String::from_utf8_lossy(&text.stdout)
+    );
+    // The words sit where Tesseract saw them: 300 dpi pixels, in points.
+    let hits = report_of(&["search", out.to_str().unwrap(), "Scanned"]);
+    let quad = &hits["hits"][0]["quads"][0];
+    assert!((quad[0].as_f64().unwrap() - 24.0).abs() < 0.5, "{hits}");
+    // Too unsure: left out.
+    let report = run_json(&[
+        "ocr",
+        file.to_str().unwrap(),
+        "--tesseract",
+        fake.to_str().unwrap(),
+        "--min-confidence",
+        "50",
+        "--dry-run",
+    ]);
+    assert_eq!(report["pages"][0]["words"], 1);
+    // No Tesseract: a clear error.
+    let missing = nupdf(&[
+        "ocr",
+        file.to_str().unwrap(),
+        "--tesseract",
+        "/nonexistent/tesseract",
+        "--dry-run",
+    ]);
+    assert_eq!(missing.status.code(), Some(3));
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&missing.stdout),
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    assert!(said.contains("ocr.unavailable"), "{said}");
+}
+
+#[test]
+fn flatten_draws_annotations_into_the_page() {
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[6 0 R]>>>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Annots[4 0 R 5 0 R 6 0 R]>>",
+        "<</Type/Annot/Subtype/Square/Rect[10 10 50 50]/C[1 0 0]>>",
+        "<</Type/Annot/Subtype/Link/Rect[0 0 10 10]/A<</S/URI/URI(https://example.com)>>>>",
+        "<</Type/Annot/Subtype/Widget/FT/Tx/T(name)/V(Ada)/DA(/Helv 10 Tf 0 g)/Rect[60 60 150 80]>>",
+    ]);
+    let file = scratch("to-flatten.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let out = scratch("flattened.pdf");
+    let report = run_json(&[
+        "flatten",
+        file.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.flatten/v1");
+    assert_eq!(
+        (report["annots"].as_u64(), report["widgets"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(report["unmade"], serde_json::json!([]));
+    // What is left: the link. The form is gone, the field's text is page text.
+    let annots = report_of(&["annots", out.to_str().unwrap()]);
+    assert_eq!(annots["pages"][0]["annots"], serde_json::json!([]));
+    let links = report_of(&["links", out.to_str().unwrap()]);
+    assert_eq!(links["pages"][0]["links"].as_array().unwrap().len(), 1);
+    let forms = report_of(&["forms", out.to_str().unwrap()]);
+    assert_eq!(forms["pages"][0]["widgets"], serde_json::json!([]));
+    let text = nupdf(&["extract", out.to_str().unwrap(), "--format", "text"]);
+    assert!(String::from_utf8_lossy(&text.stdout).contains("Ada"));
+    // --annots-only keeps the field.
+    let kept = run_json(&[
+        "flatten",
+        file.to_str().unwrap(),
+        "--annots-only",
+        "--dry-run",
+    ]);
+    assert_eq!(kept["widgets"], 0);
+}
+
+/// With Tesseract on the path: a page of text read back by OCR.
+#[test]
+fn ocr_reads_a_real_page_with_tesseract() {
+    if std::process::Command::new("tesseract")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("tesseract not found; skipped");
+        return;
+    }
+    let content = "BT /F1 36 Tf 40 120 Td (Invoice 2026) Tj ET";
+    let page = format!(
+        "<</Length {}>>\nstream\n{content}\nendstream",
+        content.len()
+    );
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        &page,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("ocr-real.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let out = scratch("ocr-real-out.pdf");
+    let report = run_json(&[
+        "ocr",
+        file.to_str().unwrap(),
+        "--all",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(report["pages"][0]["words"], 2, "{report}");
+    // The page now has its text twice: drawn, and read.
+    let hits = report_of(&["search", out.to_str().unwrap(), "Invoice"]);
+    assert_eq!(hits["hits"].as_array().unwrap().len(), 2, "{hits}");
+}
+
+fn annotated_pdf() -> PathBuf {
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Annots[4 0 R 5 0 R]>>",
+        "<</Type/Annot/Subtype/Text/Rect[10 10 30 30]/Contents(old)/Popup 5 0 R>>",
+        "<</Type/Annot/Subtype/Popup/Parent 4 0 R/Rect[40 10 140 60]>>",
+    ]);
+    let file = scratch("annot-edit.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    file
+}
+
+#[test]
+fn annots_adds_and_deletes_and_the_listing_shows_it() {
+    let file = annotated_pdf();
+    let out = scratch("annot-edit-out.pdf");
+    let _ = std::fs::remove_file(&out);
+    let report = report_of(&[
+        "annots",
+        file.to_str().unwrap(),
+        "--delete",
+        "p1.a1",
+        "--add",
+        r#"{"page":1,"type":"Square","rect":[20,20,80,60],"color":[0,0,1],"contents":"box"}"#,
+        "--add",
+        r#"{"page":1,"type":"Highlight","quad_points":[[10,100,90,100,10,112,90,112]]}"#,
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.annots-edit/v1");
+    assert_eq!(report["deleted"], serde_json::json!(["p1.a1"]));
+    assert_eq!(report["added"][0]["id"], "p1.a1");
+    assert_eq!(report["added"][0]["object"], 6);
+    assert_eq!(report["added"][1]["id"], "p1.a2");
+    assert_eq!(report["added"][1]["type"], "Highlight");
+    assert_eq!(report["unmade"], serde_json::json!([]));
+    // The note and its popup are gone; the new ones list as given.
+    let listed = report_of(&["annots", out.to_str().unwrap()]);
+    let annots = listed["pages"][0]["annots"].as_array().unwrap();
+    assert_eq!(annots.len(), 2);
+    assert_eq!(annots[0]["type"], "Square");
+    assert_eq!(
+        annots[0]["rect"],
+        serde_json::json!([20.0, 20.0, 80.0, 60.0])
+    );
+    assert_eq!(annots[0]["color"], serde_json::json!([0.0, 0.0, 1.0]));
+    assert_eq!(annots[0]["contents"], "box");
+    assert_eq!(annots[0]["flags"], 4);
+    assert_eq!(
+        annots[1]["quad_points"],
+        serde_json::json!([[10.0, 100.0, 90.0, 100.0, 10.0, 112.0, 90.0, 112.0]])
+    );
+    assert_eq!(annots[1]["color"], serde_json::json!([1.0, 1.0, 0.0]));
+}
+
+#[test]
+fn annots_without_edits_still_lists_and_edits_need_somewhere_to_go() {
+    let file = annotated_pdf();
+    let listed = report_of(&["annots", file.to_str().unwrap()]);
+    assert_eq!(listed["schema"], "nupdf.annots/v1");
+    let run = nupdf(&["annots", file.to_str().unwrap(), "--delete", "p1.a1"]);
+    assert_eq!(run.status.code(), Some(2));
+}
+
+#[test]
+fn annots_refuses_bad_edits() {
+    let file = annotated_pdf();
+    let f = file.to_str().unwrap();
+    let code = |args: &[&str]| nupdf(args).status.code();
+    // Not an id, no such annotation, no such page.
+    assert_eq!(code(&["annots", f, "--delete", "a1", "--dry-run"]), Some(2));
+    assert_eq!(
+        code(&["annots", f, "--delete", "p1.a9", "--dry-run"]),
+        Some(3)
+    );
+    assert_eq!(
+        code(&[
+            "annots",
+            f,
+            "--add",
+            r#"{"page":4,"type":"Ink"}"#,
+            "--dry-run"
+        ]),
+        Some(3)
+    );
+    // An unknown field, and a property the type does not have.
+    assert_eq!(
+        code(&[
+            "annots",
+            f,
+            "--add",
+            r#"{"page":1,"type":"Ink","colour":[1]}"#,
+            "--dry-run"
+        ]),
+        Some(2)
+    );
+    let run = nupdf(&[
+        "annots",
+        f,
+        "--add",
+        r#"{"page":1,"type":"Ink","rect":[0,0,1,1]}"#,
+        "--dry-run",
+    ]);
+    assert_eq!(run.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&run.stderr).contains("Ink annotations have no Rect property"));
+}
+
+#[test]
+fn annots_highlights_each_search_hit() {
+    let input = smoke("minimal.pdf");
+    let report = report_of(&[
+        "annots",
+        input.to_str().unwrap(),
+        "--highlight",
+        "nupdf",
+        "--dry-run",
+    ]);
+    let added = report["added"].as_array().unwrap();
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0]["type"], "Highlight");
+    assert_eq!(added[0]["id"], "p1.a1");
+}

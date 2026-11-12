@@ -419,3 +419,252 @@ fn graft_input(
         )),
     }
 }
+
+/// What `sanitize` removes, from its flags.
+pub fn sanitize_policy(
+    keep: &[String],
+    uri: &str,
+    attachments: bool,
+) -> Result<nupdf::sanitize::Policy, Failure> {
+    let mut p = nupdf::sanitize::Policy {
+        attachments,
+        ..nupdf::sanitize::Policy::default()
+    };
+    for k in keep {
+        match k.as_str() {
+            "javascript" => p.javascript = false,
+            "launch" => p.launch = false,
+            "data" => p.data = false,
+            "remote" => p.remote = false,
+            "xfa" => p.xfa = false,
+            other => {
+                return Err(Failure {
+                    exit: Exit::Usage,
+                    code: "usage.bad_value",
+                    message: format!(
+                        "--keep takes javascript, launch, data, remote or xfa, got {other:?}"
+                    ),
+                });
+            }
+        }
+    }
+    p.uri = match uri {
+        "keep" => nupdf::sanitize::UriPolicy::Keep,
+        "remove" => nupdf::sanitize::UriPolicy::Remove,
+        other => match other.strip_prefix("allow:") {
+            Some(hosts) => nupdf::sanitize::UriPolicy::Allow(
+                hosts
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .map(String::from)
+                    .collect(),
+            ),
+            None => {
+                return Err(Failure {
+                    exit: Exit::Usage,
+                    code: "usage.bad_value",
+                    message: format!("--uri takes keep, remove or allow:HOST,..., got {other:?}"),
+                });
+            }
+        },
+    };
+    Ok(p)
+}
+
+fn findings_json(found: &[nupdf::sanitize::Finding]) -> serde_json::Value {
+    found
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "object": f.object,
+                "path": f.path,
+                "kind": f.kind,
+                "detail": f.detail,
+            })
+        })
+        .collect()
+}
+
+/// `sanitize`: the document without what `policy` removes, checked by
+/// scanning the output again before it is written.
+pub fn sanitize(
+    doc: &Document,
+    facts: &FileFacts,
+    policy: &nupdf::sanitize::Policy,
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    let plan = write.plan(nupdf::write::WriteOptions::default(), password)?;
+    nupdf::write::check_document(doc);
+    let removed = nupdf::sanitize::sanitize(doc, policy);
+    let mut counts = serde_json::Map::new();
+    for f in &removed {
+        let n = counts
+            .get(f.kind)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        counts.insert(f.kind.into(), (n + 1).into());
+    }
+    // The output, read back and scanned again: nothing may be left.
+    let left = if plan.verify {
+        let bytes = nupdf::write::save(doc, &plan.options)
+            .map_err(|e| input_failure("input.unloadable_object", e.message))?;
+        let out = Document::open(bytes).map_err(|e| {
+            input_failure("verify.failed", format!("the output does not open: {e:?}"))
+        })?;
+        if let Some(pw) = password {
+            let _ = out.authenticate(pw);
+        }
+        Some(nupdf::sanitize::scan(&out, policy))
+    } else {
+        None
+    };
+    if let Some(left) = &left
+        && !left.is_empty()
+    {
+        return Err(Failure {
+            exit: Exit::Verify,
+            code: "verify.failed",
+            message: format!(
+                "the output still has {} things the policy removes, first {} at object {} {}",
+                left.len(),
+                left[0].kind,
+                left[0].object,
+                left[0].path
+            ),
+        });
+    }
+    let uri = match &policy.uri {
+        nupdf::sanitize::UriPolicy::Keep => serde_json::json!("keep"),
+        nupdf::sanitize::UriPolicy::Remove => serde_json::json!("remove"),
+        nupdf::sanitize::UriPolicy::Allow(h) => serde_json::json!({ "allow": h }),
+    };
+    let body = serde_json::json!({
+        "policy": {
+            "javascript": policy.javascript,
+            "launch": policy.launch,
+            "data": policy.data,
+            "remote": policy.remote,
+            "xfa": policy.xfa,
+            "attachments": policy.attachments,
+            "uri": uri,
+        },
+        "removed": findings_json(&removed),
+        "counts": counts,
+        "clean": left.as_ref().map(Vec::is_empty),
+    });
+    write_document(doc, facts, &plan, "nupdf.sanitize/v1", body)
+}
+
+/// `flatten`: annotations and form fields drawn into their pages and
+/// removed, as `pdf_bake_document` bakes them.
+/// `forms --set` and `--toggle`: the fields filled as MuPDF's widget API
+/// fills them with JavaScript off, their widgets' appearances made again,
+/// and the document written as `clean` writes it. Sets go first, in the
+/// order given, then toggles.
+pub fn fill(
+    doc: &Document,
+    facts: &FileFacts,
+    set: &[String],
+    toggle: &[String],
+    fill_first: bool,
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    use nupdf::fill::Edit;
+    let mut edits = Vec::new();
+    for entry in set {
+        let Some((name, value)) = entry.split_once('=') else {
+            return Err(Failure {
+                exit: Exit::Usage,
+                code: "usage.bad_value",
+                message: format!("--set takes NAME=VALUE, got {entry:?}"),
+            });
+        };
+        edits.push(Edit::Set {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
+    }
+    edits.extend(
+        toggle
+            .iter()
+            .map(|name| Edit::Toggle { name: name.clone() }),
+    );
+    let plan = write.plan(nupdf::write::WriteOptions::default(), password)?;
+    nupdf::write::check_document(doc);
+    let filled = if fill_first {
+        nupdf::fill::fill_first(doc, "nupdf")
+    } else {
+        nupdf::fill::fill(doc, &edits)
+    }
+    .map_err(|e| match e {
+        nupdf::fill::FillError::UnknownField(_) => Failure {
+            exit: Exit::Usage,
+            code: "usage.unknown_field",
+            message: e.to_string(),
+        },
+        nupdf::fill::FillError::Page(_) => Failure {
+            exit: Exit::Input,
+            code: "input.page_tree",
+            message: e.to_string(),
+        },
+    })?;
+    let fields: Vec<serde_json::Value> = filled
+        .changes
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "op": c.op,
+                "type": c.kind,
+                "page": c.page + 1,
+                "object": c.object,
+                "old": c.old,
+                "new": c.new,
+                "changed": c.changed,
+                "notes": c.notes,
+            })
+        })
+        .collect();
+    let made: Vec<serde_json::Value> = filled
+        .made
+        .iter()
+        .map(|m| serde_json::json!({ "page": m.page + 1, "object": m.object, "error": m.error }))
+        .collect();
+    let body = serde_json::json!({
+        // JavaScript is off: no keystroke, format, validate or calculate
+        // script runs, as with `mutool run`.
+        "scripts_run": false,
+        "fields": fields,
+        "appearances": made,
+    });
+    write_document(doc, facts, &plan, "nupdf.fill/v1", body)
+}
+
+pub fn flatten(
+    doc: &Document,
+    facts: &FileFacts,
+    annots: bool,
+    widgets: bool,
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    let plan = write.plan(nupdf::write::WriteOptions::default(), password)?;
+    nupdf::write::check_document(doc);
+    let baked = nupdf::bake::bake_document(doc, annots, widgets);
+    let unmade: Vec<serde_json::Value> = baked
+        .unmade
+        .iter()
+        .map(|(page, object, why)| serde_json::json!({ "page": page + 1, "object": object, "error": why }))
+        .collect();
+    let body = serde_json::json!({
+        "annots": baked.annots,
+        "widgets": baked.widgets,
+        "pages": baked.pages,
+        "unmade": unmade,
+        "stopped": baked.stopped,
+    });
+    write_document(doc, facts, &plan, "nupdf.flatten/v1", body)
+}

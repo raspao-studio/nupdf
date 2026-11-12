@@ -252,9 +252,29 @@ fn uses_objects(name: &str) -> bool {
     matches!(name, "objects" | "show")
 }
 
+/// A program that answers as Tesseract does, with two words for any page,
+/// so `ocr`'s report can be read without Tesseract.
+fn stand_in_tesseract(work: &Path) -> String {
+    let path = work.join("tesseract.sh");
+    let script = "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'tesseract 5 (stand-in)'; exit 0; fi\n\
+        printf 'level\\tpage_num\\tblock_num\\tpar_num\\tline_num\\tword_num\\tleft\\ttop\\twidth\\theight\\tconf\\ttext\\n'\n\
+        printf '5\\t1\\t1\\t1\\t1\\t1\\t10\\t10\\t50\\t20\\t90\\tStand\\n5\\t1\\t1\\t1\\t1\\t2\\t70\\t10\\t30\\t20\\t80\\tin\\n'\n";
+    if !path.exists() {
+        let _ = std::fs::create_dir_all(work);
+        let _ = std::fs::write(&path, script);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    path.to_string_lossy().into_owned()
+}
+
 /// The runs of `nupdf` on `file` that give the reports their shapes.
 fn runs(file: &str, work: &Path) -> Vec<Vec<String>> {
     let w = |p: &str| work.join(p).to_string_lossy().into_owned();
+    let tesseract = stand_in_tesseract(work);
     let lines: Vec<Vec<&str>> = vec![
         vec!["info", file],
         vec!["objects", file],
@@ -297,6 +317,20 @@ fn runs(file: &str, work: &Path) -> Vec<Vec<String>> {
         vec!["verify", file, "--text", "e"],
         vec!["outline", file],
         vec!["tables", file],
+        vec!["annots", file],
+        vec!["forms", file],
+        vec!["signatures", file],
+        vec!["flatten", file, "--dry-run"],
+        vec!["forms", file, "--fill-first", "--dry-run"],
+        vec![
+            "annots",
+            file,
+            "--add",
+            r#"{"page":1,"type":"Square","rect":[10,10,60,60],"contents":"x"}"#,
+            "--dry-run",
+        ],
+        vec!["sanitize", file, "--dry-run"],
+        vec!["ocr", file, "--all", "--dry-run", "--tesseract", &tesseract],
         vec!["links", file],
         vec!["labels", file],
         vec!["attachments", file],

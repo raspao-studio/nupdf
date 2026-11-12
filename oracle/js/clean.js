@@ -6,9 +6,21 @@
 // the commas in a page list. Edits as the `meta` and `pages` commands make
 // them may come too, applied in order: "meta=KEY=VALUE" (setMetaData, as
 // pdf_set_metadata), "strip-meta" (drops /Info and the catalog's
-// /Metadata) and "rotate=DEGREES@PAGES" (adds to each page's inherited
-// /Rotate, put on the page).
-// Usage: mutool run oracle/js/clean.js <file> <scratch-dir> [options]
+// /Metadata), "rotate=DEGREES@PAGES" (adds to each page's inherited
+// /Rotate, put on the page) and "bake", "bake-annots" or "bake-widgets"
+// (pdf_bake_document, as `flatten` bakes). Form edits as `forms --set`
+// and `--toggle` make them come as "fill=NAME=VALUE" (setTextValue, or setChoiceValue for
+// a choice field, on the first widget of the field with that full name),
+// "toggle=NAME" (toggle) and "fill-first" (the first text widget set to
+// "nupdf", then the first check box toggled); every page is loaded first
+// and kept open, and each page is updated after the edits. JavaScript is
+// off, as `mutool run` leaves it.
+// With "annots", the arguments
+// after the options are annotation edits as `annots` makes them:
+// "delete=p1.a2" (page.deleteAnnotation) and "add=JSON" (createAnnotation,
+// then the setters in `annots --add`'s order), deletions first, then each
+// page updated.
+// Usage: mutool run oracle/js/clean.js <file> <scratch-dir> [options] [edits]
 // The output is written to <scratch-dir>/clean.pdf; the harness replaces
 // the "file" field with the BLAKE3 hash of what was written, after naming
 // nupdf in the comment line (both lines are the same length).
@@ -95,10 +107,140 @@ function stripMeta() {
   if (root && root.isDictionary()) root.delete("Metadata");
 }
 
+// Every page, loaded once and kept open, as filling needs them.
+var openPages = null;
+function loadPages() {
+  if (openPages) return openPages;
+  openPages = [];
+  for (var i = 0; i < pdf.countPages(); i++) openPages.push(pdf.loadPage(i));
+  return openPages;
+}
+
+function widgetNamed(name) {
+  var pages = loadPages();
+  for (var i = 0; i < pages.length; i++) {
+    var ws = pages[i].getWidgets();
+    for (var k = 0; k < ws.length; k++) {
+      var n;
+      try { n = ws[k].getName(); } catch (e) { continue; }
+      if (n === name) return ws[k];
+    }
+  }
+  throw new Error("no field named '" + name + "'");
+}
+
+function firstWidget(type) {
+  var pages = loadPages();
+  for (var i = 0; i < pages.length; i++) {
+    var ws = pages[i].getWidgets();
+    for (var k = 0; k < ws.length; k++) {
+      try { ws[k].getName(); } catch (e) { continue; }
+      if (ws[k].getFieldType() === type) return ws[k];
+    }
+  }
+  return null;
+}
+
+function setValue(w, value) {
+  var ty = w.getFieldType();
+  if (ty === "combobox" || ty === "listbox") w.setChoiceValue(value);
+  else w.setTextValue(value);
+}
+
+var filled = false;
+function fill(o) {
+  check();
+  filled = true;
+  if (o == "fill-first") {
+    var t = firstWidget("text");
+    if (t) setValue(t, "nupdf");
+    var c = firstWidget("checkbox");
+    if (c) c.toggle();
+  } else if (o.indexOf("fill=") == 0) {
+    var kv = o.slice(5);
+    var eq = kv.indexOf("=");
+    setValue(widgetNamed(kv.slice(0, eq)), kv.slice(eq + 1));
+  } else {
+    widgetNamed(o.slice(7)).toggle();
+  }
+}
+
+// `annots --add/--delete`: the pages loaded first, in the order first
+// named (MuPDF updates its open pages newest first); the deletions by the
+// listing before any of them; then each addition's setters in the order
+// `annots` applies them; then the pages updated.
+function annotEdits(specs) {
+  var adds = [], dels = [], needles = [];
+  specs.forEach(function (s) {
+    if (s.indexOf("add=") == 0) adds.push(JSON.parse(s.slice(4)));
+    else if (s.indexOf("highlight=") == 0) needles.push(s.slice(10));
+    else if (s.indexOf("delete=") == 0) {
+      var m = /^p([0-9]+)\.a([0-9]+)$/.exec(s.slice(7));
+      if (!m) throw new Error("not an annotation id: " + s.slice(7));
+      dels.push([parseInt(m[1], 10) - 1, parseInt(m[2], 10) - 1, s.slice(7)]);
+    } else throw new Error("unknown annotation edit: " + s);
+  });
+  var n = pdf.countPages();
+  var order = [], pages = {}, hits = [];
+  // "highlight=TEXT": a Highlight over each hit, case and all, every page
+  // loaded first and searched before any change.
+  if (needles.length) {
+    for (var p = 0; p < n; p++) {
+      order.push(p);
+      pages[p] = pdf.loadPage(p);
+    }
+    for (var q = 0; q < n; q++)
+      needles.forEach(function (t) {
+        pages[q].search(t, 0, 1000000).forEach(function (h) { hits.push([q, h]); });
+      });
+  }
+  dels.map(function (d) { return d[0]; })
+    .concat(adds.map(function (a) { return a.page - 1; }))
+    .forEach(function (p) { if (order.indexOf(p) < 0) order.push(p); });
+  order.forEach(function (p) {
+    if (p >= n) throw new Error("no page " + (p + 1) + " (the document has " + n + ")");
+    pages[p] = pdf.loadPage(p);
+  });
+  var targets = dels.map(function (d) {
+    var list = pages[d[0]].getAnnotations();
+    if (d[1] >= list.length) throw new Error("no annotation " + d[2]);
+    return [d[0], list[d[1]]];
+  });
+  targets.forEach(function (t) { pages[t[0]].deleteAnnotation(t[1]); });
+  adds.forEach(function (a) {
+    var annot = pages[a.page - 1].createAnnotation(a.type);
+    var width = a.border_width;
+    if (width === undefined && a.border) width = a.border.width;
+    if (a.rect) annot.setRect(a.rect);
+    if (a.popup) annot.setPopup(a.popup);
+    if (a.quad_points) annot.setQuadPoints(a.quad_points);
+    if (a.ink_list) annot.setInkList(a.ink_list);
+    if (a.line) annot.setLine(a.line[0], a.line[1]);
+    if (a.vertices) annot.setVertices(a.vertices);
+    if (a.contents !== undefined) annot.setContents(a.contents);
+    if (a.author !== undefined) annot.setAuthor(a.author);
+    if (a.subject !== undefined) annot.setSubject(a.subject);
+    if (a.color) annot.setColor(a.color);
+    if (a.interior_color) annot.setInteriorColor(a.interior_color);
+    if (a.opacity !== undefined) annot.setOpacity(a.opacity);
+    if (a.icon !== undefined) annot.setIcon(a.icon);
+    if (width !== undefined) annot.setBorderWidth(width);
+    if (a.flags !== undefined) annot.setFlags(a.flags);
+    if (a.open !== undefined) annot.setIsOpen(a.open);
+  });
+  hits.forEach(function (h) {
+    pages[h[0]].createAnnotation("Highlight").setQuadPoints(h[1]);
+  });
+  order.forEach(function (p) { pages[p].update(); });
+}
+
 if (scriptArgs[2]) {
   var rest = [];
   scriptArgs[2].split(",").forEach(function (o) {
-    if (o.indexOf("pages=") == 0) {
+    if (o == "annots") {
+      check();
+      annotEdits(scriptArgs.slice(3));
+    } else if (o.indexOf("pages=") == 0) {
       check();
       pdf.rearrangePages(pageList(o.slice(6)));
     } else if (o.indexOf("meta=") == 0) {
@@ -106,9 +248,14 @@ if (scriptArgs[2]) {
       var kv = o.slice(5);
       var eq = kv.indexOf("=");
       pdf.setMetaData(kv.slice(0, eq), kv.slice(eq + 1));
+    } else if (o == "bake" || o == "bake-annots" || o == "bake-widgets") {
+      check();
+      pdf.bake(o != "bake-widgets", o != "bake-annots");
     } else if (o == "strip-meta") {
       check();
       stripMeta();
+    } else if (o == "fill-first" || o.indexOf("fill=") == 0 || o.indexOf("toggle=") == 0) {
+      fill(o);
     } else if (o.indexOf("rotate=") == 0) {
       check();
       rotate(o.slice(7));
@@ -120,5 +267,6 @@ if (scriptArgs[2]) {
   });
   if (rest.length) options += "," + rest.join(",");
 }
+if (filled) loadPages().forEach(function (page) { page.update(); });
 pdf.save(scriptArgs[1] + "/clean.pdf", options);
 print(JSON.stringify({ output: { file: "clean.pdf" } }));

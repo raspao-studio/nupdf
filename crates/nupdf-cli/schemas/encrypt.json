@@ -63,6 +63,28 @@
         },
         "path": {
           "type": "null"
+        },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "after": {
+                "type": "string"
+              },
+              "before": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "after",
+              "before",
+              "name"
+            ]
+          }
         }
       },
       "required": [

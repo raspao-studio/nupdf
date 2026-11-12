@@ -152,6 +152,31 @@
     },
     "schema": {
       "type": "string"
+    },
+    "text": {
+      "type": "object",
+      "properties": {
+        "checked": {
+          "type": "boolean"
+        },
+        "next": {
+          "type": "string"
+        },
+        "pages_with_text": {
+          "type": "integer"
+        },
+        "scanned_pages": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        }
+      },
+      "required": [
+        "checked",
+        "pages_with_text",
+        "scanned_pages"
+      ]
     }
   },
   "required": [
@@ -173,6 +198,7 @@
     "repaired",
     "revision_offsets",
     "revisions",
-    "schema"
+    "schema",
+    "text"
   ]
 }

@@ -19,6 +19,84 @@ use serde_json::{Value, json};
 use crate::proc::{self, Status};
 use crate::{corpus, oracle};
 
+// The annotations the annot-add checks put on page 1, in page space: the
+// same JSON for `annots --add` and for the oracle's "add=".
+macro_rules! add_highlight {
+    () => {
+        r#"{"page":1,"type":"Highlight","quad_points":[[72,72,272,72,72,90,272,90]],"contents":"Seen","author":"nupdf","opacity":0.5}"#
+    };
+}
+macro_rules! add_underline {
+    () => {
+        r#"{"page":1,"type":"Underline","quad_points":[[72,100,200,100,72,114,200,114],[72,120,150,120,72,134,150,134]]}"#
+    };
+}
+macro_rules! add_strike_out {
+    () => {
+        r#"{"page":1,"type":"StrikeOut","quad_points":[[220,100,330.5,100,220,114.25,330.5,114.25]],"color":[0,0,1]}"#
+    };
+}
+macro_rules! add_squiggly {
+    () => {
+        r#"{"page":1,"type":"Squiggly","quad_points":[[72,150,300,150,72,166,300,166]]}"#
+    };
+}
+macro_rules! add_square {
+    () => {
+        r#"{"page":1,"type":"Square","rect":[72,200,272,280],"interior_color":[0,0,1],"border_width":2}"#
+    };
+}
+macro_rules! add_circle {
+    () => {
+        r#"{"page":1,"type":"Circle","rect":[300,200,420.5,290.25],"opacity":0.5,"color":[0,0.5,0]}"#
+    };
+}
+macro_rules! add_line {
+    () => {
+        r#"{"page":1,"type":"Line","line":[[72,320],[272,380]],"interior_color":[1,1,0]}"#
+    };
+}
+macro_rules! add_ink {
+    () => {
+        r#"{"page":1,"type":"Ink","ink_list":[[[72,420],[120,460],[180,430],[230,470]],[[300,420],[310,425]]],"border_width":3}"#
+    };
+}
+macro_rules! add_polygon {
+    () => {
+        r#"{"page":1,"type":"Polygon","vertices":[[72,500],[172,500],[122,580]],"interior_color":[1,0.5,0]}"#
+    };
+}
+macro_rules! add_polyline {
+    () => {
+        r#"{"page":1,"type":"PolyLine","vertices":[[300,500],[350,560],[420,510]]}"#
+    };
+}
+macro_rules! add_text {
+    () => {
+        r#"{"page":1,"type":"Text","rect":[450,72,470,92],"contents":"A note","author":"nupdf","open":true}"#
+    };
+}
+macro_rules! add_free_text {
+    () => {
+        r#"{"page":1,"type":"FreeText","rect":[300,600,500,660],"contents":"Free text"}"#
+    };
+}
+macro_rules! add_stamp {
+    () => {
+        r#"{"page":1,"type":"Stamp","rect":[72,620,262,670]}"#
+    };
+}
+macro_rules! add_caret {
+    () => {
+        r#"{"page":1,"type":"Caret","rect":[280,72,298,87]}"#
+    };
+}
+macro_rules! add_redact {
+    () => {
+        r#"{"page":1,"type":"Redact","quad_points":[[72,700,200,700,72,714,200,714]]}"#
+    };
+}
+
 #[derive(Debug)]
 pub struct Check {
     pub name: &'static str,
@@ -273,6 +351,66 @@ pub const CHECKS: &[Check] = &[
         nupdf_fixup: None,
         reread: None,
         oracle_args: &["links"],
+    },
+    Check {
+        name: "annots",
+        about: "each page's annotations as `Page.getAnnotations` lists them, with what the getters read of each",
+        oracle_script: "oracle/js/annots.js",
+        nupdf_args: &["annots"],
+        compare: Compare::FieldsClose(&["/page_count", "/pages"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &[],
+    },
+    Check {
+        name: "annot-synthesis",
+        about: "each annotation's appearance made again as `requestResynthesis` and `update` make it: Rect, RD, BBox, Matrix, Resources and content",
+        oracle_script: "oracle/js/annots.js",
+        nupdf_args: &["annots", "--synthesize"],
+        compare: Compare::FieldsClose(&["/page_count", "/pages"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["synthesize"],
+    },
+    Check {
+        name: "widget-synthesis",
+        about: "each widget's appearance made again as `requestResynthesis` and `update` make it: Rect, BBox, Matrix, Resources and content, and each state's for buttons",
+        oracle_script: "oracle/js/forms.js",
+        nupdf_args: &["forms", "--synthesize"],
+        compare: Compare::FieldsClose(&["/page_count", "/pages"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["synthesize"],
+    },
+    Check {
+        name: "forms",
+        about: "each page's widgets as `Page.getWidgets` lists them, with the field getters' values",
+        oracle_script: "oracle/js/forms.js",
+        nupdf_args: &["forms"],
+        compare: Compare::FieldsClose(&["/page_count", "/pages", "/need_appearances", "/xfa"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &[],
+    },
+    Check {
+        name: "signatures",
+        about: "each signature widget: signed, signatory, the signature dictionary, byte ranges, changes since signing and the digest check",
+        oracle_script: "oracle/js/signatures.js",
+        nupdf_args: &["signatures"],
+        compare: Compare::Fields(&["/page_count", "/pages"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: Some(drop_signing_times),
+        reread: None,
+        oracle_args: &[],
     },
     Check {
         name: "labels",
@@ -590,6 +728,182 @@ pub const CHECKS: &[Check] = &[
         nupdf_fixup: None,
         reread: None,
         oracle_args: &[],
+    },
+    Check {
+        name: "flatten",
+        about: "annotations and fields baked into the pages as `pdf_bake_document` bakes them, then written as `clean` writes: BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &["flatten", "--dry-run", "--no-verify"],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["bake"],
+    },
+    Check {
+        name: "fill",
+        about: "form fields filled through the widget API (the first text field set to \"nupdf\", the first check box toggled), pages updated, then written as `clean` writes: BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &["forms", "--fill-first", "--dry-run", "--no-verify"],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["fill-first"],
+    },
+    Check {
+        name: "flatten-annots",
+        about: "annotations alone baked into the pages (`bake(true, false)`): BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &["flatten", "--annots-only", "--dry-run", "--no-verify"],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["bake-annots"],
+    },
+    Check {
+        name: "annot-add-markup",
+        about: "a Highlight, Underline, StrikeOut and Squiggly added to page 1 as `createAnnotation` and the setters make them, the page updated: BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &[
+            "annots",
+            "{file}",
+            "--add",
+            add_highlight!(),
+            "--add",
+            add_underline!(),
+            "--add",
+            add_strike_out!(),
+            "--add",
+            add_squiggly!(),
+            "--dry-run",
+            "--no-verify",
+        ],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &[
+            "annots",
+            concat!("add=", add_highlight!()),
+            concat!("add=", add_underline!()),
+            concat!("add=", add_strike_out!()),
+            concat!("add=", add_squiggly!()),
+        ],
+    },
+    Check {
+        name: "annot-add-shapes",
+        about: "a Square, Circle, Line, Ink, Polygon and PolyLine added to page 1: BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &[
+            "annots",
+            "{file}",
+            "--add",
+            add_square!(),
+            "--add",
+            add_circle!(),
+            "--add",
+            add_line!(),
+            "--add",
+            add_ink!(),
+            "--add",
+            add_polygon!(),
+            "--add",
+            add_polyline!(),
+            "--dry-run",
+            "--no-verify",
+        ],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &[
+            "annots",
+            concat!("add=", add_square!()),
+            concat!("add=", add_circle!()),
+            concat!("add=", add_line!()),
+            concat!("add=", add_ink!()),
+            concat!("add=", add_polygon!()),
+            concat!("add=", add_polyline!()),
+        ],
+    },
+    Check {
+        name: "annot-add-notes",
+        about: "a Text note (with its popup), FreeText, Stamp, Caret and Redact added to page 1: BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &[
+            "annots",
+            "{file}",
+            "--add",
+            add_text!(),
+            "--add",
+            add_free_text!(),
+            "--add",
+            add_stamp!(),
+            "--add",
+            add_caret!(),
+            "--add",
+            add_redact!(),
+            "--dry-run",
+            "--no-verify",
+        ],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &[
+            "annots",
+            concat!("add=", add_text!()),
+            concat!("add=", add_free_text!()),
+            concat!("add=", add_stamp!()),
+            concat!("add=", add_caret!()),
+            concat!("add=", add_redact!()),
+        ],
+    },
+    Check {
+        name: "annot-delete",
+        about: "page 1's first annotation (and its popup) deleted as `deleteAnnotation` deletes it: BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &[
+            "annots",
+            "{file}",
+            "--delete",
+            "p1.a1",
+            "--dry-run",
+            "--no-verify",
+        ],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["annots", "delete=p1.a1"],
+    },
+    Check {
+        name: "annot-highlight",
+        about: "a Highlight over each hit of \"the\" (`page.search`, case and all) on every page: BLAKE3 of the output",
+        oracle_script: "oracle/js/clean.js",
+        nupdf_args: &[
+            "annots",
+            "{file}",
+            "--highlight",
+            "the",
+            "--dry-run",
+            "--no-verify",
+        ],
+        compare: Compare::Fields(&["/output/blake3"]),
+        oracle_writes_files: true,
+        oracle_file_fixup: Some(name_nupdf_as_writer),
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["annots", "highlight=the"],
     },
     Check {
         name: "roundtrip",
@@ -1977,6 +2291,21 @@ fn search_pages(json: &mut Value) {
 /// The `fonts` report's `load` facts: what nupdf loaded each font as,
 /// which MuPDF's scripts cannot see.
 /// The script walker gives no structure boxes: `tables` without them.
+/// The signing times: the oracle has no date parser to read /M with (the
+/// dates are checked through the annotation dates).
+fn drop_signing_times(report: &mut serde_json::Value) {
+    for page in report["pages"].as_array_mut().into_iter().flatten() {
+        let list = page
+            .get_mut("signatures")
+            .and_then(serde_json::Value::as_array_mut);
+        for s in list.into_iter().flatten() {
+            if let Some(s) = s.as_object_mut() {
+                s.remove("signing_time");
+            }
+        }
+    }
+}
+
 fn drop_table_boxes(json: &mut Value) {
     let boxes = |v: &mut Value| {
         if let Value::Object(o) = v {
