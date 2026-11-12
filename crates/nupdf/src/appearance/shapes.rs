@@ -936,7 +936,10 @@ b
         );
     }
 
+    // MuPDF's bytes on aarch64: clouds go through cosf, sinf and fused
+    // multiply-adds, which round otherwise on x86-64 and its libm.
     #[test]
+    #[cfg_attr(not(target_arch = "aarch64"), ignore = "expected bytes are MuPDF's on aarch64")]
     fn circle_cloudy() {
         check(
             r#"/Subtype /Circle /Rect [100 100 106 104] /C [0 1 0] /BS << /W 0.5 >> /BE << /S /C /I 0.5 >>"#,
@@ -1046,7 +1049,10 @@ b
         );
     }
 
+    // MuPDF's bytes on aarch64: clouds go through cosf, sinf and fused
+    // multiply-adds, which round otherwise on x86-64 and its libm.
     #[test]
+    #[cfg_attr(not(target_arch = "aarch64"), ignore = "expected bytes are MuPDF's on aarch64")]
     fn polygon_cloudy() {
         check(
             r#"/Subtype /Polygon /Rect [0 0 1 1] /Vertices [100 100 110 100 105 108] /C [0 0 1] /BE << /S /C /I 1 >>"#,
