@@ -264,14 +264,14 @@ Exit: ≥99% of pages have the same character sequence as MuPDF's stext, and ≥
 
 MuPDF reference: `pdf-clean.c` (`pdf_redact_page` and helpers), `pdf-op-filter.c`, `pdf-image-rewriter.c`, `pdf-annot.c` (Redact annotations), `pdf-form.c`, `pdf-outline.c`, `pdf-nametree.c`.
 
-- [ ] Targets: text, regex, presets (email, phone, card-like, SSN-like, IBAN), bboxes, span ids, search-hit files; resolved to quads per page
-- [ ] Content filtering with MuPDF's policies: text removed; images left, removed or pixel-blanked; line art left, removed when covered, or removed when touched. Split `TJ` arrays so surrounding text keeps its position; give pages their own copies of shared Form XObjects; handle Type3 glyphs and clipping paths
-- [ ] Image pixel redaction: decode, blank, re-encode with the original filter where possible
-- [ ] Annotations, widgets and links inside redacted regions; optional overlay boxes
-- [ ] Document scrub: Info, XMP, outline titles, named destinations, embedded files, form values, JavaScript, ActualText, Alt and structure tree, hidden optional content, thumbnails, unused objects, incremental history (always a full rewrite)
-- [ ] `verify`: an independent pass over the output that checks every leak class in [AGENT-INTERFACE](AGENT-INTERFACE.md#redaction-contract)
+- [x] Targets: text, regex, presets (email, phone, card-like, SSN-like, IBAN), bboxes, span ids, search-hit files; resolved to quads per page
+- [x] Content filtering with MuPDF's policies: text removed; images left, removed or pixel-blanked; line art left, removed when covered, or removed when touched. Split `TJ` arrays so surrounding text keeps its position; give pages their own copies of shared Form XObjects; handle Type3 glyphs and clipping paths
+- [x] Image pixel redaction: decode, blank, re-encode with the original filter where possible
+- [x] Annotations, widgets and links inside redacted regions; optional overlay boxes
+- [x] Document scrub: Info, XMP, outline titles, named destinations, embedded files, form values, JavaScript, ActualText, Alt and structure tree, hidden optional content, thumbnails, unused objects, incremental history (always a full rewrite)
+- [x] `verify`: an independent pass over the output that checks every leak class in [AGENT-INTERFACE](AGENT-INTERFACE.md#redaction-contract)
 - [ ] Adversarial fixture generator, one fixture per leak class; the `redaction` corpus tier (pdf-redaction-benchmarks)
-- [ ] `--dry-run`: the redaction plan as quads now, with rendered previews after M7
+- [x] `--dry-run`: the redaction plan as quads now, with rendered previews after M7
 
 Exit: zero leaks on the adversarial suite and the redaction tier, as judged by `nupdf verify`, MuPDF extraction and `pdftotext`. Remaining-text parity with MuPDF's redaction ≥99%. Tests seeded with deliberately leaky outputs prove `verify` fails them.
 

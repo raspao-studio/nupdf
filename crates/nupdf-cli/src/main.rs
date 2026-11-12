@@ -9,6 +9,7 @@ mod extract;
 mod inventory;
 mod md5;
 mod objects;
+mod redact;
 mod search;
 mod stext;
 mod trace;
@@ -236,6 +237,90 @@ enum Command {
         /// output is the same at every count (DECISIONS D37).
         #[arg(long)]
         threads: Option<usize>,
+    },
+    /// Remove text, images and line art under targets, and prove it is
+    /// gone: the targets' hits are found on each page, the pages are
+    /// redacted as MuPDF's pdf_redact_page does, the document is
+    /// rewritten whole, and the output is searched again before it is
+    /// kept. A target still found fails with exit 4 and writes nothing.
+    Redact {
+        file: PathBuf,
+        /// Text to redact, matched as MuPDF's search matches it (across
+        /// line breaks, ligatures decomposed). Repeatable.
+        #[arg(long)]
+        text: Vec<String>,
+        /// A regular expression to redact. Repeatable.
+        #[arg(long)]
+        regex: Vec<String>,
+        /// A preset: email, phone, card, ssn, iban, or pii for all of them.
+        #[arg(long, value_parser = ["pii", "email", "phone", "card", "ssn", "iban"])]
+        preset: Vec<String>,
+        /// A region, `p3:[x0,y0,x1,y1]` in page space. Repeatable.
+        #[arg(long)]
+        region: Vec<String>,
+        /// A content id from `extract` or `search`. Repeatable.
+        #[arg(long)]
+        id: Vec<String>,
+        /// A `search` report whose hits to redact.
+        #[arg(long, value_name = "FILE")]
+        hits: Option<PathBuf>,
+        /// Match text and patterns ignoring case.
+        #[arg(long)]
+        ignore_case: bool,
+        /// The stext options targets are found with. Clipping is off and
+        /// hidden layers are run by default, so text clipped away or in
+        /// hidden optional content is found too.
+        #[arg(long, default_value = "clip=no,all-layers")]
+        stext_options: String,
+        /// Only these pages, in MuPDF's syntax.
+        #[arg(long)]
+        pages: Option<String>,
+        /// Fill each redacted area in black.
+        #[arg(long)]
+        boxes: bool,
+        /// Images under a target: none, remove, pixels (blank the pixels
+        /// covered; whole images removed until re-encoding lands) or
+        /// remove-unless-invisible.
+        #[arg(long, default_value = "pixels")]
+        images: String,
+        /// Line art under a target: none, covered (removed when a target
+        /// covers it) or touched (removed when a target touches it).
+        #[arg(long, default_value = "covered")]
+        line_art: String,
+        /// Where to write, replacing the file atomically.
+        #[arg(short, long, required_unless_present = "dry_run")]
+        output: Option<PathBuf>,
+        /// Report the plan, the quads on each page, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Write the output even when the check finds targets left; the
+        /// report still gives what it found. For comparisons, such as
+        /// with MuPDF's redaction, which leaves what this check catches.
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Check a document for the targets, class by class (content text,
+    /// structure, annotations and forms, metadata, outline and names,
+    /// embedded files, hidden layers, images, history, JavaScript). Any
+    /// leak fails with exit 4.
+    Verify {
+        file: PathBuf,
+        /// A `redact` report: its targets, and the areas whose image
+        /// pixels must be blank.
+        #[arg(long, value_name = "REPORT")]
+        against: Option<PathBuf>,
+        /// Text to look for. Repeatable.
+        #[arg(long)]
+        text: Vec<String>,
+        /// A regular expression to look for. Repeatable.
+        #[arg(long)]
+        regex: Vec<String>,
+        /// A preset: email, phone, card, ssn, iban, or pii.
+        #[arg(long, value_parser = ["pii", "email", "phone", "card", "ssn", "iban"])]
+        preset: Vec<String>,
+        /// Match ignoring case.
+        #[arg(long)]
+        ignore_case: bool,
     },
     /// List the fonts the pages use, as `mutool info` finds them, with
     /// what each loads as; --extract writes the embedded font programs as
@@ -631,6 +716,123 @@ fn run(cli: Cli) -> ExitCode {
                         .map(|body| report("nupdf.search/v0", &facts, &doc, body))
                 })
         }
+        Command::Redact {
+            file,
+            text,
+            regex,
+            preset,
+            region,
+            id,
+            hits,
+            ignore_case,
+            stext_options,
+            pages,
+            boxes,
+            images,
+            line_art,
+            output,
+            dry_run,
+            no_verify,
+        } => open(file).and_then(|(doc, facts)| {
+            let usage = |message: String| Failure {
+                exit: Exit::Usage,
+                code: "usage.bad_option",
+                message,
+            };
+            let mut targets: Vec<redact::Target> = Vec::new();
+            targets.extend(text.iter().cloned().map(redact::Target::Text));
+            targets.extend(regex.iter().cloned().map(redact::Target::Regex));
+            targets.extend(preset.iter().cloned().map(redact::Target::Preset));
+            for r in region {
+                targets.push(redact::parse_region(r).map_err(usage)?);
+            }
+            targets.extend(id.iter().cloned().map(redact::Target::Id));
+            if let Some(path) = hits {
+                let data = std::fs::read_to_string(path).map_err(|e| Failure {
+                    exit: Exit::Input,
+                    code: "input.unreadable",
+                    message: format!("cannot read {}: {e}", path.display()),
+                })?;
+                targets.push(redact::parse_hits(&data, &facts.doc_id).map_err(usage)?);
+            }
+            if targets.is_empty() {
+                return Err(usage(
+                    "nothing to redact: give --text, --regex, --preset, --region, --id or --hits"
+                        .into(),
+                ));
+            }
+            let args = redact::Args {
+                targets: &targets,
+                ignore_case: *ignore_case,
+                stext: nupdf::stext::Options::parse(stext_options).map_err(usage)?,
+                options: nupdf::redact::RedactOptions {
+                    black_boxes: *boxes,
+                    image_method: redact::image_method(images).map_err(usage)?,
+                    line_art: redact::line_art(line_art).map_err(usage)?,
+                    text: nupdf::redact::TextMethod::Remove,
+                },
+                pages: pages.as_deref(),
+            };
+            redact_command(
+                &doc,
+                &facts,
+                &args,
+                output.as_deref(),
+                (*dry_run, *no_verify),
+                password,
+            )
+        }),
+        Command::Verify {
+            file,
+            against,
+            text,
+            regex,
+            preset,
+            ignore_case,
+        } => open(file).and_then(|(doc, facts)| {
+            let usage = |message: String| Failure {
+                exit: Exit::Usage,
+                code: "usage.bad_option",
+                message,
+            };
+            let mut targets: Vec<redact::Target> = Vec::new();
+            targets.extend(text.iter().cloned().map(redact::Target::Text));
+            targets.extend(regex.iter().cloned().map(redact::Target::Regex));
+            targets.extend(preset.iter().cloned().map(redact::Target::Preset));
+            let mut plan = None;
+            if let Some(path) = against {
+                let data = std::fs::read_to_string(path).map_err(|e| Failure {
+                    exit: Exit::Input,
+                    code: "input.unreadable",
+                    message: format!("cannot read {}: {e}", path.display()),
+                })?;
+                let (t, p) = redact::parse_against(&data).map_err(usage)?;
+                targets.extend(t);
+                plan = Some(p);
+            }
+            if targets.is_empty() && plan.is_none() {
+                return Err(usage(
+                    "nothing to look for: give --against, --text, --regex or --preset".into(),
+                ));
+            }
+            let t = redact::verify_targets(&targets, *ignore_case, plan.as_ref()).map_err(usage)?;
+            let v = nupdf::verify::verify(&doc, &t);
+            let mut body = serde_json::Map::new();
+            body.insert("verified".into(), v.verified().into());
+            body.insert("verification".into(), redact::verification_json(&v));
+            let out = report("nupdf.verify/v0", &facts, &doc, body.into());
+            if v.verified() {
+                Ok(out)
+            } else {
+                // The report goes to stdout before the failure.
+                emit(&mut std::io::stdout().lock(), &out, false);
+                Err(Failure {
+                    exit: Exit::Verify,
+                    code: "verify.failed",
+                    message: "targets were found".into(),
+                })
+            }
+        }),
         Command::Stext {
             file,
             options,
@@ -1053,6 +1255,125 @@ fn clean_options(f: &CleanFlags) -> Result<nupdf::write::WriteOptions, Failure> 
         })?,
         incremental: false,
     })
+}
+
+/// `redact`: plan, apply, rewrite, check, write.
+fn redact_command(
+    doc: &Document,
+    facts: &FileFacts,
+    args: &redact::Args,
+    output: Option<&Path>,
+    (dry_run, no_verify): (bool, bool),
+    password: Option<&str>,
+) -> Result<serde_json::Value, Failure> {
+    let input = |message: String| Failure {
+        exit: Exit::Input,
+        code: "input.redaction",
+        message: nupdf::diag::report::strip(&message).to_string(),
+    };
+    if doc.needs_password() && password.is_none() {
+        return Err(Failure {
+            exit: Exit::Input,
+            code: "input.needs_password",
+            message: "the empty password does not open the document: pass --password".into(),
+        });
+    }
+    // Every object loaded first, so a repair cannot lose the edits.
+    nupdf::write::check_document(doc);
+    let plan = redact::plan(doc, args).map_err(input)?;
+    let mut fields = serde_json::Map::new();
+    fields.insert("applied".into(), (!dry_run).into());
+    if dry_run {
+        fields.extend(redact::describe(args, &plan, None));
+        fields.insert("output".into(), serde_json::Value::Null);
+        fields.insert("verification".into(), serde_json::Value::Null);
+        return Ok(report("nupdf.redact/v0", facts, doc, fields.into()));
+    }
+    let m = redact::matcher(args.targets, args.ignore_case).map_err(input)?;
+    let scrubbed = redact::apply(doc, &plan, args.options, &m).map_err(input)?;
+    let options = nupdf::write::WriteOptions {
+        pretty: false,
+        ascii: false,
+        garbage: 1,
+        decompress: false,
+        compress: true,
+        compress_images: false,
+        compress_fonts: false,
+        effort: 0,
+        objstms: false,
+        encrypt: nupdf::write::Encrypt::Keep,
+        incremental: false,
+    };
+    let bytes = nupdf::write::save(doc, &options).map_err(|e| Failure {
+        exit: Exit::Input,
+        code: "input.unloadable_object",
+        message: nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
+            .to_string(),
+    })?;
+    let out_doc = Document::open(bytes.clone()).map_err(|e| Failure {
+        exit: Exit::Verify,
+        code: "verify.failed",
+        message: format!("the output does not open: {}", e.message),
+    })?;
+    if let Some(p) = password {
+        let _ = out_doc.authenticate(p);
+    }
+    let targets =
+        redact::verify_targets(args.targets, args.ignore_case, Some(&plan)).map_err(input)?;
+    let v = nupdf::verify::verify(&out_doc, &targets);
+    let verified = v.verified();
+    fields.extend(redact::describe(args, &plan, Some(&v.hits_after)));
+    fields.insert(
+        "scrubbed".into(),
+        serde_json::json!({
+            "metadata": scrubbed.metadata,
+            "xmp": scrubbed.xmp,
+            "outline": scrubbed.outline,
+            "names": scrubbed.names,
+            "embedded_files": scrubbed.embedded_files,
+            "annotations": scrubbed.annotations,
+            "fields": scrubbed.fields,
+            "javascript": scrubbed.javascript,
+            "structure": scrubbed.structure,
+            "layers": scrubbed.layers,
+            "page_labels": scrubbed.page_labels,
+            "thumbnails": scrubbed.thumbnails,
+        }),
+    );
+    let hash = blake3::hash(&bytes);
+    fields.insert(
+        "output".into(),
+        serde_json::json!({
+            "path": output.map(|p| p.display().to_string()),
+            "doc_id": DocId::from_hash(&hash).to_string(),
+            "file_size": bytes.len(),
+        }),
+    );
+    fields.insert("verification".into(), redact::verification_json(&v));
+    fields.insert("verified".into(), verified.into());
+    if !verified && !no_verify {
+        let classes: Vec<&str> = nupdf::verify::Class::ALL
+            .iter()
+            .filter(|c| v.findings.iter().any(|f| f.class == **c))
+            .map(|c| c.name())
+            .collect();
+        return Err(Failure {
+            exit: Exit::Verify,
+            code: "verify.failed",
+            message: format!(
+                "targets are still in the output ({}); nothing was written",
+                classes.join(", ")
+            ),
+        });
+    }
+    if let Some(path) = output {
+        write_atomically(path, &bytes).map_err(|e| Failure {
+            exit: Exit::Input,
+            code: "output.unwritable",
+            message: format!("cannot write {}: {e}", path.display()),
+        })?;
+    }
+    Ok(report("nupdf.redact/v0", facts, doc, fields.into()))
 }
 
 /// `pdf_clean_file`'s page subset: every object loaded first, so a repair
