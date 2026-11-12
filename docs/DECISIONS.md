@@ -421,3 +421,9 @@ The search item adds `nupdf search`, a port of `fz_match_stext_page_cb`. The che
 - **A repair during the run starts the run again.** A page that makes the document repair itself changes what the pages before it would have read, and which pages ran before it depends on timing. So the file is opened afresh (`Document::reopen`, keeping an accepted password) and every page is done again, one after another, on the new document. A document made or changed in memory has no file to reopen; its pages stay as they ran.
 - **`extract` works on 64 pages at a time**, the same at every thread count, so budgets and cursors stop it early without extracting the rest of a long document. `stext` works on all the pages asked for, and so does `search` with threads; without them it stops running pages once `--max-items` is reached, as before.
 - **Workers run on 1 GB stacks**, as the CLI's main thread does: content streams nest about a thousand forms deep.
+
+## D39. Arithmetic is fused as MuPDF's build fuses it
+
+*2026-11-11*
+
+The oracle is MuPDF built by clang at `-O2`, whose default `-ffp-contract=on` turns `a * b + c * d` into `fma(a, b, c * d)` and `a * b - c * d` into `fma(a, b, -(c * d))` within an expression. Content streams written back (`clean -s`, redaction) print matrices and text moves at the shortest round-trip digits, so a last-bit difference changes the bytes. `geometry` (matrix concatenation, translation, point and vector transforms), the text matrix updates in `run` and the sanitize filter's text moves use `mul_add` in the same places, which is what disassembling MuPDF's code shows clang does. A MuPDF built without contraction (gcc on x86-64 without `-mfma`) would round differently; the harness's oracle is the build in `target/oracle`.
