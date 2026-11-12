@@ -19,6 +19,7 @@ moxcms = { version = "0.9", default-features = false, features = ["lut"] }
 hayro-jpeg2000 = { version = "0.5", default-features = false, features = ["simd"] }
 md-5 = "0.11"
 memchr = "2"
+sha1 = "0.11"
 sha2 = "0.11"
 
 [lints]

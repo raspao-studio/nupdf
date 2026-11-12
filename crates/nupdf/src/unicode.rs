@@ -28,6 +28,27 @@ pub fn general_category(c: i32) -> u8 {
     }
 }
 
+/// `ucdn_get_script`: `UCDN_SCRIPT_*`.
+pub fn script(c: i32) -> u8 {
+    match u32::try_from(c).ok().filter(|&c| c < 0x110000) {
+        Some(c) => run(&tables::SCRIPT, c),
+        // ucdn's record 0.
+        None => SCRIPT_UNKNOWN,
+    }
+}
+
+pub const SCRIPT_COMMON: u8 = 0;
+pub const SCRIPT_LATIN: u8 = 1;
+pub const SCRIPT_GREEK: u8 = 2;
+pub const SCRIPT_CYRILLIC: u8 = 3;
+pub const SCRIPT_HANGUL: u8 = 24;
+pub const SCRIPT_HIRAGANA: u8 = 32;
+pub const SCRIPT_KATAKANA: u8 = 33;
+pub const SCRIPT_BOPOMOFO: u8 = 34;
+pub const SCRIPT_HAN: u8 = 35;
+pub const SCRIPT_INHERITED: u8 = 40;
+pub const SCRIPT_UNKNOWN: u8 = 102;
+
 /// `ucdn_get_combining_class`.
 pub fn combining_class(c: i32) -> u8 {
     match u32::try_from(c).ok().filter(|&c| c < 0x110000) {

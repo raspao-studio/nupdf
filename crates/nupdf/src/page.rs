@@ -252,40 +252,109 @@ impl Document {
         }
     }
 
-    /// `pdf_repair_page_tree_parents` for the page tree: every kid's parent
-    /// is the node whose /Kids lists it. The root keeps its own /Parent.
+    /// `pdf_repair_page_tree_parents`: every field's parent is the field
+    /// (or /AcroForm) whose /Kids (or /Fields) lists it; every page tree
+    /// node's parent is the node whose /Kids lists it; and, as MuPDF has it,
+    /// every annotation's parent is the page whose /Annots lists it, the
+    /// fields tree walked first. The roots keep their own /Parent.
     fn tree_parents(&self) -> HashMap<i32, Object> {
         let mut parents = HashMap::new();
         let root = self.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
+        if let Some(acroform) = self.lookup(&root, b"AcroForm") {
+            self.walk_fields(&acroform, &mut Vec::new(), None, b"Fields", &mut parents);
+        }
         if let Some(pages) = self.lookup(&root, b"Pages") {
-            self.collect_parents(&pages, &mut Vec::new(), &mut parents);
+            self.walk_pages(&pages, &mut Vec::new(), None, &mut parents);
         }
         parents
     }
 
-    fn collect_parents(
+    /// Records `parent` as the parent of `node`, saying so when its own
+    /// /Parent is another.
+    fn fix_parent(
+        &self,
+        node: &Object,
+        parent: &Object,
+        code: &'static str,
+        message: &'static str,
+        parents: &mut HashMap<i32, Object>,
+    ) {
+        if self.lookup(node, b"Parent").as_ref() != Some(parent) {
+            self.diagnostics().warn(code, message);
+        }
+        if let Object::Ref(r) = node {
+            parents.insert(r.num, parent.clone());
+        }
+    }
+
+    /// `walk_page_tree`.
+    fn walk_pages(
         &self,
         node: &Object,
         ancestors: &mut Vec<i32>,
+        parent: Option<&Object>,
         parents: &mut HashMap<i32, Object>,
     ) {
         let num = node.as_ref().map_or(0, |r| r.num);
         if (num > 0 && ancestors.contains(&num)) || ancestors.len() > MAX_TREE_DEPTH {
             return;
         }
+        if let Some(parent) = parent {
+            self.fix_parent(
+                node,
+                parent,
+                "page.fixed_parent",
+                "fixed bad Parent in Pages tree",
+                parents,
+            );
+        }
+        self.walk_fields(node, &mut Vec::new(), None, b"Annots", parents);
         ancestors.push(num);
         let kids = self.lookup(node, b"Kids").map(|k| self.resolve(&k));
         for kid in kids.as_ref().and_then(Object::as_array).unwrap_or_default() {
-            if let Object::Ref(r) = kid {
-                if self.lookup(kid, b"Parent").as_ref() != Some(node) {
-                    self.diagnostics()
-                        .warn("page.fixed_parent", "fixed bad Parent in Pages tree");
-                }
-                parents.insert(r.num, node.clone());
-            }
-            self.collect_parents(kid, ancestors, parents);
+            self.walk_pages(kid, ancestors, Some(node), parents);
         }
         ancestors.pop();
+    }
+
+    /// `walk_field_tree`.
+    fn walk_fields(
+        &self,
+        field: &Object,
+        ancestors: &mut Vec<i32>,
+        parent: Option<&Object>,
+        kids_key: &[u8],
+        parents: &mut HashMap<i32, Object>,
+    ) {
+        let num = field.as_ref().map_or(0, |r| r.num);
+        if (num > 0 && ancestors.contains(&num)) || ancestors.len() > MAX_TREE_DEPTH {
+            return;
+        }
+        if let Some(parent) = parent {
+            self.fix_parent(
+                field,
+                parent,
+                "form.fixed_parent",
+                "fixed bad Parent in AcroForm tree",
+                parents,
+            );
+        }
+        ancestors.push(num);
+        let kids = self.lookup(field, kids_key).map(|k| self.resolve(&k));
+        for kid in kids.as_ref().and_then(Object::as_array).unwrap_or_default() {
+            self.walk_fields(kid, ancestors, Some(field), b"Kids", parents);
+        }
+        ancestors.pop();
+    }
+
+    /// A node's /Parent, as MuPDF has it after repairing the parents (see
+    /// `inherited`).
+    pub fn parent_of(&self, node: &Object) -> Option<Object> {
+        let fixed = match (node, self.current().repaired_parents.get()) {
+            (Object::Ref(r), Some(map)) => map.get(&r.num).cloned(),
+            _ => None,
+        };
+        fixed.or_else(|| self.lookup(node, b"Parent"))
     }
 
     /// `pdf_dict_get`: resolve the container, return the value as stored.
