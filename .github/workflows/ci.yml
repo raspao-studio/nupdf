@@ -22,6 +22,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
       - run: cargo xtask fixtures --check
+      - run: cargo xtask schemas --check
 
   deny:
     runs-on: ubuntu-latest
