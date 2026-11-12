@@ -2400,6 +2400,12 @@ fn encrypted(spec: crate::encrypt::Spec, seed: &str) -> Vec<u8> {
 }
 
 pub fn run(root: &Path, check: bool) -> Result<()> {
+    write_dir(
+        &root.join("corpus/redaction"),
+        "corpus/redaction",
+        crate::adversarial::files(),
+        check,
+    )?;
     let dir = root.join("corpus/smoke");
     let fixtures = all();
     let mut expected: BTreeMap<String, Vec<u8>> = fixtures
@@ -2438,6 +2444,46 @@ pub fn run(root: &Path, check: bool) -> Result<()> {
         std::fs::write(dir.join(name), bytes)?;
     }
     println!("wrote {} fixtures to {}", fixtures.len(), dir.display());
+    Ok(())
+}
+
+/// Writes `expected` into `dir`, or with `check` verifies it is there as
+/// generated and nothing else is.
+fn write_dir(
+    dir: &Path,
+    label: &str,
+    expected: BTreeMap<String, Vec<u8>>,
+    check: bool,
+) -> Result<()> {
+    if check {
+        let mut problems = Vec::new();
+        for (name, bytes) in &expected {
+            match std::fs::read(dir.join(name)) {
+                Ok(found) if &found == bytes => {}
+                Ok(_) => problems.push(format!("{name} differs from its generator")),
+                Err(_) => problems.push(format!("{name} is missing")),
+            }
+        }
+        for entry in std::fs::read_dir(dir).with_context(|| format!("reading {label}"))? {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            if !expected.contains_key(&name) {
+                problems.push(format!("{name} has no generator"));
+            }
+        }
+        if !problems.is_empty() {
+            bail!(
+                "{label} is stale; run `cargo xtask fixtures`:\n  {}",
+                problems.join("\n  ")
+            );
+        }
+        println!("{label} is up to date ({} files)", expected.len());
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)?;
+    for (name, bytes) in &expected {
+        std::fs::write(dir.join(name), bytes)?;
+    }
+    println!("wrote {} files to {}", expected.len(), dir.display());
     Ok(())
 }
 
