@@ -3472,3 +3472,26 @@ fn annots_highlights_each_search_hit() {
     assert_eq!(added[0]["type"], "Highlight");
     assert_eq!(added[0]["id"], "p1.a1");
 }
+
+/// Found by the stext fuzz target: structure parents in a cycle, which
+/// MuPDF climbs forever. nupdf stops, says so, and finishes the page.
+#[test]
+fn a_structure_tree_cycle_ends() {
+    let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/structure-cycle.pdf");
+    let started = std::time::Instant::now();
+    let out = nupdf(&["stext", file.to_str().unwrap(), "--timeout", "60"]);
+    assert!(
+        started.elapsed().as_secs() < 30,
+        "took {:?}",
+        started.elapsed()
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "structure.cycle"),
+        "{report}"
+    );
+}

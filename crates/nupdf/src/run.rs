@@ -19,7 +19,12 @@
 //! marked-content structure and metatext follow MuPDF. Glyph boxes are
 //! their font's box until outlines are read (DECISIONS D32).
 
+use crate::fma::Madd;
 use std::sync::Arc;
+
+/// Structure elements climbed through at most, closing marked structure:
+/// past this the /P chain is taken for a cycle.
+const MAX_STRUCTURE_DEPTH: usize = 4096;
 
 use crate::colorspace::{self, ColorSpace, MAX_COLORS};
 use crate::content::{self, Op, ProcState, Processor, Store};
@@ -1097,16 +1102,16 @@ impl<'a> Run<'a> {
             let h = fd.lookup_hmtx(cid);
             let w0 = h.w as f32 * 0.001;
             adv = w0;
-            self.tos.char_tx = w0.mul_add(ts.size, ts.char_space) * ts.scale;
+            self.tos.char_tx = w0.madd(ts.size, ts.char_space) * ts.scale;
             self.tos.char_ty = 0.0;
         } else {
             let v = fd.lookup_vmtx(cid);
             let w1 = v.w as f32 * 0.001;
             adv = w1;
-            tsm.e = (-(v.x as f32 * ts.size * ts.scale)).mul_add(0.001, tsm.e);
-            tsm.f = (-(v.y as f32 * ts.size)).mul_add(0.001, tsm.f);
+            tsm.e = (-(v.x as f32 * ts.size * ts.scale)).madd(0.001, tsm.e);
+            tsm.f = (-(v.y as f32 * ts.size)).madd(0.001, tsm.f);
             self.tos.char_tx = 0.0;
-            self.tos.char_ty = w1.mul_add(ts.size, ts.char_space);
+            self.tos.char_ty = w1.madd(ts.size, ts.char_space);
         }
         let trm = tsm.concat(self.tos.tm);
         let gid = fd.cid_to_gid(cid);
@@ -2194,8 +2199,19 @@ impl<'a> Run<'a> {
 
     fn pop_structure_to(&mut self, common: Option<&Object>) {
         let doc = self.doc;
+        let mut steps = 0usize;
         while let Some(sent) = self.mcid_sent.clone() {
             if common == Some(&sent) {
+                break;
+            }
+            // MuPDF climbs a /P cycle that misses both forever.
+            steps += 1;
+            if steps > MAX_STRUCTURE_DEPTH {
+                doc.diagnostics().warn(
+                    "structure.cycle",
+                    "cycle in structure tree parents; structure dropped",
+                );
+                self.mcid_sent = None;
                 break;
             }
             let p = self.parent(&sent);
