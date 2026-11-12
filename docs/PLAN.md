@@ -310,7 +310,7 @@ Exit status, 2026-11-12: not met, and left for later. Eleven graded tasks (the e
 - [ ] OCR: rasterize, run Tesseract as a subprocess (or ocrs), add an invisible text layer; `info` routes scanned pages here
 - [ ] Tables: structured rows from `stext-table` parity
 - [ ] Signatures: list them, check byte-range integrity, preserve them with incremental saves
-- [ ] Attachments, outlines, page labels, links; `sanitize` (JavaScript, actions, launch and URI policy)
+- [ ] Attachments, outlines, page labels, links; `sanitize` (JavaScript, actions, launch and URI policy). Reading done (D46): `outline`, `links`, `labels`, `attachments`, each checked against MuPDF; `sanitize` to come
 - [ ] Optional: Python bindings (PyO3) for agents that run Python
 
 ## M10: Hardening and public release

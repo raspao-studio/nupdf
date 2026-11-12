@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 hum
-// Derived from MuPDF source/pdf/pdf-outline.c,
+// Derived from MuPDF source/pdf/pdf-outline.c and source/fitz/outline.c
+// (fz_load_outline_from_iterator),
 // Copyright (C) 2004-2026 Artifex Software, Inc.
 
 //! MuPDF's outline iterator: walking a document's outline items, and
@@ -421,6 +422,57 @@ fn test_outline(
         dict = next;
     }
     Ok(())
+}
+
+/// An outline entry as `fz_load_outline` gives it: the item, the page its
+/// link leads to (from 0, or -1), and the entries below it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outline {
+    pub item: OutlineItem,
+    pub page: i32,
+    pub down: Vec<Outline>,
+}
+
+/// `fz_load_outline`: the whole outline, read through the iterator as
+/// `load_outline_sub` reads it.
+pub fn load_outline(doc: &Document) -> Result<Vec<Outline>, String> {
+    let mut it = OutlineIter::new(doc)?;
+    load_sub(doc, &mut it, 0)
+}
+
+fn load_sub(doc: &Document, it: &mut OutlineIter, depth: usize) -> Result<Vec<Outline>, String> {
+    let mut out = Vec::new();
+    // The tree was checked when the iterator was made; this only keeps a
+    // tree changed since from recursing without end.
+    if depth > MAX_DEPTH {
+        return Ok(out);
+    }
+    loop {
+        let Some(item) = it.item()? else {
+            return Ok(out);
+        };
+        let page = item
+            .uri
+            .as_deref()
+            .and_then(|u| crate::link::resolve_link_page(doc, u).ok())
+            .unwrap_or(-1);
+        let mut node = Outline {
+            item,
+            page,
+            down: Vec::new(),
+        };
+        let res = it.down();
+        if res == 0 {
+            node.down = load_sub(doc, it, depth + 1)?;
+        }
+        if res >= 0 {
+            it.up();
+        }
+        out.push(node);
+        if it.next_sibling() != 0 {
+            return Ok(out);
+        }
+    }
 }
 
 #[cfg(test)]

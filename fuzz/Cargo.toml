@@ -136,3 +136,9 @@ name = "render"
 path = "fuzz_targets/render.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "navigation"
+path = "fuzz_targets/navigation.rs"
+test = false
+doc = false

@@ -2566,3 +2566,70 @@ fn the_guide_is_text_for_models() {
     let skill = nupdf(&["guide", "--skill"]);
     assert!(String::from_utf8_lossy(&skill.stdout).starts_with("---\nname: nupdf\n"));
 }
+
+fn redaction_fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/redaction")
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn report_of(args: &[&str]) -> Value {
+    let out = nupdf(args);
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn navigation_reports_outline_labels_links_and_attachments() {
+    let outline = report_of(&["outline", &redaction_fixture("outline.pdf")]);
+    assert_eq!(outline["schema"], "nupdf.outline/v1");
+    assert_eq!(outline["items"][0]["title"], "SECRET-4711 chapter");
+    assert_eq!(outline["items"][0]["page"], 1);
+
+    let labels = report_of(&["labels", &redaction_fixture("page-labels.pdf")]);
+    assert_eq!(labels["pages"][0]["label"], "SECRET-4711-1");
+    // A document without labels: page numbers.
+    let plain = report_of(&["labels", smoke("multipage-inherit.pdf").to_str().unwrap()]);
+    let got: Vec<&str> = plain["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(got, ["1", "2", "3"]);
+
+    let links = report_of(&["links", smoke("merge-links.pdf").to_str().unwrap()]);
+    let first = &links["pages"][0]["links"][0];
+    assert_eq!(first["uri"], "http://example.com/a?b=c");
+    assert_eq!(first["page"], Value::Null);
+    assert_eq!(first["bbox"].as_array().unwrap().len(), 4);
+
+    let dir = scratch("attachments-out");
+    let _ = std::fs::remove_dir_all(&dir);
+    let found = report_of(&[
+        "attachments",
+        &redaction_fixture("embedded-file.pdf"),
+        "--extract",
+        dir.to_str().unwrap(),
+    ]);
+    let a = &found["attachments"][0];
+    assert_eq!(
+        (
+            a["name"].as_str(),
+            a["embedded"].as_bool(),
+            a["checksum_ok"].as_bool()
+        ),
+        (Some("SECRET-4711.txt"), Some(true), Some(true))
+    );
+    let written = std::fs::read(dir.join(a["file"].as_str().unwrap())).unwrap();
+    assert_eq!(written.len() as u64, a["length"].as_u64().unwrap());
+    // None embedded: an empty list, not an error.
+    let none = report_of(&["attachments", smoke("minimal.pdf").to_str().unwrap()]);
+    assert_eq!(none["attachments"], serde_json::json!([]));
+}
