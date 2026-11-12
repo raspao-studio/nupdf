@@ -509,7 +509,7 @@ fn sample_evenly<T>(files: Vec<T>, n: Option<usize>) -> Vec<T> {
 }
 
 /// The page count `nupdf info` reports, or 0 if it reports none.
-fn page_count(nupdf: &Path, file: &Path) -> usize {
+pub fn page_count(nupdf: &Path, file: &Path) -> usize {
     proc::run(
         nupdf,
         &[OsString::from("info"), file.as_os_str().to_owned()],

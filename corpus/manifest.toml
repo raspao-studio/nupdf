@@ -97,3 +97,13 @@ kind = "manual"
 url = "https://digitalcorpora.org/cc-main-2021-31-pdf-untruncated/"
 license = "Common Crawl and Digital Corpora terms; not sanitized, contains malware"
 about = "SafeDocs CC-MAIN-2021-31-PDF-UNTRUNCATED: ~8M PDFs; sample subsets"
+
+[[source]]
+name = "long"
+tier = "long"
+kind = "merged"
+from = "standard"
+min_pages = 100
+count = 30
+license = "as the standard tier's files it is made of"
+about = "30 documents of 100 pages or more, each the next standard-tier files merged by nupdf, for the scaling benches"

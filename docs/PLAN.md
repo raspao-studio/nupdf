@@ -260,7 +260,7 @@ MuPDF reference: `fitz/stext-device.c`, `stext-output.c`, `stext-search.c`, `ste
 
 Exit: ≥99% of pages have the same character sequence as MuPDF's stext, and ≥98% of characters have bbox IoU ≥0.98. Single-threaded time ≤1.1× MuPDF's. ≥6× speedup on 8 cores, in total time, for documents of 50+ pages that take 100 ms or more on one thread (`stext-scaling`, `extract-scaling`; a document that is mostly starting the process shows nothing of what threads do).
 
-Exit status: met for parity and single-threaded time. Scaling on the standard tier, 2026-11-12, on 6 performance and 12 efficiency cores with Finder, fseventsd and Spotlight each holding a core: `stext` 3.4× (one document qualifies), `extract` 2.8× (two).
+Exit status: met for parity and single-threaded time. Scaling, 2026-11-12, on 6 performance and 12 efficiency cores with Finder, fseventsd and Spotlight each holding a core: on the standard tier `stext` 3.4× (one document qualifies), `extract` 2.8× (two); on the `long` tier (30 documents of 100 pages or more merged from the standard tier's files, `cargo xtask corpus fetch long`; 9 qualify) `stext` 2.36× in geometric mean and 1.29× in total time, `extract` 2.33× and 1.25×. The total is one document's: a single page of `long-006.pdf` takes 2.3 s (MuPDF 2.0 s), which threads over pages cannot split; the others run 2.1× to 3.4×.
 
 ## M6: Redaction and verification
 
