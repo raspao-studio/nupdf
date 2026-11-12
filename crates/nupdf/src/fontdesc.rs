@@ -159,7 +159,7 @@ pub struct Vmtx {
 }
 
 /// `pdf_font_desc`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FontDesc {
     pub font: Arc<Font>,
     pub flags: i32,
@@ -181,6 +181,15 @@ pub struct FontDesc {
 }
 
 impl FontDesc {
+    /// A copy whose font is counted apart from this one's: every character
+    /// holds its font, and counting one font's holders from many threads
+    /// at once costs more than copying it.
+    pub fn copy_for_thread(&self) -> FontDesc {
+        let mut fd = self.clone();
+        fd.font = Arc::new(Font::clone(&self.font));
+        fd
+    }
+
     /// `pdf_new_font_desc`; the font is a placeholder until the loader
     /// sets it.
     fn new() -> FontDesc {

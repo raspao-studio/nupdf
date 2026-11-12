@@ -354,6 +354,9 @@ impl ProcState {
     }
 }
 
+/// Fonts the threads working on one document share, by object number.
+pub type SharedFonts = Arc<std::sync::Mutex<HashMap<i32, Arc<crate::fontdesc::FontDesc>>>>;
+
 /// What MuPDF's store keeps for a document while it is interpreted: each
 /// object is loaded (and its warnings reported) once.
 #[derive(Debug, Default)]
@@ -369,6 +372,10 @@ pub struct Store {
     ocg: Option<Rc<layer::Descriptor>>,
     /// Fonts by object number, and fonts given directly, by value.
     pub fonts: HashMap<i32, Arc<crate::fontdesc::FontDesc>>,
+    /// Fonts by object number that the threads working on one document
+    /// share, so that each loads a font only if none has yet. Type 3
+    /// fonts are not shared: what they load depends on the page.
+    pub shared_fonts: Option<SharedFonts>,
     pub direct_fonts: Vec<(Object, Arc<crate::fontdesc::FontDesc>)>,
     /// `pdf_load_hail_mary_font`'s font, once loaded.
     pub hail_mary: Option<Arc<crate::fontdesc::FontDesc>>,
@@ -380,6 +387,14 @@ pub struct Store {
 }
 
 impl Store {
+    /// An empty store that shares its fonts with the others given `fonts`.
+    pub fn sharing_fonts(fonts: &SharedFonts) -> Store {
+        Store {
+            shared_fonts: Some(Arc::clone(fonts)),
+            ..Store::default()
+        }
+    }
+
     /// `pdf_read_ocg`, once.
     pub fn ocg(&mut self, doc: &Document) -> Rc<layer::Descriptor> {
         self.ocg
