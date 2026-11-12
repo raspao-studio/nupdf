@@ -25,6 +25,10 @@ The first frozen version, at the end of M8: 27 schemas, read off what the comman
 
 `batch`, `batch.item`, `clean`, `decrypt`, `diff`, `encrypt`, `error`, `extract`, `extract.page`, `fonts`, `images`, `info`, `merge`, `meta`, `objects`, `operators`, `pages`, `redact`, `render`, `schema`, `search`, `show`, `split`, `stext`, `streams`, `trace`, `verify`.
 
+## M9 additions (2026-11-12)
+
+New reports, at v1: `annots`, `annots-edit`, `attachments`, `fill`, `flatten`, `forms`, `labels`, `links`, `ocr`, `outline`, `sanitize`, `signatures`, `tables`. Added fields: `info` has `text` (pages with text, scanned pages); a written document's `output` has `signatures` when the input was signed.
+
 ## v0
 
 Reports from M0 to M8, while their shapes could still change.

@@ -305,12 +305,12 @@ Exit status, 2026-11-12: not met, and left for later. Eleven graded tasks (the e
 
 ## M9: Coverage
 
-- [ ] Forms: list, fill and flatten AcroForm fields; generate appearances (`pdf-form.c`, `pdf-appearance.c`); detect and strip XFA
-- [ ] Annotations: list, add, delete, flatten
-- [ ] OCR: rasterize, run Tesseract as a subprocess (or ocrs), add an invisible text layer; `info` routes scanned pages here
+- [x] Forms: list, fill and flatten AcroForm fields; generate appearances (`pdf-form.c`, `pdf-appearance.c`); detect and strip XFA. `nupdf forms` lists fields (`--set NAME=VALUE`, `--toggle NAME` fill them as the widget API does, JavaScript off), `flatten` bakes them, `sanitize` strips XFA (D49); the `forms`, `widget-synthesis`, `fill` and `flatten` checks hold each to MuPDF on every file, the edits to the byte. Not covered: text MuPDF lays out with its HTML engine, and unsigned signature appearances
+- [x] Annotations: list, add, delete, flatten. `nupdf annots` lists them (`--add JSON`, `--delete ID`, `--highlight TEXT` edit them), `flatten` bakes them (D49); appearances are made as `pdf-appearance.c` makes them, every type; the `annots`, `annot-synthesis`, `annot-add-*`, `annot-delete`, `annot-highlight` and `flatten-annots` checks compare with MuPDF on every file
+- [x] OCR: rasterize, run Tesseract as a subprocess (or ocrs), add an invisible text layer; `info` routes scanned pages here. `nupdf ocr` (D50): Tesseract's TSV words laid over the page in a glyphless font, scanned pages only unless asked; `info` lists `text.scanned_pages` and names the command
 - [x] Tables: structured rows from `stext-table` parity. `nupdf tables`: MuPDF's `Table`, `TR` and `TD` structures as rows of cells, JSON or CSV, with the vector paths table hunting needs for ruled tables; the `tables` check compares them with MuPDF's on every file
-- [ ] Signatures: list them, check byte-range integrity, preserve them with incremental saves
-- [ ] Attachments, outlines, page labels, links; `sanitize` (JavaScript, actions, launch and URI policy). Reading done (D46): `outline`, `links`, `labels`, `attachments`, each checked against MuPDF; `sanitize` to come
+- [x] Signatures: list them, check byte-range integrity, preserve them with incremental saves. `nupdf signatures` (D47): each field's signature dictionary, byte ranges, changes since signing, signatory, and the digest check of MuPDF's OpenSSL backend (RSA signers verified in nupdf's own code); every write of a signed file reports which signatures survive and warns when one breaks, which `--incremental` avoids; the `signatures` check compares it all with MuPDF on every file
+- [x] Attachments, outlines, page labels, links; `sanitize` (JavaScript, actions, launch and URI policy). Reading (D46): `outline`, `links`, `labels`, `attachments`, each checked against MuPDF. `nupdf sanitize` (D48): JavaScript, Launch, SubmitForm/ImportData, GoToR/GoToE and XFA removed by default, URIs by policy, attachments on request, every removal reported and the output scanned again before it is written
 - [ ] Optional: Python bindings (PyO3) for agents that run Python
 
 ## M10: Hardening and public release
