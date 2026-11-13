@@ -11,6 +11,7 @@
 //! /JavaScript tree. What is removed is reported by object and key path,
 //! and `scan` on the result finds nothing left.
 
+use std::fmt::Write;
 use std::sync::Arc;
 
 use crate::document::Document;
@@ -166,21 +167,33 @@ struct Walk<'a> {
     policy: &'a Policy,
     object: i32,
     found: Vec<Finding>,
+    /// Where in the object the walk is (`/A/Next[0]`), grown and cut back
+    /// as it goes down and up: written out afresh for every value, the
+    /// paths of a deep object cost far more than the walk.
+    path: String,
 }
 
 impl Walk<'_> {
-    fn note(&mut self, path: &str, kind: &'static str, detail: String) {
+    fn note(&mut self, kind: &'static str, detail: String) {
         self.found.push(Finding {
             object: self.object,
-            path: path.to_string(),
+            path: self.path.clone(),
             kind,
             detail,
         });
     }
 
-    /// Whether the value at `path` is an action the policy removes; it is
-    /// noted when it is.
-    fn action_goes(&mut self, path: &str, value: &Object) -> bool {
+    /// `/key` onto the path, as its length was before.
+    fn push_key(&mut self, key: &[u8]) -> usize {
+        let len = self.path.len();
+        self.path.push('/');
+        self.path.push_str(&String::from_utf8_lossy(key));
+        len
+    }
+
+    /// Whether the value at the path is an action the policy removes; it
+    /// is noted when it is.
+    fn action_goes(&mut self, value: &Object) -> bool {
         let resolved = self.doc.resolve(value);
         if resolved.as_dict().is_none() {
             return false;
@@ -189,7 +202,7 @@ impl Walk<'_> {
             Some((kind, detail)) => {
                 // An action of its own object is noted once, as that object.
                 if !matches!(value, Object::Ref(_)) {
-                    self.note(path, kind, detail);
+                    self.note(kind, detail);
                 }
                 true
             }
@@ -199,40 +212,40 @@ impl Walk<'_> {
 
     /// An additional-actions dictionary: every trigger is an action, and
     /// those the policy removes go.
-    fn triggers(&mut self, triggers: &Dict, path: &str, depth: usize) -> Dict {
+    fn triggers(&mut self, triggers: &Dict, depth: usize) -> Dict {
         let mut kept = Dict::new();
         for (t, action) in triggers.iter() {
-            let tp = format!("{path}/{}", String::from_utf8_lossy(t));
-            if !self.action_goes(&tp, action) {
-                kept.put(t, self.walk(action, &tp, depth + 1));
+            let len = self.push_key(t);
+            if !self.action_goes(action) {
+                kept.put(t, self.walk(action, depth + 1));
             }
+            self.path.truncate(len);
         }
         kept
     }
 
-    fn walk(&mut self, obj: &Object, path: &str, depth: usize) -> Object {
+    fn walk(&mut self, obj: &Object, depth: usize) -> Object {
         if depth > MAX_DEPTH {
             return obj.clone();
         }
         match obj {
-            Object::Dict(d) => Object::Dict(Arc::new(self.dict(d, path, depth))),
+            Object::Dict(d) => Object::Dict(Arc::new(self.dict(d, depth))),
             Object::Array(a) => {
-                let items: Vec<Object> = a
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, v)| {
-                        let p = format!("{path}[{i}]");
-                        // An array of actions (/Next): drop the ones that go.
-                        if path.ends_with("/Next") && self.action_goes(&p, v) {
-                            return None;
-                        }
-                        Some(self.walk(v, &p, depth + 1))
-                    })
-                    .collect();
+                // An array of actions (/Next): drop the ones that go.
+                let actions = self.path.ends_with("/Next");
+                let len = self.path.len();
+                let mut items = Vec::with_capacity(a.len());
+                for (i, v) in a.iter().enumerate() {
+                    let _ = write!(self.path, "[{i}]");
+                    if !(actions && self.action_goes(v)) {
+                        items.push(self.walk(v, depth + 1));
+                    }
+                    self.path.truncate(len);
+                }
                 Object::Array(Arc::new(items))
             }
             Object::Stream(s) => {
-                let dict = self.dict(&s.dict, path, depth);
+                let dict = self.dict(&s.dict, depth);
                 if dict == s.dict {
                     obj.clone()
                 } else {
@@ -245,65 +258,90 @@ impl Walk<'_> {
         }
     }
 
-    fn dict(&mut self, d: &Dict, path: &str, depth: usize) -> Dict {
-        let doc = self.doc;
+    fn dict(&mut self, d: &Dict, depth: usize) -> Dict {
         let mut out = Dict::new();
+        let names = self.path.ends_with("/Names");
+        let acroform = self.path.ends_with("/AcroForm");
         let is_catalog = matches!(d.get(b"Type"), Some(Object::Name(n)) if &**n == b"Catalog");
         for (key, value) in d.iter() {
-            let p = format!("{path}/{}", String::from_utf8_lossy(key));
-            match key {
-                // Where actions hang.
-                b"A" | b"OpenAction" | b"PA" | b"Next" if self.action_goes(&p, value) => continue,
-                // Additional actions: every trigger is an action.
-                b"AA" => {
-                    if let Object::Dict(triggers) = value {
-                        let kept = self.triggers(triggers, &p, depth);
-                        if !kept.is_empty() {
-                            out.put(key, Object::Dict(Arc::new(kept)));
-                        }
-                        continue;
-                    }
-                    // An /AA of its own object is walked as that object
-                    // (`each_object` knows it for one); here only whether
-                    // it is still there matters.
-                    out.put(key, value.clone());
-                    continue;
-                }
-                b"JavaScript" if self.policy.javascript && path.ends_with("/Names") => {
-                    let count = name_tree_count(doc, value);
-                    self.note(&p, "javascript", format!("{count} document scripts"));
-                    continue;
-                }
-                b"EmbeddedFiles" if self.policy.attachments && path.ends_with("/Names") => {
-                    let count = name_tree_count(doc, value);
-                    self.note(&p, "attachments", format!("{count} embedded files"));
-                    continue;
-                }
-                b"XFA" if self.policy.xfa && path.ends_with("/AcroForm") => {
-                    self.note(&p, "xfa", "XFA form".into());
-                    continue;
-                }
-                b"NeedsRendering" if self.policy.xfa && is_catalog => {
-                    self.note(&p, "xfa", "NeedsRendering".into());
-                    continue;
-                }
-                // Calculation order: scripts that run on every change.
-                b"CO" if self.policy.javascript && path.ends_with("/AcroForm") => {
-                    self.note(&p, "javascript", "calculation order".into());
-                    continue;
-                }
-                b"FS"
-                    if self.policy.attachments
-                        && matches!(d.get(b"Subtype"), Some(Object::Name(n)) if &**n == b"FileAttachment") =>
-                {
-                    self.note(&p, "attachments", text(doc, value));
-                    continue;
-                }
-                _ => {}
-            }
-            out.put(key, self.walk(value, &p, depth + 1));
+            let len = self.push_key(key);
+            self.entry(
+                d,
+                key,
+                value,
+                depth,
+                (names, acroform, is_catalog),
+                &mut out,
+            );
+            self.path.truncate(len);
         }
         out
+    }
+
+    /// One entry of `d`, at the path, into `out` unless it goes. `under`
+    /// is whether `d` is at `/Names`, at `/AcroForm`, and a catalog.
+    fn entry(
+        &mut self,
+        d: &Dict,
+        key: &[u8],
+        value: &Object,
+        depth: usize,
+        under: (bool, bool, bool),
+        out: &mut Dict,
+    ) {
+        let doc = self.doc;
+        let (names, acroform, is_catalog) = under;
+        match key {
+            // Where actions hang.
+            b"A" | b"OpenAction" | b"PA" | b"Next" if self.action_goes(value) => return,
+            // Additional actions: every trigger is an action.
+            b"AA" => {
+                if let Object::Dict(triggers) = value {
+                    let kept = self.triggers(triggers, depth);
+                    if !kept.is_empty() {
+                        out.put(key, Object::Dict(Arc::new(kept)));
+                    }
+                    return;
+                }
+                // An /AA of its own object is walked as that object
+                // (`each_object` knows it for one); here only whether it is
+                // still there matters.
+                out.put(key, value.clone());
+                return;
+            }
+            b"JavaScript" if self.policy.javascript && names => {
+                let count = name_tree_count(doc, value);
+                self.note("javascript", format!("{count} document scripts"));
+                return;
+            }
+            b"EmbeddedFiles" if self.policy.attachments && names => {
+                let count = name_tree_count(doc, value);
+                self.note("attachments", format!("{count} embedded files"));
+                return;
+            }
+            b"XFA" if self.policy.xfa && acroform => {
+                self.note("xfa", "XFA form".into());
+                return;
+            }
+            b"NeedsRendering" if self.policy.xfa && is_catalog => {
+                self.note("xfa", "NeedsRendering".into());
+                return;
+            }
+            // Calculation order: scripts that run on every change.
+            b"CO" if self.policy.javascript && acroform => {
+                self.note("javascript", "calculation order".into());
+                return;
+            }
+            b"FS"
+                if self.policy.attachments
+                    && matches!(d.get(b"Subtype"), Some(Object::Name(n)) if &**n == b"FileAttachment") =>
+            {
+                self.note("attachments", text(doc, value));
+                return;
+            }
+            _ => {}
+        }
+        out.put(key, self.walk(value, depth + 1));
     }
 }
 
@@ -406,6 +444,7 @@ fn each_object(
             policy,
             object: num,
             found: Vec::new(),
+            path: String::new(),
         };
         // An action that is an object of its own goes: the keys pointing
         // to it are dropped, and it is emptied.
@@ -423,9 +462,13 @@ fn each_object(
         }
         let new = match &obj {
             Object::Dict(d) if aa_objects.contains(&num) => {
-                Object::Dict(Arc::new(w.triggers(d, "/AA", 0)))
+                w.path = "/AA".into();
+                Object::Dict(Arc::new(w.triggers(d, 0)))
             }
-            _ => w.walk(&obj, &top_path(doc, num), 0),
+            _ => {
+                w.path = top_path(doc, num);
+                w.walk(&obj, 0)
+            }
         };
         found.extend(w.found.iter().cloned());
         if new != obj {
