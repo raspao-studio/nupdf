@@ -1,6 +1,6 @@
 # Benchmarks
 
-Speed of nupdf against MuPDF, the reference, and PDF Oxide ([oxide.fyi](https://oxide.fyi), the `pdf_oxide` crates). How the runs work is in [TESTING](TESTING.md#benchmarks); the milestone measures against MuPDF alone (render, text, scaling, `clean`, `merge`, `split`) are in [PLAN](PLAN.md) beside each milestone's exit. The raw data for this page is in `bench/results/2026-11-13-pdf_oxide/`.
+Speed of nupdf against MuPDF, the reference, and PDF Oxide ([oxide.fyi](https://oxide.fyi), the `pdf_oxide` crates). How the runs work is in [TESTING](TESTING.md#benchmarks); earlier runs against MuPDF alone (`clean`, `merge`, `split`, `render`, thread scaling) are [at the end](#against-mupdf-alone-earlier-runs). The raw data for this page is in `bench/results/2026-11-13-pdf_oxide/`.
 
 ## Against MuPDF and PDF Oxide, 2026-11-13
 
@@ -137,3 +137,11 @@ The bench also times Python in process, against nupdf's process time less its st
 - In the per-call comparison, MuPDF and PDF Oxide draw annotations and nupdf does not, and PDF Oxide's PNGs are RGBA. The CLI has no tables, annotations, signatures or page-box commands, and no speed-first text option.
 - The per-call `text` rows come from a rerun of that operation alone, after the CLI's page separators (`---` lines) were left out of its character count.
 - The machine was not idle. One-off spikes move single files; medians and geometric means damp them but do not remove them.
+
+## Against MuPDF alone, earlier runs
+
+Each with the code of its date, as processes, start included (`cargo xtask bench --tier T --sample N --pair NAME`). Ratios are MuPDF's time over nupdf's, as above.
+
+- **`clean`, `merge`, `split`, 2026-11-10**, on 300 standard-tier files: `nupdf clean` 614 ms in total against `mutool clean`'s 900 ms (geometric mean 1.50x), its read-back check included; `clean -gggg` 724 ms against 1,035 ms (1.48x); `clean -z` 916 ms against 1,050 ms (1.36x), where the check decodes every stream. `nupdf merge` of each file with itself 677 ms against `mutool merge`'s 924 ms (1.44x), links and outline included; `nupdf split` 935 ms against 1,518 ms for a MuPDF script that does the same (`oracle/js/split.js`; 1.94x, the script's overhead included). `clean` is slower on files of a megabyte or more, where hashing the input and the output for their `doc_id` costs more than MuPDF's whole save; `merge` and `split` on 5 to 11 files, the larger ones, for the same reason.
+- **`render`, 2026-11-11**, on 200 standard-tier files at 72 dpi against `mutool draw -N`: one thread, geometric mean 1.25x (1,293 ms in total against 1,357 ms); eight threads, 1.28x (the oracle is built without threads, so MuPDF runs on one).
+- **Thread scaling, 2026-11-12** (`stext-scaling`, `extract-scaling`: nupdf on one thread against eight, for documents of 50 pages or more that take 100 ms or more on one), on 6 performance and 12 efficiency cores with Finder, fseventsd and Spotlight each holding a core: on the standard tier `stext` 3.4x (one document qualifies), `extract` 2.8x (two); on the `long` tier (9 qualify) `stext` 2.36x in geometric mean and 1.29x in total time, `extract` 2.33x and 1.25x. The total was one document's: a single page of `long-006.pdf` took 2.3 s (MuPDF 2.0 s), which threads over pages cannot split. That page has since dropped to 0.02 s (its shading's sampled function had interpolated every corner of a cell), so these totals predate the fix; the scaling pairs have not been rerun since.

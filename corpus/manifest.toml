@@ -8,7 +8,7 @@
 #
 # `kind = "git"` sources are sparse, shallow clones of `paths` (gitignore-style
 # patterns). `kind = "manual"` sources are downloaded by hand into the
-# source's directory until fetching is automated (PLAN.md, M1).
+# source's directory until fetching is automated.
 
 [[source]]
 name = "pdfjs"

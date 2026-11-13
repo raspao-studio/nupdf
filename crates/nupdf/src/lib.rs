@@ -3,8 +3,7 @@
 
 //! nupdf: a memory-safe, parallel PDF engine rewritten in Rust from MuPDF.
 //!
-//! The roadmap lives in `docs/PLAN.md`; the module-to-MuPDF map in
-//! `docs/ARCHITECTURE.md`.
+//! The module-to-MuPDF map is in `docs/ARCHITECTURE.md`.
 
 pub mod annot;
 pub mod annot_edit;
