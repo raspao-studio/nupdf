@@ -676,14 +676,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hayro-jbig2"
-version = "0.4.0"
-dependencies = [
- "fearless_simd",
- "hayro-ccitt 0.5.0",
-]
-
-[[package]]
 name = "hayro-jpeg2000"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,13 +959,14 @@ dependencies = [
 
 [[package]]
 name = "nupdf"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "aes",
  "blake3",
  "brotli-decompressor",
+ "fearless_simd",
  "flate2",
- "hayro-jbig2 0.4.0",
+ "hayro-ccitt 0.5.0",
  "hayro-jpeg2000 0.5.0",
  "md-5",
  "memchr",
@@ -1044,7 +1037,7 @@ dependencies = [
  "fontdb",
  "getrandom",
  "harfrust",
- "hayro-jbig2 0.3.0",
+ "hayro-jbig2",
  "hayro-jpeg2000 0.4.1",
  "image",
  "jpeg-decoder",

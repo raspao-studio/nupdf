@@ -24,7 +24,3 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 
-# As the root workspace: nupdf's hayro-jbig2 0.4 with its guards. pdf_oxide
-# uses hayro-jbig2 0.3, which this does not touch.
-[patch.crates-io]
-hayro-jbig2 = { path = "../../vendor/hayro-jbig2" }
