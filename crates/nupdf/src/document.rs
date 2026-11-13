@@ -312,6 +312,11 @@ pub struct Document {
     edited: AtomicBool,
     /// Made by `create`, not read from a file.
     created: bool,
+    /// MuPDF's local xref: streams made only to be drawn (appearances an
+    /// annotation is given on loading its page), by their negative
+    /// numbers, which no object of the document has.
+    local: RwLock<HashMap<i32, Vec<u8>>>,
+    local_next: std::sync::atomic::AtomicI32,
 }
 
 /// The copy-on-write layer over the parsed document.
@@ -331,6 +336,29 @@ pub(crate) struct Edits {
     pub(crate) gens: HashMap<i32, i32>,
     /// The page map, built again after each edit as MuPDF drops it.
     pub(crate) page_map: Option<Option<crate::page::PageMap>>,
+}
+
+/// A stream of the document's local xref ([`Document::add_local_stream`]).
+#[derive(Debug)]
+pub struct LocalStream<'a> {
+    doc: &'a Document,
+    obj: Object,
+    num: i32,
+}
+
+impl LocalStream<'_> {
+    /// The stream, to be run as a form.
+    pub fn object(&self) -> &Object {
+        &self.obj
+    }
+}
+
+impl Drop for LocalStream<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut l) = self.doc.local.write() {
+            l.remove(&self.num);
+        }
+    }
 }
 
 /// Marks a repair error that came from the security handler.
@@ -440,6 +468,8 @@ impl Document {
             edits: RwLock::new(Edits::default()),
             edited: AtomicBool::new(false),
             created: false,
+            local: RwLock::new(HashMap::new()),
+            local_next: std::sync::atomic::AtomicI32::new(-1),
         };
 
         let loaded = if broken.is_none() && !is_fdf {
@@ -954,6 +984,27 @@ impl Document {
         });
     }
 
+    /// A stream of the local xref (`pdf_new_local_xref`'s objects): made
+    /// to be drawn and never part of the document, nor of what it writes.
+    /// It is a direct stream object with a negative number; it goes when
+    /// the [`LocalStream`] is dropped.
+    pub fn add_local_stream(&self, dict: Dict, data: Vec<u8>) -> LocalStream<'_> {
+        let num = self.local_next.fetch_sub(1, Ordering::Relaxed);
+        if let Ok(mut l) = self.local.write() {
+            l.insert(num, data);
+        }
+        let stream = Stream {
+            dict,
+            data_start: 0,
+            num,
+        };
+        LocalStream {
+            doc: self,
+            obj: Object::Stream(Arc::new(stream)),
+            num,
+        }
+    }
+
     /// Replaces the trailer.
     pub fn set_trailer(&self, trailer: Dict) {
         self.edit_mut(|e| e.trailer = Some(trailer));
@@ -1024,8 +1075,18 @@ impl Document {
         self.with_edits(|e| e.objects.get(&num).cloned()).flatten()
     }
 
-    /// The data of a stream the edits made.
+    /// The data of a stream the edits made, or of a local one.
     fn edited_data(&self, stream: &Stream) -> Option<Vec<u8>> {
+        // A local stream that is gone reads as empty, never as the file.
+        if stream.num < 0 {
+            return Some(
+                self.local
+                    .read()
+                    .ok()
+                    .and_then(|l| l.get(&stream.num).cloned())
+                    .unwrap_or_default(),
+            );
+        }
         self.with_edits(|e| e.data.get(&stream.num).cloned())
             .flatten()
     }
@@ -2323,6 +2384,28 @@ mod tests {
         );
         assert_eq!(doc.stream_data(&stream).ok(), Some(b"data".to_vec()));
         assert!(doc.is_edited());
+    }
+
+    #[test]
+    fn local_streams_are_read_while_kept_and_never_edit_the_document() {
+        let doc = doc(SIMPLE);
+        let len = doc.xref_len();
+        let a = doc.add_local_stream(Dict::new(), b"one".to_vec());
+        let b = doc.add_local_stream(Dict::new(), b"two".to_vec());
+        let data = |l: &LocalStream| match l.object() {
+            Object::Stream(s) => doc.stream_data(s).ok(),
+            _ => None,
+        };
+        assert_eq!(data(&a), Some(b"one".to_vec()));
+        assert_eq!(data(&b), Some(b"two".to_vec()));
+        assert!(!doc.is_edited());
+        assert_eq!(doc.xref_len(), len);
+        let Object::Stream(gone) = a.object().clone() else {
+            panic!("not a stream");
+        };
+        drop(a);
+        assert_eq!(doc.stream_data(&gone).ok(), Some(Vec::new()));
+        assert_eq!(data(&b), Some(b"two".to_vec()));
     }
 
     #[test]
