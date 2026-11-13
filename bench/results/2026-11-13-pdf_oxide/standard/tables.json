@@ -1,0 +1,2002 @@
+[
+  {
+    "file": "pdf-differences/Atomic-Fill+Stroke/FillStrokeOrdering.pdf",
+    "mupdf_ms": 5.05725,
+    "nupdf_ms": 2.623958,
+    "oxide_ms": 38.498,
+    "oxide_work_ms": 0.2896660002988938,
+    "oxide_import_ms": 18.268082999838953,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdf-differences/UnknownFilter/382252277877c00a92f3bb54daef1413bafe5557e2f5f7c32c23e800cd9bdcd4.pdf",
+    "mupdf_ms": 22.958583,
+    "nupdf_ms": 10.798958,
+    "oxide_ms": 41.549583,
+    "oxide_work_ms": 4.476125000110187,
+    "oxide_import_ms": 17.932958000073995,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/annotation_highlight_rollover_ap.pdf",
+    "mupdf_ms": 4.81175,
+    "nupdf_ms": 2.454542,
+    "oxide_ms": 37.065667,
+    "oxide_work_ms": 0.2513330000510905,
+    "oxide_import_ms": 17.38374999968073,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/bug_1206.pdf",
+    "mupdf_ms": 7.449584000000001,
+    "nupdf_ms": 2.6359999999999997,
+    "oxide_ms": 36.515499999999996,
+    "oxide_work_ms": 0.266208000084589,
+    "oxide_import_ms": 17.329834000065603,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/bug_182.pdf",
+    "mupdf_ms": 6.894458,
+    "nupdf_ms": 2.841292,
+    "oxide_ms": 38.278458,
+    "oxide_work_ms": 0.664790999962861,
+    "oxide_import_ms": 18.0707499998789,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/bug_425244539.pdf",
+    "mupdf_ms": 6.942834,
+    "nupdf_ms": 2.9995,
+    "oxide_ms": 37.341083,
+    "oxide_work_ms": 0.4877509995822038,
+    "oxide_import_ms": 17.47054100042078,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/bug_552046.pdf",
+    "mupdf_ms": 4.668417,
+    "nupdf_ms": 2.405125,
+    "oxide_ms": 36.823375,
+    "oxide_work_ms": 0.31087500019566505,
+    "oxide_import_ms": 17.409957999916514,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/bug_765384.pdf",
+    "mupdf_ms": 4.8525,
+    "nupdf_ms": 2.4044589999999997,
+    "oxide_ms": 37.824917,
+    "oxide_work_ms": 0.2658319999682135,
+    "oxide_import_ms": 18.09445799972309,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/cropped_text.pdf",
+    "mupdf_ms": 7.893084,
+    "nupdf_ms": 3.014541,
+    "oxide_ms": 37.892042000000004,
+    "oxide_work_ms": 0.7576669995614793,
+    "oxide_import_ms": 17.901083000197104,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/freetext_annotation_without_da.pdf",
+    "mupdf_ms": 4.817374999999999,
+    "nupdf_ms": 2.305708,
+    "oxide_ms": 37.516416,
+    "oxide_work_ms": 0.25700000014694524,
+    "oxide_import_ms": 18.18787499996688,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/jpeg_reduced_size_with_smask.pdf",
+    "mupdf_ms": 4.9520409999999995,
+    "nupdf_ms": 2.630167,
+    "oxide_ms": 36.900959,
+    "oxide_work_ms": 0.3438749999986612,
+    "oxide_import_ms": 17.605791999812936,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/page_tree_empty_node.pdf",
+    "mupdf_ms": 4.896707999999999,
+    "nupdf_ms": 2.33975,
+    "oxide_ms": 36.131707999999996,
+    "oxide_work_ms": 0.3006660003848083,
+    "oxide_import_ms": 17.346125000130996,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/pixel/bug_867501.pdf",
+    "mupdf_ms": 4.789209,
+    "nupdf_ms": 2.606458,
+    "oxide_ms": 37.859916,
+    "oxide_work_ms": 0.5446259997370362,
+    "oxide_import_ms": 18.037333999927796,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/repeat_viewer_ref.pdf",
+    "mupdf_ms": 5.0487079999999995,
+    "nupdf_ms": 2.4837499999999997,
+    "oxide_ms": null,
+    "oxide_work_ms": null,
+    "oxide_import_ms": null,
+    "nupdf_units": 0,
+    "oxide_units": null
+  },
+  {
+    "file": "pdfium/testing/resources/text_form_multiple.pdf",
+    "mupdf_ms": 5.083542,
+    "nupdf_ms": 2.585833,
+    "oxide_ms": 35.822083,
+    "oxide_work_ms": 0.4362089994174312,
+    "oxide_import_ms": 17.24445800027752,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfium/testing/resources/xfa/xfa_combobox.pdf",
+    "mupdf_ms": 4.6514169999999995,
+    "nupdf_ms": 2.3045829999999996,
+    "oxide_ms": 36.157458000000005,
+    "oxide_work_ms": 0.2397499997641717,
+    "oxide_import_ms": 17.321541999990586,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/TAMReview.pdf",
+    "mupdf_ms": 123.05975,
+    "nupdf_ms": 13.133000000000001,
+    "oxide_ms": 67.874083,
+    "oxide_work_ms": 30.11041500030842,
+    "oxide_import_ms": 17.591959000128554,
+    "nupdf_units": 4,
+    "oxide_units": 5
+  },
+  {
+    "file": "pdfjs/test/pdfs/annotation-squiggly-without-appearance.pdf",
+    "mupdf_ms": 4.965625,
+    "nupdf_ms": 2.48625,
+    "oxide_ms": 37.167125000000006,
+    "oxide_work_ms": 0.9144169998762663,
+    "oxide_import_ms": 17.36700000037672,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bitmap-composite-and-xnor-halftone.pdf",
+    "mupdf_ms": 4.858333,
+    "nupdf_ms": 2.454542,
+    "oxide_ms": 36.131334,
+    "oxide_work_ms": 0.3362089996699069,
+    "oxide_import_ms": 17.22741700041297,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bitmap-p32-eof.pdf",
+    "mupdf_ms": 4.639749999999999,
+    "nupdf_ms": 2.3965829999999997,
+    "oxide_ms": 37.146834,
+    "oxide_work_ms": 0.31587500006935443,
+    "oxide_import_ms": 17.833165999945777,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bitmap-symbol-symbolrefineseveral.pdf",
+    "mupdf_ms": 4.701958,
+    "nupdf_ms": 2.255667,
+    "oxide_ms": 37.337834,
+    "oxide_work_ms": 0.31399999988934724,
+    "oxide_import_ms": 18.2255830000031,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bitmap-symbol-texttoprighttranspose.pdf",
+    "mupdf_ms": 4.712375000000001,
+    "nupdf_ms": 2.206333,
+    "oxide_ms": 42.821,
+    "oxide_work_ms": 0.3888749997713603,
+    "oxide_import_ms": 20.556166999995185,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug1020226.pdf",
+    "mupdf_ms": 4.928334,
+    "nupdf_ms": 2.287459,
+    "oxide_ms": null,
+    "oxide_work_ms": null,
+    "oxide_import_ms": null,
+    "nupdf_units": 0,
+    "oxide_units": null
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug1529502.pdf",
+    "mupdf_ms": 7.907041,
+    "nupdf_ms": 8.768583,
+    "oxide_ms": 39.72375,
+    "oxide_work_ms": 2.0175839999865275,
+    "oxide_import_ms": 18.41187500031083,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug1796741.pdf",
+    "mupdf_ms": 4.7805,
+    "nupdf_ms": 2.2907499999999996,
+    "oxide_ms": 37.750667,
+    "oxide_work_ms": 0.27908299989576335,
+    "oxide_import_ms": 18.298458000117535,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug1907000_reduced.pdf",
+    "mupdf_ms": 7.095334,
+    "nupdf_ms": 8.488333,
+    "oxide_ms": 38.56975,
+    "oxide_work_ms": 0.9896670003399776,
+    "oxide_import_ms": 18.16145900011179,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug2035197_2.pdf",
+    "mupdf_ms": 4.791666,
+    "nupdf_ms": 2.3337499999999998,
+    "oxide_ms": 38.038166999999994,
+    "oxide_work_ms": 0.23912400001790957,
+    "oxide_import_ms": 18.292916000063997,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug921409.pdf",
+    "mupdf_ms": 7.255,
+    "nupdf_ms": 8.851875,
+    "oxide_ms": 38.992375,
+    "oxide_work_ms": 1.2888330002169823,
+    "oxide_import_ms": 18.387832999906095,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/crypt_filters.pdf",
+    "mupdf_ms": null,
+    "nupdf_ms": null,
+    "oxide_ms": 38.221041,
+    "oxide_work_ms": 0.76245900027061,
+    "oxide_import_ms": 18.09304100015652,
+    "nupdf_units": null,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/firefox_stamp.pdf",
+    "mupdf_ms": 4.768166,
+    "nupdf_ms": 2.45025,
+    "oxide_ms": 38.17,
+    "oxide_work_ms": 0.4036250002172892,
+    "oxide_import_ms": 18.35633400014558,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue10084_reduced.pdf",
+    "mupdf_ms": 7.033125,
+    "nupdf_ms": 2.648208,
+    "oxide_ms": 38.082333000000006,
+    "oxide_work_ms": 0.6474589999925229,
+    "oxide_import_ms": 18.091917000219837,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue11442_reduced.pdf",
+    "mupdf_ms": 7.067165999999999,
+    "nupdf_ms": 2.6852080000000003,
+    "oxide_ms": 38.207459,
+    "oxide_work_ms": 0.4451670001799357,
+    "oxide_import_ms": 18.31604100016193,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue12337.pdf",
+    "mupdf_ms": 176.85575,
+    "nupdf_ms": 23.022833,
+    "oxide_ms": 120.441166,
+    "oxide_work_ms": 80.7675000000927,
+    "oxide_import_ms": 18.549458000052255,
+    "nupdf_units": 1,
+    "oxide_units": 2
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue13343.pdf",
+    "mupdf_ms": 7.220375000000001,
+    "nupdf_ms": 8.315917,
+    "oxide_ms": 38.614250000000006,
+    "oxide_work_ms": 0.5739590001212491,
+    "oxide_import_ms": 18.231624999771157,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue14618.pdf",
+    "mupdf_ms": 6.723375,
+    "nupdf_ms": 8.305541,
+    "oxide_ms": 39.00875,
+    "oxide_work_ms": 1.1702510000759505,
+    "oxide_import_ms": 18.277875000421773,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue15557.pdf",
+    "mupdf_ms": 5.133209,
+    "nupdf_ms": 2.6280409999999996,
+    "oxide_ms": 38.834,
+    "oxide_work_ms": 0.9237499998562272,
+    "oxide_import_ms": 18.4804579998854,
+    "nupdf_units": 1,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue16316.pdf",
+    "mupdf_ms": 9.215083,
+    "nupdf_ms": 4.3721250000000005,
+    "oxide_ms": 41.439083000000004,
+    "oxide_work_ms": 4.330624999511201,
+    "oxide_import_ms": 18.178834000082137,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue17871_bottom_right.pdf",
+    "mupdf_ms": 4.849916,
+    "nupdf_ms": 2.4793749999999997,
+    "oxide_ms": 38.459708,
+    "oxide_work_ms": 0.33979199952227646,
+    "oxide_import_ms": 18.46620899959817,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue18768_stateful_spacing.pdf",
+    "mupdf_ms": 6.971749999999999,
+    "nupdf_ms": 2.5390420000000002,
+    "oxide_ms": 38.120167,
+    "oxide_work_ms": 0.46195799995985,
+    "oxide_import_ms": 18.374042000232297,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue19505.pdf",
+    "mupdf_ms": 4.7565,
+    "nupdf_ms": 2.44475,
+    "oxide_ms": 38.015667,
+    "oxide_work_ms": 0.31558399996356457,
+    "oxide_import_ms": 18.578165999770135,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue20504.pdf",
+    "mupdf_ms": 4.765834,
+    "nupdf_ms": 2.373333,
+    "oxide_ms": 37.975334,
+    "oxide_work_ms": 0.4151669995735574,
+    "oxide_import_ms": 17.98437500019645,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue2391-1.pdf",
+    "mupdf_ms": 7.1627920000000005,
+    "nupdf_ms": 2.802334,
+    "oxide_ms": 37.030167000000006,
+    "oxide_work_ms": 0.4765830003634619,
+    "oxide_import_ms": 17.242291000002297,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue3521.pdf",
+    "mupdf_ms": 6.944125,
+    "nupdf_ms": 8.108542,
+    "oxide_ms": 36.62225,
+    "oxide_work_ms": 0.5965010004729265,
+    "oxide_import_ms": 17.484957999840844,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue4800.pdf",
+    "mupdf_ms": 6.940209,
+    "nupdf_ms": 2.676666,
+    "oxide_ms": 37.659749999999995,
+    "oxide_work_ms": 1.0083330002998991,
+    "oxide_import_ms": 17.697083000257408,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue5549.pdf",
+    "mupdf_ms": 5.07575,
+    "nupdf_ms": 3.027667,
+    "oxide_ms": 37.501958,
+    "oxide_work_ms": 1.0947910000140837,
+    "oxide_import_ms": 17.87370900001406,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue6069.pdf",
+    "mupdf_ms": 7.252625,
+    "nupdf_ms": 2.588459,
+    "oxide_ms": 36.482333,
+    "oxide_work_ms": 0.6720409996887611,
+    "oxide_import_ms": 17.30720899968219,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue6769.pdf",
+    "mupdf_ms": 4.706625,
+    "nupdf_ms": 2.3267919999999997,
+    "oxide_ms": 38.331542000000006,
+    "oxide_work_ms": 0.2919989997280936,
+    "oxide_import_ms": 18.382125000243832,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue7544.pdf",
+    "mupdf_ms": 6.965042,
+    "nupdf_ms": 8.613917,
+    "oxide_ms": 38.899207999999994,
+    "oxide_work_ms": 0.9564999995745892,
+    "oxide_import_ms": 18.170417000419548,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue840.pdf",
+    "mupdf_ms": 30.873292,
+    "nupdf_ms": 15.582458,
+    "oxide_ms": 53.819084000000004,
+    "oxide_work_ms": 15.031916000225465,
+    "oxide_import_ms": 18.8661659999525,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue9291.pdf",
+    "mupdf_ms": 7.285167,
+    "nupdf_ms": 2.6779170000000003,
+    "oxide_ms": 38.397375,
+    "oxide_work_ms": 0.510875000145461,
+    "oxide_import_ms": 18.60279199991055,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/knockout_inner_backdrop.pdf",
+    "mupdf_ms": 5.110625,
+    "nupdf_ms": 2.592334,
+    "oxide_ms": 38.176666,
+    "oxide_work_ms": 0.34558299967102357,
+    "oxide_import_ms": 18.495333999908325,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/nonisolated_blend_smask.pdf",
+    "mupdf_ms": 7.354292,
+    "nupdf_ms": 2.7349580000000002,
+    "oxide_ms": 39.63775,
+    "oxide_work_ms": 0.6496669998341531,
+    "oxide_import_ms": 18.916208000064216,
+    "nupdf_units": 1,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/perf_images_16bit.pdf",
+    "mupdf_ms": 5.546416,
+    "nupdf_ms": 3.381209,
+    "oxide_ms": 39.159666,
+    "oxide_work_ms": 1.545666999845707,
+    "oxide_import_ms": 18.43279100012296,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/perf_shadings_mesh_patches.pdf",
+    "mupdf_ms": 4.732291,
+    "nupdf_ms": 2.4866659999999996,
+    "oxide_ms": 37.913250000000005,
+    "oxide_work_ms": 0.28737599996020435,
+    "oxide_import_ms": 18.299290999948425,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/perf_transparency_blend_modes.pdf",
+    "mupdf_ms": 10.738959,
+    "nupdf_ms": 6.437209,
+    "oxide_ms": 40.3705,
+    "oxide_work_ms": 2.6574590001473553,
+    "oxide_import_ms": 18.35741600007168,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/radial_gradients.pdf",
+    "mupdf_ms": 10.44675,
+    "nupdf_ms": 3.488083,
+    "oxide_ms": 39.599584,
+    "oxide_work_ms": 1.5297919999284204,
+    "oxide_import_ms": 18.441083000197978,
+    "nupdf_units": 17,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/standard_fonts.pdf",
+    "mupdf_ms": 65.996084,
+    "nupdf_ms": 33.549166,
+    "oxide_ms": 62.485040999999995,
+    "oxide_work_ms": 25.02500099990357,
+    "oxide_import_ms": 17.556540999976278,
+    "nupdf_units": 14,
+    "oxide_units": 0
+  },
+  {
+    "file": "pdfjs/test/pdfs/two_pages.pdf",
+    "mupdf_ms": 6.928792,
+    "nupdf_ms": 2.605667,
+    "oxide_ms": 37.488082999999996,
+    "oxide_work_ms": 1.0829990001184342,
+    "oxide_import_ms": 17.50050000009651,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/compare-for-test/qtest/compare/enc1.pdf",
+    "mupdf_ms": 14.121500000000001,
+    "nupdf_ms": 4.49275,
+    "oxide_ms": 38.919250000000005,
+    "oxide_work_ms": 0.9905000001708686,
+    "oxide_import_ms": 18.429624999953376,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/examples/qtest/custom-filter/input.pdf",
+    "mupdf_ms": 7.354583,
+    "nupdf_ms": 2.668584,
+    "oxide_ms": 38.56775,
+    "oxide_work_ms": 0.45370800035016146,
+    "oxide_import_ms": 18.393290999938472,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/examples/qtest/qpdf-job/in.pdf",
+    "mupdf_ms": 6.91625,
+    "nupdf_ms": 2.5270409999999996,
+    "oxide_ms": 37.919709000000005,
+    "oxide_work_ms": 0.4426250002325105,
+    "oxide_import_ms": 18.46966699986297,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/annotation-no-resources.pdf",
+    "mupdf_ms": 4.963125,
+    "nupdf_ms": 2.4398340000000003,
+    "oxide_ms": 38.60825,
+    "oxide_work_ms": 0.3202500001862063,
+    "oxide_import_ms": 18.557875000169588,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/bad-data-out.pdf",
+    "mupdf_ms": 4.98325,
+    "nupdf_ms": 2.4958329999999997,
+    "oxide_ms": 39.476833000000006,
+    "oxide_work_ms": 0.4163750004408939,
+    "oxide_import_ms": 18.792374999975436,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/bad24.pdf",
+    "mupdf_ms": 7.2347920000000006,
+    "nupdf_ms": 2.711834,
+    "oxide_ms": 37.365834,
+    "oxide_work_ms": 0.2872499999284628,
+    "oxide_import_ms": 18.307917000129237,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/boxes-flattened.pdf",
+    "mupdf_ms": 10.469583,
+    "nupdf_ms": 3.319041,
+    "oxide_ms": 38.90754200000001,
+    "oxide_work_ms": 1.6909150008359577,
+    "oxide_import_ms": 18.062084000121104,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/c-object-handle-creation-out.pdf",
+    "mupdf_ms": 7.033084000000001,
+    "nupdf_ms": 2.715541,
+    "oxide_ms": 38.31104199999999,
+    "oxide_work_ms": 0.4287500000828004,
+    "oxide_import_ms": 18.349083999964932,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/copied-positive-P.pdf",
+    "mupdf_ms": 14.322792000000002,
+    "nupdf_ms": 4.488125,
+    "oxide_ms": 39.338167,
+    "oxide_work_ms": 0.9520829999019044,
+    "oxide_import_ms": 18.658416000107536,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/direct-pages-fixed.pdf",
+    "mupdf_ms": 7.080375,
+    "nupdf_ms": 2.859083,
+    "oxide_ms": 38.748375,
+    "oxide_work_ms": 0.5192920002627943,
+    "oxide_import_ms": 18.733416000031863,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/enc-XI-R6,V5,U=wwwww,O=wwwww.pdf",
+    "mupdf_ms": 9.878083,
+    "nupdf_ms": 3.7369999999999997,
+    "oxide_ms": null,
+    "oxide_work_ms": null,
+    "oxide_import_ms": null,
+    "nupdf_units": 0,
+    "oxide_units": null
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/extra-header-newline.pdf",
+    "mupdf_ms": 6.806125,
+    "nupdf_ms": 2.5960419999999997,
+    "oxide_ms": 36.892416,
+    "oxide_work_ms": 0.42933299982905737,
+    "oxide_import_ms": 17.75674999998955,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/form-no-need-appearances.pdf",
+    "mupdf_ms": 4.70425,
+    "nupdf_ms": 2.4975840000000002,
+    "oxide_ms": 37.075790999999995,
+    "oxide_work_ms": 0.7901659996605304,
+    "oxide_import_ms": 17.704958000194893,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/global.pdf",
+    "mupdf_ms": 6.9835,
+    "nupdf_ms": 2.7253339999999997,
+    "oxide_ms": 36.11625,
+    "oxide_work_ms": 0.4343750001680746,
+    "oxide_import_ms": 17.182042000058573,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/i3.pdf",
+    "mupdf_ms": 4.77775,
+    "nupdf_ms": 2.507667,
+    "oxide_ms": 40.666042,
+    "oxide_work_ms": 0.4593750004460162,
+    "oxide_import_ms": 20.29129099992133,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/issue-119.pdf",
+    "mupdf_ms": 4.899125,
+    "nupdf_ms": 2.959625,
+    "oxide_ms": null,
+    "oxide_work_ms": null,
+    "oxide_import_ms": null,
+    "nupdf_units": 0,
+    "oxide_units": null
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/job-json-input-file-password.pdf",
+    "mupdf_ms": 7.714958,
+    "nupdf_ms": 2.974541,
+    "oxide_ms": 38.452167,
+    "oxide_work_ms": 1.0929959994427918,
+    "oxide_import_ms": 18.15233300021646,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/lin7.pdf",
+    "mupdf_ms": 8.365166,
+    "nupdf_ms": 2.875416,
+    "oxide_ms": 39.841083,
+    "oxide_work_ms": 1.7218300013155383,
+    "oxide_import_ms": 18.644208000296203,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/minimal-9.pdf",
+    "mupdf_ms": 6.967709,
+    "nupdf_ms": 2.679917,
+    "oxide_ms": 38.276833,
+    "oxide_work_ms": 0.4486249999899883,
+    "oxide_import_ms": 18.326792000152636,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/new-streams.pdf",
+    "mupdf_ms": 7.113,
+    "nupdf_ms": 2.590875,
+    "oxide_ms": 38.583375000000004,
+    "oxide_work_ms": 0.4533749997790437,
+    "oxide_import_ms": 18.66824999979144,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/outlines-split-01-10.pdf",
+    "mupdf_ms": 7.507917,
+    "nupdf_ms": 2.9316250000000004,
+    "oxide_ms": 38.551083,
+    "oxide_work_ms": 0.7314570007110888,
+    "oxide_import_ms": 18.578291999801877,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/page-outlines.pdf",
+    "mupdf_ms": 8.261709000000002,
+    "nupdf_ms": 2.876,
+    "oxide_ms": 39.246958,
+    "oxide_work_ms": 1.4837089997854491,
+    "oxide_import_ms": 18.3818750001592,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/qpdfjob-ctest4.pdf",
+    "mupdf_ms": 7.038042000000001,
+    "nupdf_ms": 2.759291,
+    "oxide_ms": 40.290375000000004,
+    "oxide_work_ms": 0.4630409998753749,
+    "oxide_import_ms": 19.173833999957424,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/rotated-shared-annotations-2.pdf",
+    "mupdf_ms": 8.170874999999999,
+    "nupdf_ms": 3.1920830000000002,
+    "oxide_ms": 39.568458,
+    "oxide_work_ms": 1.2167090003458725,
+    "oxide_import_ms": 18.76937499991982,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/shared-images-pages-out.pdf",
+    "mupdf_ms": 7.727625,
+    "nupdf_ms": 3.087542,
+    "oxide_ms": 39.073167,
+    "oxide_work_ms": 0.6281249998210114,
+    "oxide_import_ms": 18.930291999822657,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/split-exp-group-06-10.pdf",
+    "mupdf_ms": 7.589292,
+    "nupdf_ms": 2.7047920000000003,
+    "oxide_ms": 39.009958,
+    "oxide_work_ms": 0.6656260002273484,
+    "oxide_import_ms": 18.781624999974156,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/test84.pdf",
+    "mupdf_ms": 7.015083,
+    "nupdf_ms": 2.667417,
+    "oxide_ms": 39.018375,
+    "oxide_work_ms": 0.4255009998814785,
+    "oxide_import_ms": 18.709958999806982,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/update-stream-data-updated.pdf",
+    "mupdf_ms": 6.704084,
+    "nupdf_ms": 2.566083,
+    "oxide_ms": 37.225916999999995,
+    "oxide_work_ms": 0.43283199966026586,
+    "oxide_import_ms": 17.554666999785695,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "sample-files/010-pdflatex-forms/pdflatex-forms.pdf",
+    "mupdf_ms": 7.1024579999999995,
+    "nupdf_ms": 2.920209,
+    "oxide_ms": 38.607541000000005,
+    "oxide_work_ms": 1.0375010001553164,
+    "oxide_import_ms": 18.685999999888736,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/ISO 32000-1/veraPDF test suite 6-2-2-t01-fail-a.pdf",
+    "mupdf_ms": 9.441958,
+    "nupdf_ms": 4.047333,
+    "oxide_ms": 37.303625,
+    "oxide_work_ms": 0.3663339998638549,
+    "oxide_import_ms": 17.804291999709676,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.1 File structure/6.1.7 Stream objects/isartor-6-1-7-t02-fail-a.pdf",
+    "mupdf_ms": 4.571584,
+    "nupdf_ms": 2.352042,
+    "oxide_ms": 37.185083,
+    "oxide_work_ms": 0.29266700039443094,
+    "oxide_import_ms": 17.67658400012806,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.2 Graphics/6.2.3 Colour spaces/6.2.3.3 Uncalibrated colour spaces/isartor-6-2-3-3-t02-fail-h.pdf",
+    "mupdf_ms": 6.72325,
+    "nupdf_ms": 2.375416,
+    "oxide_ms": 38.36625,
+    "oxide_work_ms": 0.6309169998530706,
+    "oxide_import_ms": 18.284792000031302,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.2 Graphics/6.2.8 Extended graphics state/isartor-6-2-8-t01-fail-b.pdf",
+    "mupdf_ms": 4.836834,
+    "nupdf_ms": 2.511292,
+    "oxide_ms": 37.832916000000004,
+    "oxide_work_ms": 0.32137399966813973,
+    "oxide_import_ms": 18.291792000127316,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.3 Fonts/6.3.5 Font subsets/isartor-6-3-5-t01-fail-d.pdf",
+    "mupdf_ms": 7.550583,
+    "nupdf_ms": 3.569083,
+    "oxide_ms": 38.518917,
+    "oxide_work_ms": 0.6732499996360275,
+    "oxide_import_ms": 18.410790999951132,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.5 Annotations/6.5.3 Annotation dictionaries/isartor-6-5-3-t01-fail-a.pdf",
+    "mupdf_ms": 4.861792,
+    "nupdf_ms": 2.542,
+    "oxide_ms": 37.837084,
+    "oxide_work_ms": 0.3185420000590966,
+    "oxide_import_ms": 18.608165999921766,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.6 Actions/6.6.1 General/isartor-6-6-1-t02-fail-d.pdf",
+    "mupdf_ms": 4.872583,
+    "nupdf_ms": 2.415375,
+    "oxide_ms": 38.34875,
+    "oxide_work_ms": 0.28270900020288536,
+    "oxide_import_ms": 18.519917000048736,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.7 Metadata/6.7.11 Version and conformance level identification/isartor-6-7-11-t01-fail-a.pdf",
+    "mupdf_ms": 4.711167,
+    "nupdf_ms": 2.3982919999999996,
+    "oxide_ms": 37.731542,
+    "oxide_work_ms": 0.2926669999396836,
+    "oxide_import_ms": 18.329167000047164,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.7 Metadata/6.7.9 Validation/isartor-6-7-9-t01-fail-a.pdf",
+    "mupdf_ms": 4.722583,
+    "nupdf_ms": 2.52225,
+    "oxide_ms": 38.728792,
+    "oxide_work_ms": 0.3024580000783317,
+    "oxide_import_ms": 18.717915999786783,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1a/6.8 Logical structure/6.8.3 Artifacts/6.8.3.4 Structure types/veraPDF test suite 6-8-3-4-t01-pass-a.pdf",
+    "mupdf_ms": 5.03175,
+    "nupdf_ms": 2.4082909999999997,
+    "oxide_ms": 38.340542,
+    "oxide_work_ms": 0.28308400032983627,
+    "oxide_import_ms": 18.601958999624912,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.1 File structure/6.1.12 Implementation limits/veraPDF test suite 6-1-12-t02-pass-i.pdf",
+    "mupdf_ms": 6.738583,
+    "nupdf_ms": 2.736333,
+    "oxide_ms": 38.255083,
+    "oxide_work_ms": 0.5499990002135746,
+    "oxide_import_ms": 18.355249999785883,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.1 File structure/6.1.2 File header/veraPDF test suite 6-1-2-t02-pass-a.pdf",
+    "mupdf_ms": 6.824541,
+    "nupdf_ms": 2.526917,
+    "oxide_ms": 38.508792,
+    "oxide_work_ms": 0.5814159999317781,
+    "oxide_import_ms": 18.421167000269634,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.1 File structure/6.1.6 String objects/veraPDF test suite 6-1-6-t01-fail-a.pdf",
+    "mupdf_ms": 7.135,
+    "nupdf_ms": 2.860084,
+    "oxide_ms": 38.955084,
+    "oxide_work_ms": 1.1317909998069808,
+    "oxide_import_ms": 18.369041999903857,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.2 Graphics/6.2.3.3 Uncalibrated color space/veraPDF test suite 6-2-3-3-t01-fail-u.pdf",
+    "mupdf_ms": 6.968542,
+    "nupdf_ms": 2.690541,
+    "oxide_ms": 37.477084,
+    "oxide_work_ms": 0.9851240001808036,
+    "oxide_import_ms": 17.545333000271057,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.2 Graphics/6.2.4 Images/veraPDF test suite 6-2-4-t03-pass-a.pdf",
+    "mupdf_ms": 4.847542,
+    "nupdf_ms": 2.447708,
+    "oxide_ms": 36.736,
+    "oxide_work_ms": 0.3829590000350436,
+    "oxide_import_ms": 17.72854199998619,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.4 Transparency/veraPDF test suite 6-4-t01-pass-a.pdf",
+    "mupdf_ms": 6.663292,
+    "nupdf_ms": 2.6234159999999997,
+    "oxide_ms": 37.314375,
+    "oxide_work_ms": 0.5815839999741002,
+    "oxide_import_ms": 18.018165999819757,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t03-fail-m.pdf",
+    "mupdf_ms": 4.637625,
+    "nupdf_ms": 2.285292,
+    "oxide_ms": 36.657166,
+    "oxide_work_ms": 0.32312499979525455,
+    "oxide_import_ms": 17.3989579998306,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t06-fail-m.pdf",
+    "mupdf_ms": 4.656124999999999,
+    "nupdf_ms": 2.375458,
+    "oxide_ms": 36.498625,
+    "oxide_work_ms": 0.3474579993962834,
+    "oxide_import_ms": 17.597458000182087,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t07-fail-g.pdf",
+    "mupdf_ms": 4.757499999999999,
+    "nupdf_ms": 2.442334,
+    "oxide_ms": 37.735625,
+    "oxide_work_ms": 0.34633400036909734,
+    "oxide_import_ms": 18.278541999734443,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t09-fail-c.pdf",
+    "mupdf_ms": 4.85925,
+    "nupdf_ms": 2.367333,
+    "oxide_ms": 38.366625,
+    "oxide_work_ms": 0.3391670002201863,
+    "oxide_import_ms": 18.49362500024654,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t09-pass-m.pdf",
+    "mupdf_ms": 4.754917,
+    "nupdf_ms": 2.444375,
+    "oxide_ms": 38.204625,
+    "oxide_work_ms": 0.36016600006405497,
+    "oxide_import_ms": 18.447708999701717,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t13-fail-j.pdf",
+    "mupdf_ms": 4.8435,
+    "nupdf_ms": 2.5048340000000002,
+    "oxide_ms": 38.096125,
+    "oxide_work_ms": 0.37562499983323505,
+    "oxide_import_ms": 18.40425000000323,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t14-fail-h.pdf",
+    "mupdf_ms": 4.8745,
+    "nupdf_ms": 2.506917,
+    "oxide_ms": 38.268292,
+    "oxide_work_ms": 0.3793340001720935,
+    "oxide_import_ms": 18.539125000188506,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t14-pass-i.pdf",
+    "mupdf_ms": 5.091082999999999,
+    "nupdf_ms": 2.4082079999999997,
+    "oxide_ms": 38.27675,
+    "oxide_work_ms": 0.3531659995132941,
+    "oxide_import_ms": 18.475416999990557,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t15-fail-i.pdf",
+    "mupdf_ms": 4.80125,
+    "nupdf_ms": 2.54575,
+    "oxide_ms": 38.064209,
+    "oxide_work_ms": 0.32466699985889136,
+    "oxide_import_ms": 18.39658299968505,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t15-pass-j.pdf",
+    "mupdf_ms": 4.9027080000000005,
+    "nupdf_ms": 2.432292,
+    "oxide_ms": 39.216583,
+    "oxide_work_ms": 0.35916600018026656,
+    "oxide_import_ms": 18.56583300013881,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t16-fail-k.pdf",
+    "mupdf_ms": 4.82775,
+    "nupdf_ms": 2.425917,
+    "oxide_ms": 38.962792,
+    "oxide_work_ms": 0.3642920000856975,
+    "oxide_import_ms": 18.970416999763984,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t16-pass-k.pdf",
+    "mupdf_ms": 5.013916999999999,
+    "nupdf_ms": 2.413834,
+    "oxide_ms": 39.174958000000004,
+    "oxide_work_ms": 0.3766250001717708,
+    "oxide_import_ms": 18.8630830002694,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t17-fail-l.pdf",
+    "mupdf_ms": 4.883125000000001,
+    "nupdf_ms": 2.362083,
+    "oxide_ms": 50.527417,
+    "oxide_work_ms": 0.35849999949277844,
+    "oxide_import_ms": 24.87041700032933,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t17-pass-l.pdf",
+    "mupdf_ms": 5.96,
+    "nupdf_ms": 3.5596669999999997,
+    "oxide_ms": 47.242542,
+    "oxide_work_ms": 0.3650410003501747,
+    "oxide_import_ms": 22.053832999972656,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.3 Document information dictionary/veraPDF test suite 6-7-3-t03-fail-b.pdf",
+    "mupdf_ms": 7.628958,
+    "nupdf_ms": 3.0545,
+    "oxide_ms": 45.53575,
+    "oxide_work_ms": 0.6661669995082775,
+    "oxide_import_ms": 21.841875000063737,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.9 Validation/veraPDF test suite 6-7-9-t04-pass-h.pdf",
+    "mupdf_ms": 5.503416,
+    "nupdf_ms": 2.9681249999999997,
+    "oxide_ms": 47.546917,
+    "oxide_work_ms": 0.4067909999321273,
+    "oxide_import_ms": 23.336291999839887,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2a/6.2 Graphics/6.2.11 Fonts/6.2.11.7 Unicode character maps/6.2.11.7.3 Level A conformance/veraPDF test suite 6-2-11-7-3-t01-pass-e.pdf",
+    "mupdf_ms": 6.050083000000001,
+    "nupdf_ms": 3.451833,
+    "oxide_ms": 46.107958999999994,
+    "oxide_work_ms": 0.9601669999028672,
+    "oxide_import_ms": 22.7564589999929,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.1 File structure/6.1.13 Implementation limits/veraPDF test suite 6-1-13-t01-fail-a.pdf",
+    "mupdf_ms": 7.859167,
+    "nupdf_ms": 3.234042,
+    "oxide_ms": 44.468917,
+    "oxide_work_ms": 0.6760830001439899,
+    "oxide_import_ms": 21.718709000197123,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.1 File structure/6.1.2 File header/veraPDF test suite 6-1-2-t02-fail-c.pdf",
+    "mupdf_ms": 5.717584,
+    "nupdf_ms": 3.1150420000000003,
+    "oxide_ms": 46.965459,
+    "oxide_work_ms": 0.3152919998683501,
+    "oxide_import_ms": 22.902208999767023,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.1 File structure/6.1.9 Indirect objects/veraPDF test suite 6-1-9-t03-fail-b.pdf",
+    "mupdf_ms": 7.834834000000001,
+    "nupdf_ms": 2.972584,
+    "oxide_ms": 46.408625,
+    "oxide_work_ms": 0.3483749997030827,
+    "oxide_import_ms": 22.308209000129864,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.10 Transparency/veraPDF test suite 6-2-10-t04-fail-c.pdf",
+    "mupdf_ms": 8.0465,
+    "nupdf_ms": 3.1225,
+    "oxide_ms": 45.007833999999995,
+    "oxide_work_ms": 0.7024579999779235,
+    "oxide_import_ms": 21.44004199999472,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.10 Transparency/veraPDF test suite 6-2-10-t07-fail-a.pdf",
+    "mupdf_ms": 5.8379579999999995,
+    "nupdf_ms": 2.926167,
+    "oxide_ms": 39.972,
+    "oxide_work_ms": 0.37804200019309064,
+    "oxide_import_ms": 19.50595800008159,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.11 Fonts/6.2.11.3 Composite fonts/6.2.11.3.3 CMaps/veraPDF test suite 6-2-11-3-3-t03-fail-b.pdf",
+    "mupdf_ms": 7.595125,
+    "nupdf_ms": 4.064166,
+    "oxide_ms": 40.361833,
+    "oxide_work_ms": 1.0405829998489935,
+    "oxide_import_ms": 19.145165999816527,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.11 Fonts/6.2.11.6 Character encodings/veraPDF test suite 6-2-11-6-t02-pass-a.pdf",
+    "mupdf_ms": 7.093458,
+    "nupdf_ms": 2.771834,
+    "oxide_ms": 39.817667,
+    "oxide_work_ms": 0.9271249996345432,
+    "oxide_import_ms": 18.96716600003856,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.3 Output intent/veraPDF test suite 6-2-3-t01-pass-a.pdf",
+    "mupdf_ms": 5.009208999999999,
+    "nupdf_ms": 2.416708,
+    "oxide_ms": 39.799,
+    "oxide_work_ms": 0.2819580004143063,
+    "oxide_import_ms": 18.938832999992883,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t01-fail-n.pdf",
+    "mupdf_ms": 8.163833,
+    "nupdf_ms": 4.88025,
+    "oxide_ms": 40.391375000000004,
+    "oxide_work_ms": 0.4185419998066209,
+    "oxide_import_ms": 19.34574999995675,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t03-fail-a.pdf",
+    "mupdf_ms": 6.690875,
+    "nupdf_ms": 2.424417,
+    "oxide_ms": 38.940166999999995,
+    "oxide_work_ms": 0.28554200025610044,
+    "oxide_import_ms": 18.800291999923505,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.4.4 Separation and DeviceN colour spaces/veraPDF test suite 6-2-4-4-t03-fail-a.pdf",
+    "mupdf_ms": 5.152959,
+    "nupdf_ms": 2.365833,
+    "oxide_ms": 38.947750000000006,
+    "oxide_work_ms": 0.30550000019502477,
+    "oxide_import_ms": 19.07783299975563,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.8 Images/6.2.8.1 General/veraPDF test suite 6-2-8-1-t02-fail-b.pdf",
+    "mupdf_ms": 5.129167,
+    "nupdf_ms": 2.6891670000000003,
+    "oxide_ms": 41.098834000000004,
+    "oxide_work_ms": 0.2948329997707333,
+    "oxide_import_ms": 19.963082999765906,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.3 Annotations/6.3.2 Annotation dictionaries/veraPDF test suite 6-3-2-t01-fail-d.pdf",
+    "mupdf_ms": 4.872541999999999,
+    "nupdf_ms": 2.4529590000000003,
+    "oxide_ms": 38.2725,
+    "oxide_work_ms": 0.307041000269237,
+    "oxide_import_ms": 18.26100000016595,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.3 Annotations/6.3.3 Annotation appearances/veraPDF test suite 6-3-3-t01-fail-c.pdf",
+    "mupdf_ms": 4.890708,
+    "nupdf_ms": 2.515708,
+    "oxide_ms": 38.001833,
+    "oxide_work_ms": 0.27050100015912903,
+    "oxide_import_ms": 18.681458000173738,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.3 Annotations/6.3.3 Annotation appearances/veraPDF test suite 6-3-3-t02-fail-b.pdf",
+    "mupdf_ms": 4.933333,
+    "nupdf_ms": 2.443709,
+    "oxide_ms": 37.38525,
+    "oxide_work_ms": 0.30333299946505576,
+    "oxide_import_ms": 17.944959000033123,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.5 Action/6.5.2 Trigger events/veraPDF test suite 6-5-2-t01-fail-b.pdf",
+    "mupdf_ms": 4.731542,
+    "nupdf_ms": 2.483541,
+    "oxide_ms": 39.611458,
+    "oxide_work_ms": 0.29270800041558687,
+    "oxide_import_ms": 19.26741699980994,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t01-fail-v.pdf",
+    "mupdf_ms": 5.152458,
+    "nupdf_ms": 2.504792,
+    "oxide_ms": 39.788625,
+    "oxide_work_ms": 0.36337400024422095,
+    "oxide_import_ms": 19.30629200023759,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t01-pass-v.pdf",
+    "mupdf_ms": 5.142334,
+    "nupdf_ms": 2.5423329999999997,
+    "oxide_ms": 40.699708,
+    "oxide_work_ms": 0.34258300001965836,
+    "oxide_import_ms": 19.42054199980703,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t02-fail-u.pdf",
+    "mupdf_ms": 5.403459,
+    "nupdf_ms": 2.464334,
+    "oxide_ms": 39.548833,
+    "oxide_work_ms": 0.38462400016214815,
+    "oxide_import_ms": 19.051791000038065,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t02-pass-u.pdf",
+    "mupdf_ms": 5.205042,
+    "nupdf_ms": 2.623083,
+    "oxide_ms": 39.076792,
+    "oxide_work_ms": 0.3789170000345621,
+    "oxide_import_ms": 18.813124999724096,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t04-fail-k.pdf",
+    "mupdf_ms": 5.114083,
+    "nupdf_ms": 2.574083,
+    "oxide_ms": 40.035208000000004,
+    "oxide_work_ms": 0.3442090001044562,
+    "oxide_import_ms": 19.04462500033333,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t04-pass-k.pdf",
+    "mupdf_ms": 5.004583,
+    "nupdf_ms": 2.623417,
+    "oxide_ms": 39.574084,
+    "oxide_work_ms": 0.35849900041284855,
+    "oxide_import_ms": 18.685583000205952,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t05-fail-j.pdf",
+    "mupdf_ms": 4.792166,
+    "nupdf_ms": 2.4222089999999996,
+    "oxide_ms": 40.944,
+    "oxide_work_ms": 0.3447080002842995,
+    "oxide_import_ms": 19.180708000021696,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t06-fail-f.pdf",
+    "mupdf_ms": 5.19875,
+    "nupdf_ms": 3.4774160000000003,
+    "oxide_ms": 39.956792,
+    "oxide_work_ms": 0.35991599997942103,
+    "oxide_import_ms": 19.025125000098345,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t07-fail-a.pdf",
+    "mupdf_ms": 4.9774579999999995,
+    "nupdf_ms": 2.502875,
+    "oxide_ms": 39.584541,
+    "oxide_work_ms": 0.3332500000396976,
+    "oxide_import_ms": 19.252957999924547,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t08-fail-b.pdf",
+    "mupdf_ms": 4.919709,
+    "nupdf_ms": 2.3815,
+    "oxide_ms": 39.599666,
+    "oxide_work_ms": 0.3504169999359874,
+    "oxide_import_ms": 19.212167000205227,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t09-pass-b.pdf",
+    "mupdf_ms": 4.99925,
+    "nupdf_ms": 2.4365419999999998,
+    "oxide_ms": 39.205667,
+    "oxide_work_ms": 0.3655420005088672,
+    "oxide_import_ms": 18.334166999920853,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t11-pass-e.pdf",
+    "mupdf_ms": 4.759209,
+    "nupdf_ms": 2.493833,
+    "oxide_ms": 37.834875,
+    "oxide_work_ms": 0.3332919995955308,
+    "oxide_import_ms": 18.1192079999164,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t13-pass-f.pdf",
+    "mupdf_ms": 4.969125,
+    "nupdf_ms": 2.4205,
+    "oxide_ms": 39.550834,
+    "oxide_work_ms": 0.33041599999705795,
+    "oxide_import_ms": 19.020875000023807,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t14-fail-q.pdf",
+    "mupdf_ms": 5.222084,
+    "nupdf_ms": 2.423875,
+    "oxide_ms": 38.754292,
+    "oxide_work_ms": 0.3763759996218141,
+    "oxide_import_ms": 18.67362499979208,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t14-pass-r.pdf",
+    "mupdf_ms": 4.9025,
+    "nupdf_ms": 2.6080840000000003,
+    "oxide_ms": 39.286334,
+    "oxide_work_ms": 0.35445900039121625,
+    "oxide_import_ms": 19.01458400016054,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t15-fail-s.pdf",
+    "mupdf_ms": 5.089958,
+    "nupdf_ms": 2.615416,
+    "oxide_ms": 39.392291,
+    "oxide_work_ms": 0.34716600021056365,
+    "oxide_import_ms": 19.141207999837206,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t15-pass-t.pdf",
+    "mupdf_ms": 5.2074169999999995,
+    "nupdf_ms": 2.606584,
+    "oxide_ms": 39.328542,
+    "oxide_work_ms": 0.3736249996109109,
+    "oxide_import_ms": 18.960332999995444,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t16-fail-v.pdf",
+    "mupdf_ms": 4.9796249999999995,
+    "nupdf_ms": 2.582541,
+    "oxide_ms": 39.565667,
+    "oxide_work_ms": 0.367999999980384,
+    "oxide_import_ms": 19.08966600012718,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t16-pass-w.pdf",
+    "mupdf_ms": 4.9607920000000005,
+    "nupdf_ms": 2.5484169999999997,
+    "oxide_ms": 39.128375,
+    "oxide_work_ms": 0.3657919996840064,
+    "oxide_import_ms": 18.977124999764783,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t17-fail-x.pdf",
+    "mupdf_ms": 4.994459,
+    "nupdf_ms": 2.491708,
+    "oxide_ms": 39.333417000000004,
+    "oxide_work_ms": 0.3907499999513675,
+    "oxide_import_ms": 18.82495800009565,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t17-pass-w.pdf",
+    "mupdf_ms": 5.012542,
+    "nupdf_ms": 2.4003330000000003,
+    "oxide_ms": 39.131625,
+    "oxide_work_ms": 0.36895900029776385,
+    "oxide_import_ms": 18.70958299969061,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.3 Extension schema container schemas/veraPDF test suite 6-6-2-3-3-t02-fail-c.pdf",
+    "mupdf_ms": 4.872083,
+    "nupdf_ms": 2.5078750000000003,
+    "oxide_ms": 39.380541,
+    "oxide_work_ms": 0.34654200044315076,
+    "oxide_import_ms": 18.903250000221306,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.9 Optional content/veraPDF test suite 6-9-t03-pass-a.pdf",
+    "mupdf_ms": 5.0980419999999995,
+    "nupdf_ms": 2.58625,
+    "oxide_ms": 40.087625,
+    "oxide_work_ms": 0.4589579998537374,
+    "oxide_import_ms": 19.201333000182785,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-3b/6.8 Embedded files/veraPDF test suite 6-8-t02-fail-b.pdf",
+    "mupdf_ms": 9.59,
+    "nupdf_ms": 3.244292,
+    "oxide_ms": 42.003541999999996,
+    "oxide_work_ms": 1.681959000052302,
+    "oxide_import_ms": 19.557167000129994,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.1 File structure/6.1.2 File header/veraPDF test suite 6-1-2-t02-fail-d.pdf",
+    "mupdf_ms": 4.996416,
+    "nupdf_ms": 2.51425,
+    "oxide_ms": 39.349334,
+    "oxide_work_ms": 0.28041599989592214,
+    "oxide_import_ms": 18.569290999948866,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.1 File structure/6.1.7 Name objects/veraPDF test suite 6-1-7-t01-fail-c.pdf",
+    "mupdf_ms": 6.746290999999999,
+    "nupdf_ms": 2.657959,
+    "oxide_ms": 38.524417,
+    "oxide_work_ms": 0.597249999827909,
+    "oxide_import_ms": 18.173416999616165,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.10 Fonts/6.2.10.3 Composite fonts/6.2.10.3.1 General/veraPDF test suite 6-2-10-3-1-t01-fail-c.pdf",
+    "mupdf_ms": 7.045375000000001,
+    "nupdf_ms": 3.227792,
+    "oxide_ms": 40.211416,
+    "oxide_work_ms": 1.0753330002444272,
+    "oxide_import_ms": 18.70812500010288,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.10 Fonts/6.2.10.5 Font metrics/veraPDF test suite 6-2-10-5-t01-fail-a.pdf",
+    "mupdf_ms": 7.030875,
+    "nupdf_ms": 2.6990410000000002,
+    "oxide_ms": 37.352292000000006,
+    "oxide_work_ms": 0.7714999997006089,
+    "oxide_import_ms": 17.42770800001381,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.10 Fonts/6.2.10.8 Use of ActualText/veraPDF test suite 6-2-10-8-t01-pass-b.pdf",
+    "mupdf_ms": 4.938209,
+    "nupdf_ms": 2.467,
+    "oxide_ms": 36.836833,
+    "oxide_work_ms": 0.8065420001912571,
+    "oxide_import_ms": 17.526791999898705,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.3 Output intent/veraPDF test suite 6-2-3-t01-fail-c.pdf",
+    "mupdf_ms": 4.897042,
+    "nupdf_ms": 2.302083,
+    "oxide_ms": 36.183667,
+    "oxide_work_ms": 0.2681659998415853,
+    "oxide_import_ms": 17.517917000077432,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.2 ICCBased colour spaces/veraPDF test suite 6-2-4-2-t03-pass-c.pdf",
+    "mupdf_ms": 22.803041,
+    "nupdf_ms": 7.698125,
+    "oxide_ms": 37.838457999999996,
+    "oxide_work_ms": 0.4970410000169067,
+    "oxide_import_ms": 18.115291999947654,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t01-pass-d.pdf",
+    "mupdf_ms": 7.412707999999999,
+    "nupdf_ms": 4.429375,
+    "oxide_ms": 37.536334,
+    "oxide_work_ms": 0.3724999996848055,
+    "oxide_import_ms": 18.038916000023164,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t04-fail-b.pdf",
+    "mupdf_ms": 4.784792,
+    "nupdf_ms": 2.357291,
+    "oxide_ms": 37.468709000000004,
+    "oxide_work_ms": 0.292998999611882,
+    "oxide_import_ms": 18.099625000104425,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t04-pass-e.pdf",
+    "mupdf_ms": 8.056625,
+    "nupdf_ms": 4.747416,
+    "oxide_ms": 37.792375,
+    "oxide_work_ms": 0.4605410003932775,
+    "oxide_import_ms": 18.444084000293515,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.4 Separation and DeviceN colour spaces/veraPDF test suite 6-2-4-4-t02-fail-c.pdf",
+    "mupdf_ms": 4.692584,
+    "nupdf_ms": 2.3475,
+    "oxide_ms": 37.563041,
+    "oxide_work_ms": 0.3019579999090638,
+    "oxide_import_ms": 17.93095799985167,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.7 Images/6.2.7.1 General/veraPDF test suite 6-2-7-1-t03-fail-a.pdf",
+    "mupdf_ms": 4.884417,
+    "nupdf_ms": 2.326042,
+    "oxide_ms": 37.508,
+    "oxide_work_ms": 0.33966599994528224,
+    "oxide_import_ms": 18.27637499991397,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.9 Transparency/veraPDF test suite 6-2-9-t03-fail-d.pdf",
+    "mupdf_ms": 6.568208,
+    "nupdf_ms": 2.39375,
+    "oxide_ms": 37.627125,
+    "oxide_work_ms": 0.32179199979509576,
+    "oxide_import_ms": 17.986999999720865,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.9 Transparency/veraPDF test suite 6-2-9-t05-pass-a.pdf",
+    "mupdf_ms": 4.607583,
+    "nupdf_ms": 2.40775,
+    "oxide_ms": 37.026709,
+    "oxide_work_ms": 0.29620800023621996,
+    "oxide_import_ms": 17.876375000014377,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.3 Annotations/6.3.2 Annotation dictionaries/veraPDF test suite 6-3-2-t01-fail-c.pdf",
+    "mupdf_ms": 4.828333,
+    "nupdf_ms": 2.3728339999999997,
+    "oxide_ms": 37.54625,
+    "oxide_work_ms": 0.2827500002240413,
+    "oxide_import_ms": 18.41666699965572,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.3 Annotations/6.3.3 Annotation appearances/veraPDF test suite 6-3-3-t01-fail-a.pdf",
+    "mupdf_ms": 5.030457999999999,
+    "nupdf_ms": 3.0709999999999997,
+    "oxide_ms": 37.985583000000005,
+    "oxide_work_ms": 0.2650420001373277,
+    "oxide_import_ms": 18.251457999667764,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.3 Annotations/6.3.3 Annotation appearances/veraPDF test suite 6-3-3-t02-pass-a.pdf",
+    "mupdf_ms": 4.790708,
+    "nupdf_ms": 2.385583,
+    "oxide_ms": 37.147542,
+    "oxide_work_ms": 0.27949999957854743,
+    "oxide_import_ms": 17.89870799984783,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.6 Action/6.6.3 Trigger events/veraPDF test suite 6-6-3-t01-fail-b.pdf",
+    "mupdf_ms": 4.881333,
+    "nupdf_ms": 2.426625,
+    "oxide_ms": 36.906542,
+    "oxide_work_ms": 0.3005819999088999,
+    "oxide_import_ms": 17.820666000261554,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.9 Embedded files/veraPDF test suite 6-9-t02-fail-a.pdf",
+    "mupdf_ms": 4.748291,
+    "nupdf_ms": 2.3357080000000003,
+    "oxide_ms": 36.181375,
+    "oxide_work_ms": 0.2614579998407862,
+    "oxide_import_ms": 17.664500000137195,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_A-4f/6.3 Annotations/6.3.2 Annotation dictionaries/veraPDF test suite 6-3-2-t01-fail-a.pdf",
+    "mupdf_ms": 4.688958,
+    "nupdf_ms": 2.308666,
+    "oxide_ms": 36.230792,
+    "oxide_work_ms": 0.2837500001078297,
+    "oxide_import_ms": 17.55441700015581,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.1 General/7.1-t02-pass-b.pdf",
+    "mupdf_ms": 5.287624999999999,
+    "nupdf_ms": 2.8308750000000003,
+    "oxide_ms": 37.103583,
+    "oxide_work_ms": 1.3415830003395968,
+    "oxide_import_ms": 17.125666000083584,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.10 Optional content/7.10-t01-fail-b.pdf",
+    "mupdf_ms": 7.136291,
+    "nupdf_ms": 8.462166999999999,
+    "oxide_ms": 37.62625,
+    "oxide_work_ms": 1.6970000001492735,
+    "oxide_import_ms": 17.421333999664057,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.18 Annotations/7.18.1 General/7.18.1-t03-fail-b.pdf",
+    "mupdf_ms": 5.978166,
+    "nupdf_ms": 2.956667,
+    "oxide_ms": 38.594166,
+    "oxide_work_ms": 1.453792000120302,
+    "oxide_import_ms": 18.099249999977474,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.18 Annotations/7.18.6 Media/7.18.6.2 Media clip data/7.18.6.2-t02-pass-a.pdf",
+    "mupdf_ms": 5.042167,
+    "nupdf_ms": 2.756166,
+    "oxide_ms": 38.583959,
+    "oxide_work_ms": 1.1444579999988491,
+    "oxide_import_ms": 18.255417000091256,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.2 Text/7.2-t15-pass-a.pdf",
+    "mupdf_ms": 5.363583,
+    "nupdf_ms": 2.776833,
+    "oxide_ms": 38.690584,
+    "oxide_work_ms": 1.2764579996655812,
+    "oxide_import_ms": 18.286166000052617,
+    "nupdf_units": 1,
+    "oxide_units": 1
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.2 Text/7.2-t23-pass-b.pdf",
+    "mupdf_ms": 7.979041,
+    "nupdf_ms": 8.934125,
+    "oxide_ms": 40.611542,
+    "oxide_work_ms": 2.7390830000513233,
+    "oxide_import_ms": 18.20124999994732,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.2 Text/7.2-t29-fail-m.pdf",
+    "mupdf_ms": 5.140124999999999,
+    "nupdf_ms": 2.555083,
+    "oxide_ms": 38.195874999999994,
+    "oxide_work_ms": 0.927042000057554,
+    "oxide_import_ms": 18.05954200017368,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.2 Text/7.2-t33-pass-b.pdf",
+    "mupdf_ms": 5.464541,
+    "nupdf_ms": 2.6012090000000003,
+    "oxide_ms": 38.131583,
+    "oxide_work_ms": 1.3106679998600157,
+    "oxide_import_ms": 18.02649999990535,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.21 Fonts/7.21.3 Composite fonts/7.21.3.2 CIDFonts/7.21.3.2-t01-fail-b.pdf",
+    "mupdf_ms": 5.399916,
+    "nupdf_ms": 8.408375,
+    "oxide_ms": 38.9505,
+    "oxide_work_ms": 1.4337910001813725,
+    "oxide_import_ms": 18.171917000017856,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.21 Fonts/7.21.6 Character encodings/7.21.6-t02-pass-d.pdf",
+    "mupdf_ms": 6.739625,
+    "nupdf_ms": 2.5292079999999997,
+    "oxide_ms": 38.563834,
+    "oxide_work_ms": 0.9954160000233968,
+    "oxide_import_ms": 18.479667000065092,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.4 Headings/7.4.4 Unnumbered headings/7.4.4-t02-fail-a.pdf",
+    "mupdf_ms": 5.461708,
+    "nupdf_ms": 2.74425,
+    "oxide_ms": 39.107542,
+    "oxide_work_ms": 1.220499999817548,
+    "oxide_import_ms": 18.47875000021304,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-2/5 Version identification/5-t02-fail-a.pdf",
+    "mupdf_ms": 7.227833,
+    "nupdf_ms": 2.932375,
+    "oxide_ms": 39.260042,
+    "oxide_work_ms": 1.6619160001027922,
+    "oxide_import_ms": 18.252416999985144,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.2 Logical structure/8.2.4 Structure types/8.2.4-t02-fail-b.pdf",
+    "mupdf_ms": 5.138625,
+    "nupdf_ms": 2.886541,
+    "oxide_ms": 39.701541999999996,
+    "oxide_work_ms": 1.1946669997087156,
+    "oxide_import_ms": 18.603500000153872,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.2 Logical structure/8.2.5 Additional requirements for specific structure types/8.2.5.26 Table (Table, TR, TH, TD, THead, TBody, TFoot)/8.2.5.26-t05-pass-b.pdf",
+    "mupdf_ms": 6.166625,
+    "nupdf_ms": 2.840833,
+    "oxide_ms": 41.209042000000004,
+    "oxide_work_ms": 1.8715829996835964,
+    "oxide_import_ms": 18.858874999750697,
+    "nupdf_units": 1,
+    "oxide_units": 1
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.4 Text representation for content/8.4.4 Declaring natural language/8.4.4-t02-fail-o.pdf",
+    "mupdf_ms": 4.708,
+    "nupdf_ms": 2.282,
+    "oxide_ms": 36.313375,
+    "oxide_work_ms": 0.8187079993149382,
+    "oxide_import_ms": 17.029666999860638,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.4 Text representation for content/8.4.5 Fonts/8.4.5.4 CMaps/8.4.5.4-t02-fail-b.pdf",
+    "mupdf_ms": 6.96975,
+    "nupdf_ms": 3.865833,
+    "oxide_ms": 36.210208,
+    "oxide_work_ms": 0.9970000000976142,
+    "oxide_import_ms": 17.415499999970052,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.4 Text representation for content/8.4.5 Fonts/8.4.5.9 Use of .notdef glyph/8.4.5.9-t01-fail-a.pdf",
+    "mupdf_ms": 6.462459,
+    "nupdf_ms": 8.142583,
+    "oxide_ms": 35.403083,
+    "oxide_work_ms": 0.6625829996664834,
+    "oxide_import_ms": 17.14475000017046,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/TWG test files/TWG test suite A005-pdfa1-fail-c.pdf",
+    "mupdf_ms": 8.698834000000002,
+    "nupdf_ms": 4.4745,
+    "oxide_ms": 42.705459000000005,
+    "oxide_work_ms": 6.326542000351765,
+    "oxide_import_ms": 17.206999999871186,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/TWG test files/TWG test suite A018-pdfa2-fail-a.pdf",
+    "mupdf_ms": 4.533625000000001,
+    "nupdf_ms": 2.3129169999999997,
+    "oxide_ms": 36.336209000000004,
+    "oxide_work_ms": 0.30483399950753665,
+    "oxide_import_ms": 17.64099999991231,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  },
+  {
+    "file": "verapdf/TWG test files/TWG test suite A027-pdfa3-pass-a.pdf",
+    "mupdf_ms": 4.914542,
+    "nupdf_ms": 2.265917,
+    "oxide_ms": 37.531791,
+    "oxide_work_ms": 0.2865409996957169,
+    "oxide_import_ms": 18.155750000005355,
+    "nupdf_units": 0,
+    "oxide_units": 0
+  }
+]
