@@ -10,7 +10,7 @@ nupdf is a command-line tool, an MCP server and a Rust library that agents and t
 
 | Attack | Defence | Checked by |
 |---|---|---|
-| Memory corruption through a parser bug | No `unsafe` in the product crates (`unsafe_code = "forbid"`); bounds-checked slices; dependencies pure Rust where they parse (zlib-rs, hayro-jbig2, hayro-jpeg2000, moxcms) | `cargo deny`, review of new dependencies (CLAUDE.md) |
+| Memory corruption through a parser bug | No `unsafe` in the product crates (`unsafe_code = "forbid"`); bounds-checked slices; dependencies pure Rust where they parse (zlib-rs, hayro-jpeg2000, moxcms; the JBIG2 decoder is carried in the crate) | `cargo deny`, review of new dependencies (AGENTS.md) |
 | A panic that kills the agent's tool | No `unwrap`, `expect` or `panic!` on paths that touch input; the CLI and MCP server catch what escapes (`internal.panic`, exit 1) and the MCP server keeps serving | 19 fuzz targets, each run on every change in CI (`fuzz/`), the wild-tier crash sweep (`cargo xtask crashes`) |
 | A decompression bomb, or a huge allocation from a small number in the file | `Limits`: decoded bytes per stream, xref entries, object-stream members; image and pixmap sizes checked before allocating; `--max-pixels` for rendering | fuzz targets with RSS limits; smoke fixtures for each bomb kind |
 | A hang: cycles in page trees, outlines, name trees, structure trees, field parents; endless content loops | Every walk over input is bounded (depths, visited sets, step counts) where MuPDF would loop or recurse without end; `--timeout` (`nupdf::interrupt`) stops anything after a deadline, checked per operator and per page | fuzz timeouts in CI; regression files for each one found (e.g. a structure tree whose parents form a cycle) |

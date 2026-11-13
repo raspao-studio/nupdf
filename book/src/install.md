@@ -1,6 +1,6 @@
 # Install
 
-nupdf is one binary, `nupdf`, from the `nupdf-cli` crate. It needs Rust 1.88 or newer to build ([rustup](https://rustup.rs) installs it).
+nupdf is one binary, `nupdf`, from the `nupdf-cli` crate. It needs Rust 1.92 or newer to build ([rustup](https://rustup.rs) installs it).
 
 From crates.io, once 0.1.0 is published:
 

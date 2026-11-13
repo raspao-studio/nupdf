@@ -1,6 +1,6 @@
 # Results
 
-What nupdf has been measured to do, against MuPDF (the engine it ports) and against the other ways an agent can handle a PDF. Each section names the command that reproduces it and the document with the full numbers. Measured on 2026-11-13 on an Apple M-series Mac, against MuPDF 1.28.6.
+What nupdf has been measured to do, against MuPDF (the reference it is checked against) and against the other ways an agent can handle a PDF. Each section names the command that reproduces it and the document with the full numbers. Measured on 2026-11-13 on an Apple M-series Mac, against MuPDF 1.28.6.
 
 ## In one paragraph
 

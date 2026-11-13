@@ -1,6 +1,6 @@
 [package]
 name = "nupdf"
-description = "Memory-safe, parallel PDF engine rewritten in Rust from MuPDF"
+description = "A PDF engine for AI agents: read, search, render, edit and redact PDFs, in memory-safe Rust"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

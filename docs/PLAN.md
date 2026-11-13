@@ -1,6 +1,6 @@
 # nupdf plan
 
-nupdf is a rewrite of MuPDF's PDF engine in Rust. It keeps MuPDF's behavior as the reference, adds memory safety and real parallelism, and wraps everything in an interface designed for AI agents. This file is the roadmap. Work items are checkboxes; tick them in the same commit that lands the work.
+nupdf is a PDF engine for AI agents, in Rust. It is memory-safe and parallel, takes MuPDF's behavior as its reference, and puts an interface designed for agents on everything. This file is the roadmap. Work items are checkboxes; tick them in the same commit that lands the work.
 
 Related docs: [ARCHITECTURE](ARCHITECTURE.md) · [AGENT-INTERFACE](AGENT-INTERFACE.md) · [TESTING](TESTING.md) · [DECISIONS](DECISIONS.md) · [PRIOR-ART](PRIOR-ART.md)
 
@@ -24,7 +24,7 @@ Line counts are rough sizes of the matching hand-written C in MuPDF 1.28.6. The 
 
 Dependency order: M1 → M2 → M3, and M2 → M4 → M5 → M6. M7 needs M4. M8 grows from M1 onward (every command ships with its JSON contract) and is finished after M7. M9 needs M5 and M7.
 
-## What "better than MuPDF" has to mean
+## What nupdf has to prove
 
 These are the claims nupdf must prove with numbers before it goes public. Each maps to an exit criterion below.
 

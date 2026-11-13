@@ -4,7 +4,7 @@ The crates `nupdf` (the library) and `nupdf-cli` (the `nupdf` command) share a v
 
 ## 0.1.0
 
-The first public release: MuPDF 1.28.6's PDF engine ported to Rust, with no `unsafe` code, and a command-line and MCP interface built for agents. What it is measured to do, and where it falls short, is in [RESULTS](docs/RESULTS.md).
+The first public release: a PDF engine for agents in Rust, with no `unsafe` code, a command-line tool, an MCP server and a library, checked against MuPDF 1.28.6. What it is measured to do, and where it falls short, is in [RESULTS](docs/RESULTS.md).
 
 - **Reading**: syntax, cross-reference tables and streams, repair of damaged files, the page tree, every standard filter, encryption (RC4, AES-128, AES-256), content streams, fonts (Type 1, TrueType, CFF, Type 3, CID), images, colour spaces with ICC colour management.
 - **Text**: structured text as MuPDF's device builds it, search, tables, Markdown, a layout format that keeps each row of a page on one line, an opt-in reading order, and OCR through Tesseract for scanned pages.

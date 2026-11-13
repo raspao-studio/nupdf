@@ -5,7 +5,7 @@
 
 [book]
 title = "nupdf"
-description = "A memory-safe, parallel PDF engine for AI agents, ported to Rust from MuPDF"
+description = "A PDF engine for AI agents, in Rust: read, search, render, edit and redact PDFs"
 authors = ["hum"]
 language = "en"
 
