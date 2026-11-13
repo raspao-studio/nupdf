@@ -16,6 +16,8 @@ cargo xtask bench --runs 5              # paired timing and memory against mutoo
 cargo xtask bench --tier standard --sample 300 --runs 3   # evenly spaced sample of a big tier
 cargo xtask corpus list                 # what is fetched, sizes, licenses
 cargo xtask corpus fetch qpdf           # sparse clone of one source
+cargo xtask crashes --tier wild         # nupdf alone on every file: crashes, internal errors, timeouts
+cargo llvm-cov --workspace --summary-only --ignore-filename-regex '(nupdf-cli|xtask|fuzz)/'   # line coverage of the nupdf crate (PLAN: at least 90%)
 ```
 
 ## Layers
