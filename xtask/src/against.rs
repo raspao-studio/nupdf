@@ -312,7 +312,9 @@ pub struct Summary {
     pub mupdf_total: f64,
     pub oxide_total: f64,
     pub oxide_work_total: f64,
-    /// What nupdf takes to start and exit with nothing to do.
+    /// The least nupdf takes to start and exit with nothing to do: the
+    /// fastest run, since a slow one is the machine's noise, and taking
+    /// less off nupdf's times only counts against it.
     pub nupdf_startup_ms: f64,
     /// Median of pdf_oxide's interpreter start and import, over every file
     /// it did: the cost an agent pays once per process.
@@ -323,8 +325,9 @@ pub struct Summary {
 }
 
 /// The least nupdf's time in process is taken to be: below it, what is left
-/// after its startup is noise.
-pub const FLOOR_MS: f64 = 0.1;
+/// after its startup is noise, and dividing by noise makes ratios of 50x.
+/// Rounding nupdf's time up only counts against it.
+pub const FLOOR_MS: f64 = 0.5;
 
 pub fn summarize(check: Check, rows: &[Row], nupdf_startup_ms: f64) -> Summary {
     let mut s = Summary {
@@ -474,8 +477,8 @@ pub fn summary_table(results: &[(&Against, Summary)]) -> String {
          MuPDF's is over the files MuPDF and nupdf did (`mutool` exits with 1 when any page has \
          an error, which counts as failing), pdf_oxide's over the files nupdf and pdf_oxide did \
          and, where checked, agree on. In process, pdf_oxide's time runs from opening the document to its last \
-         byte of output, and nupdf's is its process time less {startup:.1} ms, what it takes \
-         to start and exit with nothing to do (`nupdf --version`), and at least {FLOOR_MS} ms; \
+         byte of output, and nupdf's is its process time less {startup:.1} ms, the least it \
+         takes to start and exit with nothing to do (`nupdf --version`, fastest of 21 runs), and at least {FLOOR_MS} ms; \
          \"of totals\" is the ratio of the summed in-process times. Units are totals over the \
          files both nupdf and pdf_oxide did."
     );
@@ -566,7 +569,12 @@ pub fn run(
     let dir = out_dir.join("scratch-dir");
     let script: PathBuf = root.join("oracle/bench/oxide.py");
     let files = sample_evenly(all.iter().collect(), sample);
-    let startup = runs_of(nupdf, &[OsString::from("--version")], 21)?.map_or(0.0, |r| wall_ms(&r));
+    let startup = runs_of(nupdf, &[OsString::from("--version")], 21)?.map_or(0.0, |r| {
+        r[1..]
+            .iter()
+            .map(|r| r.wall.as_secs_f64() * 1000.0)
+            .fold(f64::INFINITY, f64::min)
+    });
     let mut results = Vec::new();
     for a in pairs {
         let mut rows = Vec::new();
