@@ -1488,14 +1488,7 @@ impl Device for DrawDevice<'_> {
                     at.push((cx, cy));
                 }
             }
-            let repeat = |into: &mut Pix, cell: &Pix| {
-                let mut copy = cell.clone();
-                for &(x, y) in &at {
-                    copy.x = x;
-                    copy.y = y;
-                    into.paint_pixmap_in(&copy, 255, below);
-                }
-            };
+            let repeat = |into: &mut Pix, cell: &Pix| into.paint_pixmap_repeated(cell, &at, below);
             let di = self.dest_index();
             if let Some(dest) = self.stack.get_mut(di).and_then(|s| s.dest.as_mut()) {
                 repeat(dest, &cell);

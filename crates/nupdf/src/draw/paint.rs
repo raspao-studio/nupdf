@@ -398,6 +398,101 @@ impl Pix {
         }
     }
 
+    /// [`Pix::paint_pixmap_in`] of `src` placed at each of `at` in turn, at
+    /// full alpha, as a tiling pattern repeats its cell (`fz_draw_end_tile`).
+    /// When each of the cell's pixels is opaque or clear, a pixel ends as
+    /// the last copy over it that is opaque there leaves it: the copies are
+    /// then painted last first, each only where no later one has painted,
+    /// and stop when every pixel has been. The pixels are the same as
+    /// painting every copy whole, which a cell many times the size of its
+    /// step makes millions of paints of the whole cell.
+    pub fn paint_pixmap_repeated(&mut self, src: &Pix, at: &[(i32, i32)], bbox: IRect) {
+        let sa = usize::from(src.alpha);
+        let da = usize::from(self.alpha);
+        let n1 = src.n - sa;
+        if self.n - da != n1 {
+            return;
+        }
+        let binary = sa == 0
+            || src
+                .samples
+                .chunks_exact(src.n)
+                .all(|p| p[n1] == 0 || p[n1] == 255);
+        if !binary {
+            let mut copy = src.clone();
+            for &(x, y) in at {
+                copy.x = x;
+                copy.y = y;
+                self.paint_pixmap_in(&copy, 255, bbox);
+            }
+            return;
+        }
+        let clip = self.bbox().intersect(bbox);
+        if clip.is_empty() {
+            return;
+        }
+        // The cell's opaque runs: row, first column, column past the last.
+        let mut runs = Vec::new();
+        for row in 0..src.h {
+            let line = &src.samples[row as usize * src.stride()..][..src.stride()];
+            let opaque = |x: i32| sa == 0 || line[x as usize * src.n + n1] == 255;
+            let mut x = 0;
+            while x < src.w {
+                if !opaque(x) {
+                    x += 1;
+                    continue;
+                }
+                let start = x;
+                while x < src.w && opaque(x) {
+                    x += 1;
+                }
+                runs.push((row, start, x));
+            }
+        }
+        let (cw, ch) = (clip.width() as usize, clip.height() as usize);
+        let mut painted = vec![false; cw * ch];
+        let mut left_in_row = vec![cw; ch];
+        let mut left = cw * ch;
+        let mut seen = std::collections::HashSet::new();
+        let mut last = None;
+        for &(x, y) in at.iter().rev() {
+            if left == 0 {
+                break;
+            }
+            // A copy where a later one is paints nothing that one does not.
+            if last == Some((x, y)) || !seen.insert((x, y)) {
+                continue;
+            }
+            last = Some((x, y));
+            for &(row, a, b) in &runs {
+                let dy = y + row;
+                if dy < clip.y0 || dy >= clip.y1 {
+                    continue;
+                }
+                let ry = (dy - clip.y0) as usize;
+                if left_in_row[ry] == 0 {
+                    continue;
+                }
+                let (x0, x1) = ((x + a).max(clip.x0), (x + b).min(clip.x1));
+                for dx in x0..x1 {
+                    let k = ry * cw + (dx - clip.x0) as usize;
+                    if painted[k] {
+                        continue;
+                    }
+                    painted[k] = true;
+                    left_in_row[ry] -= 1;
+                    left -= 1;
+                    let d = self.at(dx, dy);
+                    let s = (dy - y) as usize * src.stride() + (dx - x) as usize * src.n;
+                    self.samples[d..d + n1].copy_from_slice(&src.samples[s..s + n1]);
+                    if da == 1 {
+                        self.samples[d + n1] = 255;
+                    }
+                }
+            }
+        }
+    }
+
     /// `fz_blend_pixmap` for an isolated group: `src` composited onto
     /// `self` with blend mode `mode` (MuPDF's numbering) at `alpha`.
     pub fn blend_pixmap(&mut self, src: &Pix, alpha: i32, mode: u8) {
@@ -975,6 +1070,59 @@ mod tests {
         assert_eq!((rgb, mask), before);
         // Pixmaps past MuPDF's size limit are refused.
         assert!(Pix::new(IRect::new(0, 0, 1 << 16, 1 << 14), 3, false).is_err());
+    }
+
+    #[test]
+    fn repeated_cells_paint_as_each_copy_painted_in_turn() {
+        // A cell with clear, opaque and (in the last case) half-covered
+        // pixels, repeated with overlaps, repeats and copies off the edges.
+        let cell = |n: usize, alphas: &[u8]| {
+            let mut c = Pix::new(IRect::new(0, 0, 5, 4), n, true).unwrap_or_else(|e| panic!("{e}"));
+            for (i, p) in c.samples.chunks_exact_mut(n).enumerate() {
+                let a = alphas[i % alphas.len()];
+                for (k, v) in p.iter_mut().enumerate() {
+                    // Premultiplied: colors no more than the alpha.
+                    *v = if k == n - 1 {
+                        a
+                    } else {
+                        a / (k as u8 + 2) + (i as u8 % 3)
+                    };
+                }
+            }
+            c
+        };
+        let mut at = Vec::new();
+        for y in -3..9 {
+            for x in -4..11 {
+                at.push((x / 2, y / 3));
+                at.push((x, y));
+            }
+        }
+        at.extend([(1, 1), (0, 0), (1, 1)]);
+        for (n, alphas, dest_alpha) in [
+            (4, &[0u8, 255, 255, 0, 255, 0, 0][..], true),
+            (4, &[255][..], false),
+            (1, &[255, 0, 0][..], true),
+            (4, &[0, 255, 128, 255][..], true),
+        ] {
+            let src = cell(n, alphas);
+            let dest_n = if dest_alpha { n } else { n - 1 };
+            let mut want = Pix::new(IRect::new(-1, 0, 9, 8), dest_n, dest_alpha)
+                .unwrap_or_else(|e| panic!("{e}"));
+            for (i, v) in want.samples.iter_mut().enumerate() {
+                *v = (i * 37 % 200) as u8;
+            }
+            let mut got = want.clone();
+            let clip = IRect::new(0, 1, 8, 7);
+            let mut copy = src.clone();
+            for &(x, y) in &at {
+                copy.x = x;
+                copy.y = y;
+                want.paint_pixmap_in(&copy, 255, clip);
+            }
+            got.paint_pixmap_repeated(&src, &at, clip);
+            assert_eq!(got, want, "n {n}, alphas {alphas:?}");
+        }
     }
 
     #[test]
