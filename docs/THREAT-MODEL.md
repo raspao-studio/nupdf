@@ -32,7 +32,7 @@ nupdf is a command-line tool, an MCP server and a Rust library that agents and t
 
 ## Keeping it true
 
-- Every new parser surface gets a fuzz target before its milestone closes, and CI runs each target on every pull request.
+- Every new parser surface gets a fuzz target in the same change, and CI runs each target on every pull request.
 - Each crash, hang or leak found becomes a regression test with the file that showed it.
 - The wild tier (100,000 files from Common Crawl, not sanitized) is swept for crashes before a release: `cargo xtask crashes --tier wild`.
 - New dependencies must be pure Rust on the `deny.toml` licence allow-list, and pass `cargo deny`'s advisories.
