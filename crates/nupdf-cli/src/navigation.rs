@@ -186,6 +186,16 @@ pub fn annots(doc: &Document, synthesize: bool) -> Result<Value, String> {
                         .map(|s| s.into_iter().map(point).collect::<Value>())
                         .collect();
                 }
+                if a::type_name(doc, obj) == "FileAttachment" {
+                    // The file's name, whether it is embedded, its type and
+                    // size; `attachments` gives the rest.
+                    let mut file = filespec_json(doc, &doc.dict_get(obj, b"FS"));
+                    if let Some(f) = file.as_object_mut() {
+                        f.remove("created");
+                        f.remove("modified");
+                    }
+                    v["file"] = file;
+                }
                 if synthesize {
                     v["synthesis"] = match &made {
                         Some(m) if again => synthesis_json(doc, m),
@@ -397,48 +407,92 @@ pub fn labels(doc: &Document) -> Result<Value, String> {
 }
 
 /// The embedded files, and with `dir` each one's contents written there
-/// under its name.
+/// under its name. `attachments` is the /EmbeddedFiles tree, as MuPDF's
+/// `getEmbeddedFiles` lists it; `annotation_attachments` adds the files
+/// that FileAttachment annotations carry, which that tree need not hold.
 pub fn attachments(doc: &Document, dir: Option<&Path>) -> Value {
     let files: Vec<Value> = nupdf::embedded::embedded_files(doc)
         .into_iter()
         .enumerate()
         .map(|(n, (name, fs))| {
-            let p = nupdf::embedded::filespec_params(doc, &fs);
-            let time = |t: i64| if t >= 0 { Value::from(t) } else { Value::Null };
-            let mut entry = json!({
-                "name": name,
-                "filename": p.filename,
-                "embedded": nupdf::embedded::is_embedded_file(doc, &fs),
-                "mimetype": p.mimetype,
-                "size": if p.size >= 0 { Value::from(p.size) } else { Value::Null },
-                "created": time(p.created),
-                "modified": time(p.modified),
-            });
-            if entry["embedded"] == true {
-                match nupdf::embedded::contents(doc, &fs).unwrap_or(Ok(Vec::new())) {
-                    Ok(data) => {
-                        entry["length"] = data.len().into();
-                        match nupdf::embedded::checksum_ok(doc, &fs) {
-                            Ok(ok) => entry["checksum_ok"] = ok.into(),
-                            Err(e) => entry["error"] = e.into(),
-                        }
-                        if let Some(dir) = dir {
-                            // A file name of the document's choosing goes
-                            // nowhere but into `dir`.
-                            let file = format!("attachment-{:04}-{}", n + 1, safe_name(&name));
-                            match crate::write_file(&dir.join(&file), &data) {
-                                Ok(()) => entry["file"] = file.into(),
-                                Err(e) => entry["write_error"] = e.to_string().into(),
-                            }
-                        }
-                    }
-                    Err(e) => entry["error"] = e.into(),
-                }
-            }
+            let mut entry = json!({ "name": name });
+            let file = format!("attachment-{:04}-{}", n + 1, safe_name(&name));
+            filespec_entry(doc, &fs, dir.map(|d| (d, file)), &mut entry);
             entry
         })
         .collect();
-    json!({ "attachments": files })
+    let mut on_annots = Vec::new();
+    let count = doc.page_count().unwrap_or(0);
+    for i in 0..count {
+        let Ok(page) = doc.page(i) else { continue };
+        if doc.resolve(&page).as_dict().is_none() {
+            continue;
+        }
+        for (n, annot) in nupdf::annot::page_annots(doc, &page).0.iter().enumerate() {
+            if nupdf::annot::type_name(doc, annot) != "FileAttachment" {
+                continue;
+            }
+            let fs = doc.dict_get(annot, b"FS");
+            let id = format!("p{}.a{}", i + 1, n + 1);
+            let mut entry = json!({ "annot": id, "page": i + 1 });
+            let name = nupdf::embedded::filespec_params(doc, &fs)
+                .filename
+                .unwrap_or_default();
+            let file = format!("annot-p{}-a{}-{}", i + 1, n + 1, safe_name(&name));
+            filespec_entry(doc, &fs, dir.map(|d| (d, file)), &mut entry);
+            on_annots.push(entry);
+        }
+    }
+    json!({ "attachments": files, "annotation_attachments": on_annots })
+}
+
+/// A file specification's fields, as `getFilespecParams` reads them.
+fn filespec_json(doc: &Document, fs: &nupdf::Object) -> Value {
+    let p = nupdf::embedded::filespec_params(doc, fs);
+    let time = |t: i64| if t >= 0 { Value::from(t) } else { Value::Null };
+    json!({
+        "filename": p.filename,
+        "embedded": nupdf::embedded::is_embedded_file(doc, fs),
+        "mimetype": p.mimetype,
+        "size": if p.size >= 0 { Value::from(p.size) } else { Value::Null },
+        "created": time(p.created),
+        "modified": time(p.modified),
+    })
+}
+
+/// A file specification's fields added to `entry`, and for an embedded
+/// file its length and checksum, its contents written to `out` (a
+/// directory and a file name there) when given.
+fn filespec_entry(
+    doc: &Document,
+    fs: &nupdf::Object,
+    out: Option<(&Path, String)>,
+    entry: &mut Value,
+) {
+    if let (Some(e), Value::Object(fields)) = (entry.as_object_mut(), filespec_json(doc, fs)) {
+        e.extend(fields);
+    }
+    if entry["embedded"] != true {
+        return;
+    }
+    match nupdf::embedded::contents(doc, fs).unwrap_or(Ok(Vec::new())) {
+        Ok(data) => {
+            entry["length"] = data.len().into();
+            match nupdf::embedded::checksum_ok(doc, fs) {
+                Ok(ok) => entry["checksum_ok"] = ok.into(),
+                Err(e) => entry["error"] = e.into(),
+            }
+            if let Some((dir, file)) = out {
+                // A file name of the document's choosing goes nowhere but
+                // into `dir`.
+                match crate::write_file(&dir.join(&file), &data) {
+                    Ok(()) => entry["file"] = file.into(),
+                    Err(e) => entry["write_error"] = e.to_string().into(),
+                }
+            }
+        }
+        Err(e) => entry["error"] = e.into(),
+    }
 }
 
 /// A name safe to write in a directory: letters, digits, `.`, `-` and `_`,
