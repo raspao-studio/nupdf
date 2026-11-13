@@ -279,16 +279,42 @@ pub fn compress_bound(n: usize) -> usize {
     n + (n >> 12) + (n >> 14) + (n >> 25) + 13
 }
 
+/// How many bytes `a` and `b` (as long as each other) have in common from
+/// the start.
+fn common_run(a: &[u8], b: &[u8]) -> usize {
+    let mut n = 0;
+    for (x, y) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
+        let diff = u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y);
+        if diff != 0 {
+            return n + (diff.trailing_zeros() / 8) as usize;
+        }
+        n += 8;
+    }
+    n + a[n..]
+        .iter()
+        .zip(&b[n..])
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
 fn adler32(adler: u32, buf: &[u8]) -> u32 {
     const BASE: u32 = 65521;
     let mut a = adler & 0xffff;
     let mut b = adler >> 16;
     // 5552 is the most bytes before b can overflow 32 bits (zlib's NMAX).
     for chunk in buf.chunks(5552) {
-        for &c in chunk {
-            a += u32::from(c);
-            b += a;
+        // A chunk at once: b gains a for each byte and each byte weighted
+        // by the steps from it to the end, the sums byte by byte makes.
+        let n = chunk.len() as u32;
+        let (mut sum, mut weighted) = (0u32, 0u32);
+        for (i, &c) in chunk.iter().enumerate() {
+            sum += u32::from(c);
+            weighted = weighted.wrapping_add((n - i as u32) * u32::from(c));
         }
+        // b stays below 2^32 byte by byte (zlib's NMAX), so the sum of its
+        // parts does too, and the wrapping is never taken.
+        b = b.wrapping_add(n.wrapping_mul(a)).wrapping_add(weighted);
+        a += sum;
         a %= BASE;
         b %= BASE;
     }
@@ -848,9 +874,13 @@ impl<'a> Deflate<'a> {
     }
 
     fn slide_hash(&mut self) {
-        for p in self.head.iter_mut().chain(self.prev.iter_mut()) {
-            let m = usize::from(*p);
-            *p = if m >= W_SIZE { (m - W_SIZE) as u16 } else { 0 };
+        // Each table on its own, as zlib's loops: chained, they did not
+        // vectorize, and this runs every 32 KB of input.
+        for p in &mut self.head {
+            *p = p.saturating_sub(W_SIZE as u16);
+        }
+        for p in &mut self.prev {
+            *p = p.saturating_sub(W_SIZE as u16);
         }
     }
 
@@ -932,23 +962,12 @@ impl<'a> Deflate<'a> {
                 && w[m] == w[start]
                 && w[m + 1] == w[start + 1]
             {
-                // scan[2] equals match[2] when the hashes do; the loop
-                // compares from scan[3], eight bytes between bounds checks.
-                let mut scan = start + 2;
-                let mut mat = m + 2;
-                'compare: loop {
-                    for _ in 0..8 {
-                        scan += 1;
-                        mat += 1;
-                        if w[scan] != w[mat] {
-                            break 'compare;
-                        }
-                    }
-                    if scan >= strend {
-                        break;
-                    }
-                }
-                let len = MAX_MATCH - (strend - scan);
+                // scan[2] equals match[2] when the hashes do; zlib compares
+                // from scan[3], eight bytes between bounds checks, and stops
+                // at the first difference or at strend, read or not. That
+                // is the length of the common run from 3 up to MAX_MATCH,
+                // found here eight bytes at a time.
+                let len = common_run(&w[start + 3..strend], &w[m + 3..m + MAX_MATCH]) + 3;
                 if len > best_len {
                     self.match_start = cur_match;
                     best_len = len;
