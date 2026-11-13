@@ -162,6 +162,27 @@ fn interpolates(image: &Image) -> bool {
     image.interpolate || image.is_jpx
 }
 
+/// An image pixel's samples as color components, as
+/// `fz_convert_slow_pixmap_samples` reads them: 0..1, but Lab's L 0..100
+/// and a, b -128..127 (`template_convert_lab`).
+fn samples_to_floats(cs: &ColorSpace, k: &[u8]) -> Vec<f32> {
+    if cs.family() == Some(crate::colorspace::Family::Lab) {
+        let v = |i: usize| f32::from(k.get(i).copied().unwrap_or(0));
+        return vec![v(0) / 255.0 * 100.0, v(1) - 128.0, v(2) - 128.0];
+    }
+    k.iter().map(|&v| f32::from(v) / 255.0).collect()
+}
+
+/// A converted component as a byte: rounded, but truncated from Lab
+/// without color management, as `template_convert_lab` stores it.
+fn to_byte(cs: &ColorSpace, v: f32, icc: bool) -> u8 {
+    if !icc && cs.family() == Some(crate::colorspace::Family::Lab) {
+        (v * 255.0).clamp(0.0, 255.0) as u8
+    } else {
+        (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+    }
+}
+
 fn flatness(expansion: f32) -> (f32, f32) {
     let expansion = if expansion < f32::EPSILON {
         1.0
@@ -1867,10 +1888,9 @@ impl DrawDevice<'_> {
                 })
                 .collect();
             let c = *cache.entry(key).or_insert_with_key(|k| {
-                let f: Vec<f32> = k.iter().map(|&v| f32::from(v) / 255.0).collect();
                 self.cc
-                    .cmyk(self.doc, cs, &f)
-                    .map(|v| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8)
+                    .cmyk(self.doc, cs, &samples_to_floats(cs, k))
+                    .map(|v| to_byte(cs, v, false))
             });
             for v in c {
                 out.samples.push(if sa == 1 {
@@ -1930,9 +1950,10 @@ impl DrawDevice<'_> {
             } else {
                 let key: Vec<u8> = p[..sn].iter().map(|&v| un(v) as u8).collect();
                 *cache.entry(key).or_insert_with_key(|k| {
-                    let f: Vec<f32> = k.iter().map(|&v| f32::from(v) / 255.0).collect();
-                    let c = self.cc.rgb(self.doc, cs, &f, self.ri(1));
-                    c.map(|v| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8)
+                    let c = self
+                        .cc
+                        .rgb(self.doc, cs, &samples_to_floats(cs, k), self.ri(1));
+                    c.map(|v| to_byte(cs, v, self.icc()))
                 })
             };
             for v in rgb {
@@ -2721,5 +2742,31 @@ mod tests {
             &extra,
         );
         check("group-rgb", &rgb, false, "8dfd06dac5a793172f1755ddc8f825c5");
+    }
+
+    #[test]
+    fn lab_images_and_colors_convert_by_mupdfs_formula() {
+        // Without color management MuPDF reads an 8-bit Lab image's
+        // samples as L 0..100 and a, b -128..127 and converts them by its
+        // own formula (`lab_to_rgb`), truncating; nupdf read them as 0..1,
+        // drawing Lab photos black, and converted Lab colors as sRGB.
+        let image = kit::hex_stream(
+            "/Type/XObject/Subtype/Image/Width 4/Height 4/ColorSpace 6 0 R/BitsPerComponent 8",
+            &(0..48u32)
+                .map(|i| ((i / 3) * 37 + (i % 3) * 91) as u8)
+                .collect::<Vec<_>>(),
+        );
+        let lab = "[/Lab<</WhitePoint[0.9505 1 1.089]/Range[-128 127 -128 127]>>]";
+        let res = "/XObject<</I 5 0 R>>/ColorSpace<</L 6 0 R>>";
+        let content = "q 64 0 0 64 0 0 cm /I Do Q /L cs 60 40 -30 sc 70 10 40 40 re f 30 -60 90 sc 70 60 40 40 re f";
+        let rgb = group_page("", res, content, &[&image, lab]);
+        check("lab-rgb", &rgb, false, "1f878528f61aa8f91200e5a61fb7b6dd");
+        let cmyk = group_page(
+            "/Group<</S/Transparency/CS/DeviceCMYK>>",
+            res,
+            content,
+            &[&image, lab],
+        );
+        check("lab-cmyk", &cmyk, false, "0b464e2f3f8a72f2987e5553198c0d4c");
     }
 }
