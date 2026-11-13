@@ -4,7 +4,7 @@ What nupdf has been measured to do, against MuPDF (the reference it is checked a
 
 ## In one paragraph
 
-nupdf reads PDFs as MuPDF does, in Rust with no `unsafe` code. On the standard tier, 5,142 test files, 91 of its 97 checks against MuPDF agree on at least 99% of the files and the median check on 99.88%. Across 1.5 million runs on 100,000 files from the open web, it never crashed. Its library is faster than PDF Oxide's in geometric mean on every operation compared, and its commands faster than MuPDF's on most. In an agent eval of 30 tasks, agents using nupdf solved every task in every run, the only arm to do so. Over MCP they spent fewer tokens and less time than agents using any other tool. Over the CLI they spent slightly more tokens than agents writing PyMuPDF or pypdf scripts.
+nupdf reads PDFs as MuPDF does, in Rust with no `unsafe` code. On the standard tier, 5,142 test files, 91 of its 97 checks against MuPDF agree on at least 99% of the files and the median check on 99.88%. Across 1.5 million runs on 100,000 files from the open web, it never crashed. Its library is faster than PDF Oxide's on every operation compared, in geometric mean and in total, and its commands are faster than MuPDF's on most. In an agent eval of 30 tasks, agents using nupdf solved every task in every run, the only arm to do so. Over MCP they spent fewer tokens and less time than agents using any other tool. Over the CLI they spent slightly more tokens than agents writing PyMuPDF or pypdf scripts.
 
 ## Parity with MuPDF
 
@@ -46,24 +46,26 @@ All 97 checks, including colour-managed rendering, round trips and every editing
 
 ## Speed
 
-`cargo xtask bench`, single-threaded, medians of 3 runs ([BENCHMARKS](BENCHMARKS.md)).
+`cargo xtask bench`, measured on `main` at `ca67177` on a busy Apple M5 Max: medians of 3 runs as processes, of 5 in process; one thread unless stated ([BENCHMARKS](BENCHMARKS.md)). Ratios are the other tool's time over nupdf's: above 1x, nupdf is faster.
 
-**Against MuPDF**, per command, start included:
-- **Small files (200):** nupdf is 1.3x to 2.1x faster.
-- **Documents of about 100 pages (30):** 1.4x to 2.9x faster on every operation but `info`. `info` scans each page for scanned pages and was 6x slower than MuPDF's; since the speed fixes of raspao-studio/nupdf#73 it takes 0.02 to 0.17 s per document, against up to 2.6 s.
-
-**Against PDF Oxide** 0.3.78, library against library: both crates in one Rust program, timing only the work on a file already in memory. The figures are PDF Oxide's time over nupdf's, in geometric mean (above 1x, nupdf is faster):
+**Against PDF Oxide** 0.3.78, library against library: both crates in one Rust program, timing only the work on a file already in memory. Geometric mean, with the ratio of the summed times in brackets:
 
 | Operation | 200 small files | 30 long documents |
 |---|---|---|
-| open | 2.14x | 4.76x |
-| page sizes | 2.22x | 7.77x |
-| text | 1.30x | 1.42x |
-| render (72 dpi, pixels only) | 1.57x | 1.61x |
-| tables | 1.25x | 1.10x |
-| annotations | 2.19x | 15.4x |
+| open | 2.21x (1.03x) | 5.85x (7.35x) |
+| page sizes | 2.49x (1.53x) | 11.45x (9.94x) |
+| text | 1.40x (2.22x) | 1.82x (2.57x) |
+| render (72 dpi, pixels only) | 1.58x (3.20x) | 3.08x (7.36x) |
+| tables | 1.27x (1.70x) | 1.55x (1.34x) |
+| annotations | 2.41x (1.44x) | 22.03x (8.10x) |
 
-**Per call against PDF Oxide's own CLI:** nupdf is 1.15x to 1.9x faster on small files, and 1.57x on long documents' text.
+**Against MuPDF**, per command, start included:
+- **Small files (200):** nupdf is faster on every command, 1.24x (`clean -z`) to 2.02x (`tables`).
+- **Documents of about 100 pages (30):** faster on reading, extraction, tables, rendering and annotations, 1.4x to 3.8x, and up to 6.7x with eight threads. Slower on two things:
+  - `info`, 0.26x: it scans every page for scanned pages, which MuPDF's `info` does not: up to 0.17 s a document, against about 5 ms.
+  - Writing long documents: `clean -z` 0.35x and `merge` 0.85x; `clean`, `clean -gggg` and `split` are about even ([#86](https://github.com/raspao-studio/nupdf/issues/86)).
+
+**Per call against PDF Oxide's own CLI:** nupdf is 1.1x to 2.2x faster on small files, and 1.86x on long documents' text. It is slower on long documents' `info` (0.24x, the same scan) and on writing their pages as PNG files: 0.73x in geometric mean, though 3.06x in total, where a few documents take PDF Oxide seconds. nupdf draws faster; the time goes to its PNG encoder ([#81](https://github.com/raspao-studio/nupdf/issues/81)).
 
 **Failures:** PDF Oxide fails 4 to 7 of the 200 standard files, depending on the operation, and nupdf one (which MuPDF also fails). On 7 of the 30 long documents its page-size call fails on boxes the pages inherit.
 
@@ -105,6 +107,10 @@ Compared task by task over the tasks both solved:
   - stroked text (FreeType's stroker);
   - CJK text in fonts the file does not embed;
   - FreeText annotations and form fields with rich text, which MuPDF lays out with its HTML engine.
-- **Slower than MuPDF on a few files.** `sanitize` saves, reparses and verifies its output, so it does more than `mutool clean` and takes longer (24 s against 9 s on the worst file seen). `tables` takes 20 to 52 s on two files from the open web, with MuPDF's own algorithm.
+- **Slower than MuPDF or PDF Oxide in places:**
+  - writing long documents: on the 30 long ones, `clean -z` runs at 0.35x MuPDF's speed and `merge` at 0.85x ([#86](https://github.com/raspao-studio/nupdf/issues/86));
+  - `info` on long documents, 0.26x MuPDF's: its scan for scanned pages takes up to 0.17 s a document, against 5 ms for MuPDF's `info`, which does not scan;
+  - PNG output: on long documents PDF Oxide's CLI writes a document's PNGs faster in geometric mean (nupdf at 0.73x), because of nupdf's PNG encoder ([#81](https://github.com/raspao-studio/nupdf/issues/81));
+  - a few files from the open web: `sanitize` saves, reparses and verifies its output, so it does more than `mutool clean` and takes longer (24 s against 9 s on the worst file seen), and `tables` takes 20 to 52 s on two files, with MuPDF's own algorithm ([#81](https://github.com/raspao-studio/nupdf/issues/81)).
 - **One machine, one model.** The speed figures come from a busy Apple M-series Mac, and the agent figures from one model. Five runs per task damp the model's variance (a task's tokens vary by a median 1.6x between its runs) but do not remove it.
 - **Not yet public.** Until the repository is public, there is no continuous fuzzing on OSS-Fuzz and no outside review.
