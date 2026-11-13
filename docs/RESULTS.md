@@ -50,7 +50,7 @@ All 97 checks, including colour-managed rendering, round trips and every editing
 
 **Against MuPDF**, per command, start included:
 - **Small files (200):** nupdf is 1.3x to 2.1x faster.
-- **Documents of about 100 pages (30):** 1.4x to 2.9x faster on every operation but `info`. `info` scans each page for scanned pages and was 6x slower than MuPDF's; since the speed fixes of raspao-studio/nupdf#72 it takes 0.02 to 0.17 s per document, against up to 2.6 s.
+- **Documents of about 100 pages (30):** 1.4x to 2.9x faster on every operation but `info`. `info` scans each page for scanned pages and was 6x slower than MuPDF's; since the speed fixes of raspao-studio/nupdf#73 it takes 0.02 to 0.17 s per document, against up to 2.6 s.
 
 **Against PDF Oxide** 0.3.78, library against library: both crates in one Rust program, timing only the work on a file already in memory. The figures are PDF Oxide's time over nupdf's, in geometric mean (above 1x, nupdf is faster):
 
