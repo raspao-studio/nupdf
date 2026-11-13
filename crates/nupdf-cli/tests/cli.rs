@@ -3473,6 +3473,61 @@ fn annots_highlights_each_search_hit() {
     assert_eq!(added[0]["id"], "p1.a1");
 }
 
+#[test]
+fn mcp_runs_a_tool_on_many_files_in_one_call_and_teaches_itself() {
+    let mut mcp = Mcp::start();
+    // The instructions are the guide, so a model starts knowing the tools.
+    mcp.send(
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "1"}}}),
+    );
+    let init = mcp.next();
+    let said = init["result"]["instructions"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        said.contains("redact") && said.contains("list of paths"),
+        "{said}"
+    );
+    mcp.send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
+    let tools = mcp.next()["result"]["tools"].clone();
+    let search = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "search")
+        .unwrap();
+    assert_eq!(
+        search["inputSchema"]["properties"]["file"]["type"],
+        serde_json::json!(["string", "array"])
+    );
+    let a = smoke("stext.pdf");
+    let b = smoke("minimal.pdf");
+    let result = mcp.call(
+        3,
+        "search",
+        serde_json::json!({"file": [a.to_str().unwrap(), b.to_str().unwrap()], "needle": "Hello"}),
+    );
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    // A line for each file, then the summary.
+    assert_eq!(lines.len(), 3, "{text}");
+    assert_eq!(lines[0]["schema"], "nupdf.batch.item/v1");
+    assert!(
+        lines[0]["report"]["hits"]
+            .as_array()
+            .is_some_and(|h| !h.is_empty()),
+        "{text}"
+    );
+    assert_eq!(lines[2]["schema"], "nupdf.batch/v1");
+    mcp.close();
+}
+
 /// Found by the stext fuzz target: structure parents in a cycle, which
 /// MuPDF climbs forever. nupdf stops, says so, and finishes the page.
 #[test]

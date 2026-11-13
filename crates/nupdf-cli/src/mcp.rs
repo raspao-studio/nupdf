@@ -28,11 +28,6 @@ use crate::{Cli, ExitCode, Failure, FileFacts};
 const PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// What the server tells a client about itself when it connects.
-const INSTRUCTIONS: &str = "nupdf reads, searches, renders, edits and redacts PDF files. \
-Each tool is a nupdf command and returns its JSON report; `file` is a path on this machine. \
-Start with `info`. Use `extract` with `max_chars` or `max_items` and resume with `cursor` \
-rather than reading whole documents. Content ids such as p3.b2.l1 are stable for a doc_id.";
-
 /// Arguments the server reads itself rather than passing to the command.
 const TIMEOUT: &str = "timeout";
 
@@ -173,8 +168,17 @@ fn tools() -> Vec<Value> {
         .map(|c| {
             let mut properties = Map::new();
             let mut required = Vec::new();
+            let batchable = crate::batch::can_run_on_each(c);
             for arg in c.get_arguments().filter(|a| is_tool_option(a)) {
-                properties.insert(arg.get_id().to_string(), property(arg));
+                let mut schema = property(arg);
+                if batchable && arg.get_id() == "file" {
+                    schema = json!({
+                        "type": ["string", "array"],
+                        "items": {"type": "string"},
+                        "description": "A PDF file; or a list of files, directories (their PDFs) and globs, to run on each in one call (`batch`): a line per file with its report, then a summary.",
+                    });
+                }
+                properties.insert(arg.get_id().to_string(), schema);
                 if arg.is_required_set() {
                     required.push(Value::from(arg.get_id().as_str()));
                 }
@@ -223,6 +227,34 @@ fn command_line(tool: &str, args: &Map<String, Value>) -> Result<Vec<String>, St
         .get_subcommands()
         .find(|c| c.get_name() == tool && !NOT_TOOLS.contains(&tool))
         .ok_or_else(|| format!("no tool named {tool}"))?;
+    // Several files: the same call on each, through `batch`.
+    if crate::batch::can_run_on_each(sub)
+        && let Some(Value::Array(files)) = args.get("file")
+    {
+        let inputs = files.iter().map(word).collect::<Result<Vec<_>, _>>()?;
+        if inputs.is_empty() {
+            return Err("file is an empty list".into());
+        }
+        let mut rest = args.clone();
+        rest.remove("file");
+        rest.remove(TIMEOUT);
+        let one = command_line_for(sub, &cli, tool, &rest)?;
+        let mut line = vec!["nupdf".to_string(), "batch".to_string()];
+        line.extend(inputs);
+        line.push("--".into());
+        line.extend(one.into_iter().skip(1));
+        return Ok(line);
+    }
+    command_line_for(sub, &cli, tool, args)
+}
+
+/// The command line for one call of `sub`.
+fn command_line_for(
+    sub: &clap::Command,
+    cli: &clap::Command,
+    tool: &str,
+    args: &Map<String, Value>,
+) -> Result<Vec<String>, String> {
     let mut line = vec!["nupdf".to_string(), tool.to_string()];
     let mut positional: Vec<(usize, Vec<String>)> = Vec::new();
     if let Some(key) = args.keys().find(|k| {
@@ -433,7 +465,7 @@ pub fn serve(call_timeout: f64, max_output: usize) -> u8 {
                         "protocolVersion": version,
                         "capabilities": {"tools": {"listChanged": false}},
                         "serverInfo": {"name": "nupdf", "version": env!("CARGO_PKG_VERSION")},
-                        "instructions": INSTRUCTIONS,
+                        "instructions": crate::guide::mcp_instructions(),
                     })),
                 );
             }
@@ -527,7 +559,8 @@ mod tests {
         assert!(!names.contains(&"mcp"));
         let extract = tools.iter().find(|t| t["name"] == "extract").unwrap();
         let props = &extract["inputSchema"]["properties"];
-        assert_eq!(props["file"]["type"], json!(["string", "number"]));
+        // One file, or several run through `batch`.
+        assert_eq!(props["file"]["type"], json!(["string", "array"]));
         assert_eq!(
             props["format"]["enum"],
             json!(["json", "jsonl", "text", "markdown"])
@@ -535,6 +568,30 @@ mod tests {
         assert_eq!(props["pretty"], Value::Null);
         assert!(props["password"].is_object() && props["timeout"].is_object());
         assert_eq!(extract["inputSchema"]["required"], json!(["file"]));
+    }
+
+    #[test]
+    fn a_list_of_files_becomes_a_batch() {
+        let line = command_line(
+            "search",
+            &args(json!({"file": ["a.pdf", "docs/"], "needle": "x", "max_items": 3, "timeout": 9})),
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            [
+                "nupdf",
+                "batch",
+                "a.pdf",
+                "docs/",
+                "--",
+                "search",
+                "--max-items=3",
+                "--",
+                "x"
+            ]
+        );
+        assert!(command_line("search", &args(json!({"file": [], "needle": "x"}))).is_err());
     }
 
     #[test]

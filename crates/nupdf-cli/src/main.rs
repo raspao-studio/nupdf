@@ -429,8 +429,10 @@ enum Command {
         /// page's top left.
         #[arg(long)]
         region: Option<String>,
-        /// Render pages on this many threads; the images do not depend on
-        /// it.
+        /// Render on this many threads: pages at once, and threads left
+        /// over split a page into bands. A page drawn in bands can differ
+        /// by a few levels where strokes and shadings cross a band's edge,
+        /// as MuPDF's bands do.
         #[arg(long, default_value_t = 1)]
         threads: usize,
         /// Convert colors by MuPDF's formulas instead of its ICC profiles,
