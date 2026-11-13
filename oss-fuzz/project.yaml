@@ -1,0 +1,7 @@
+homepage: "https://github.com/raspao-studio/nupdf"
+language: rust
+main_repo: "https://github.com/raspao-studio/nupdf"
+sanitizers:
+  - address
+fuzzing_engines:
+  - libfuzzer

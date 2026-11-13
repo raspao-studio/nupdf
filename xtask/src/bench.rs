@@ -115,6 +115,41 @@ pub const PAIRS: &[Pair] = &[
         ..DEFAULT
     },
     Pair {
+        name: "tables",
+        about: "every page's tables found by table hunting, as rows of cells (JS overhead included on the MuPDF side)",
+        oracle: &["run", "oracle/js/tables.js", "{file}"],
+        nupdf: &["tables", "{file}"],
+        ..DEFAULT
+    },
+    Pair {
+        name: "annots",
+        about: "every page's annotations with what MuPDF's getters read of each (JS overhead included on the MuPDF side)",
+        oracle: &["run", "oracle/js/annots.js", "{file}"],
+        nupdf: &["annots", "{file}"],
+        ..DEFAULT
+    },
+    Pair {
+        name: "forms",
+        about: "every page's form widgets with what the field getters read of each (JS overhead included on the MuPDF side)",
+        oracle: &["run", "oracle/js/forms.js", "{file}"],
+        nupdf: &["forms", "{file}"],
+        ..DEFAULT
+    },
+    Pair {
+        name: "signatures",
+        about: "every signature field checked: byte ranges, signatory, the digest (JS overhead included on the MuPDF side)",
+        oracle: &["run", "oracle/js/signatures.js", "{file}"],
+        nupdf: &["signatures", "{file}"],
+        ..DEFAULT
+    },
+    Pair {
+        name: "flatten",
+        about: "annotations and fields baked into the pages, then the document written; nupdf also reads its output back to verify it",
+        oracle: &["run", "oracle/js/clean.js", "{file}", "{dir}", "bake"],
+        nupdf: &["flatten", "{file}", "-o", "{out}"],
+        ..DEFAULT
+    },
+    Pair {
         name: "stext",
         about: "structured text of every page as JSON, on one thread: `mutool draw -F stext.json` against `nupdf stext`",
         oracle: &["draw", "-q", "-F", "stext.json", "-o", "{out}", "{file}"],

@@ -1560,11 +1560,19 @@ pub fn run(
     only: Option<&str>,
     update_baseline: bool,
     timeout: Duration,
+    sample: Option<usize>,
 ) -> Result<()> {
     let mutool = oracle::mutool(root)?;
     let oracle_version = oracle::version(root)?;
     let nupdf = crate::build_nupdf(root)?;
-    let files = corpus::files(root, tier)?;
+    let mut files = corpus::files(root, tier)?;
+    // An evenly spaced sample, for tiers too big to run whole (wild).
+    if let Some(n) = sample.filter(|&n| n > 0 && n < files.len()) {
+        let step = files.len() as f64 / n as f64;
+        files = (0..n)
+            .map(|i| files[(i as f64 * step) as usize].clone())
+            .collect();
+    }
     if files.is_empty() {
         bail!("tier {tier} has no files; see `cargo xtask corpus list`");
     }

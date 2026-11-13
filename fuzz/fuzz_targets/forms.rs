@@ -8,6 +8,9 @@ fuzz_target!(|data: &[u8]| {
     // DER and BER on their own, as signatures hold them, and the RSA
     // public-key operation on what they give.
     let _ = nupdf::signature::signatory_of(data);
+    // Default appearance strings and language tags, as fields carry them.
+    let _ = nupdf::appearance::parse_default_appearance(data, 100);
+    let _ = nupdf::appearance::language_from_string(data);
     if data.len() > 4 {
         let (key, sig) = data.split_at(data.len() / 2);
         let _ = nupdf::rsa::recover(key, &[1, 0, 1], sig);
@@ -34,6 +37,8 @@ fuzz_target!(|data: &[u8]| {
             let _ = nupdf::form::options(&doc, w);
             let _ = nupdf::signature::check_digest(&doc, w);
             let _ = nupdf::signature::signatory(&doc, w);
+            let _ = nupdf::appearance::synthesize(&doc, w, ctm);
+            let _ = nupdf::appearance::synthesize_button(&doc, w, ctm);
         }
     }
     let _ = nupdf::signature::summary(&doc);

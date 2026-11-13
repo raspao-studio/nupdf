@@ -7,6 +7,7 @@ mod adversarial;
 mod arlington;
 mod bench;
 mod corpus;
+mod crashes;
 mod encode;
 mod encrypt;
 mod fixtures;
@@ -80,8 +81,35 @@ enum Cmd {
         /// Per-process timeout in seconds.
         #[arg(long, default_value_t = 60)]
         timeout: u64,
+        /// An evenly spaced sample of this many files.
+        #[arg(long)]
+        sample: Option<usize>,
     },
     /// Time paired oracle/nupdf commands on a corpus tier.
+    /// Run nupdf alone on every file of a tier, each command in its own
+    /// process, and count crashes, internal errors and timeouts.
+    Crashes {
+        #[arg(long, default_value = "wild")]
+        tier: String,
+        /// An evenly spaced sample of this many files.
+        #[arg(long)]
+        sample: Option<usize>,
+        /// Processes at once; 0 for one per core.
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+        /// Seconds each run may take.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        /// Keep the runs already in target/crashes/<tier>.jsonl.
+        #[arg(long)]
+        resume: bool,
+        /// Only these commands, comma-separated.
+        #[arg(long)]
+        only: Option<String>,
+        /// Summarize the log only.
+        #[arg(long)]
+        summary: bool,
+    },
     Bench {
         #[arg(long, default_value = "smoke")]
         tier: String,
@@ -202,12 +230,14 @@ fn main() -> Result<()> {
             check,
             update_baseline,
             timeout,
+            sample,
         } => harness::run(
             &root,
             &tier,
             check.as_deref(),
             update_baseline,
             Duration::from_secs(timeout),
+            sample,
         ),
         Cmd::Bench {
             tier,
@@ -215,6 +245,41 @@ fn main() -> Result<()> {
             runs,
             sample,
         } => bench::run(&root, &tier, pair.as_deref(), runs, sample),
+        Cmd::Crashes {
+            tier,
+            sample,
+            jobs,
+            timeout,
+            resume,
+            only,
+            summary,
+        } => {
+            let dir = root.join("target/crashes");
+            if summary {
+                return crashes::summarize(
+                    &dir.join(format!("{tier}.jsonl")),
+                    &dir.join(format!("{tier}-summary.json")),
+                );
+            }
+            let nupdf = build_nupdf(&root)?;
+            let jobs = if jobs == 0 {
+                std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
+            } else {
+                jobs
+            };
+            crashes::run_all(
+                &root,
+                &nupdf,
+                &crashes::Options {
+                    tier: &tier,
+                    sample,
+                    jobs,
+                    timeout: Duration::from_secs(timeout),
+                    resume,
+                    only: only.as_deref(),
+                },
+            )
+        }
         Cmd::ReadingOrder => reading_order::run(&root),
         Cmd::Corpus { action } => match action {
             CorpusCmd::List => corpus::list(&root),
