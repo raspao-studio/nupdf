@@ -786,14 +786,18 @@ fn interpolate(
 ) -> f32 {
     let idx0 = e0[dim] * scale[dim] + idx;
     let idx1 = e1[dim] * scale[dim] + idx;
-    let (a, b) = if dim == 0 {
-        (at(idx0), at(idx1))
-    } else {
-        (
-            interpolate(at, scale, e0, e1, efrac, dim - 1, idx0),
-            interpolate(at, scale, e0, e1, efrac, dim - 1, idx1),
-        )
+    let corner = |idx| {
+        if dim == 0 {
+            at(idx)
+        } else {
+            interpolate(at, scale, e0, e1, efrac, dim - 1, idx)
+        }
     };
+    let a = corner(idx0);
+    // MuPDF reads both corners even when they are the same one (an input
+    // on a sample, as the inputs a shading leaves at 0 are), which is
+    // 2^m reads; the value is the same read once.
+    let b = if idx1 == idx0 { a } else { corner(idx1) };
     a + (b - a) * efrac[dim]
 }
 
@@ -1588,6 +1592,24 @@ mod tests {
         let f = f.unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(eval1(&doc, &f, &[0.0]), [1.0]);
         assert_eq!(eval1(&doc, &f, &[1.0]), [0.5]);
+    }
+
+    #[test]
+    fn sampled_functions_of_many_inputs_skip_corners_that_coincide() {
+        // 32 inputs, only the first sampled twice: each evaluation would
+        // visit 2^32 corners of the cell if the ones that are the same
+        // sample were read twice, as a shading sampling it 256 times does.
+        let domain = vec!["0 1"; 32].join(" ");
+        let size = format!("2{}", " 1".repeat(31));
+        let mut body = format!(
+            "<</FunctionType 0/Domain[{domain}]/Range[0 1]/Size[{size}]/BitsPerSample 8/Length 2>>stream\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(b"\x00\xff\nendstream");
+        let (doc, f, _) = load_body(&body, 32, 1);
+        let f = f.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(eval1(&doc, &f, &[0.25]), [0.25]);
+        assert_eq!(eval1(&doc, &f, &[0.75; 32]), [0.75]);
     }
 
     #[test]
