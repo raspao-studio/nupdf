@@ -1,0 +1,10 @@
+[
+  {
+    "file": "pdfjs/test/pdfs/freeculture.pdf",
+    "oracle_ms": 114.427334,
+    "nupdf_ms": 37.176291,
+    "speedup": 3.0779653085887455,
+    "oracle_rss_mb": 124.15625,
+    "nupdf_rss_mb": 129.171875
+  }
+]

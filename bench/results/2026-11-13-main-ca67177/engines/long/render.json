@@ -1,0 +1,272 @@
+[
+  {
+    "file": "long/long-001.pdf",
+    "nupdf_ms": 159.075083,
+    "oxide_ms": null,
+    "nupdf_units": 79,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Unsupported filter: XXXDecode"
+  },
+  {
+    "file": "long/long-002.pdf",
+    "nupdf_ms": 233.860167,
+    "oxide_ms": 803.7788340000001,
+    "nupdf_units": 62,
+    "oxide_units": 60,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-003.pdf",
+    "nupdf_ms": 51.110375,
+    "oxide_ms": 53.685333,
+    "nupdf_units": 63,
+    "oxide_units": 64,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-004.pdf",
+    "nupdf_ms": 85.19737500000001,
+    "oxide_ms": 61.156166,
+    "nupdf_units": 73,
+    "oxide_units": 72,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-005.pdf",
+    "nupdf_ms": 913.919708,
+    "oxide_ms": null,
+    "nupdf_units": 81,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Stream decoding error: FlateDecode decompression failed: stream is labeled as compressed but all decompression attempts failed. This violates PDF Spec ISO 32000-1:2008, Section 7.3.8.2. Zlib error: corrupt deflate stream, Deflate error: corrupt deflate stream. Compressed size: 64 bytes."
+  },
+  {
+    "file": "long/long-006.pdf",
+    "nupdf_ms": 226.758625,
+    "oxide_ms": 208.037167,
+    "nupdf_units": 92,
+    "oxide_units": 92,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-007.pdf",
+    "nupdf_ms": 214.110542,
+    "oxide_ms": null,
+    "nupdf_units": 94,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Invalid PDF: Failed to create pixmap"
+  },
+  {
+    "file": "long/long-008.pdf",
+    "nupdf_ms": 755.128875,
+    "oxide_ms": 13628.199666,
+    "nupdf_units": 76,
+    "oxide_units": 76,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-009.pdf",
+    "nupdf_ms": 205.871542,
+    "oxide_ms": 712.872208,
+    "nupdf_units": 87,
+    "oxide_units": 83,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-010.pdf",
+    "nupdf_ms": 871.529042,
+    "oxide_ms": 2350.8634580000003,
+    "nupdf_units": 359,
+    "oxide_units": 359,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-011.pdf",
+    "nupdf_ms": 591.1504170000001,
+    "oxide_ms": 1373.853292,
+    "nupdf_units": 105,
+    "oxide_units": 104,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-012.pdf",
+    "nupdf_ms": 823.352584,
+    "oxide_ms": 1724.059083,
+    "nupdf_units": 85,
+    "oxide_units": 86,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-013.pdf",
+    "nupdf_ms": 542.154583,
+    "oxide_ms": 5849.463833,
+    "nupdf_units": 90,
+    "oxide_units": 82,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-014.pdf",
+    "nupdf_ms": null,
+    "oxide_ms": 4994.132541,
+    "nupdf_units": null,
+    "oxide_units": 121,
+    "nupdf_error": "limit error: 12608x16806 pixels is more than 100000000",
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-015.pdf",
+    "nupdf_ms": 237.321875,
+    "oxide_ms": 2860.671875,
+    "nupdf_units": 81,
+    "oxide_units": 78,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-016.pdf",
+    "nupdf_ms": 118.656333,
+    "oxide_ms": 483.27475,
+    "nupdf_units": 108,
+    "oxide_units": 108,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-017.pdf",
+    "nupdf_ms": 2599.07,
+    "oxide_ms": null,
+    "nupdf_units": 84,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Stream decoding error: ASCIIHexDecode: invalid hex digit '\u001a'"
+  },
+  {
+    "file": "long/long-018.pdf",
+    "nupdf_ms": 466.265375,
+    "oxide_ms": 1695.610958,
+    "nupdf_units": 91,
+    "oxide_units": 91,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-019.pdf",
+    "nupdf_ms": 139.515375,
+    "oxide_ms": 1045.181333,
+    "nupdf_units": 101,
+    "oxide_units": 103,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-020.pdf",
+    "nupdf_ms": 5.793583,
+    "oxide_ms": 14.498458,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-021.pdf",
+    "nupdf_ms": 19.950708,
+    "oxide_ms": 37.043792,
+    "nupdf_units": 108,
+    "oxide_units": 108,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-022.pdf",
+    "nupdf_ms": 9.83,
+    "oxide_ms": 21.367625,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-023.pdf",
+    "nupdf_ms": 18.362042,
+    "oxide_ms": 45.428749999999994,
+    "nupdf_units": 107,
+    "oxide_units": 107,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-024.pdf",
+    "nupdf_ms": 48.115167,
+    "oxide_ms": null,
+    "nupdf_units": 92,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Stream decoding error: Invalid LZW code: 408 (next_code=259, code_bits=9)"
+  },
+  {
+    "file": "long/long-025.pdf",
+    "nupdf_ms": 7.206667,
+    "oxide_ms": 23.167375,
+    "nupdf_units": 125,
+    "oxide_units": 125,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-026.pdf",
+    "nupdf_ms": 5.244917,
+    "oxide_ms": 15.981709,
+    "nupdf_units": 105,
+    "oxide_units": 105,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-027.pdf",
+    "nupdf_ms": 5.167916,
+    "oxide_ms": 15.626583,
+    "nupdf_units": 105,
+    "oxide_units": 105,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-028.pdf",
+    "nupdf_ms": 5.917833,
+    "oxide_ms": 15.299084,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-029.pdf",
+    "nupdf_ms": 7.835165999999999,
+    "oxide_ms": 17.617209000000003,
+    "nupdf_units": 116,
+    "oxide_units": 116,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-030.pdf",
+    "nupdf_ms": 56.356042,
+    "oxide_ms": 420.2848330000001,
+    "nupdf_units": 112,
+    "oxide_units": 112,
+    "nupdf_error": null,
+    "oxide_error": null
+  }
+]

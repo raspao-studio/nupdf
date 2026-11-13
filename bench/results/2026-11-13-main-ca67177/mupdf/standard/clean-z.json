@@ -1,0 +1,1602 @@
+[
+  {
+    "file": "pdf-differences/Atomic-Fill+Stroke/FillStrokeOrdering.pdf",
+    "oracle_ms": 3.5187500000000003,
+    "nupdf_ms": 2.639375,
+    "speedup": 1.3331754676770071,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 5.84375
+  },
+  {
+    "file": "pdf-differences/UnknownFilter/382252277877c00a92f3bb54daef1413bafe5557e2f5f7c32c23e800cd9bdcd4.pdf",
+    "oracle_ms": 4.149500000000001,
+    "nupdf_ms": 12.392667,
+    "speedup": 0.3348351085363627,
+    "oracle_rss_mb": 4.796875,
+    "nupdf_rss_mb": 11.59375
+  },
+  {
+    "file": "pdfium/testing/resources/annotation_highlight_rollover_ap.pdf",
+    "oracle_ms": 3.6965000000000003,
+    "nupdf_ms": 2.4029160000000003,
+    "speedup": 1.5383392511431944,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 5.890625
+  },
+  {
+    "file": "pdfium/testing/resources/bug_1206.pdf",
+    "oracle_ms": 3.812084,
+    "nupdf_ms": 2.839833,
+    "speedup": 1.3423620332604065,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 5.890625
+  },
+  {
+    "file": "pdfium/testing/resources/bug_182.pdf",
+    "oracle_ms": 4.740666999999999,
+    "nupdf_ms": 2.936208,
+    "speedup": 1.614554214142867,
+    "oracle_rss_mb": 4.375,
+    "nupdf_rss_mb": 6.046875
+  },
+  {
+    "file": "pdfium/testing/resources/bug_425244539.pdf",
+    "oracle_ms": 3.932375,
+    "nupdf_ms": 2.627208,
+    "speedup": 1.4967886060030269,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.828125
+  },
+  {
+    "file": "pdfium/testing/resources/bug_552046.pdf",
+    "oracle_ms": 3.77375,
+    "nupdf_ms": 2.686375,
+    "speedup": 1.4047740914801545,
+    "oracle_rss_mb": 4.515625,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "pdfium/testing/resources/bug_765384.pdf",
+    "oracle_ms": 3.689083,
+    "nupdf_ms": 2.981709,
+    "speedup": 1.2372377720293966,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "pdfium/testing/resources/cropped_text.pdf",
+    "oracle_ms": 3.720458,
+    "nupdf_ms": 2.8425830000000003,
+    "speedup": 1.308830032403627,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.890625
+  },
+  {
+    "file": "pdfium/testing/resources/freetext_annotation_without_da.pdf",
+    "oracle_ms": 3.640708,
+    "nupdf_ms": 2.598792,
+    "speedup": 1.4009231981628387,
+    "oracle_rss_mb": 4.28125,
+    "nupdf_rss_mb": 5.53125
+  },
+  {
+    "file": "pdfium/testing/resources/jpeg_reduced_size_with_smask.pdf",
+    "oracle_ms": 3.923625,
+    "nupdf_ms": 5.068166,
+    "speedup": 0.774170577680368,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 7.34375
+  },
+  {
+    "file": "pdfium/testing/resources/page_tree_empty_node.pdf",
+    "oracle_ms": 4.024958000000001,
+    "nupdf_ms": 2.58975,
+    "speedup": 1.554187855970654,
+    "oracle_rss_mb": 4.296875,
+    "nupdf_rss_mb": 5.515625
+  },
+  {
+    "file": "pdfium/testing/resources/pixel/bug_867501.pdf",
+    "oracle_ms": 3.620708,
+    "nupdf_ms": 2.569625,
+    "speedup": 1.4090413970910154,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "pdfium/testing/resources/repeat_viewer_ref.pdf",
+    "oracle_ms": 3.453375,
+    "nupdf_ms": 2.264958,
+    "speedup": 1.524697146702058,
+    "oracle_rss_mb": 4.28125,
+    "nupdf_rss_mb": 5.390625
+  },
+  {
+    "file": "pdfium/testing/resources/text_form_multiple.pdf",
+    "oracle_ms": 3.706625,
+    "nupdf_ms": 2.4915,
+    "speedup": 1.4877082079068835,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.890625
+  },
+  {
+    "file": "pdfium/testing/resources/xfa/xfa_combobox.pdf",
+    "oracle_ms": 3.904791,
+    "nupdf_ms": 2.73175,
+    "speedup": 1.4294100851102773,
+    "oracle_rss_mb": 4.5625,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "pdfjs/test/pdfs/TAMReview.pdf",
+    "oracle_ms": 5.836041,
+    "nupdf_ms": 9.709042,
+    "speedup": 0.6010933931483662,
+    "oracle_rss_mb": 5.390625,
+    "nupdf_rss_mb": 13.140625
+  },
+  {
+    "file": "pdfjs/test/pdfs/annotation-squiggly-without-appearance.pdf",
+    "oracle_ms": 3.548833,
+    "nupdf_ms": 3.1653749999999996,
+    "speedup": 1.121141412944754,
+    "oracle_rss_mb": 4.375,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "pdfjs/test/pdfs/bitmap-composite-and-xnor-halftone.pdf",
+    "oracle_ms": 3.2275419999999997,
+    "nupdf_ms": 2.79125,
+    "speedup": 1.1563070309001344,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 6.5625
+  },
+  {
+    "file": "pdfjs/test/pdfs/bitmap-p32-eof.pdf",
+    "oracle_ms": 3.186792,
+    "nupdf_ms": 2.495917,
+    "speedup": 1.2768020731458618,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 6.28125
+  },
+  {
+    "file": "pdfjs/test/pdfs/bitmap-symbol-symbolrefineseveral.pdf",
+    "oracle_ms": 3.261042,
+    "nupdf_ms": 2.756084,
+    "speedup": 1.1832157510438726,
+    "oracle_rss_mb": 4.515625,
+    "nupdf_rss_mb": 6.4375
+  },
+  {
+    "file": "pdfjs/test/pdfs/bitmap-symbol-texttoprighttranspose.pdf",
+    "oracle_ms": 3.4428330000000003,
+    "nupdf_ms": 2.748375,
+    "speedup": 1.2526794924273437,
+    "oracle_rss_mb": 4.515625,
+    "nupdf_rss_mb": 6.390625
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug1020226.pdf",
+    "oracle_ms": 3.1458749999999998,
+    "nupdf_ms": 2.1792920000000002,
+    "speedup": 1.4435307430119504,
+    "oracle_rss_mb": 4.28125,
+    "nupdf_rss_mb": 5.421875
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug1529502.pdf",
+    "oracle_ms": 3.6336250000000003,
+    "nupdf_ms": 2.9369579999999997,
+    "speedup": 1.2372070012577643,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.4375
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug1796741.pdf",
+    "oracle_ms": 3.558125,
+    "nupdf_ms": 2.347375,
+    "speedup": 1.515788913147665,
+    "oracle_rss_mb": 4.640625,
+    "nupdf_rss_mb": 6.140625
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug1907000_reduced.pdf",
+    "oracle_ms": 3.9141660000000003,
+    "nupdf_ms": 3.05325,
+    "speedup": 1.281967084254483,
+    "oracle_rss_mb": 4.78125,
+    "nupdf_rss_mb": 6.375
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug2035197_2.pdf",
+    "oracle_ms": 3.383833,
+    "nupdf_ms": 2.191625,
+    "speedup": 1.543983573832202,
+    "oracle_rss_mb": 4.28125,
+    "nupdf_rss_mb": 5.578125
+  },
+  {
+    "file": "pdfjs/test/pdfs/bug921409.pdf",
+    "oracle_ms": 3.411459,
+    "nupdf_ms": 2.7395829999999997,
+    "speedup": 1.2452475431479901,
+    "oracle_rss_mb": 4.75,
+    "nupdf_rss_mb": 6.46875
+  },
+  {
+    "file": "pdfjs/test/pdfs/crypt_filters.pdf",
+    "oracle_ms": 2.999,
+    "nupdf_ms": 2.073541,
+    "speedup": 1.446318158165187,
+    "oracle_rss_mb": 4.203125,
+    "nupdf_rss_mb": 5.375
+  },
+  {
+    "file": "pdfjs/test/pdfs/firefox_stamp.pdf",
+    "oracle_ms": 3.31725,
+    "nupdf_ms": 5.186625,
+    "speedup": 0.6395777601041139,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 8.0625
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue10084_reduced.pdf",
+    "oracle_ms": 3.3344590000000003,
+    "nupdf_ms": 2.6676249999999997,
+    "speedup": 1.2499729159833188,
+    "oracle_rss_mb": 4.671875,
+    "nupdf_rss_mb": 6.15625
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue11442_reduced.pdf",
+    "oracle_ms": 3.033791,
+    "nupdf_ms": 2.238667,
+    "speedup": 1.355177433713902,
+    "oracle_rss_mb": 4.515625,
+    "nupdf_rss_mb": 5.8125
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue12337.pdf",
+    "oracle_ms": 7.14925,
+    "nupdf_ms": 14.842667,
+    "speedup": 0.48166882676812733,
+    "oracle_rss_mb": 5.71875,
+    "nupdf_rss_mb": 14.453125
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue13343.pdf",
+    "oracle_ms": 3.292834,
+    "nupdf_ms": 2.3404160000000003,
+    "speedup": 1.4069438937351306,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue14618.pdf",
+    "oracle_ms": 6.7812920000000005,
+    "nupdf_ms": 6.042083,
+    "speedup": 1.1223434037566185,
+    "oracle_rss_mb": 5.03125,
+    "nupdf_rss_mb": 6.703125
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue15557.pdf",
+    "oracle_ms": 3.3140829999999997,
+    "nupdf_ms": 2.4298330000000004,
+    "speedup": 1.3639138986094925,
+    "oracle_rss_mb": 4.375,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue16316.pdf",
+    "oracle_ms": 3.884084,
+    "nupdf_ms": 4.2924169999999995,
+    "speedup": 0.904871078462321,
+    "oracle_rss_mb": 4.828125,
+    "nupdf_rss_mb": 7.171875
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue17871_bottom_right.pdf",
+    "oracle_ms": 3.2702080000000002,
+    "nupdf_ms": 3.020292,
+    "speedup": 1.0827456418121162,
+    "oracle_rss_mb": 4.515625,
+    "nupdf_rss_mb": 6.46875
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue18768_stateful_spacing.pdf",
+    "oracle_ms": 3.414875,
+    "nupdf_ms": 2.3206670000000003,
+    "speedup": 1.4715058213866958,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.90625
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue19505.pdf",
+    "oracle_ms": 3.3665000000000003,
+    "nupdf_ms": 2.485458,
+    "speedup": 1.3544787318876441,
+    "oracle_rss_mb": 4.6875,
+    "nupdf_rss_mb": 6.234375
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue20504.pdf",
+    "oracle_ms": 3.823416,
+    "nupdf_ms": 3.2018329999999997,
+    "speedup": 1.194133485412887,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.4375
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue2391-1.pdf",
+    "oracle_ms": 3.776625,
+    "nupdf_ms": 2.699375,
+    "speedup": 1.3990738596897432,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.96875
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue3521.pdf",
+    "oracle_ms": 3.926083,
+    "nupdf_ms": 2.531959,
+    "speedup": 1.5506108116284665,
+    "oracle_rss_mb": 4.40625,
+    "nupdf_rss_mb": 5.875
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue4800.pdf",
+    "oracle_ms": 3.470792,
+    "nupdf_ms": 2.6849589999999997,
+    "speedup": 1.292679701999174,
+    "oracle_rss_mb": 4.71875,
+    "nupdf_rss_mb": 6.328125
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue5549.pdf",
+    "oracle_ms": 3.342667,
+    "nupdf_ms": 3.3310000000000004,
+    "speedup": 1.0035025517862504,
+    "oracle_rss_mb": 5.265625,
+    "nupdf_rss_mb": 10.6875
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue6069.pdf",
+    "oracle_ms": 3.341209,
+    "nupdf_ms": 2.523,
+    "speedup": 1.3243000396353548,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 5.9375
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue6769.pdf",
+    "oracle_ms": 3.0426670000000002,
+    "nupdf_ms": 2.317208,
+    "speedup": 1.313074613931939,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.890625
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue7544.pdf",
+    "oracle_ms": 3.148167,
+    "nupdf_ms": 2.453666,
+    "speedup": 1.2830462662807407,
+    "oracle_rss_mb": 4.359375,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue840.pdf",
+    "oracle_ms": 5.0287500000000005,
+    "nupdf_ms": 4.925042,
+    "speedup": 1.0210572823541404,
+    "oracle_rss_mb": 5.109375,
+    "nupdf_rss_mb": 8.515625
+  },
+  {
+    "file": "pdfjs/test/pdfs/issue9291.pdf",
+    "oracle_ms": 3.500709,
+    "nupdf_ms": 2.27625,
+    "speedup": 1.5379281713344315,
+    "oracle_rss_mb": 4.5625,
+    "nupdf_rss_mb": 5.859375
+  },
+  {
+    "file": "pdfjs/test/pdfs/knockout_inner_backdrop.pdf",
+    "oracle_ms": 3.148167,
+    "nupdf_ms": 2.236916,
+    "speedup": 1.4073693424339582,
+    "oracle_rss_mb": 4.5625,
+    "nupdf_rss_mb": 5.90625
+  },
+  {
+    "file": "pdfjs/test/pdfs/nonisolated_blend_smask.pdf",
+    "oracle_ms": 3.173292,
+    "nupdf_ms": 2.3058750000000003,
+    "speedup": 1.3761769393397298,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 6.078125
+  },
+  {
+    "file": "pdfjs/test/pdfs/perf_images_16bit.pdf",
+    "oracle_ms": 3.44325,
+    "nupdf_ms": 19.187541,
+    "speedup": 0.17945238527438195,
+    "oracle_rss_mb": 5.703125,
+    "nupdf_rss_mb": 27.375
+  },
+  {
+    "file": "pdfjs/test/pdfs/perf_shadings_mesh_patches.pdf",
+    "oracle_ms": 3.260083,
+    "nupdf_ms": 2.501667,
+    "speedup": 1.303164250078048,
+    "oracle_rss_mb": 4.328125,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "pdfjs/test/pdfs/perf_transparency_blend_modes.pdf",
+    "oracle_ms": 3.340417,
+    "nupdf_ms": 15.772667,
+    "speedup": 0.21178517241250322,
+    "oracle_rss_mb": 4.5,
+    "nupdf_rss_mb": 14.953125
+  },
+  {
+    "file": "pdfjs/test/pdfs/radial_gradients.pdf",
+    "oracle_ms": 4.163,
+    "nupdf_ms": 2.734833,
+    "speedup": 1.522213604998916,
+    "oracle_rss_mb": 4.625,
+    "nupdf_rss_mb": 6.171875
+  },
+  {
+    "file": "pdfjs/test/pdfs/standard_fonts.pdf",
+    "oracle_ms": 3.788542,
+    "nupdf_ms": 4.390292,
+    "speedup": 0.8629362238320367,
+    "oracle_rss_mb": 4.484375,
+    "nupdf_rss_mb": 6.890625
+  },
+  {
+    "file": "pdfjs/test/pdfs/two_pages.pdf",
+    "oracle_ms": 3.6909170000000002,
+    "nupdf_ms": 7.917917,
+    "speedup": 0.4661474728770206,
+    "oracle_rss_mb": 4.640625,
+    "nupdf_rss_mb": 8.90625
+  },
+  {
+    "file": "qpdf/compare-for-test/qtest/compare/enc1.pdf",
+    "oracle_ms": 17.233208,
+    "nupdf_ms": 6.347875,
+    "speedup": 2.7147995195242505,
+    "oracle_rss_mb": 4.328125,
+    "nupdf_rss_mb": 5.921875
+  },
+  {
+    "file": "qpdf/examples/qtest/custom-filter/input.pdf",
+    "oracle_ms": 3.643125,
+    "nupdf_ms": 2.695833,
+    "speedup": 1.351391202644971,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 5.9375
+  },
+  {
+    "file": "qpdf/examples/qtest/qpdf-job/in.pdf",
+    "oracle_ms": 3.707,
+    "nupdf_ms": 2.6948749999999997,
+    "speedup": 1.3755740062155017,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.84375
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/annotation-no-resources.pdf",
+    "oracle_ms": 3.602875,
+    "nupdf_ms": 2.604459,
+    "speedup": 1.3833487108071196,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 6.140625
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/bad-data-out.pdf",
+    "oracle_ms": 3.894084,
+    "nupdf_ms": 2.8388340000000003,
+    "speedup": 1.371719515829386,
+    "oracle_rss_mb": 4.28125,
+    "nupdf_rss_mb": 5.65625
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/bad24.pdf",
+    "oracle_ms": 3.9660420000000003,
+    "nupdf_ms": 2.641833,
+    "speedup": 1.5012462937664872,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.890625
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/boxes-flattened.pdf",
+    "oracle_ms": 3.933875,
+    "nupdf_ms": 3.267041,
+    "speedup": 1.2041094678640396,
+    "oracle_rss_mb": 4.671875,
+    "nupdf_rss_mb": 6.125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/c-object-handle-creation-out.pdf",
+    "oracle_ms": 4.017209,
+    "nupdf_ms": 2.65375,
+    "speedup": 1.5137857748469148,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 5.875
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/copied-positive-P.pdf",
+    "oracle_ms": 18.739458,
+    "nupdf_ms": 6.763334,
+    "speedup": 2.770742654436406,
+    "oracle_rss_mb": 4.359375,
+    "nupdf_rss_mb": 5.921875
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/direct-pages-fixed.pdf",
+    "oracle_ms": 3.7127499999999998,
+    "nupdf_ms": 2.705416,
+    "speedup": 1.3723397806474122,
+    "oracle_rss_mb": 4.28125,
+    "nupdf_rss_mb": 5.65625
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/enc-XI-R6,V5,U=wwwww,O=wwwww.pdf",
+    "oracle_ms": 18.252792,
+    "nupdf_ms": 3.726667,
+    "speedup": 4.897886502872406,
+    "oracle_rss_mb": 4.375,
+    "nupdf_rss_mb": 5.703125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/extra-header-newline.pdf",
+    "oracle_ms": 3.841625,
+    "nupdf_ms": 2.70375,
+    "speedup": 1.4208506703652335,
+    "oracle_rss_mb": 4.28125,
+    "nupdf_rss_mb": 5.671875
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/form-no-need-appearances.pdf",
+    "oracle_ms": 4.2125829999999995,
+    "nupdf_ms": 3.097875,
+    "speedup": 1.359829883387806,
+    "oracle_rss_mb": 4.671875,
+    "nupdf_rss_mb": 6.171875
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/global.pdf",
+    "oracle_ms": 3.481709,
+    "nupdf_ms": 2.43225,
+    "speedup": 1.4314766163017782,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.828125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/i3.pdf",
+    "oracle_ms": 3.437583,
+    "nupdf_ms": 2.644708,
+    "speedup": 1.2997968017641266,
+    "oracle_rss_mb": 4.625,
+    "nupdf_rss_mb": 6.125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/issue-119.pdf",
+    "oracle_ms": 3.248666,
+    "nupdf_ms": 2.310125,
+    "speedup": 1.4062728207348085,
+    "oracle_rss_mb": 4.296875,
+    "nupdf_rss_mb": 5.453125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/job-json-input-file-password.pdf",
+    "oracle_ms": 3.826375,
+    "nupdf_ms": 2.856084,
+    "speedup": 1.339727753105301,
+    "oracle_rss_mb": 4.703125,
+    "nupdf_rss_mb": 6.140625
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/lin7.pdf",
+    "oracle_ms": 3.7895,
+    "nupdf_ms": 3.162334,
+    "speedup": 1.1983237697219837,
+    "oracle_rss_mb": 4.5,
+    "nupdf_rss_mb": 6.46875
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/minimal-9.pdf",
+    "oracle_ms": 4.725125,
+    "nupdf_ms": 3.632375,
+    "speedup": 1.3008362297394955,
+    "oracle_rss_mb": 4.390625,
+    "nupdf_rss_mb": 5.75
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/new-streams.pdf",
+    "oracle_ms": 5.248333,
+    "nupdf_ms": 3.947959,
+    "speedup": 1.3293788005397218,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 5.890625
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/outlines-split-01-10.pdf",
+    "oracle_ms": 5.158125,
+    "nupdf_ms": 2.969667,
+    "speedup": 1.7369371717434987,
+    "oracle_rss_mb": 4.796875,
+    "nupdf_rss_mb": 6.140625
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/page-outlines.pdf",
+    "oracle_ms": 4.032375,
+    "nupdf_ms": 3.015958,
+    "speedup": 1.3370129822762784,
+    "oracle_rss_mb": 4.734375,
+    "nupdf_rss_mb": 6.28125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/qpdfjob-ctest4.pdf",
+    "oracle_ms": 3.333834,
+    "nupdf_ms": 2.360292,
+    "speedup": 1.412466762587002,
+    "oracle_rss_mb": 4.296875,
+    "nupdf_rss_mb": 5.6875
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/rotated-shared-annotations-2.pdf",
+    "oracle_ms": 4.4316249999999995,
+    "nupdf_ms": 3.2884580000000003,
+    "speedup": 1.3476301050522765,
+    "oracle_rss_mb": 4.75,
+    "nupdf_rss_mb": 6.53125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/shared-images-pages-out.pdf",
+    "oracle_ms": 3.681292,
+    "nupdf_ms": 2.475292,
+    "speedup": 1.487215245716465,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 6.140625
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/split-exp-group-06-10.pdf",
+    "oracle_ms": 3.2617089999999997,
+    "nupdf_ms": 2.324166,
+    "speedup": 1.4033890006135534,
+    "oracle_rss_mb": 4.34375,
+    "nupdf_rss_mb": 5.78125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/test84.pdf",
+    "oracle_ms": 3.481208,
+    "nupdf_ms": 2.413583,
+    "speedup": 1.4423402882768068,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.828125
+  },
+  {
+    "file": "qpdf/qpdf/qtest/qpdf/update-stream-data-updated.pdf",
+    "oracle_ms": 3.9294589999999996,
+    "nupdf_ms": 2.2829159999999997,
+    "speedup": 1.7212455473613573,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.84375
+  },
+  {
+    "file": "sample-files/010-pdflatex-forms/pdflatex-forms.pdf",
+    "oracle_ms": 3.621,
+    "nupdf_ms": 2.7508340000000002,
+    "speedup": 1.3163280663246126,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.453125
+  },
+  {
+    "file": "verapdf/ISO 32000-1/veraPDF test suite 6-2-2-t01-fail-a.pdf",
+    "oracle_ms": 3.4347079999999997,
+    "nupdf_ms": 5.546042,
+    "speedup": 0.6193079677362703,
+    "oracle_rss_mb": 4.8125,
+    "nupdf_rss_mb": 8.421875
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.1 File structure/6.1.7 Stream objects/isartor-6-1-7-t02-fail-a.pdf",
+    "oracle_ms": 3.426291,
+    "nupdf_ms": 2.790584,
+    "speedup": 1.2278042875613133,
+    "oracle_rss_mb": 4.3125,
+    "nupdf_rss_mb": 5.75
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.2 Graphics/6.2.3 Colour spaces/6.2.3.3 Uncalibrated colour spaces/isartor-6-2-3-3-t02-fail-h.pdf",
+    "oracle_ms": 3.302958,
+    "nupdf_ms": 2.385041,
+    "speedup": 1.3848642434239073,
+    "oracle_rss_mb": 4.359375,
+    "nupdf_rss_mb": 5.828125
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.2 Graphics/6.2.8 Extended graphics state/isartor-6-2-8-t01-fail-b.pdf",
+    "oracle_ms": 3.351417,
+    "nupdf_ms": 2.381167,
+    "speedup": 1.4074682708100692,
+    "oracle_rss_mb": 4.328125,
+    "nupdf_rss_mb": 5.875
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.3 Fonts/6.3.5 Font subsets/isartor-6-3-5-t01-fail-d.pdf",
+    "oracle_ms": 3.533333,
+    "nupdf_ms": 2.976958,
+    "speedup": 1.1868938023311042,
+    "oracle_rss_mb": 4.390625,
+    "nupdf_rss_mb": 6.09375
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.5 Annotations/6.5.3 Annotation dictionaries/isartor-6-5-3-t01-fail-a.pdf",
+    "oracle_ms": 3.6059170000000003,
+    "nupdf_ms": 2.983416,
+    "speedup": 1.2086537713815304,
+    "oracle_rss_mb": 4.375,
+    "nupdf_rss_mb": 5.96875
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.6 Actions/6.6.1 General/isartor-6-6-1-t02-fail-d.pdf",
+    "oracle_ms": 3.5551250000000003,
+    "nupdf_ms": 2.468709,
+    "speedup": 1.4400745490861824,
+    "oracle_rss_mb": 4.359375,
+    "nupdf_rss_mb": 5.84375
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.7 Metadata/6.7.11 Version and conformance level identification/isartor-6-7-11-t01-fail-a.pdf",
+    "oracle_ms": 3.886792,
+    "nupdf_ms": 2.8479170000000003,
+    "speedup": 1.3647841562798353,
+    "oracle_rss_mb": 4.34375,
+    "nupdf_rss_mb": 5.78125
+  },
+  {
+    "file": "verapdf/Isartor test files/PDFA-1b/6.7 Metadata/6.7.9 Validation/isartor-6-7-9-t01-fail-a.pdf",
+    "oracle_ms": 4.13025,
+    "nupdf_ms": 3.07625,
+    "speedup": 1.3426249492076392,
+    "oracle_rss_mb": 4.359375,
+    "nupdf_rss_mb": 5.8125
+  },
+  {
+    "file": "verapdf/PDF_A-1a/6.8 Logical structure/6.8.3 Artifacts/6.8.3.4 Structure types/veraPDF test suite 6-8-3-4-t01-pass-a.pdf",
+    "oracle_ms": 4.0897499999999996,
+    "nupdf_ms": 2.8111669999999997,
+    "speedup": 1.4548228547076711,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.953125
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.1 File structure/6.1.12 Implementation limits/veraPDF test suite 6-1-12-t02-pass-i.pdf",
+    "oracle_ms": 4.6365419999999995,
+    "nupdf_ms": 3.358875,
+    "speedup": 1.3803853968962823,
+    "oracle_rss_mb": 4.828125,
+    "nupdf_rss_mb": 6.328125
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.1 File structure/6.1.2 File header/veraPDF test suite 6-1-2-t02-pass-a.pdf",
+    "oracle_ms": 3.914875,
+    "nupdf_ms": 2.821333,
+    "speedup": 1.387597635585732,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.09375
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.1 File structure/6.1.6 String objects/veraPDF test suite 6-1-6-t01-fail-a.pdf",
+    "oracle_ms": 3.817917,
+    "nupdf_ms": 3.468375,
+    "speedup": 1.1007797599740512,
+    "oracle_rss_mb": 4.640625,
+    "nupdf_rss_mb": 6.28125
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.2 Graphics/6.2.3.3 Uncalibrated color space/veraPDF test suite 6-2-3-3-t01-fail-u.pdf",
+    "oracle_ms": 4.275792,
+    "nupdf_ms": 3.602042,
+    "speedup": 1.1870466807438669,
+    "oracle_rss_mb": 4.625,
+    "nupdf_rss_mb": 6.25
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.2 Graphics/6.2.4 Images/veraPDF test suite 6-2-4-t03-pass-a.pdf",
+    "oracle_ms": 3.864625,
+    "nupdf_ms": 6.5925,
+    "speedup": 0.5862153962836557,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 9.0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.4 Transparency/veraPDF test suite 6-4-t01-pass-a.pdf",
+    "oracle_ms": 4.073208,
+    "nupdf_ms": 3.169209,
+    "speedup": 1.2852443622367602,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.109375
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t03-fail-m.pdf",
+    "oracle_ms": 3.7118339999999996,
+    "nupdf_ms": 2.412625,
+    "speedup": 1.538504326200715,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.9375
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t06-fail-m.pdf",
+    "oracle_ms": 3.4120830000000004,
+    "nupdf_ms": 2.503875,
+    "speedup": 1.3627209824771607,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t07-fail-g.pdf",
+    "oracle_ms": 3.334209,
+    "nupdf_ms": 2.534916,
+    "speedup": 1.3153134068347827,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t09-fail-c.pdf",
+    "oracle_ms": 3.52425,
+    "nupdf_ms": 2.731792,
+    "speedup": 1.2900872394384346,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t09-pass-m.pdf",
+    "oracle_ms": 3.4729579999999998,
+    "nupdf_ms": 2.575959,
+    "speedup": 1.3482194398280405,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t13-fail-j.pdf",
+    "oracle_ms": 3.318792,
+    "nupdf_ms": 2.507416,
+    "speedup": 1.323590501137426,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t14-fail-h.pdf",
+    "oracle_ms": 3.2055,
+    "nupdf_ms": 2.3306669999999996,
+    "speedup": 1.3753573547829872,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t14-pass-i.pdf",
+    "oracle_ms": 3.2690829999999997,
+    "nupdf_ms": 2.446583,
+    "speedup": 1.3361831583069121,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t15-fail-i.pdf",
+    "oracle_ms": 3.60775,
+    "nupdf_ms": 2.35925,
+    "speedup": 1.5291935996609092,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t15-pass-j.pdf",
+    "oracle_ms": 3.543958,
+    "nupdf_ms": 2.410708,
+    "speedup": 1.4700901146053358,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t16-fail-k.pdf",
+    "oracle_ms": 3.560875,
+    "nupdf_ms": 2.6367920000000002,
+    "speedup": 1.3504572981107343,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t16-pass-k.pdf",
+    "oracle_ms": 3.739875,
+    "nupdf_ms": 2.711083,
+    "speedup": 1.379476393751132,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t17-fail-l.pdf",
+    "oracle_ms": 3.883459,
+    "nupdf_ms": 2.6687909999999997,
+    "speedup": 1.4551379257498998,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.2 Properties/veraPDF test suite 6-7-2-t17-pass-l.pdf",
+    "oracle_ms": 3.74425,
+    "nupdf_ms": 2.671167,
+    "speedup": 1.4017281585164836,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.3 Document information dictionary/veraPDF test suite 6-7-3-t03-fail-b.pdf",
+    "oracle_ms": 3.9972920000000003,
+    "nupdf_ms": 3.017208,
+    "speedup": 1.324831433563745,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.109375
+  },
+  {
+    "file": "verapdf/PDF_A-1b/6.7 Metadata/6.7.9 Validation/veraPDF test suite 6-7-9-t04-pass-h.pdf",
+    "oracle_ms": 3.940625,
+    "nupdf_ms": 2.889042,
+    "speedup": 1.3639902085189486,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.046875
+  },
+  {
+    "file": "verapdf/PDF_A-2a/6.2 Graphics/6.2.11 Fonts/6.2.11.7 Unicode character maps/6.2.11.7.3 Level A conformance/veraPDF test suite 6-2-11-7-3-t01-pass-e.pdf",
+    "oracle_ms": 3.817084,
+    "nupdf_ms": 4.033084000000001,
+    "speedup": 0.9464429701935292,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 6.265625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.1 File structure/6.1.13 Implementation limits/veraPDF test suite 6-1-13-t01-fail-a.pdf",
+    "oracle_ms": 3.6648750000000003,
+    "nupdf_ms": 2.7134590000000003,
+    "speedup": 1.350628478263353,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.125
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.1 File structure/6.1.2 File header/veraPDF test suite 6-1-2-t02-fail-c.pdf",
+    "oracle_ms": 3.491167,
+    "nupdf_ms": 2.728958,
+    "speedup": 1.2793040420556123,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.1 File structure/6.1.9 Indirect objects/veraPDF test suite 6-1-9-t03-fail-b.pdf",
+    "oracle_ms": 3.574167,
+    "nupdf_ms": 2.553666,
+    "speedup": 1.399621955259615,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.890625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.10 Transparency/veraPDF test suite 6-2-10-t04-fail-c.pdf",
+    "oracle_ms": 3.7726669999999998,
+    "nupdf_ms": 2.6357500000000003,
+    "speedup": 1.431344778526036,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.10 Transparency/veraPDF test suite 6-2-10-t07-fail-a.pdf",
+    "oracle_ms": 3.6306670000000003,
+    "nupdf_ms": 3.0044999999999997,
+    "speedup": 1.2084097187552008,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.609375
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.11 Fonts/6.2.11.3 Composite fonts/6.2.11.3.3 CMaps/veraPDF test suite 6-2-11-3-3-t03-fail-b.pdf",
+    "oracle_ms": 5.818582999999999,
+    "nupdf_ms": 4.8680829999999995,
+    "speedup": 1.195251395672588,
+    "oracle_rss_mb": 4.859375,
+    "nupdf_rss_mb": 6.71875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.11 Fonts/6.2.11.6 Character encodings/veraPDF test suite 6-2-11-6-t02-pass-a.pdf",
+    "oracle_ms": 3.6780839999999997,
+    "nupdf_ms": 2.586917,
+    "speedup": 1.421802091060517,
+    "oracle_rss_mb": 4.625,
+    "nupdf_rss_mb": 6.1875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.3 Output intent/veraPDF test suite 6-2-3-t01-pass-a.pdf",
+    "oracle_ms": 3.917834,
+    "nupdf_ms": 3.085167,
+    "speedup": 1.2698936556756895,
+    "oracle_rss_mb": 4.5625,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t01-fail-n.pdf",
+    "oracle_ms": 4.073459,
+    "nupdf_ms": 6.848708,
+    "speedup": 0.5947777303397954,
+    "oracle_rss_mb": 4.921875,
+    "nupdf_rss_mb": 8.96875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t03-fail-a.pdf",
+    "oracle_ms": 4.0734580000000005,
+    "nupdf_ms": 2.838333,
+    "speedup": 1.4351585948512737,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 5.84375
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.4.4 Separation and DeviceN colour spaces/veraPDF test suite 6-2-4-4-t03-fail-a.pdf",
+    "oracle_ms": 3.9975,
+    "nupdf_ms": 2.9870840000000003,
+    "speedup": 1.3382616625444748,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.046875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.2 Graphics/6.2.8 Images/6.2.8.1 General/veraPDF test suite 6-2-8-1-t02-fail-b.pdf",
+    "oracle_ms": 3.9753339999999997,
+    "nupdf_ms": 2.8514999999999997,
+    "speedup": 1.3941202875679468,
+    "oracle_rss_mb": 4.5625,
+    "nupdf_rss_mb": 6.078125
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.3 Annotations/6.3.2 Annotation dictionaries/veraPDF test suite 6-3-2-t01-fail-d.pdf",
+    "oracle_ms": 4.084125,
+    "nupdf_ms": 2.885625,
+    "speedup": 1.4153346328784926,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.3 Annotations/6.3.3 Annotation appearances/veraPDF test suite 6-3-3-t01-fail-c.pdf",
+    "oracle_ms": 3.6895000000000002,
+    "nupdf_ms": 2.873625,
+    "speedup": 1.2839183957544913,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.90625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.3 Annotations/6.3.3 Annotation appearances/veraPDF test suite 6-3-3-t02-fail-b.pdf",
+    "oracle_ms": 3.897209,
+    "nupdf_ms": 3.014583,
+    "speedup": 1.292785436659067,
+    "oracle_rss_mb": 4.640625,
+    "nupdf_rss_mb": 6.15625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.5 Action/6.5.2 Trigger events/veraPDF test suite 6-5-2-t01-fail-b.pdf",
+    "oracle_ms": 4.027708,
+    "nupdf_ms": 3.144166,
+    "speedup": 1.2810099721197927,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.046875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t01-fail-v.pdf",
+    "oracle_ms": 3.9596249999999995,
+    "nupdf_ms": 2.9135839999999997,
+    "speedup": 1.359022084141044,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t01-pass-v.pdf",
+    "oracle_ms": 3.7675,
+    "nupdf_ms": 2.535292,
+    "speedup": 1.4860221228955086,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t02-fail-u.pdf",
+    "oracle_ms": 3.873792,
+    "nupdf_ms": 2.742125,
+    "speedup": 1.4126970871130964,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t02-pass-u.pdf",
+    "oracle_ms": 3.879459,
+    "nupdf_ms": 2.694083,
+    "speedup": 1.439992383308161,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t04-fail-k.pdf",
+    "oracle_ms": 3.2791669999999997,
+    "nupdf_ms": 2.5265410000000004,
+    "speedup": 1.297887902867992,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.96875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t04-pass-k.pdf",
+    "oracle_ms": 3.216791,
+    "nupdf_ms": 2.262041,
+    "speedup": 1.4220745777817467,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t05-fail-j.pdf",
+    "oracle_ms": 3.282583,
+    "nupdf_ms": 2.428958,
+    "speedup": 1.351436706604231,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.96875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t06-fail-f.pdf",
+    "oracle_ms": 3.568708,
+    "nupdf_ms": 3.036292,
+    "speedup": 1.1753507238434249,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.96875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t07-fail-a.pdf",
+    "oracle_ms": 3.9734590000000005,
+    "nupdf_ms": 2.603958,
+    "speedup": 1.5259305257611684,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t08-fail-b.pdf",
+    "oracle_ms": 3.7183339999999996,
+    "nupdf_ms": 2.528542,
+    "speedup": 1.470544685435322,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t09-pass-b.pdf",
+    "oracle_ms": 3.49525,
+    "nupdf_ms": 2.353334,
+    "speedup": 1.485233290302184,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t11-pass-e.pdf",
+    "oracle_ms": 3.332125,
+    "nupdf_ms": 2.5841250000000002,
+    "speedup": 1.2894596817104436,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t13-pass-f.pdf",
+    "oracle_ms": 3.371,
+    "nupdf_ms": 2.4742919999999997,
+    "speedup": 1.362409933831577,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t14-fail-q.pdf",
+    "oracle_ms": 3.6934590000000003,
+    "nupdf_ms": 2.744666,
+    "speedup": 1.3456861417746278,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.953125
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t14-pass-r.pdf",
+    "oracle_ms": 3.264625,
+    "nupdf_ms": 2.369917,
+    "speedup": 1.3775271454654319,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.96875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t15-fail-s.pdf",
+    "oracle_ms": 3.2185,
+    "nupdf_ms": 2.710166,
+    "speedup": 1.1875656325110713,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t15-pass-t.pdf",
+    "oracle_ms": 3.333166,
+    "nupdf_ms": 2.258084,
+    "speedup": 1.4761036347629226,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t16-fail-v.pdf",
+    "oracle_ms": 3.391625,
+    "nupdf_ms": 2.480584,
+    "speedup": 1.3672687560671197,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.96875
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t16-pass-w.pdf",
+    "oracle_ms": 3.323708,
+    "nupdf_ms": 2.296292,
+    "speedup": 1.4474239338899406,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t17-fail-x.pdf",
+    "oracle_ms": 3.847458,
+    "nupdf_ms": 2.8174580000000002,
+    "speedup": 1.3655777654893169,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.90625
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.1 General/veraPDF test suite 6-6-2-3-1-t17-pass-w.pdf",
+    "oracle_ms": 3.9418329999999995,
+    "nupdf_ms": 2.763291,
+    "speedup": 1.4264994168185685,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.6 Metadata/6.6.2 Metadata streams/6.6.2.3 Schemas/6.6.2.3.3 Extension schema container schemas/veraPDF test suite 6-6-2-3-3-t02-fail-c.pdf",
+    "oracle_ms": 3.9049169999999997,
+    "nupdf_ms": 2.7894579999999998,
+    "speedup": 1.3998837767050087,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "verapdf/PDF_A-2b/6.9 Optional content/veraPDF test suite 6-9-t03-pass-a.pdf",
+    "oracle_ms": 4.15,
+    "nupdf_ms": 4.382334,
+    "speedup": 0.946983958776305,
+    "oracle_rss_mb": 4.640625,
+    "nupdf_rss_mb": 6.765625
+  },
+  {
+    "file": "verapdf/PDF_A-3b/6.8 Embedded files/veraPDF test suite 6-8-t02-fail-b.pdf",
+    "oracle_ms": 4.329459,
+    "nupdf_ms": 4.137125,
+    "speedup": 1.0464897724869322,
+    "oracle_rss_mb": 4.71875,
+    "nupdf_rss_mb": 7.84375
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.1 File structure/6.1.2 File header/veraPDF test suite 6-1-2-t02-fail-d.pdf",
+    "oracle_ms": 3.8544579999999997,
+    "nupdf_ms": 2.7047920000000003,
+    "speedup": 1.42504784101698,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.1 File structure/6.1.7 Name objects/veraPDF test suite 6-1-7-t01-fail-c.pdf",
+    "oracle_ms": 4.0144589999999996,
+    "nupdf_ms": 2.990917,
+    "speedup": 1.3422167850194437,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.078125
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.10 Fonts/6.2.10.3 Composite fonts/6.2.10.3.1 General/veraPDF test suite 6-2-10-3-1-t01-fail-c.pdf",
+    "oracle_ms": 5.770042,
+    "nupdf_ms": 4.807958999999999,
+    "speedup": 1.2001021639327625,
+    "oracle_rss_mb": 4.859375,
+    "nupdf_rss_mb": 6.609375
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.10 Fonts/6.2.10.5 Font metrics/veraPDF test suite 6-2-10-5-t01-fail-a.pdf",
+    "oracle_ms": 3.848834,
+    "nupdf_ms": 2.970625,
+    "speedup": 1.295631054071113,
+    "oracle_rss_mb": 4.625,
+    "nupdf_rss_mb": 6.15625
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.10 Fonts/6.2.10.8 Use of ActualText/veraPDF test suite 6-2-10-8-t01-pass-b.pdf",
+    "oracle_ms": 3.887584,
+    "nupdf_ms": 2.9093750000000003,
+    "speedup": 1.3362265091299677,
+    "oracle_rss_mb": 4.625,
+    "nupdf_rss_mb": 6.28125
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.3 Output intent/veraPDF test suite 6-2-3-t01-fail-c.pdf",
+    "oracle_ms": 3.750166,
+    "nupdf_ms": 2.947041,
+    "speedup": 1.2725191132393476,
+    "oracle_rss_mb": 4.5625,
+    "nupdf_rss_mb": 5.984375
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.2 ICCBased colour spaces/veraPDF test suite 6-2-4-2-t03-pass-c.pdf",
+    "oracle_ms": 4.152959,
+    "nupdf_ms": 9.207042,
+    "speedup": 0.45106332739657323,
+    "oracle_rss_mb": 4.84375,
+    "nupdf_rss_mb": 9.953125
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t01-pass-d.pdf",
+    "oracle_ms": 3.924833,
+    "nupdf_ms": 6.04675,
+    "speedup": 0.6490814073675941,
+    "oracle_rss_mb": 4.84375,
+    "nupdf_rss_mb": 8.484375
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t04-fail-b.pdf",
+    "oracle_ms": 4.249375,
+    "nupdf_ms": 3.1128750000000003,
+    "speedup": 1.365096574709874,
+    "oracle_rss_mb": 4.5625,
+    "nupdf_rss_mb": 6.203125
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.3 Uncalibrated -Device colour spaces/veraPDF test suite 6-2-4-3-t04-pass-e.pdf",
+    "oracle_ms": 4.139,
+    "nupdf_ms": 7.472917,
+    "speedup": 0.5538667163036871,
+    "oracle_rss_mb": 4.84375,
+    "nupdf_rss_mb": 8.9375
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.4 Colour spaces/6.2.4.4 Separation and DeviceN colour spaces/veraPDF test suite 6-2-4-4-t02-fail-c.pdf",
+    "oracle_ms": 4.076458,
+    "nupdf_ms": 3.090959,
+    "speedup": 1.318832763553318,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 6.109375
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.7 Images/6.2.7.1 General/veraPDF test suite 6-2-7-1-t03-fail-a.pdf",
+    "oracle_ms": 4.0205,
+    "nupdf_ms": 3.6313750000000002,
+    "speedup": 1.1071563801590307,
+    "oracle_rss_mb": 4.5625,
+    "nupdf_rss_mb": 6.5625
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.9 Transparency/veraPDF test suite 6-2-9-t03-fail-d.pdf",
+    "oracle_ms": 3.9955410000000002,
+    "nupdf_ms": 2.881375,
+    "speedup": 1.3866785822740881,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.0625
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.2 Graphics/6.2.9 Transparency/veraPDF test suite 6-2-9-t05-pass-a.pdf",
+    "oracle_ms": 4.139791000000001,
+    "nupdf_ms": 2.9684999999999997,
+    "speedup": 1.394573353545562,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 6.09375
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.3 Annotations/6.3.2 Annotation dictionaries/veraPDF test suite 6-3-2-t01-fail-c.pdf",
+    "oracle_ms": 4.36175,
+    "nupdf_ms": 2.950917,
+    "speedup": 1.4780998584507798,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.046875
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.3 Annotations/6.3.3 Annotation appearances/veraPDF test suite 6-3-3-t01-fail-a.pdf",
+    "oracle_ms": 4.175624999999999,
+    "nupdf_ms": 2.70475,
+    "speedup": 1.5438118125519915,
+    "oracle_rss_mb": 4.53125,
+    "nupdf_rss_mb": 5.90625
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.3 Annotations/6.3.3 Annotation appearances/veraPDF test suite 6-3-3-t02-pass-a.pdf",
+    "oracle_ms": 3.6220839999999996,
+    "nupdf_ms": 2.757083,
+    "speedup": 1.313737743840138,
+    "oracle_rss_mb": 4.59375,
+    "nupdf_rss_mb": 6.046875
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.6 Action/6.6.3 Trigger events/veraPDF test suite 6-6-3-t01-fail-b.pdf",
+    "oracle_ms": 3.826875,
+    "nupdf_ms": 2.773875,
+    "speedup": 1.3796133567662565,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "verapdf/PDF_A-4/6.9 Embedded files/veraPDF test suite 6-9-t02-fail-a.pdf",
+    "oracle_ms": 3.9564589999999997,
+    "nupdf_ms": 2.781792,
+    "speedup": 1.4222698893375205,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.3125
+  },
+  {
+    "file": "verapdf/PDF_A-4f/6.3 Annotations/6.3.2 Annotation dictionaries/veraPDF test suite 6-3-2-t01-fail-a.pdf",
+    "oracle_ms": 3.809292,
+    "nupdf_ms": 2.828958,
+    "speedup": 1.3465353674391773,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.078125
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.1 General/7.1-t02-pass-b.pdf",
+    "oracle_ms": 4.500083999999999,
+    "nupdf_ms": 10.181834,
+    "speedup": 0.4419718490794487,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 9.234375
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.10 Optional content/7.10-t01-fail-b.pdf",
+    "oracle_ms": 4.283833,
+    "nupdf_ms": 3.372125,
+    "speedup": 1.2703660154946805,
+    "oracle_rss_mb": 4.921875,
+    "nupdf_rss_mb": 6.859375
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.18 Annotations/7.18.1 General/7.18.1-t03-fail-b.pdf",
+    "oracle_ms": 3.8914169999999997,
+    "nupdf_ms": 3.331667,
+    "speedup": 1.1680089876929476,
+    "oracle_rss_mb": 4.609375,
+    "nupdf_rss_mb": 6.625
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.18 Annotations/7.18.6 Media/7.18.6.2 Media clip data/7.18.6.2-t02-pass-a.pdf",
+    "oracle_ms": 3.865916,
+    "nupdf_ms": 18.544208,
+    "speedup": 0.20847026737405014,
+    "oracle_rss_mb": 4.84375,
+    "nupdf_rss_mb": 16.796875
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.2 Text/7.2-t15-pass-a.pdf",
+    "oracle_ms": 4.277457999999999,
+    "nupdf_ms": 2.8957919999999997,
+    "speedup": 1.4771288821849082,
+    "oracle_rss_mb": 4.484375,
+    "nupdf_rss_mb": 6.171875
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.2 Text/7.2-t23-pass-b.pdf",
+    "oracle_ms": 4.908709,
+    "nupdf_ms": 3.7668340000000002,
+    "speedup": 1.303139187975897,
+    "oracle_rss_mb": 4.96875,
+    "nupdf_rss_mb": 7.34375
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.2 Text/7.2-t29-fail-m.pdf",
+    "oracle_ms": 3.8888339999999997,
+    "nupdf_ms": 2.998166,
+    "speedup": 1.2970709427029723,
+    "oracle_rss_mb": 4.453125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.2 Text/7.2-t33-pass-b.pdf",
+    "oracle_ms": 3.898209,
+    "nupdf_ms": 2.9576659999999997,
+    "speedup": 1.3180017622003297,
+    "oracle_rss_mb": 4.40625,
+    "nupdf_rss_mb": 6.15625
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.21 Fonts/7.21.3 Composite fonts/7.21.3.2 CIDFonts/7.21.3.2-t01-fail-b.pdf",
+    "oracle_ms": 3.7196249999999997,
+    "nupdf_ms": 3.3440000000000003,
+    "speedup": 1.1123280502392343,
+    "oracle_rss_mb": 4.765625,
+    "nupdf_rss_mb": 6.53125
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.21 Fonts/7.21.6 Character encodings/7.21.6-t02-pass-d.pdf",
+    "oracle_ms": 4.111041999999999,
+    "nupdf_ms": 2.942125,
+    "speedup": 1.3973036495730127,
+    "oracle_rss_mb": 4.515625,
+    "nupdf_rss_mb": 6.203125
+  },
+  {
+    "file": "verapdf/PDF_UA-1/7.4 Headings/7.4.4 Unnumbered headings/7.4.4-t02-fail-a.pdf",
+    "oracle_ms": 3.919667,
+    "nupdf_ms": 3.561042,
+    "speedup": 1.1007078826927623,
+    "oracle_rss_mb": 4.546875,
+    "nupdf_rss_mb": 6.234375
+  },
+  {
+    "file": "verapdf/PDF_UA-2/5 Version identification/5-t02-fail-a.pdf",
+    "oracle_ms": 3.858041,
+    "nupdf_ms": 3.3297499999999998,
+    "speedup": 1.1586578571964863,
+    "oracle_rss_mb": 4.515625,
+    "nupdf_rss_mb": 6.296875
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.2 Logical structure/8.2.4 Structure types/8.2.4-t02-fail-b.pdf",
+    "oracle_ms": 4.235583,
+    "nupdf_ms": 3.3665000000000003,
+    "speedup": 1.258156245358681,
+    "oracle_rss_mb": 4.515625,
+    "nupdf_rss_mb": 6.234375
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.2 Logical structure/8.2.5 Additional requirements for specific structure types/8.2.5.26 Table (Table, TR, TH, TD, THead, TBody, TFoot)/8.2.5.26-t05-pass-b.pdf",
+    "oracle_ms": 4.003417000000001,
+    "nupdf_ms": 3.099,
+    "speedup": 1.2918415617941272,
+    "oracle_rss_mb": 4.703125,
+    "nupdf_rss_mb": 6.515625
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.4 Text representation for content/8.4.4 Declaring natural language/8.4.4-t02-fail-o.pdf",
+    "oracle_ms": 3.921458,
+    "nupdf_ms": 3.0147500000000003,
+    "speedup": 1.3007572767227795,
+    "oracle_rss_mb": 4.453125,
+    "nupdf_rss_mb": 6.0
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.4 Text representation for content/8.4.5 Fonts/8.4.5.4 CMaps/8.4.5.4-t02-fail-b.pdf",
+    "oracle_ms": 5.797,
+    "nupdf_ms": 4.820333000000001,
+    "speedup": 1.2026140102768832,
+    "oracle_rss_mb": 4.8125,
+    "nupdf_rss_mb": 6.5
+  },
+  {
+    "file": "verapdf/PDF_UA-2/8.4 Text representation for content/8.4.5 Fonts/8.4.5.9 Use of .notdef glyph/8.4.5.9-t01-fail-a.pdf",
+    "oracle_ms": 4.250083,
+    "nupdf_ms": 3.379625,
+    "speedup": 1.2575605281651072,
+    "oracle_rss_mb": 4.46875,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "verapdf/TWG test files/TWG test suite A005-pdfa1-fail-c.pdf",
+    "oracle_ms": 3.982541,
+    "nupdf_ms": 2.815458,
+    "speedup": 1.4145268727148477,
+    "oracle_rss_mb": 4.78125,
+    "nupdf_rss_mb": 6.578125
+  },
+  {
+    "file": "verapdf/TWG test files/TWG test suite A018-pdfa2-fail-a.pdf",
+    "oracle_ms": 3.625459,
+    "nupdf_ms": 3.694917,
+    "speedup": 0.9812017428266996,
+    "oracle_rss_mb": 4.578125,
+    "nupdf_rss_mb": 6.03125
+  },
+  {
+    "file": "verapdf/TWG test files/TWG test suite A027-pdfa3-pass-a.pdf",
+    "oracle_ms": 3.766458,
+    "nupdf_ms": 2.698333,
+    "speedup": 1.3958462502589564,
+    "oracle_rss_mb": 4.34375,
+    "nupdf_rss_mb": 7.078125
+  }
+]

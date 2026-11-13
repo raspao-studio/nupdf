@@ -1,0 +1,272 @@
+[
+  {
+    "file": "long/long-001.pdf",
+    "nupdf_ms": 0.2075,
+    "oxide_ms": null,
+    "nupdf_units": 100,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Invalid PDF: MediaBox not found or not an array"
+  },
+  {
+    "file": "long/long-002.pdf",
+    "nupdf_ms": 0.158333,
+    "oxide_ms": null,
+    "nupdf_units": 96,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Invalid PDF: MediaBox not found or not an array"
+  },
+  {
+    "file": "long/long-003.pdf",
+    "nupdf_ms": 0.174875,
+    "oxide_ms": null,
+    "nupdf_units": 99,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Invalid PDF: MediaBox not found or not an array"
+  },
+  {
+    "file": "long/long-004.pdf",
+    "nupdf_ms": 0.187125,
+    "oxide_ms": null,
+    "nupdf_units": 98,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Invalid PDF: MediaBox not found or not an array"
+  },
+  {
+    "file": "long/long-005.pdf",
+    "nupdf_ms": 0.26125,
+    "oxide_ms": null,
+    "nupdf_units": 99,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Invalid PDF: MediaBox not found or not an array"
+  },
+  {
+    "file": "long/long-006.pdf",
+    "nupdf_ms": 0.201792,
+    "oxide_ms": 3.0128749999999997,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-007.pdf",
+    "nupdf_ms": 0.367916,
+    "oxide_ms": 3.095875,
+    "nupdf_units": 103,
+    "oxide_units": 103,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-008.pdf",
+    "nupdf_ms": 2.692459,
+    "oxide_ms": 20.837209,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-009.pdf",
+    "nupdf_ms": 0.240125,
+    "oxide_ms": 2.642458,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-010.pdf",
+    "nupdf_ms": 1.1082500000000002,
+    "oxide_ms": 7.658125,
+    "nupdf_units": 362,
+    "oxide_units": 362,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-011.pdf",
+    "nupdf_ms": 0.278542,
+    "oxide_ms": 3.100583,
+    "nupdf_units": 111,
+    "oxide_units": 111,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-012.pdf",
+    "nupdf_ms": 0.27791699999999997,
+    "oxide_ms": 3.507667,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-013.pdf",
+    "nupdf_ms": 0.258583,
+    "oxide_ms": 3.3562499999999997,
+    "nupdf_units": 107,
+    "oxide_units": 107,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-014.pdf",
+    "nupdf_ms": 0.32275000000000004,
+    "oxide_ms": null,
+    "nupdf_units": 135,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Invalid PDF: MediaBox not found or not an array"
+  },
+  {
+    "file": "long/long-015.pdf",
+    "nupdf_ms": 0.211916,
+    "oxide_ms": 2.771875,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-016.pdf",
+    "nupdf_ms": 0.188041,
+    "oxide_ms": null,
+    "nupdf_units": 118,
+    "oxide_units": null,
+    "nupdf_error": null,
+    "oxide_error": "Invalid PDF: MediaBox not found or not an array"
+  },
+  {
+    "file": "long/long-017.pdf",
+    "nupdf_ms": 0.288792,
+    "oxide_ms": 3.774042,
+    "nupdf_units": 101,
+    "oxide_units": 101,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-018.pdf",
+    "nupdf_ms": 0.253625,
+    "oxide_ms": 3.0555830000000004,
+    "nupdf_units": 103,
+    "oxide_units": 103,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-019.pdf",
+    "nupdf_ms": 0.227,
+    "oxide_ms": 2.501584,
+    "nupdf_units": 104,
+    "oxide_units": 104,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-020.pdf",
+    "nupdf_ms": 0.17450000000000002,
+    "oxide_ms": 2.006875,
+    "nupdf_units": 101,
+    "oxide_units": 101,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-021.pdf",
+    "nupdf_ms": 0.205792,
+    "oxide_ms": 2.461792,
+    "nupdf_units": 108,
+    "oxide_units": 108,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-022.pdf",
+    "nupdf_ms": 0.192375,
+    "oxide_ms": 2.9741250000000004,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-023.pdf",
+    "nupdf_ms": 0.219125,
+    "oxide_ms": 2.217542,
+    "nupdf_units": 107,
+    "oxide_units": 107,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-024.pdf",
+    "nupdf_ms": 0.183375,
+    "oxide_ms": 2.2455830000000003,
+    "nupdf_units": 99,
+    "oxide_units": 99,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-025.pdf",
+    "nupdf_ms": 0.19775,
+    "oxide_ms": 2.154625,
+    "nupdf_units": 125,
+    "oxide_units": 125,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-026.pdf",
+    "nupdf_ms": 0.170125,
+    "oxide_ms": 2.121208,
+    "nupdf_units": 105,
+    "oxide_units": 105,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-027.pdf",
+    "nupdf_ms": 0.179916,
+    "oxide_ms": 2.025167,
+    "nupdf_units": 105,
+    "oxide_units": 105,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-028.pdf",
+    "nupdf_ms": 0.16449999999999998,
+    "oxide_ms": 2.005209,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-029.pdf",
+    "nupdf_ms": 0.202708,
+    "oxide_ms": 2.6713750000000003,
+    "nupdf_units": 116,
+    "oxide_units": 116,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-030.pdf",
+    "nupdf_ms": 0.196666,
+    "oxide_ms": 2.2445,
+    "nupdf_units": 112,
+    "oxide_units": 112,
+    "nupdf_error": null,
+    "oxide_error": null
+  }
+]
