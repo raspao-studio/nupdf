@@ -1,0 +1,272 @@
+[
+  {
+    "file": "long/long-001.pdf",
+    "nupdf_ms": 0.151125,
+    "oxide_ms": 2.423625,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-002.pdf",
+    "nupdf_ms": 0.105333,
+    "oxide_ms": 1.656417,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-003.pdf",
+    "nupdf_ms": 0.123417,
+    "oxide_ms": 1.883166,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-004.pdf",
+    "nupdf_ms": 0.121125,
+    "oxide_ms": 1.804875,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-005.pdf",
+    "nupdf_ms": 0.199417,
+    "oxide_ms": 2.741791,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-006.pdf",
+    "nupdf_ms": 0.150667,
+    "oxide_ms": 2.427334,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-007.pdf",
+    "nupdf_ms": 0.208125,
+    "oxide_ms": 2.566166,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-008.pdf",
+    "nupdf_ms": 41.493791,
+    "oxide_ms": 138.147833,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-009.pdf",
+    "nupdf_ms": 0.17425000000000002,
+    "oxide_ms": 2.560083,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-010.pdf",
+    "nupdf_ms": 1.223459,
+    "oxide_ms": 50.876708,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-011.pdf",
+    "nupdf_ms": 0.189,
+    "oxide_ms": 2.9003750000000004,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-012.pdf",
+    "nupdf_ms": 0.21975,
+    "oxide_ms": 3.571458,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-013.pdf",
+    "nupdf_ms": 0.204167,
+    "oxide_ms": 3.09225,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-014.pdf",
+    "nupdf_ms": 0.21975,
+    "oxide_ms": 4.525167,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-015.pdf",
+    "nupdf_ms": 0.1615,
+    "oxide_ms": 2.55425,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-016.pdf",
+    "nupdf_ms": 0.255375,
+    "oxide_ms": 3.1275,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-017.pdf",
+    "nupdf_ms": 0.228334,
+    "oxide_ms": 3.3939999999999997,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-018.pdf",
+    "nupdf_ms": 0.196417,
+    "oxide_ms": 2.916875,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-019.pdf",
+    "nupdf_ms": 0.169084,
+    "oxide_ms": 2.4321249999999996,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-020.pdf",
+    "nupdf_ms": 0.129542,
+    "oxide_ms": 2.192792,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-021.pdf",
+    "nupdf_ms": 0.16245800000000002,
+    "oxide_ms": 2.70925,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-022.pdf",
+    "nupdf_ms": 0.161333,
+    "oxide_ms": 2.5225,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-023.pdf",
+    "nupdf_ms": 0.15804200000000002,
+    "oxide_ms": 2.618791,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-024.pdf",
+    "nupdf_ms": 0.14962499999999998,
+    "oxide_ms": 2.4045,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-025.pdf",
+    "nupdf_ms": 0.153959,
+    "oxide_ms": 3.146208,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-026.pdf",
+    "nupdf_ms": 0.148625,
+    "oxide_ms": 2.5088749999999997,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-027.pdf",
+    "nupdf_ms": 0.13366699999999998,
+    "oxide_ms": 2.213792,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-028.pdf",
+    "nupdf_ms": 0.131167,
+    "oxide_ms": 2.054084,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-029.pdf",
+    "nupdf_ms": 0.174208,
+    "oxide_ms": 3.257292,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-030.pdf",
+    "nupdf_ms": 0.188375,
+    "oxide_ms": 2.848791,
+    "nupdf_units": 0,
+    "oxide_units": 0,
+    "nupdf_error": null,
+    "oxide_error": null
+  }
+]

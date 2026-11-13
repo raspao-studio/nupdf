@@ -1,0 +1,272 @@
+[
+  {
+    "file": "long/long-001.pdf",
+    "nupdf_ms": 0.024,
+    "oxide_ms": 0.100208,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-002.pdf",
+    "nupdf_ms": 0.0215,
+    "oxide_ms": 0.07104200000000001,
+    "nupdf_units": 96,
+    "oxide_units": 96,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-003.pdf",
+    "nupdf_ms": 0.021375,
+    "oxide_ms": 0.06999999999999999,
+    "nupdf_units": 99,
+    "oxide_units": 99,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-004.pdf",
+    "nupdf_ms": 0.023416,
+    "oxide_ms": 0.076459,
+    "nupdf_units": 98,
+    "oxide_units": 98,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-005.pdf",
+    "nupdf_ms": 0.0385,
+    "oxide_ms": 0.31016699999999997,
+    "nupdf_units": 99,
+    "oxide_units": 99,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-006.pdf",
+    "nupdf_ms": 0.025041,
+    "oxide_ms": 0.12774999999999995,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-007.pdf",
+    "nupdf_ms": 0.052417000000000005,
+    "oxide_ms": 0.3265,
+    "nupdf_units": 103,
+    "oxide_units": 103,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-008.pdf",
+    "nupdf_ms": 0.647708,
+    "oxide_ms": 5.396958000000001,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-009.pdf",
+    "nupdf_ms": 0.048167,
+    "oxide_ms": 0.266334,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-010.pdf",
+    "nupdf_ms": 0.056916999999999995,
+    "oxide_ms": 0.237042,
+    "nupdf_units": 362,
+    "oxide_units": 362,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-011.pdf",
+    "nupdf_ms": 0.063958,
+    "oxide_ms": 0.475084,
+    "nupdf_units": 111,
+    "oxide_units": 111,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-012.pdf",
+    "nupdf_ms": 0.057540999999999995,
+    "oxide_ms": 0.414042,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-013.pdf",
+    "nupdf_ms": 0.068791,
+    "oxide_ms": 0.438709,
+    "nupdf_units": 107,
+    "oxide_units": 107,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-014.pdf",
+    "nupdf_ms": 0.062042,
+    "oxide_ms": 0.6432089999999999,
+    "nupdf_units": 135,
+    "oxide_units": 135,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-015.pdf",
+    "nupdf_ms": 0.051334,
+    "oxide_ms": 0.420625,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-016.pdf",
+    "nupdf_ms": 0.027667,
+    "oxide_ms": 0.121125,
+    "nupdf_units": 118,
+    "oxide_units": 118,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-017.pdf",
+    "nupdf_ms": 0.047875,
+    "oxide_ms": 0.7822079999999999,
+    "nupdf_units": 101,
+    "oxide_units": 101,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-018.pdf",
+    "nupdf_ms": 0.079333,
+    "oxide_ms": 0.524625,
+    "nupdf_units": 103,
+    "oxide_units": 103,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-019.pdf",
+    "nupdf_ms": 0.06708299999999999,
+    "oxide_ms": 0.376292,
+    "nupdf_units": 104,
+    "oxide_units": 104,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-020.pdf",
+    "nupdf_ms": 0.024375,
+    "oxide_ms": 0.077958,
+    "nupdf_units": 101,
+    "oxide_units": 101,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-021.pdf",
+    "nupdf_ms": 0.024875,
+    "oxide_ms": 0.095875,
+    "nupdf_units": 108,
+    "oxide_units": 108,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-022.pdf",
+    "nupdf_ms": 0.023959,
+    "oxide_ms": 0.068416,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-023.pdf",
+    "nupdf_ms": 0.032,
+    "oxide_ms": 0.134125,
+    "nupdf_units": 107,
+    "oxide_units": 107,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-024.pdf",
+    "nupdf_ms": 0.024875,
+    "oxide_ms": 0.08479099999999999,
+    "nupdf_units": 99,
+    "oxide_units": 99,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-025.pdf",
+    "nupdf_ms": 0.028083,
+    "oxide_ms": 0.086708,
+    "nupdf_units": 125,
+    "oxide_units": 125,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-026.pdf",
+    "nupdf_ms": 0.021458,
+    "oxide_ms": 0.06075,
+    "nupdf_units": 105,
+    "oxide_units": 105,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-027.pdf",
+    "nupdf_ms": 0.022,
+    "oxide_ms": 0.06674999999999999,
+    "nupdf_units": 105,
+    "oxide_units": 105,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-028.pdf",
+    "nupdf_ms": 0.023459,
+    "oxide_ms": 0.06820799999999999,
+    "nupdf_units": 100,
+    "oxide_units": 100,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-029.pdf",
+    "nupdf_ms": 0.024083,
+    "oxide_ms": 0.06854199999999999,
+    "nupdf_units": 116,
+    "oxide_units": 116,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-030.pdf",
+    "nupdf_ms": 0.028084,
+    "oxide_ms": 0.096,
+    "nupdf_units": 112,
+    "oxide_units": 112,
+    "nupdf_error": null,
+    "oxide_error": null
+  }
+]
