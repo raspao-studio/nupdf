@@ -33,107 +33,107 @@ Each layer only depends on the layers to its left. Consumers never see raw bytes
 
 The module names are targets; they appear as the milestones land. "MuPDF" lists the files a module follows. When upstream MuPDF changes one of these files, the oracle bump review (TESTING.md) checks the matching module.
 
-| nupdf module | MuPDF source | Milestone |
-|---|---|---|
-| `header` | `pdf/pdf-xref.c` (`pdf_load_version`) | M0 |
-| `lex` | `pdf/pdf-lex.c` | M1 |
-| `strtof` | `fitz/strtof.c`, `fitz/string.c` (`fz_atof`) | M1 |
-| `parse` | `pdf/pdf-parse.c` | M1 |
-| `object` | `pdf/pdf-object.c` | M1 |
-| `xref` | `pdf/pdf-xref.c` (loading), `fitz/filter-basic.c` (endstream filter) | M1 |
-| `slots` (sparse xref storage) | new; MuPDF allocates every declared slot | M1 |
-| `interrupt` (stopping a call at a deadline or when cancelled) | new | M8 |
-| `crypt` (standard security handler) | `pdf/pdf-crypt.c`, `fitz/crypt-arc4.c`, `fitz/filter-basic.c` (RC4 and AES filters) | M1 |
-| `repair` (scanner) | `pdf/pdf-repair.c` | M1 |
-| `document` (state, loading, object streams, repair rebuild, version, page count; the edit overlay, new documents) | `pdf/pdf-xref.c` (also `pdf_update_object`, `pdf_xref_ensure_incremental_object`, `pdf_create_object`, `pdf_delete_object`, `pdf_update_stream`, `pdf_create_document`), `pdf/pdf-repair.c`, `pdf/pdf-page.c` | M1, M3 |
-| `diag` | MuPDF's `fz_warn` calls, as data | M1 |
-| `text_string` | `pdf/pdf-parse.c` (`pdf_new_utf8_from_pdf_string`), `fitz/string.c` (`fz_runetochar`), `fitz/encodings.h` (PDFDocEncoding) | M1 |
-| `stream` (MuPDF's stream model, the endstream filter) | `include/mupdf/fitz/stream.h`, `fitz/stream-read.c`, `fitz/stream-open.c`, `fitz/filter-basic.c` | M2 |
-| `filter` (Flate, LZW, Brotli, RunLength, ASCIIHex, ASCII85, predictors, RC4 and AES; the filter chain) | `pdf/pdf-stream.c` (`build_filter`, `build_compression_params`), `pdf/pdf-colorspace.c` (`pdf_guess_colorspace_components`), `fitz/compressed-buffer.c`, `fitz/filter-basic.c`, `fitz/filter-flate.c`, `fitz/filter-lzw.c`, `fitz/filter-brotli.c`, `fitz/filter-predict.c` | M1, M2 |
-| `page` | `pdf/pdf-page.c` (page map and lookup), `pdf/pdf-repair.c` (`pdf_walk_parent`, parent repair), `pdf/pdf-object.c` (`pdf_cycle`) | M1 |
-| `fax` (CCITTFax) | `fitz/filter-fax.c` | M2 |
-| `dct` (DCTDecode around the JPEG decoder) | `fitz/filter-dct.c` | M2 |
-| `jpeg` (JPEG decoder) | libjpeg 10 as bundled with MuPDF: `jdapimin.c`, `jdapistd.c`, `jdmaster.c`, `jdinput.c`, `jdmarker.c`, `jdhuff.c`, `jdarith.c`, `jaricom.c`, `jdcoefct.c`, `jddctmgr.c`, `jidctint.c`, `jdmainct.c`, `jdsample.c`, `jdcolor.c`, `jutils.c` (NOTICE) | M2 |
-| `jbig2` (JBIG2Decode around hayro-jbig2) | `fitz/filter-jbig2.c`, `pdf/pdf-stream.c` (`pdf_load_jbig2_globals`); jbig2dec's refusals from `jbig2.c` and `jbig2_segment.c` | M2 |
-| `names` (the names MuPDF interns, which take their own dictionary lookup path) | `include/mupdf/pdf/name-table.h` | M3 |
-| `print` (object syntax as MuPDF writes it) | `pdf/pdf-object.c` (`pdf_print_obj`), `fitz/printf.c` (`fmtfloat`), `fitz/ftoa.c` (`fz_grisu`) | M3 |
-| `write` (full and incremental saves, and the read-back check) | `pdf/pdf-write.c` | M3 |
-| `rearrange` (keeping some pages in a given order) | `pdf/pdf-clean-file.c` (`pdf_rearrange_pages`), `pdf/pdf-nametree.c` (`pdf_load_name_tree`), `pdf/pdf-page.c` (`pdf_flatten_inheritable_page_items`), `pdf/pdf-repair.c` (`pdf_parent_root`) | M3 |
-| `edit` (document information, removing metadata, page rotation) | `pdf/pdf-xref.c` (`pdf_set_metadata`), `pdf/pdf-parse.c` (`pdf_new_text_string`) | M3 |
-| `garbage` (garbage collection on save: marking, merging duplicates, renumbering) | `pdf/pdf-write.c`, `pdf/pdf-object.c` (`pdf_objcmp`, `pdf_hash_obj`) | M3 |
-| `deflate` (zlib's `compress2`, for the streams `clean -z` writes) | zlib 1.3.2 as bundled with MuPDF: `compress.c`, `deflate.c`, `trees.c`, `adler32.c` (NOTICE) | M3 |
-| `fax_encode` (CCITT G4 encoder, for 1-bit images `clean -z` writes) | `fitz/encode-fax.c`, `fitz/buffer.c` (`fz_append_bits`) | M3 |
-| `graft` (copying objects and pages between documents) | `pdf/pdf-graft.c` | M3 |
-| `insert` (putting a page into the page tree, page labels shifted) | `pdf/pdf-page.c` (`pdf_insert_page`, `pdf_adjust_page_labels`), `pdf/pdf-repair.c` (`pdf_walk_parent`) | M3 |
-| `geometry` (points, rectangles, matrices in single precision) | `fitz/geometry.c` | M3 |
-| `link` (links read as URIs and written back: destinations, actions, file specifications, `pdf_create_link`) | `pdf/pdf-link.c`, `pdf/pdf-annot.c` (`pdf_create_link`), `pdf/pdf-nametree.c` (`pdf_lookup_dest`), `pdf/pdf-page.c` (`pdf_lookup_page_number`), `fitz/link.c`, `fitz/string.c` (URI encoding, `fz_cleanname`) | M3 |
-| `outline` (MuPDF's outline iterator, repair pass included; the whole outline as `fz_load_outline` reads it) | `pdf/pdf-outline.c`, `fitz/outline.c` (`fz_load_outline_from_iterator`) | M3, M9 |
-| `page_label` (page labels from the /PageLabels number tree) | `pdf/pdf-page.c` (`pdf_lookup_page_label`, `pdf_format_page_label`, `pdf_page_label`) | M9 |
-| `embedded` (embedded files: the name tree, file specifications, contents, checksums) | `pdf/pdf-link.c` (`get_file_stream_and_name`, `pdf_get_filespec_params` and the rest), `tools/murun.c` (`getEmbeddedFiles`) | M9 |
-| `date` (PDF dates as seconds since 1970) | `pdf/pdf-parse.c` (`pdf_parse_date`) | M9 |
-| `merge` (`mutool merge`: pages, external links, outline items) | `tools/pdfmerge.c` | M3 |
-| `content` (content streams lexed and handed to a processor: the operand stack, ExtGState entries, inline images, contents arrays) | `pdf/pdf-interpret.c` (`pdf_process_stream`, `pdf_process_keyword`, `pdf_process_extgstate`), `pdf/pdf-image.c` (inline images), `pdf/pdf-stream.c` (`pdf_open_contents_stream`, `pdf_open_object_array`, `pdf_load_compressed_inline_image`), `fitz/filter-basic.c` (`fz_open_concat`), `fitz/filter-leech.c`, `fitz/image.c` (`fz_decomp_image_from_stream`) | M4 |
-| `colorspace` (colorspace definitions: families, components, indexed and separation bases; ICC profiles judged by their header as lcms opens it) | `pdf/pdf-colorspace.c`, `fitz/colorspace.c` (`fz_new_indexed_colorspace`, `fz_new_icc_colorspace`), `thirdparty/lcms2/src/cmsio0.c` (`_cmsReadHeader`), `cmspcs.c` (`cmsChannelsOf`) | M4 |
-| `run` (the run processor: gstates, clips, groups and soft masks, patterns, shadings, images, forms, text and Type 3 glyphs, layers, structure, metatext; a page run; the transparency scan) | `pdf/pdf-op-run.c`, `pdf/pdf-interpret.c` (`pdf_tos_*`, `pdf_process_glyph`), `fitz/font.c` (`fz_prepare_t3_glyph`, `fz_bound_t3_glyph`, `fz_render_t3_glyph_direct`), `fitz/bbox-device.c` and `fitz/list-device.c` (a Type 3 glyph's measured box), `pdf/pdf-run.c` (`pdf_run_page_contents`, `pdf_structure_type`), `pdf/pdf-page.c` (`pdf_resources_use_blending`, `pdf_load_default_colorspaces`), `pdf/pdf-pattern.c`, `pdf/pdf-xobject.c`, `pdf/pdf-struct.c` (`pdf_check_structure_tree`), `pdf/pdf-nametree.c` (`pdf_lookup_number`), `pdf/pdf-interpret.c` (soft masks in `pdf_process_extgstate`) | M4 |
-| `device` (what the interpreter draws to) | `include/mupdf/fitz/device.h`, `fitz/device.c` | M4 |
-| `path` (paths built and bounded as MuPDF builds them) | `fitz/path.c` | M4 |
-| `image` (images as `pdf_load_image` loads them, JPEG 2000 judged by its header as openjpeg reads it) | `pdf/pdf-image.c`, `fitz/image.c` (`fz_new_image_of_size`), `fitz/load-jpx.c`, `thirdparty/openjpeg/src/lib/openjp2/jp2.c` (`opj_jp2_read_header`) | M4 |
-| `function` (functions of types 0, 2, 3 and 4, loaded and evaluated) | `pdf/pdf-function.c`, `fitz/device.c` (`fz_eval_function`) | M4 |
-| `shade` (shadings loaded, their functions sampled) | `pdf/pdf-shade.c` | M4 |
-| `font` (font programs as FreeType opens them for MuPDF: sfnt, CFF and Type 1 faces, their charmaps, glyph names and widths; the standard 14 fonts; the CJK font's metrics) | FreeType 2: `sfnt/ttload.c`, `ttcmap.c`, `ttpost.c`, `ttmtx.c`, `sfobjs.c`, `cff/cffload.c`, `cffparse.c`, `cffobjs.c`, `type1/t1parse.c`, `t1load.c`, `t1objs.c`, `psaux/psintrp.c`, `t1decode.c`, `base/ftobjs.c`, `psnames/psmodule.c` (NOTICE); `fitz/font.c` (`ft_char_index`, `ft_name_index`), `fitz/noto.c` | M4 |
-| `font::outline` (a glyph's unhinted outline control box: TrueType glyphs and composites, CFF and Type 1 charstrings) | FreeType 2: `truetype/ttgload.c`, `ttpload.c`, `psaux/psintrp.c`, `psft.c`, `pshints.c`, `psstack.c`, `cff/cffgload.c`, `base/ftoutln.c` (NOTICE) | M5 |
-| `fontdesc` (PDF fonts: simple, composite and Type 3; the font program, encodings, ToUnicode, widths, the width table; glyph boxes) | `pdf/pdf-font.c`, `pdf/pdf-type3.c`, `pdf/pdf-unicode.c`, `pdf/pdf-metrics.c`, `fitz/font.c` (`fz_new_font_from_buffer`, `fz_bound_glyph`, `fz_bound_ft_glyph`, `fz_adjust_ft_glyph_width`) | M4 |
-| `cmap` (CMaps: embedded, predefined, lookups) | `pdf/pdf-cmap.c`, `pdf/pdf-cmap-parse.c`, `pdf/pdf-cmap-load.c` | M4 |
-| `glyphs` (glyph names to Unicode, named encodings) | `fitz/encodings.c`, `pdf/pdf-font.c` (`pdf_load_encoding`) | M4 |
-| `tables` (generated: the glyph list, encodings, bidi classes) | `fitz/glyphlist.h`, `fitz/encodings.h`, `fitz/ucdn_db.h` | M4 |
-| `text` (glyphs as devices get them, in spans; their bounds) | `fitz/text.c` | M4 |
-| `inventory` (the fonts and images the pages' resources reach, and embedded font programs) | `tools/pdfinfo.c` (`gatherresourceinfo`, `gatherfonts`, `gatherimages`), `tools/pdfextract.c` (`savefont`) | M4 |
-| `pixmap` (an image decoded to 8-bit samples; PAM and PNG writers) | `fitz/image.c` (`fz_decomp_image_from_stream`, `fz_mask_color_key`, `fz_unblend_masked_tile`, the JPEG height patch of `compressed_image_get_pixmap`), `fitz/draw-unpack.c`, `fitz/pixmap.c` (`fz_convert_indexed_pixmap_to_base`), `fitz/output-pnm.c`, `fitz/output-png.c` | M4 |
-| `layer` (optional content: the default configuration's states and whether a group or membership dictionary hides content) | `pdf/pdf-layer.c` (`pdf_read_ocg`, `pdf_select_layer_config`, `pdf_is_ocg_hidden`) | M4 |
-| `stext` (structured text: the stext device and its options, with the device's container stack and scissors) | `fitz/stext-device.c`, `fitz/device.c` (the container stack), `fitz/glyphbox.c`, `fitz/string.c` (`fz_chartorune`, `fz_utflen`), `fitz/util.c` (`fz_new_stext_page_from_page`); later `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` | M5 |
-| `para` (paragraph breaking: titles by underline or bold font, indents, line-height changes, trailing gaps, justified text, list items) | `fitz/stext-para.c` | M5 |
-| `table` (table hunting: candidate areas from rafts of rectangles and from segments, grids from the gaps in content and the lines drawn, cells merged and scored, Table/TR/TD structures with a grid block) | `fitz/stext-table.c`, `fitz/stext-raft.c` (the flotilla) | M5 |
-| `stext_tree` (the page as MuPDF's linked lists of blocks while the passes rework it, and its block iterators) | `fitz/stext-iterator.c`; the list handling of `stext-boxer.c` and `stext-table.c` | M5 |
-| `order` (opt-in reading order: a recursive XY-cut of the blocks, D38) | nupdf's own | M5 |
-| `segment` (page segmentation: the boxer's empty rectangles, splits at the widest gaps, `Div` structure blocks; page fills dropped) | `fitz/stext-boxer.c` | M5 |
-| `extract` (content ids, spans, the text of each level, Markdown) | nupdf's own; the text follows `fitz/stext-output.c` (`do_as_text`, in `stext`) | M5 |
-| `search` (search in structured text: flattening, text transforms, finders, quads) | `fitz/stext-search.c`, `fitz/util.c` (`fz_new_buffer_from_flattened_stext_page`) | M5 |
-| `regexp` (MuPDF's regular expressions) | `fitz/regexp.c` | M5 |
-| `unicode` (categories, combining classes, decomposition, composition, case) | `fitz/ucdn.c`, `fitz/string.c` (`fz_toupper`, `fz_tolower`, `fz_isalpha`) | M5 |
-| `content_write` (content stream writer) | `pdf/pdf-op-buffer.c` (`pdf_new_output_processor`), `pdf/pdf-stream.c` (`build_compression_params`) | M6 |
-| `content_filter` (sanitize filter) | `pdf/pdf-op-filter.c` (`pdf_new_sanitize_filter`) | M6 |
-| `content_clean` (`clean -c` and `-s`) | `pdf/pdf-clean.c` (`pdf_filter_page_contents` and helpers), `pdf/pdf-write.c` (`clean_content_streams`) | M6 |
-| `redact` | `pdf/pdf-clean.c` (`pdf_redact_page` and its filters) | M6 |
-| `redact_image` | `pdf/pdf-clean.c` (`pdf_redact_image_filter_pixels`), `pdf/pdf-image.c` (`pdf_add_image`), `fitz/geometry.c` (quad tests) | M6 |
-| `scrub` (document scrub after redaction) | none; nupdf's own | M6 |
-| `verify` (leak classes) | none; nupdf's own | M6 |
-| `verify` | new | M6 |
-| `draw::edge` (the edge list and its anti-aliased scan conversion) | `fitz/draw-edge.c` | M7 |
-| `draw::path` (path flattening, strokes with joins, caps and dashes) | `fitz/draw-path.c` | M7 |
-| `draw::paint` (pixmaps; spans, glyphs and pixmaps painted with MuPDF's 8-bit arithmetic; blend modes) | `fitz/draw-paint.c`, `fitz/paint-glyph.h`, `fitz/draw-blend.c`, `fitz/pixmap.c` | M7 |
-| `draw::device` (the draw device: clips, groups, soft masks, tiles, text, images, shadings) | `fitz/draw-device.c`, `fitz/draw-glyph.c` (`draw_glyph`) | M7 |
-| `draw::glyph` (subpixel placement, FreeType-rendered glyphs and their cache, glyph outlines as paths) | `fitz/draw-glyph.c` (`fz_subpixel_adjust`, `fz_render_glyph`), `fitz/font.c` (`do_ft_render_glyph`, `fz_outline_ft_glyph`) | M7 |
-| `draw::grays` (FreeType's smooth rasterizer, which MuPDF draws glyphs with) | FreeType `src/smooth/ftgrays.c`, `ftsmooth.c`, `src/base/ftoutln.c`, `ftobjs.c` (`ft_glyphslot_preset_bitmap`) | M7 |
-| `draw::image` (subsampling, the scaler, the affine image painter) | `fitz/draw-affine.c`, `fitz/draw-scale-simple.c`, `fitz/pixmap.c` (`fz_subsample_pixmap`), `fitz/image.c` (the subsampling factor) | M7 |
-| `draw::shade` (shadings as triangles) | `fitz/shade.c` (`fz_process_shade`), `fitz/draw-mesh.c` | M7 |
-| `draw::list` (display lists, for band rendering) | `fitz/list-device.c` | M7 |
-| `draw::color` (colors into the page's RGB, with and without color management) | `fitz/colorspace.c` (`fz_convert_color`, `fz_default_colorspace`), `fitz/color-fast.c` | M7 |
-| `cms` (ICC profiles through moxcms, with lcms2's black point compensation) | `fitz/color-lcms.c`; lcms2 `cmscnvrt.c` and `cmssamp.c` (black points) | M7 |
-| `font::outline` (glyph outlines for rendering: TrueType loading at a scale, charstring contours) | FreeType `src/truetype/ttgload.c`, `src/cff/cffgload.c`, `src/type1/t1gload.c` | M4, M7 |
-| `annot` (a page's annotations as `pdf_sync_annots` lists them, and the getters) | `pdf/pdf-annot.c` (`pdf_sync_annots`, `pdf_annot_*`), `pdf/pdf-appearance.c` (`pdf_annot_rect_diff`) | M9 |
-| `appearance` (appearance synthesis: `pdf_update_appearance`'s rules and the shared writers), `::shapes` (ink, polygons, lines, squares, circles, clouds), `::markup` (text markup, redactions, carets, icons) | `pdf/pdf-appearance.c`, `pdf/pdf-annot.c` (`pdf_annot_ap`, the border dash getters), `pdf/annotation-icons.h` | M9 |
-| `form` (fields as the widget getters read them: type, flags, value, options, name, label) | `pdf/pdf-form.c` (`pdf_field_type`, `pdf_field_value`, `load_field_name` and the rest) | M9 |
-| `bake` (flattening: appearances drawn into the page, `pdf_bake_document`) | `pdf/pdf-form.c` (`pdf_bake_document`, `pdf_bake_page`, `pdf_bake_annot`), `pdf/pdf-op-buffer.c` (`pdf_count_q_balance`), `pdf/pdf-xobject.c` (`pdf_new_xobject`) | M9 |
-| `signature` (byte ranges, changes since signing, the digest check and signatory), `der` (DER and BER), `rsa` (PKCS #1 v1.5 verification) | `pdf/pdf-form.c` (`pdf_signature_byte_range`, `validate_byte_ranges`, `pdf_signature_incremental_change_since_signing`), `pdf/pdf-signature.c`, `helpers/pkcs7/pkcs7-openssl.c` (`check_digest`, `get_signatory`); `der` and `rsa` are nupdf's own | M9 |
-| `sanitize` (JavaScript, launch, submit, remote and web actions, XFA, attachments removed) | nupdf's own (D48) | M9 |
-| `ocr` (an invisible text layer from Tesseract's TSV) | nupdf's own (D50) | M9 |
-| `annot_edit` (annotations added and deleted, each type's defaults, the setters, the new appearances made on update) | `pdf/pdf-annot.c` (`pdf_create_annot`, `pdf_create_annot_raw`, `pdf_delete_annot`, `pdf_set_annot_*`), `pdf/pdf-appearance.c` (`pdf_update_appearance`), `pdf/pdf-font-add.c` (font objects shared by digest) | M9 |
-| `appearance::text` (free text, stamps, line captions), `::layout` (the text walk, line breaking, `write_variable_text`), `::fonts` (DA parsing, the annotation's language, base-14 and CJK font resources) | `pdf/pdf-appearance.c`; `pdf/pdf-annot.c` (`pdf_parse_default_appearance`, `pdf_annot_language`); `pdf/pdf-font-add.c` (`pdf_add_simple_font`, `pdf_add_cjk_font`); `fitz/text.c` | M9 |
-| `appearance::commit` (a synthesized appearance written into the document: font objects first, one per font and encoding, then the form, then /AP) | `pdf/pdf-annot.c` (`pdf_set_annot_appearance`); `pdf/pdf-xobject.c` (`pdf_new_xobject`); `pdf/pdf-font-add.c`; `pdf/pdf-resources.c` (`pdf_find_font_resource`) | M9 |
-| `fill` (form filling as the widget API fills, JavaScript off: values, check boxes and radio groups, dirty fields made again on every page) | `pdf/pdf-form.c` (`pdf_set_text_field_value`, `pdf_set_field_value`, `update_field_value`, `pdf_field_mark_dirty`, `pdf_toggle_widget`, `set_check_grp`, `pdf_update_page`); `pdf/pdf-page.c` (`pdf_load_page`'s failures) | M9 |
-| `appearance::widget` (text, choice and signature widgets, the unsigned signature's sign-here arrow; push buttons, check boxes and radio buttons, a stream per state) | `pdf/pdf-appearance.c` (`pdf_write_widget_appearance`, `pdf_update_button_appearance`); `pdf/pdf-annot.c` (`pdf_annot_MK_BG`, `pdf_annot_MK_BC`); `pdf/pdf-form.c` (`pdf_button_field_on_state`); `pdf/pdf-layout.c` (`pdf_layout_fit_text`) | M9 |
-| `page_run` (a whole page as `fz_run_page` runs it: contents, annotations, widgets; which are drawn, how each appearance maps onto its /Rect, the appearances made on loading kept in the local xref) | `fitz/document.c` (`fz_run_page`), `pdf/pdf-run.c` (`pdf_run_page_with_usage`, `pdf_run_annot_with_usage`, `pdf_run_page_annots_with_usage`, `pdf_run_page_widgets_with_usage`), `pdf/pdf-interpret.c` (`pdf_process_annot`), `pdf/pdf-annot.c` (`pdf_annot_ap`, `pdf_annot_transform`, `pdf_annot_display_rect`, `pdf_annot_display_rotate`), `pdf/pdf-appearance.c` (`pdf_update_appearance`'s local synthesis) | M10 |
-| `list_run` (a display list played as `fz_run_display_list` plays it: node rectangles, clips narrowed to what they hold, culling; the text `mutool draw -F txt` gathers) | `fitz/list-device.c` (`fz_append_display_node`, the `fz_list_*` rectangles, `fz_run_display_list`) | M10 |
+| nupdf module | MuPDF source |
+|---|---|
+| `header` | `pdf/pdf-xref.c` (`pdf_load_version`) |
+| `lex` | `pdf/pdf-lex.c` |
+| `strtof` | `fitz/strtof.c`, `fitz/string.c` (`fz_atof`) |
+| `parse` | `pdf/pdf-parse.c` |
+| `object` | `pdf/pdf-object.c` |
+| `xref` | `pdf/pdf-xref.c` (loading), `fitz/filter-basic.c` (endstream filter) |
+| `slots` (sparse xref storage) | new; MuPDF allocates every declared slot |
+| `interrupt` (stopping a call at a deadline or when cancelled) | new |
+| `crypt` (standard security handler) | `pdf/pdf-crypt.c`, `fitz/crypt-arc4.c`, `fitz/filter-basic.c` (RC4 and AES filters) |
+| `repair` (scanner) | `pdf/pdf-repair.c` |
+| `document` (state, loading, object streams, repair rebuild, version, page count; the edit overlay, new documents) | `pdf/pdf-xref.c` (also `pdf_update_object`, `pdf_xref_ensure_incremental_object`, `pdf_create_object`, `pdf_delete_object`, `pdf_update_stream`, `pdf_create_document`), `pdf/pdf-repair.c`, `pdf/pdf-page.c` |
+| `diag` | MuPDF's `fz_warn` calls, as data |
+| `text_string` | `pdf/pdf-parse.c` (`pdf_new_utf8_from_pdf_string`), `fitz/string.c` (`fz_runetochar`), `fitz/encodings.h` (PDFDocEncoding) |
+| `stream` (MuPDF's stream model, the endstream filter) | `include/mupdf/fitz/stream.h`, `fitz/stream-read.c`, `fitz/stream-open.c`, `fitz/filter-basic.c` |
+| `filter` (Flate, LZW, Brotli, RunLength, ASCIIHex, ASCII85, predictors, RC4 and AES; the filter chain) | `pdf/pdf-stream.c` (`build_filter`, `build_compression_params`), `pdf/pdf-colorspace.c` (`pdf_guess_colorspace_components`), `fitz/compressed-buffer.c`, `fitz/filter-basic.c`, `fitz/filter-flate.c`, `fitz/filter-lzw.c`, `fitz/filter-brotli.c`, `fitz/filter-predict.c` |
+| `page` | `pdf/pdf-page.c` (page map and lookup), `pdf/pdf-repair.c` (`pdf_walk_parent`, parent repair), `pdf/pdf-object.c` (`pdf_cycle`) |
+| `fax` (CCITTFax) | `fitz/filter-fax.c` |
+| `dct` (DCTDecode around the JPEG decoder) | `fitz/filter-dct.c` |
+| `jpeg` (JPEG decoder) | libjpeg 10 as bundled with MuPDF: `jdapimin.c`, `jdapistd.c`, `jdmaster.c`, `jdinput.c`, `jdmarker.c`, `jdhuff.c`, `jdarith.c`, `jaricom.c`, `jdcoefct.c`, `jddctmgr.c`, `jidctint.c`, `jdmainct.c`, `jdsample.c`, `jdcolor.c`, `jutils.c` (NOTICE) |
+| `jbig2` (JBIG2Decode around hayro-jbig2) | `fitz/filter-jbig2.c`, `pdf/pdf-stream.c` (`pdf_load_jbig2_globals`); jbig2dec's refusals from `jbig2.c` and `jbig2_segment.c` |
+| `names` (the names MuPDF interns, which take their own dictionary lookup path) | `include/mupdf/pdf/name-table.h` |
+| `print` (object syntax as MuPDF writes it) | `pdf/pdf-object.c` (`pdf_print_obj`), `fitz/printf.c` (`fmtfloat`), `fitz/ftoa.c` (`fz_grisu`) |
+| `write` (full and incremental saves, and the read-back check) | `pdf/pdf-write.c` |
+| `rearrange` (keeping some pages in a given order) | `pdf/pdf-clean-file.c` (`pdf_rearrange_pages`), `pdf/pdf-nametree.c` (`pdf_load_name_tree`), `pdf/pdf-page.c` (`pdf_flatten_inheritable_page_items`), `pdf/pdf-repair.c` (`pdf_parent_root`) |
+| `edit` (document information, removing metadata, page rotation) | `pdf/pdf-xref.c` (`pdf_set_metadata`), `pdf/pdf-parse.c` (`pdf_new_text_string`) |
+| `garbage` (garbage collection on save: marking, merging duplicates, renumbering) | `pdf/pdf-write.c`, `pdf/pdf-object.c` (`pdf_objcmp`, `pdf_hash_obj`) |
+| `deflate` (zlib's `compress2`, for the streams `clean -z` writes) | zlib 1.3.2 as bundled with MuPDF: `compress.c`, `deflate.c`, `trees.c`, `adler32.c` (NOTICE) |
+| `fax_encode` (CCITT G4 encoder, for 1-bit images `clean -z` writes) | `fitz/encode-fax.c`, `fitz/buffer.c` (`fz_append_bits`) |
+| `graft` (copying objects and pages between documents) | `pdf/pdf-graft.c` |
+| `insert` (putting a page into the page tree, page labels shifted) | `pdf/pdf-page.c` (`pdf_insert_page`, `pdf_adjust_page_labels`), `pdf/pdf-repair.c` (`pdf_walk_parent`) |
+| `geometry` (points, rectangles, matrices in single precision) | `fitz/geometry.c` |
+| `link` (links read as URIs and written back: destinations, actions, file specifications, `pdf_create_link`) | `pdf/pdf-link.c`, `pdf/pdf-annot.c` (`pdf_create_link`), `pdf/pdf-nametree.c` (`pdf_lookup_dest`), `pdf/pdf-page.c` (`pdf_lookup_page_number`), `fitz/link.c`, `fitz/string.c` (URI encoding, `fz_cleanname`) |
+| `outline` (MuPDF's outline iterator, repair pass included; the whole outline as `fz_load_outline` reads it) | `pdf/pdf-outline.c`, `fitz/outline.c` (`fz_load_outline_from_iterator`) |
+| `page_label` (page labels from the /PageLabels number tree) | `pdf/pdf-page.c` (`pdf_lookup_page_label`, `pdf_format_page_label`, `pdf_page_label`) |
+| `embedded` (embedded files: the name tree, file specifications, contents, checksums) | `pdf/pdf-link.c` (`get_file_stream_and_name`, `pdf_get_filespec_params` and the rest), `tools/murun.c` (`getEmbeddedFiles`) |
+| `date` (PDF dates as seconds since 1970) | `pdf/pdf-parse.c` (`pdf_parse_date`) |
+| `merge` (`mutool merge`: pages, external links, outline items) | `tools/pdfmerge.c` |
+| `content` (content streams lexed and handed to a processor: the operand stack, ExtGState entries, inline images, contents arrays) | `pdf/pdf-interpret.c` (`pdf_process_stream`, `pdf_process_keyword`, `pdf_process_extgstate`), `pdf/pdf-image.c` (inline images), `pdf/pdf-stream.c` (`pdf_open_contents_stream`, `pdf_open_object_array`, `pdf_load_compressed_inline_image`), `fitz/filter-basic.c` (`fz_open_concat`), `fitz/filter-leech.c`, `fitz/image.c` (`fz_decomp_image_from_stream`) |
+| `colorspace` (colorspace definitions: families, components, indexed and separation bases; ICC profiles judged by their header as lcms opens it) | `pdf/pdf-colorspace.c`, `fitz/colorspace.c` (`fz_new_indexed_colorspace`, `fz_new_icc_colorspace`), `thirdparty/lcms2/src/cmsio0.c` (`_cmsReadHeader`), `cmspcs.c` (`cmsChannelsOf`) |
+| `run` (the run processor: gstates, clips, groups and soft masks, patterns, shadings, images, forms, text and Type 3 glyphs, layers, structure, metatext; a page run; the transparency scan) | `pdf/pdf-op-run.c`, `pdf/pdf-interpret.c` (`pdf_tos_*`, `pdf_process_glyph`), `fitz/font.c` (`fz_prepare_t3_glyph`, `fz_bound_t3_glyph`, `fz_render_t3_glyph_direct`), `fitz/bbox-device.c` and `fitz/list-device.c` (a Type 3 glyph's measured box), `pdf/pdf-run.c` (`pdf_run_page_contents`, `pdf_structure_type`), `pdf/pdf-page.c` (`pdf_resources_use_blending`, `pdf_load_default_colorspaces`), `pdf/pdf-pattern.c`, `pdf/pdf-xobject.c`, `pdf/pdf-struct.c` (`pdf_check_structure_tree`), `pdf/pdf-nametree.c` (`pdf_lookup_number`), `pdf/pdf-interpret.c` (soft masks in `pdf_process_extgstate`) |
+| `device` (what the interpreter draws to) | `include/mupdf/fitz/device.h`, `fitz/device.c` |
+| `path` (paths built and bounded as MuPDF builds them) | `fitz/path.c` |
+| `image` (images as `pdf_load_image` loads them, JPEG 2000 judged by its header as openjpeg reads it) | `pdf/pdf-image.c`, `fitz/image.c` (`fz_new_image_of_size`), `fitz/load-jpx.c`, `thirdparty/openjpeg/src/lib/openjp2/jp2.c` (`opj_jp2_read_header`) |
+| `function` (functions of types 0, 2, 3 and 4, loaded and evaluated) | `pdf/pdf-function.c`, `fitz/device.c` (`fz_eval_function`) |
+| `shade` (shadings loaded, their functions sampled) | `pdf/pdf-shade.c` |
+| `font` (font programs as FreeType opens them for MuPDF: sfnt, CFF and Type 1 faces, their charmaps, glyph names and widths; the standard 14 fonts; the CJK font's metrics) | FreeType 2: `sfnt/ttload.c`, `ttcmap.c`, `ttpost.c`, `ttmtx.c`, `sfobjs.c`, `cff/cffload.c`, `cffparse.c`, `cffobjs.c`, `type1/t1parse.c`, `t1load.c`, `t1objs.c`, `psaux/psintrp.c`, `t1decode.c`, `base/ftobjs.c`, `psnames/psmodule.c` (NOTICE); `fitz/font.c` (`ft_char_index`, `ft_name_index`), `fitz/noto.c` |
+| `font::outline` (a glyph's unhinted outline control box: TrueType glyphs and composites, CFF and Type 1 charstrings) | FreeType 2: `truetype/ttgload.c`, `ttpload.c`, `psaux/psintrp.c`, `psft.c`, `pshints.c`, `psstack.c`, `cff/cffgload.c`, `base/ftoutln.c` (NOTICE) |
+| `fontdesc` (PDF fonts: simple, composite and Type 3; the font program, encodings, ToUnicode, widths, the width table; glyph boxes) | `pdf/pdf-font.c`, `pdf/pdf-type3.c`, `pdf/pdf-unicode.c`, `pdf/pdf-metrics.c`, `fitz/font.c` (`fz_new_font_from_buffer`, `fz_bound_glyph`, `fz_bound_ft_glyph`, `fz_adjust_ft_glyph_width`) |
+| `cmap` (CMaps: embedded, predefined, lookups) | `pdf/pdf-cmap.c`, `pdf/pdf-cmap-parse.c`, `pdf/pdf-cmap-load.c` |
+| `glyphs` (glyph names to Unicode, named encodings) | `fitz/encodings.c`, `pdf/pdf-font.c` (`pdf_load_encoding`) |
+| `tables` (generated: the glyph list, encodings, bidi classes) | `fitz/glyphlist.h`, `fitz/encodings.h`, `fitz/ucdn_db.h` |
+| `text` (glyphs as devices get them, in spans; their bounds) | `fitz/text.c` |
+| `inventory` (the fonts and images the pages' resources reach, and embedded font programs) | `tools/pdfinfo.c` (`gatherresourceinfo`, `gatherfonts`, `gatherimages`), `tools/pdfextract.c` (`savefont`) |
+| `pixmap` (an image decoded to 8-bit samples; PAM and PNG writers) | `fitz/image.c` (`fz_decomp_image_from_stream`, `fz_mask_color_key`, `fz_unblend_masked_tile`, the JPEG height patch of `compressed_image_get_pixmap`), `fitz/draw-unpack.c`, `fitz/pixmap.c` (`fz_convert_indexed_pixmap_to_base`), `fitz/output-pnm.c`, `fitz/output-png.c` |
+| `layer` (optional content: the default configuration's states and whether a group or membership dictionary hides content) | `pdf/pdf-layer.c` (`pdf_read_ocg`, `pdf_select_layer_config`, `pdf_is_ocg_hidden`) |
+| `stext` (structured text: the stext device and its options, with the device's container stack and scissors) | `fitz/stext-device.c`, `fitz/device.c` (the container stack), `fitz/glyphbox.c`, `fitz/string.c` (`fz_chartorune`, `fz_utflen`), `fitz/util.c` (`fz_new_stext_page_from_page`); later `stext-output.c`, `stext-iterator.c`, `stext-para.c`, `stext-classify.c`, `stext-boxer.c`, `stext-raft.c`, `stext-table.c` |
+| `para` (paragraph breaking: titles by underline or bold font, indents, line-height changes, trailing gaps, justified text, list items) | `fitz/stext-para.c` |
+| `table` (table hunting: candidate areas from rafts of rectangles and from segments, grids from the gaps in content and the lines drawn, cells merged and scored, Table/TR/TD structures with a grid block) | `fitz/stext-table.c`, `fitz/stext-raft.c` (the flotilla) |
+| `stext_tree` (the page as MuPDF's linked lists of blocks while the passes rework it, and its block iterators) | `fitz/stext-iterator.c`; the list handling of `stext-boxer.c` and `stext-table.c` |
+| `order` (opt-in reading order: a recursive XY-cut of the blocks, D38) | nupdf's own |
+| `segment` (page segmentation: the boxer's empty rectangles, splits at the widest gaps, `Div` structure blocks; page fills dropped) | `fitz/stext-boxer.c` |
+| `extract` (content ids, spans, the text of each level, Markdown) | nupdf's own; the text follows `fitz/stext-output.c` (`do_as_text`, in `stext`) |
+| `search` (search in structured text: flattening, text transforms, finders, quads) | `fitz/stext-search.c`, `fitz/util.c` (`fz_new_buffer_from_flattened_stext_page`) |
+| `regexp` (MuPDF's regular expressions) | `fitz/regexp.c` |
+| `unicode` (categories, combining classes, decomposition, composition, case) | `fitz/ucdn.c`, `fitz/string.c` (`fz_toupper`, `fz_tolower`, `fz_isalpha`) |
+| `content_write` (content stream writer) | `pdf/pdf-op-buffer.c` (`pdf_new_output_processor`), `pdf/pdf-stream.c` (`build_compression_params`) |
+| `content_filter` (sanitize filter) | `pdf/pdf-op-filter.c` (`pdf_new_sanitize_filter`) |
+| `content_clean` (`clean -c` and `-s`) | `pdf/pdf-clean.c` (`pdf_filter_page_contents` and helpers), `pdf/pdf-write.c` (`clean_content_streams`) |
+| `redact` | `pdf/pdf-clean.c` (`pdf_redact_page` and its filters) |
+| `redact_image` | `pdf/pdf-clean.c` (`pdf_redact_image_filter_pixels`), `pdf/pdf-image.c` (`pdf_add_image`), `fitz/geometry.c` (quad tests) |
+| `scrub` (document scrub after redaction) | none; nupdf's own |
+| `verify` (leak classes) | none; nupdf's own |
+| `verify` | new |
+| `draw::edge` (the edge list and its anti-aliased scan conversion) | `fitz/draw-edge.c` |
+| `draw::path` (path flattening, strokes with joins, caps and dashes) | `fitz/draw-path.c` |
+| `draw::paint` (pixmaps; spans, glyphs and pixmaps painted with MuPDF's 8-bit arithmetic; blend modes) | `fitz/draw-paint.c`, `fitz/paint-glyph.h`, `fitz/draw-blend.c`, `fitz/pixmap.c` |
+| `draw::device` (the draw device: clips, groups, soft masks, tiles, text, images, shadings) | `fitz/draw-device.c`, `fitz/draw-glyph.c` (`draw_glyph`) |
+| `draw::glyph` (subpixel placement, FreeType-rendered glyphs and their cache, glyph outlines as paths) | `fitz/draw-glyph.c` (`fz_subpixel_adjust`, `fz_render_glyph`), `fitz/font.c` (`do_ft_render_glyph`, `fz_outline_ft_glyph`) |
+| `draw::grays` (FreeType's smooth rasterizer, which MuPDF draws glyphs with) | FreeType `src/smooth/ftgrays.c`, `ftsmooth.c`, `src/base/ftoutln.c`, `ftobjs.c` (`ft_glyphslot_preset_bitmap`) |
+| `draw::image` (subsampling, the scaler, the affine image painter) | `fitz/draw-affine.c`, `fitz/draw-scale-simple.c`, `fitz/pixmap.c` (`fz_subsample_pixmap`), `fitz/image.c` (the subsampling factor) |
+| `draw::shade` (shadings as triangles) | `fitz/shade.c` (`fz_process_shade`), `fitz/draw-mesh.c` |
+| `draw::list` (display lists, for band rendering) | `fitz/list-device.c` |
+| `draw::color` (colors into the page's RGB, with and without color management) | `fitz/colorspace.c` (`fz_convert_color`, `fz_default_colorspace`), `fitz/color-fast.c` |
+| `cms` (ICC profiles through moxcms, with lcms2's black point compensation) | `fitz/color-lcms.c`; lcms2 `cmscnvrt.c` and `cmssamp.c` (black points) |
+| `font::outline` (glyph outlines for rendering: TrueType loading at a scale, charstring contours) | FreeType `src/truetype/ttgload.c`, `src/cff/cffgload.c`, `src/type1/t1gload.c` |
+| `annot` (a page's annotations as `pdf_sync_annots` lists them, and the getters) | `pdf/pdf-annot.c` (`pdf_sync_annots`, `pdf_annot_*`), `pdf/pdf-appearance.c` (`pdf_annot_rect_diff`) |
+| `appearance` (appearance synthesis: `pdf_update_appearance`'s rules and the shared writers), `::shapes` (ink, polygons, lines, squares, circles, clouds), `::markup` (text markup, redactions, carets, icons) | `pdf/pdf-appearance.c`, `pdf/pdf-annot.c` (`pdf_annot_ap`, the border dash getters), `pdf/annotation-icons.h` |
+| `form` (fields as the widget getters read them: type, flags, value, options, name, label) | `pdf/pdf-form.c` (`pdf_field_type`, `pdf_field_value`, `load_field_name` and the rest) |
+| `bake` (flattening: appearances drawn into the page, `pdf_bake_document`) | `pdf/pdf-form.c` (`pdf_bake_document`, `pdf_bake_page`, `pdf_bake_annot`), `pdf/pdf-op-buffer.c` (`pdf_count_q_balance`), `pdf/pdf-xobject.c` (`pdf_new_xobject`) |
+| `signature` (byte ranges, changes since signing, the digest check and signatory), `der` (DER and BER), `rsa` (PKCS #1 v1.5 verification) | `pdf/pdf-form.c` (`pdf_signature_byte_range`, `validate_byte_ranges`, `pdf_signature_incremental_change_since_signing`), `pdf/pdf-signature.c`, `helpers/pkcs7/pkcs7-openssl.c` (`check_digest`, `get_signatory`); `der` and `rsa` are nupdf's own |
+| `sanitize` (JavaScript, launch, submit, remote and web actions, XFA, attachments removed) | nupdf's own (D48) |
+| `ocr` (an invisible text layer from Tesseract's TSV) | nupdf's own (D50) |
+| `annot_edit` (annotations added and deleted, each type's defaults, the setters, the new appearances made on update) | `pdf/pdf-annot.c` (`pdf_create_annot`, `pdf_create_annot_raw`, `pdf_delete_annot`, `pdf_set_annot_*`), `pdf/pdf-appearance.c` (`pdf_update_appearance`), `pdf/pdf-font-add.c` (font objects shared by digest) |
+| `appearance::text` (free text, stamps, line captions), `::layout` (the text walk, line breaking, `write_variable_text`), `::fonts` (DA parsing, the annotation's language, base-14 and CJK font resources) | `pdf/pdf-appearance.c`; `pdf/pdf-annot.c` (`pdf_parse_default_appearance`, `pdf_annot_language`); `pdf/pdf-font-add.c` (`pdf_add_simple_font`, `pdf_add_cjk_font`); `fitz/text.c` |
+| `appearance::commit` (a synthesized appearance written into the document: font objects first, one per font and encoding, then the form, then /AP) | `pdf/pdf-annot.c` (`pdf_set_annot_appearance`); `pdf/pdf-xobject.c` (`pdf_new_xobject`); `pdf/pdf-font-add.c`; `pdf/pdf-resources.c` (`pdf_find_font_resource`) |
+| `fill` (form filling as the widget API fills, JavaScript off: values, check boxes and radio groups, dirty fields made again on every page) | `pdf/pdf-form.c` (`pdf_set_text_field_value`, `pdf_set_field_value`, `update_field_value`, `pdf_field_mark_dirty`, `pdf_toggle_widget`, `set_check_grp`, `pdf_update_page`); `pdf/pdf-page.c` (`pdf_load_page`'s failures) |
+| `appearance::widget` (text, choice and signature widgets, the unsigned signature's sign-here arrow; push buttons, check boxes and radio buttons, a stream per state) | `pdf/pdf-appearance.c` (`pdf_write_widget_appearance`, `pdf_update_button_appearance`); `pdf/pdf-annot.c` (`pdf_annot_MK_BG`, `pdf_annot_MK_BC`); `pdf/pdf-form.c` (`pdf_button_field_on_state`); `pdf/pdf-layout.c` (`pdf_layout_fit_text`) |
+| `page_run` (a whole page as `fz_run_page` runs it: contents, annotations, widgets; which are drawn, how each appearance maps onto its /Rect, the appearances made on loading kept in the local xref) | `fitz/document.c` (`fz_run_page`), `pdf/pdf-run.c` (`pdf_run_page_with_usage`, `pdf_run_annot_with_usage`, `pdf_run_page_annots_with_usage`, `pdf_run_page_widgets_with_usage`), `pdf/pdf-interpret.c` (`pdf_process_annot`), `pdf/pdf-annot.c` (`pdf_annot_ap`, `pdf_annot_transform`, `pdf_annot_display_rect`, `pdf_annot_display_rotate`), `pdf/pdf-appearance.c` (`pdf_update_appearance`'s local synthesis) |
+| `list_run` (a display list played as `fz_run_display_list` plays it: node rectangles, clips narrowed to what they hold, culling; the text `mutool draw -F txt` gathers) | `fitz/list-device.c` (`fz_append_display_node`, the `fz_list_*` rectangles, `fz_run_display_list`) |
 
 ## Core data model
 
