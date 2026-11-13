@@ -47,10 +47,17 @@ fn count(blocks: &[Block], chars: &mut usize, images: &mut Vec<nupdf::geometry::
     }
 }
 
-/// Each page's text and image cover, or why it could not be read.
-pub fn scan(doc: &Document, indices: &[i32]) -> Vec<Result<PageText, String>> {
+/// Each page's text and image cover, or why it could not be read. With
+/// `quick`, a page's run stops at its first character, so `chars` is 1 on a
+/// page with text: whether a page has text and whether it looks scanned
+/// are the same, the warnings the rest of the page would give are not.
+pub fn scan(doc: &Document, indices: &[i32], quick: bool) -> Vec<Result<PageText, String>> {
+    let mut flags = nupdf::stext::flags::PRESERVE_IMAGES;
+    if quick {
+        flags |= nupdf::stext::flags::STOP_AT_TEXT;
+    }
     let opts = Options {
-        flags: nupdf::stext::flags::PRESERVE_IMAGES,
+        flags,
         ..Options::default()
     };
     nupdf::parallel::map(doc, indices, opts, None, &|i, page| {
@@ -87,7 +94,8 @@ pub fn info_text(doc: &Document) -> Value {
         return json!({ "checked": false });
     }
     let indices: Vec<i32> = (0..n).collect();
-    let pages = scan(doc, &indices);
+    // On `info`'s own copy, so the warnings left out are not missed.
+    let pages = scan(doc, &indices, true);
     let with_text = pages
         .iter()
         .filter(|p| p.as_ref().is_ok_and(|p| p.chars > 0))
@@ -186,7 +194,7 @@ pub fn ocr(
     };
     nupdf::write::check_document(doc);
     // Unless asked, only the pages that look scanned.
-    let scanned = scan(doc, &indices);
+    let scanned = scan(doc, &indices, false);
     let dir = std::env::temp_dir().join(format!("nupdf-ocr-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| Failure {
         exit: Exit::Input,
