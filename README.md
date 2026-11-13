@@ -31,6 +31,7 @@ cargo xtask bench            # paired timings and peak memory
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | Layers, module-to-MuPDF map, data model, concurrency, safety |
 | [AGENT-INTERFACE](docs/AGENT-INTERFACE.md) | The JSON contract, addressing, exit codes, the redaction contract |
 | [TESTING](docs/TESTING.md) | Oracle, corpora, checks, ratchet, benchmarks, fuzzing, agent eval |
+| [BENCHMARKS](docs/BENCHMARKS.md) | Speed against MuPDF and pdf_oxide, with the machine and versions |
 | [DECISIONS](docs/DECISIONS.md) | Why things are the way they are |
 | [PRIOR-ART](docs/PRIOR-ART.md) | What else exists, and what is new here |
 
