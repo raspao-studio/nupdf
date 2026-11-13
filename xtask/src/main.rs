@@ -11,6 +11,7 @@ mod corpus;
 mod crashes;
 mod encode;
 mod encrypt;
+mod engines;
 mod fixtures;
 mod harness;
 mod jpeg;
@@ -121,8 +122,10 @@ enum Cmd {
         /// Bench an evenly spaced sample of this many files.
         #[arg(long)]
         sample: Option<usize>,
-        /// Also time this tool on the pairs it can do (`pdf_oxide`, from
-        /// target/bench-venv), MuPDF staying the reference.
+        /// Also time PDF Oxide: `pdf_oxide` runs its CLI and Python bindings
+        /// on the pairs they can do, MuPDF staying the reference; `engines`
+        /// times nupdf's library against pdf_oxide's in process
+        /// (bench/engines).
         #[arg(long)]
         against: Option<String>,
     },

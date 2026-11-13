@@ -242,6 +242,10 @@ pub fn run(
     sample: Option<usize>,
     against: Option<&str>,
 ) -> Result<()> {
+    if against == Some(crate::engines::ENGINES) {
+        let all = corpus::files(root, tier)?;
+        return crate::engines::run(root, tier, only, runs, sample, &all);
+    }
     let mutool = oracle::mutool(root)?;
     let nupdf = crate::build_nupdf(root)?;
     let all = corpus::files(root, tier)?;
@@ -250,8 +254,9 @@ pub fn run(
             return crate::against::run(root, tier, only, runs, sample, &nupdf, &mutool, &all);
         }
         Some(other) => bail!(
-            "cannot bench against {other}; only {}",
-            crate::against::OXIDE
+            "cannot bench against {other}; only {} or {}",
+            crate::against::OXIDE,
+            crate::engines::ENGINES
         ),
         None => {}
     }
