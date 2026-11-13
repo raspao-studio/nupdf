@@ -27,6 +27,7 @@ cargo xtask bench            # paired timings and peak memory
 
 | | |
 |---|---|
+| [RESULTS](docs/RESULTS.md) | What nupdf is measured to do: parity, safety, speed, agents, and where it falls short |
 | [PLAN](docs/PLAN.md) | Milestones M0–M10, work items, exit criteria |
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | Layers, module-to-MuPDF map, data model, concurrency, safety |
 | [AGENT-INTERFACE](docs/AGENT-INTERFACE.md) | The JSON contract, addressing, exit codes, the redaction contract |
