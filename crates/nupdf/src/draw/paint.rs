@@ -47,6 +47,89 @@ pub fn mul255(a: i32, b: i32) -> i32 {
     (x + (x >> 8)) >> 8
 }
 
+/// `fz_div255`: alpha premultiplication undone.
+#[inline]
+pub fn div255(c: i32, a: i32) -> i32 {
+    if a == 0 {
+        0
+    } else {
+        (c * (255 * 256 / a)) >> 8
+    }
+}
+
+/// `fz_convert_fast_pixmap_samples` between device gray, RGB and CMYK
+/// (told apart by their number of colors, 1, 3 and 4), as MuPDF converts
+/// pixmaps with color management off: `fast_cmyk_to_rgb`,
+/// `fast_cmyk_to_gray`, `fast_rgb_to_cmyk`, `fast_gray_to_cmyk` and the
+/// rest, premultiplied colors undone and redone around the formulas.
+pub fn convert_device(src: &Pix, to: usize) -> Pix {
+    let sa = usize::from(src.alpha);
+    let from = src.n - sa;
+    let mut out = Pix {
+        n: to + sa,
+        samples: Vec::with_capacity(src.samples.len() / src.n.max(1) * (to + sa)),
+        ..*src
+    };
+    for p in src.samples.chunks(src.n.max(1)) {
+        let a = if sa == 1 { i32::from(p[from]) } else { 255 };
+        let un = |k: usize| {
+            let v = i32::from(p.get(k).copied().unwrap_or(0));
+            if sa == 1 { div255(v, a) } else { v }
+        };
+        let raw = |k: usize| i32::from(p.get(k).copied().unwrap_or(0));
+        // Gray and RGB convert on the premultiplied values.
+        let direct = match (from, to) {
+            (3, 1) => Some([
+                (((raw(0) + 1) * 77 + (raw(1) + 1) * 150 + (raw(2) + 1) * 28) >> 8),
+                0,
+                0,
+            ]),
+            (1, 3) => Some([raw(0); 3]),
+            _ if from == to => {
+                out.samples.extend_from_slice(p);
+                continue;
+            }
+            _ => None,
+        };
+        if let Some(d) = direct {
+            out.samples.extend(d[..to].iter().map(|&v| v as u8));
+            if sa == 1 {
+                out.samples.push(a as u8);
+            }
+            continue;
+        }
+        let mut px = [0i32; 4];
+        match (from, to) {
+            (4, 3) => {
+                let k = un(3);
+                for (i, c) in px.iter_mut().take(3).enumerate() {
+                    *c = 255 - (un(i) + k).min(255);
+                }
+            }
+            (4, 1) => px[0] = 255 - (un(0) + un(1) + un(2) + un(3)).min(255),
+            (3, 4) => {
+                let (c, m, y) = (255 - un(0), 255 - un(1), 255 - un(2));
+                let k = c.min(m.min(y));
+                px = [c - k, m - k, y - k, k];
+            }
+            (1, 4) => px[3] = 255 - un(0),
+            _ => {
+                for (i, c) in px.iter_mut().take(to.min(4)).enumerate() {
+                    *c = un(i);
+                }
+            }
+        }
+        for &v in &px[..to.min(4)] {
+            out.samples
+                .push(if sa == 1 { mul255(v, a) } else { v } as u8);
+        }
+        if sa == 1 {
+            out.samples.push(a as u8);
+        }
+    }
+    out
+}
+
 impl Pix {
     /// `fz_new_pixmap_with_bbox`, cleared to 0.
     pub fn new(bbox: IRect, n: usize, alpha: bool) -> Result<Pix, String> {
@@ -421,6 +504,8 @@ impl Pix {
         if n1 != self.n - usize::from(self.alpha) {
             return;
         }
+        // CMYK is subtractive: blended as its complement.
+        let complement = n1 == 4;
         let w = r.width() as usize;
         for y in r.y0..r.y1 {
             let (d0, s0, h0) = (self.at(r.x0, y), src.at(r.x0, y), ga.at(r.x0, y));
@@ -473,7 +558,11 @@ impl Pix {
                 }
                 for k in 0..n1 {
                     let mut sc = (i32::from(sp[k]) * invsa) >> 8;
-                    let bc = (i32::from(bp[k]) * invba) >> 8;
+                    let mut bc = (i32::from(bp[k]) * invba) >> 8;
+                    if complement {
+                        sc = 255 - sc;
+                        bc = 255 - bc;
+                    }
                     sc = (sc + (((sc - bc) * scale) >> 8)).clamp(0, 255);
                     let mut rc = if mode >= 12 {
                         if mode == 15 { sc } else { bc }
@@ -489,6 +578,9 @@ impl Pix {
                     }
                     if ra0 != 0 {
                         rc += mul255(ra0, bc);
+                    }
+                    if complement {
+                        rc = ra - rc;
                     }
                     bp[k] = rc.clamp(0, ra) as u8;
                 }
@@ -822,14 +914,22 @@ fn blend_px(bp: &mut [u8], bal: usize, sp: &[u8], sal: usize, n: usize, mode: u8
                 + mul255(saba, rc[k])) as u8;
         }
     } else {
+        // CMYK is subtractive: blended as its complement.
+        let complement = n == 4;
         for k in 0..n {
-            let sc = un_s(k);
-            let bc = un_b(bp, k);
-            let rc = if mode >= 12 {
+            let (mut sc, mut bc) = (un_s(k), un_b(bp, k));
+            if complement {
+                sc = 255 - sc;
+                bc = 255 - bc;
+            }
+            let mut rc = if mode >= 12 {
                 if mode == 15 { sc } else { bc }
             } else {
                 separable(mode, bc, sc)
             };
+            if complement {
+                rc = 255 - rc;
+            }
             bp[k] = (mul255(255 - sa, i32::from(bp[k]))
                 + mul255(255 - ba, i32::from(sp[k]))
                 + mul255(saba, rc)) as u8;
