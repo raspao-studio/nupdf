@@ -58,7 +58,8 @@ pub mod flags {
     pub const ALL_LAYERS: u32 = 1 << 29;
 
     /// nupdf's own: the page's run stops at its first character, for
-    /// whoever only asks whether a page has text.
+    /// whoever only asks whether a page has text and what images it has;
+    /// contents that can show neither are not run.
     pub const STOP_AT_TEXT: u32 = 1 << 28;
 }
 
@@ -1936,8 +1937,16 @@ pub fn extract_page(
     };
     let mut dev = StextDevice::new(mediabox, opts).with_doc(doc);
     let usage = (opts.flags & flags::ALL_LAYERS == 0).then_some("View");
-    let mut run = crate::run::run_page_contents_for(doc, page, &mut dev, store, usage);
     let stop_at_text = opts.flags & flags::STOP_AT_TEXT != 0;
+    let run_page = |dev: &mut StextDevice, store| {
+        crate::run::run_page_contents_for(doc, page, dev, store, usage)
+    };
+    let mut run = if stop_at_text {
+        // Nor is a stream run that could not have shown a character.
+        crate::content::skipping_unmarked(|| run_page(&mut dev, store))
+    } else {
+        run_page(&mut dev, store)
+    };
     if stop_at_text && crate::interrupt::stopped() {
         // Broken off at the first character: the page so far, and no
         // Type 3 font left marked as in use.
@@ -2249,6 +2258,25 @@ mod tests {
                 .0
                 .is_ok()
         );
+        // Contents that cannot show a character or an image are not run
+        // at all (the vectors collected show it); others run.
+        let blocks = |content: &[u8]| {
+            let d = doc(content, "", "", &[]);
+            let page = d.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+            let opts = Options {
+                flags: flags::STOP_AT_TEXT | flags::COLLECT_VECTORS,
+                ..Options::default()
+            };
+            extract_page(&d, &page, opts, Store::default())
+                .0
+                .unwrap_or_else(|e| panic!("{e}"))
+                .blocks
+                .len()
+        };
+        assert_eq!(blocks(b"0 0 1 1 re f 5 5 2 2 re f"), 0);
+        assert_eq!(blocks(b"0 0 1 1 re f 0 0 1 rg 5 5 2 2 re f"), 0);
+        assert_eq!(blocks(b"0 0 1 1 re f 0 0 1 rg 5 5 2 2 re f /G gs"), 2);
+        assert_eq!(blocks(b"0 0 1 1 re f BT /F1 9 Tf (A) Tj ET"), 2);
     }
 
     fn outline_of(doc: &Document, opts: &str) -> Vec<String> {
