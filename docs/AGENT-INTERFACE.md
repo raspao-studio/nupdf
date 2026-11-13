@@ -1,6 +1,6 @@
 # Agent interface
 
-The contract that agents program against. The CLI and the MCP server (M8) expose the same commands with the same JSON. Library functions return the typed reports these documents describe. Schemas are versioned and frozen at `v1` (M8): each report's JSON Schema is `nupdf schema <command>`, and docs/SCHEMA-CHANGELOG.md says what changes and when. A breaking change (a field removed, renamed or given another type, a value given another meaning) bumps the version in `schema`; adding a field does not.
+The contract that agents program against. The CLI and the MCP server expose the same commands with the same JSON. Library functions return the typed reports these documents describe. Schemas are versioned and frozen at `v1`: each report's JSON Schema is `nupdf schema <command>`, and docs/SCHEMA-CHANGELOG.md says what changes and when. A breaking change (a field removed, renamed or given another type, a value given another meaning) bumps the version in `schema`; adding a field does not.
 
 ## Rules every command follows
 
@@ -91,7 +91,7 @@ Each editing command makes one edit, then writes the document as `clean` writes 
 - **Content ids** are stable for a given `doc_id` and schema version: `p3` (page), `p3.b2` (block), `p3.b2.l4` (line), `p3.b2.l4.s1` (span), and `p3.b2.l4.s1:5-12` (a character range within a span). Search hits refer to these ids, and redaction accepts them. An id used with a different `doc_id` is rejected, so agents find out the file changed.
 - **Regions** are `p3:[x0,y0,x1,y1]` in the coordinate space above.
 
-## Commands by milestone
+## Commands
 
 | Command | What it does |
 |---|---|
@@ -125,24 +125,38 @@ Each editing command makes one edit, then writes the document as `clean` writes 
 
 ## Examples
 
-`nupdf info` today (M0):
+`nupdf info corpus/smoke/garbage-prefix.pdf`, abbreviated:
 
 ```json
 {"schema":"nupdf.info/v1","doc_id":"b3:0b7651d98660496320e5c86a9bab07fc","file_size":619,"kind":"pdf","pdf_version":"1.6",
- "header_offset":64,"diagnostics":[{"code":"header.garbage_prefix","severity":"warning","message":"64 bytes before the %PDF- marker"}]}
+ "header_version":"1.6","header_offset":64,"encryption":"None","needs_password":false,"permissions":{"print":true,...},
+ "page_count":1,"object_count":6,"revisions":1,"revision_offsets":[439],"linearized":false,"repaired":false,"encrypted":false,
+ "metadata":{},"diagnostics":[{"code":"header.garbage_prefix","severity":"warning","message":"garbage bytes before version marker"}],
+ "text":{"checked":true,"pages_with_text":1,"scanned_pages":[]}}
 ```
 
-`nupdf extract --pages 3` (M5 target), abbreviated:
+`nupdf extract --pages 1 corpus/smoke/stext.pdf`, abbreviated:
 
 ```json
-{"schema":"nupdf.extract/v1","doc_id":"b3:...","pages":[{"page":3,"size":[612,792],"blocks":[
-  {"id":"p3.b0","kind":"text","bbox":[72,60,540,88],"lines":[
-    {"id":"p3.b0.l0","bbox":[72,60,540,88],"spans":[
-      {"id":"p3.b0.l0.s0","text":"Invoice 2026-114","bbox":[72,60,301,88],"font":"Helvetica-Bold","size":24,"color":"#000000"}]}]}]}],
- "diagnostics":[],"truncated":false}
+{"schema":"nupdf.extract/v1","doc_id":"b3:388a2b03971dc57d53556414a002f28d","page_count":2,"pages":[
+ {"id":"p1","page":1,"bbox":[0.0,0.0,300.0,300.0],"blocks":[
+  {"id":"p1.b1","type":"text","bbox":[20.0,7.09999942779541,170.7559814453125,51.5880012512207],"lines":[
+   {"id":"p1.b1.l1","bbox":[20.0,7.09999942779541,84.13999938964844,23.58799934387207],"wmode":0,"dir":[1.0,0.0],"spans":[
+    {"id":"p1.b1.l1.s1","text":"Hello world!","font":"Helvetica","size":12.0,"bold":false,"italic":false,"color":"#000000",
+     "bbox":[20.0,7.09999942779541,84.13999938964844,23.58799934387207]}]},
+   ...]},
+  ...]}],
+ "truncated":false,"next_cursor":null,"diagnostics":[]}
 ```
 
-`nupdf search --regex '\d{3}-\d{2}-\d{4}'` (M5 target) returns hits shaped like `{"id":"h0","page":2,"text":"123-45-6789","quads":[[...]],"spans":["p2.b4.l1.s0:10-21"]}`.
+`nupdf search corpus/smoke/stext.pdf 'w[a-z]+d' --options regexp`, abbreviated:
+
+```json
+{"schema":"nupdf.search/v1","doc_id":"b3:388a2b03971dc57d53556414a002f28d","page_count":2,"hit_count":2,"hits":[
+ {"page":1,"id":"p1.b1.l1.s1:6-11","text":"world","quads":[[50.936004638671875,7.09999942779541,79.60400390625,7.09999942779541,...]]},
+ {"page":1,"id":"p1.b1.l3.s1:5-9","text":"word","quads":[[46.68800354003906,35.099998474121094,72.69200134277344,35.099998474121094,...]]}],
+ "page_errors":[],"truncated":false,"diagnostics":[]}
+```
 
 ## Redaction contract
 
