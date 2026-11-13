@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/nupdf", "crates/nupdf-cli", "xtask"]
-exclude = ["vendor"]
+exclude = ["vendor", "bench/engines"]
 default-members = ["crates/nupdf", "crates/nupdf-cli"]
 
 [workspace.package]

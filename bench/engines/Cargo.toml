@@ -1,0 +1,30 @@
+# nupdf's library against PDF Oxide's, in one process, for
+# `cargo xtask bench --against engines`. Its own workspace, so that no
+# product crate (and not the root lockfile) gains pdf_oxide.
+[package]
+name = "nupdf-engines-bench"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+nupdf = { path = "../../crates/nupdf" }
+# The version the CLI and the Python package are, with the features the CLI
+# builds it with (and its defaults: ICC through qcms, legacy crypto).
+pdf_oxide = { version = "=0.3.78", features = ["rendering", "logging"] }
+serde_json = "1"
+
+[workspace]
+
+# The root workspace's release profile, so both libraries build the same way.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+# As the root workspace: nupdf's hayro-jbig2 0.4 with its guards. pdf_oxide
+# uses hayro-jbig2 0.3, which this does not touch.
+[patch.crates-io]
+hayro-jbig2 = { path = "../../vendor/hayro-jbig2" }
