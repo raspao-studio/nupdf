@@ -13,7 +13,7 @@ This crate forbids unsafe code via a crate-level attribute.
 
 #![forbid(unsafe_code)]
 // nupdf: style lints of nupdf's workspace that the upstream code does not follow.
-#![allow(missing_debug_implementations, clippy::too_many_arguments)]
+#![allow(missing_debug_implementations, clippy::too_many_arguments, clippy::needless_range_loop)]
 #![allow(missing_docs)]
 
 use core::ops::ControlFlow;
