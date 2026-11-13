@@ -1,6 +1,6 @@
 # OSS-Fuzz
 
-The files for nupdf's project in [OSS-Fuzz](https://github.com/google/oss-fuzz): `project.yaml`, `Dockerfile` and `build.sh` go in `projects/nupdf/` there. Applying needs the repository to be public (M10).
+The files for nupdf's project in [OSS-Fuzz](https://github.com/google/oss-fuzz): `project.yaml`, `Dockerfile` and `build.sh` go in `projects/nupdf/` there. Applying needs the repository to be public.
 
 Before sending them, check the build with OSS-Fuzz's helper, from a checkout of oss-fuzz with these files copied in:
 
