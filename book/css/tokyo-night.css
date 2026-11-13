@@ -1,0 +1,69 @@
+/* Tokyo Night colours: Night for the dark theme (mdBook's "navy"), Day's
+   accents on the default light theme. Only variables mdBook already has. */
+
+.navy {
+    --bg: #1a1b26;
+    --fg: #c0caf5;
+
+    --sidebar-bg: #16161e;
+    --sidebar-fg: #a9b1d6;
+    --sidebar-non-existant: #545c7e;
+    --sidebar-active: #7aa2f7;
+    --sidebar-spacer: #292e42;
+    --sidebar-header-border-color: #3d59a1;
+
+    --scrollbar: #414868;
+
+    --icons: #565f89;
+    --icons-hover: #c0caf5;
+
+    --links: #7aa2f7;
+
+    --inline-code-color: #7dcfff;
+
+    --theme-popup-bg: #16161e;
+    --theme-popup-border: #3b4261;
+    --theme-hover: #292e42;
+
+    --quote-bg: #1f2335;
+    --quote-border: #3b4261;
+
+    --warning-border: #ff9e64;
+
+    --table-border-color: #292e42;
+    --table-header-bg: #292e42;
+    --table-alternate-bg: #1f2335;
+
+    --searchbar-border-color: #3b4261;
+    --searchbar-bg: #1f2335;
+    --searchbar-fg: #c0caf5;
+    --searchbar-shadow-color: #16161e;
+    --searchresults-header-fg: #565f89;
+    --searchresults-border-color: #3b4261;
+    --searchresults-li-bg: #1f2335;
+    --search-mark-bg: #3d59a1;
+
+    --footnote-highlight: #7aa2f7;
+    --overlay-bg: rgba(22, 22, 30, 0.5);
+
+    --blockquote-note-color: #7aa2f7;
+    --blockquote-tip-color: #9ece6a;
+    --blockquote-important-color: #bb9af7;
+    --blockquote-warning-color: #e0af68;
+    --blockquote-caution-color: #f7768e;
+}
+
+.navy .hljs { background: #16161e; color: #c0caf5; }
+.navy .hljs-comment, .navy .hljs-quote { color: #565f89; }
+.navy .hljs-keyword, .navy .hljs-selector-tag, .navy .hljs-built_in { color: #bb9af7; }
+.navy .hljs-string, .navy .hljs-attr + .hljs-string { color: #9ece6a; }
+.navy .hljs-number, .navy .hljs-literal { color: #ff9e64; }
+.navy .hljs-title, .navy .hljs-section, .navy .hljs-attr { color: #7aa2f7; }
+.navy .hljs-type, .navy .hljs-meta { color: #2ac3de; }
+.navy .hljs-variable, .navy .hljs-template-variable { color: #c0caf5; }
+
+.light {
+    --links: #2e7de9;
+    --sidebar-active: #2e7de9;
+    --search-mark-bg: #b7c1e3;
+}
