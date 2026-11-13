@@ -25,10 +25,10 @@ cargo deny check
 ```
 
 ```bash
-cargo package --workspace
+CARGO_TARGET_DIR=target/pkgcheck cargo package -p nupdf -p nupdf-cli
 ```
 
-`cargo package --workspace` packages and builds both crates together, which is the only way to check `nupdf-cli` before `nupdf` is on crates.io.
+Packaging the two crates together is the only way to check `nupdf-cli` before `nupdf` is on crates.io. Cargo takes a registry crate's version to mean its contents never change, so a second check of the same version reuses the first one's build; a target directory of its own each time (delete `target/pkgcheck` first) keeps the check honest.
 
 ## The first release only
 
