@@ -64,11 +64,20 @@ pub const AGAINST: &[Against] = &[
     Against {
         name: "info",
         op: "info",
-        about: "open and count pages: `nupdf info` (version, page count, objects, permissions, metadata), MuPDF's `info.js` (the same, JS overhead included), pdf_oxide `PdfDocument`, `version()` and `page_count`",
+        about: "open and count pages, as each tool's info command does it: `nupdf info` (version, page count, objects, permissions, metadata, and every page's text scanned for the pages that need OCR, up to 2,000 pages), MuPDF's `info.js` (the same without the text scan, JS overhead included), pdf_oxide `PdfDocument`, `version()` and `page_count`",
         units: "pages",
         check: Check::Equal,
         oracle: &["run", "oracle/js/info.js", "{file}"],
         nupdf: &["info", "{file}"],
+    },
+    Against {
+        name: "pages",
+        op: "pages",
+        about: "open and walk the page tree: `nupdf pages` and `pages.js` (each page's object and inherited MediaBox, CropBox, Rotate and Resources, JS overhead included on the MuPDF side), pdf_oxide `page_media_box(i)`, `page_crop_box(i)` and `page_rotation(i)` for every page",
+        units: "pages",
+        check: Check::Equal,
+        oracle: &["run", "oracle/js/pages.js", "{file}"],
+        nupdf: &["pages", "{file}"],
     },
     Against {
         name: "text",
@@ -207,6 +216,7 @@ pub fn nupdf_units(op: &str, stdout: &[u8], dir: &Path) -> Option<u64> {
     };
     match op {
         "info" => first_line(stdout)?["page_count"].as_u64(),
+        "pages" => Some(first_line(stdout)?["pages"].as_array()?.len() as u64),
         // The text is all of stdout; the report goes to stderr.
         "text" | "text-fast" => Some(
             String::from_utf8_lossy(stdout)
@@ -280,12 +290,14 @@ pub struct Summary {
     pub failed_mupdf: usize,
     pub failed_nupdf: usize,
     pub failed_oxide: usize,
-    /// Files every side did but on which nupdf and pdf_oxide disagree.
+    /// Files nupdf and pdf_oxide both did but on which they disagree.
     pub disagree: usize,
-    /// Files in the ratios: every side did them and agreed.
+    /// Files in MuPDF's ratio: MuPDF and nupdf did them.
+    pub counted_mupdf: usize,
+    /// Files in pdf_oxide's ratios: nupdf and pdf_oxide did them and agreed.
     pub counted: usize,
-    /// Geometric means of each side's process time over nupdf's: above 1,
-    /// nupdf is faster.
+    /// Geometric means of each side's process time over nupdf's, each over
+    /// its own counted files: above 1, nupdf is faster.
     pub mupdf_ratio: f64,
     pub oxide_ratio: f64,
     /// The same in process: pdf_oxide's time in process over nupdf's
@@ -294,7 +306,8 @@ pub struct Summary {
     pub work_ratio: f64,
     /// The ratio of the in-process totals, which small files sway less.
     pub work_total_ratio: f64,
-    /// Total ms over the counted files.
+    /// Total ms: MuPDF's over its counted files, the others' over
+    /// pdf_oxide's.
     pub nupdf_total: f64,
     pub mupdf_total: f64,
     pub oxide_total: f64,
@@ -320,6 +333,7 @@ pub fn summarize(check: Check, rows: &[Row], nupdf_startup_ms: f64) -> Summary {
         ..Summary::default()
     };
     let mut counted = Vec::new();
+    let mut with_mupdf = Vec::new();
     let mut startup = Vec::new();
     for r in rows {
         s.failed_mupdf += usize::from(r.mupdf_ms.is_none());
@@ -334,29 +348,29 @@ pub fn summarize(check: Check, rows: &[Row], nupdf_startup_ms: f64) -> Summary {
             s.nupdf_units += a;
             s.oxide_units += b;
         }
-        let (Some(n), Some(m), Some(o), Some(w)) =
-            (r.nupdf_ms, r.mupdf_ms, r.oxide_ms, r.oxide_work_ms)
-        else {
+        if let (Some(n), Some(m)) = (r.nupdf_ms, r.mupdf_ms) {
+            with_mupdf.push((n, m));
+        }
+        let (Some(n), Some(o), Some(w)) = (r.nupdf_ms, r.oxide_ms, r.oxide_work_ms) else {
             continue;
         };
         if !r.agrees(check) {
             s.disagree += 1;
             continue;
         }
-        counted.push((n, m, o, w));
+        counted.push((n, o, w));
     }
     s.counted = counted.len();
-    let ratio = |f: fn(&(f64, f64, f64, f64)) -> f64| {
-        geomean(counted.iter().map(|c| f(c) / c.0.max(f64::EPSILON)))
-    };
-    s.mupdf_ratio = ratio(|c| c.1);
-    s.oxide_ratio = ratio(|c| c.2);
+    s.counted_mupdf = with_mupdf.len();
+    let over = |t: f64, n: f64| t / n.max(f64::EPSILON);
+    s.mupdf_ratio = geomean(with_mupdf.iter().map(|&(n, m)| over(m, n)));
+    s.oxide_ratio = geomean(counted.iter().map(|&(n, o, _)| over(o, n)));
     let in_process = |n: f64| (n - nupdf_startup_ms).max(FLOOR_MS);
-    s.work_ratio = geomean(counted.iter().map(|c| c.3 / in_process(c.0)));
+    s.work_ratio = geomean(counted.iter().map(|&(n, _, w)| w / in_process(n)));
+    s.mupdf_total = with_mupdf.iter().map(|c| c.1).sum();
     s.nupdf_total = counted.iter().map(|c| c.0).sum();
-    s.mupdf_total = counted.iter().map(|c| c.1).sum();
-    s.oxide_total = counted.iter().map(|c| c.2).sum();
-    s.oxide_work_total = counted.iter().map(|c| c.3).sum();
+    s.oxide_total = counted.iter().map(|c| c.1).sum();
+    s.oxide_work_total = counted.iter().map(|c| c.2).sum();
     s.work_total_ratio = if counted.is_empty() {
         f64::NAN
     } else {
@@ -424,23 +438,24 @@ fn times(ratio: f64) -> String {
 /// what each side failed on.
 pub fn summary_table(results: &[(&Against, Summary)]) -> String {
     let mut out = String::from(
-        "| Operation | Files | Counted | MuPDF / nupdf | pdf_oxide / nupdf | In process: pdf_oxide / nupdf | Of totals | \
+        "| Operation | Files | MuPDF / nupdf | Files in it | pdf_oxide / nupdf | In process | Of totals | Files in them | \
          Failed: MuPDF | nupdf | pdf_oxide | Disagree | Units: nupdf | pdf_oxide |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     let mut startup = f64::NAN;
     for (a, s) in results {
         startup = s.nupdf_startup_ms;
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             a.name,
             s.files,
-            s.counted,
             times(s.mupdf_ratio),
+            s.counted_mupdf,
             times(s.oxide_ratio),
             times(s.work_ratio),
             times(s.work_total_ratio),
+            s.counted,
             s.failed_mupdf,
             s.failed_nupdf,
             s.failed_oxide,
@@ -455,9 +470,10 @@ pub fn summary_table(results: &[(&Against, Summary)]) -> String {
     }
     let _ = writeln!(
         out,
-        "\nRatios are each side's time over nupdf's, geometric means over the counted files \
-         (every side did them and, where checked, nupdf and pdf_oxide agree): above 1x, nupdf \
-         is faster. In process, pdf_oxide's time runs from opening the document to its last \
+        "\nRatios are each side's time over nupdf's, geometric means: above 1x, nupdf is faster. \
+         MuPDF's is over the files MuPDF and nupdf did (`mutool` exits with 1 when any page has \
+         an error, which counts as failing), pdf_oxide's over the files nupdf and pdf_oxide did \
+         and, where checked, agree on. In process, pdf_oxide's time runs from opening the document to its last \
          byte of output, and nupdf's is its process time less {startup:.1} ms, what it takes \
          to start and exit with nothing to do (`nupdf --version`), and at least {FLOOR_MS} ms; \
          \"of totals\" is the ratio of the summed in-process times. Units are totals over the \
@@ -685,6 +701,8 @@ mod tests {
         let dir = Path::new("/nonexistent");
         let info = br#"{"schema":"nupdf.info/v1","page_count":4}"#;
         assert_eq!(nupdf_units("info", info, dir), Some(4));
+        let pages = br#"{"page_count":3,"pages":[{"object":"3 0 R"},{"object":"4 0 R"}]}"#;
+        assert_eq!(nupdf_units("pages", pages, dir), Some(2));
         // Text on stdout, the report on stderr.
         assert_eq!(
             nupdf_units("text", b"Hello world\n\x0c\n  a\n", dir),
@@ -749,9 +767,14 @@ mod tests {
             row(None, None, Some((30.0, 5.0)), (0, 3)),
         ];
         let s = summarize(Check::NonEmpty, &rows, 1.0);
-        assert_eq!((s.files, s.counted, s.disagree), (5, 2, 1), "{s:?}");
+        assert_eq!(
+            (s.files, s.counted, s.counted_mupdf, s.disagree),
+            (5, 2, 4, 1),
+            "{s:?}"
+        );
         assert_eq!((s.failed_mupdf, s.failed_nupdf, s.failed_oxide), (1, 1, 1));
-        assert!((s.mupdf_ratio - 2f64.sqrt()).abs() < 1e-9, "{s:?}");
+        // MuPDF over every file it and nupdf did, pdf_oxide failing or not.
+        assert!((s.mupdf_ratio - 18f64.powf(0.25)).abs() < 1e-9, "{s:?}");
         assert!((s.oxide_ratio - 10.0).abs() < 1e-9, "{s:?}");
         // In process: 10 / (2 - 1) and 16 / (8 - 1).
         let work = (10.0f64 * 16.0 / 7.0).sqrt();
@@ -795,8 +818,9 @@ mod tests {
         );
         assert!(out.contains("| f | fail | 2.0 |"), "{out}");
         assert!(
-            out.contains("| info | 2 | 0 | - | - | - | - | 1 | 0 | 0 | 1 |")
-                && out.contains("less 1.0 ms"),
+            out.contains(
+                "| info | 2 | 2.00x | 1 | 20.00x | 1.00x | 1.00x | 1 | 1 | 0 | 0 | 1 | 6 | 5 |"
+            ) && out.contains("less 1.0 ms"),
             "{out}"
         );
     }

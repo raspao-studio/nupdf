@@ -11,6 +11,7 @@
 # failure is not counted as a win:
 #
 #   info        the page count
+#   pages       pages whose boxes and rotation were read
 #   text        non-whitespace characters, `extract_text` with its defaults
 #   text-fast   the same with `extract_tables=False`, its speed-first mode
 #   render      pages with any non-white pixel, `render_pixmap` at 72 dpi
@@ -85,6 +86,16 @@ def main(op, path, out):
         with clock:
             doc.version()
         units = n
+    elif op == "pages":
+        with open(out, "w", encoding="utf-8") as f:
+            boxes, failed = per_page(
+                doc,
+                n,
+                clock,
+                f,
+                lambda i: (doc.page_media_box(i), doc.page_crop_box(i), doc.page_rotation(i)),
+            )
+        units = len(boxes)
     elif op in ("text", "text-fast"):
         tables = op == "text"
         with open(out, "w", encoding="utf-8", errors="replace") as f:
