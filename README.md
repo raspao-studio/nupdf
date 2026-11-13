@@ -35,6 +35,7 @@ cargo xtask bench            # paired timings and peak memory
 | [BENCHMARKS](docs/BENCHMARKS.md) | Speed against MuPDF and pdf_oxide, with the machine and versions |
 | [DECISIONS](docs/DECISIONS.md) | Why things are the way they are |
 | [PRIOR-ART](docs/PRIOR-ART.md) | What else exists, and what is new here |
+| [Docs site](https://raspao-studio.github.io/nupdf/) | These docs with a getting-started guide, as a book built from `book/`; live once the repository is public and Pages is enabled |
 
 ## License
 

@@ -27,6 +27,7 @@ Each layer only depends on the layers to its left. Consumers never see raw bytes
 | `skills/nupdf/SKILL.md` | The Claude Code skill, `nupdf guide --skill`'s output (D45). |
 | `fuzz/` | cargo-fuzz targets (from M1). |
 | `docs/` | Plan, architecture, interface contract, testing, decisions, prior art. |
+| `book/` | The docs site, an mdBook published to GitHub Pages by `.github/workflows/docs.yml`: getting-started pages of its own, and pages that include `docs/`, `SECURITY.md` and `eval/REPORT.md` as they are. |
 
 ## Module map
 
