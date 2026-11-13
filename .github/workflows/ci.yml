@@ -55,7 +55,7 @@ jobs:
           done
       - name: Run each target for 30 seconds
         run: |
-          for target in lex parse_object filters open_walk crypt images content function run font cmap pixmap stext regexp; do
+          for target in lex parse_object filters open_walk crypt images content function run font cmap pixmap stext regexp encode navigation forms redact render; do
             # The prebuilt cargo-fuzz is a musl binary and would default to a
             # musl target, which AddressSanitizer does not support.
             cargo fuzz run -O --target x86_64-unknown-linux-gnu "$target" -- -max_total_time=30 -rss_limit_mb=2048 -timeout=10
