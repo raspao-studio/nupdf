@@ -1,0 +1,272 @@
+[
+  {
+    "file": "long/long-001.pdf",
+    "nupdf_ms": 11.485833,
+    "oxide_ms": 15.746125,
+    "nupdf_units": 5850,
+    "oxide_units": 5576,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-002.pdf",
+    "nupdf_ms": 6.664333,
+    "oxide_ms": 4.937709,
+    "nupdf_units": 1039,
+    "oxide_units": 1009,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-003.pdf",
+    "nupdf_ms": 8.899917,
+    "oxide_ms": 5.356459,
+    "nupdf_units": 2178,
+    "oxide_units": 1998,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-004.pdf",
+    "nupdf_ms": 6.200333,
+    "oxide_ms": 6.1322920000000005,
+    "nupdf_units": 6334,
+    "oxide_units": 6308,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-005.pdf",
+    "nupdf_ms": 109.266959,
+    "oxide_ms": 269.46166700000003,
+    "nupdf_units": 99273,
+    "oxide_units": 60926,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-006.pdf",
+    "nupdf_ms": 2609.011708,
+    "oxide_ms": 27.466583,
+    "nupdf_units": 6992,
+    "oxide_units": 7397,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-007.pdf",
+    "nupdf_ms": 154.74025,
+    "oxide_ms": 26.833416999999997,
+    "nupdf_units": 3891,
+    "oxide_units": 3923,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-008.pdf",
+    "nupdf_ms": 116.565625,
+    "oxide_ms": 409.428542,
+    "nupdf_units": 102964,
+    "oxide_units": 102762,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-009.pdf",
+    "nupdf_ms": 42.037042,
+    "oxide_ms": 111.873708,
+    "nupdf_units": 116182,
+    "oxide_units": 113407,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-010.pdf",
+    "nupdf_ms": 83.452791,
+    "oxide_ms": 254.60504099999997,
+    "nupdf_units": 544369,
+    "oxide_units": 541612,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-011.pdf",
+    "nupdf_ms": 136.0075,
+    "oxide_ms": 182.234708,
+    "nupdf_units": 146858,
+    "oxide_units": 146461,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-012.pdf",
+    "nupdf_ms": 63.168958,
+    "oxide_ms": 206.701583,
+    "nupdf_units": 42766,
+    "oxide_units": 42188,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-013.pdf",
+    "nupdf_ms": 40.306957999999995,
+    "oxide_ms": 88.65825,
+    "nupdf_units": 73723,
+    "oxide_units": 73525,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-014.pdf",
+    "nupdf_ms": 44.486791999999994,
+    "oxide_ms": 107.405834,
+    "nupdf_units": 80702,
+    "oxide_units": 80272,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-015.pdf",
+    "nupdf_ms": 82.032209,
+    "oxide_ms": 42.499417,
+    "nupdf_units": 18383,
+    "oxide_units": 18345,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-016.pdf",
+    "nupdf_ms": 25.498458000000003,
+    "oxide_ms": 57.765125,
+    "nupdf_units": 114206,
+    "oxide_units": 114186,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-017.pdf",
+    "nupdf_ms": 208.108583,
+    "oxide_ms": 185.873125,
+    "nupdf_units": 188747,
+    "oxide_units": 188209,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-018.pdf",
+    "nupdf_ms": 87.856584,
+    "oxide_ms": 217.71875,
+    "nupdf_units": 218829,
+    "oxide_units": 217926,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-019.pdf",
+    "nupdf_ms": 46.704417,
+    "oxide_ms": 127.419708,
+    "nupdf_units": 140928,
+    "oxide_units": 140910,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-020.pdf",
+    "nupdf_ms": 2.431083,
+    "oxide_ms": 2.890708,
+    "nupdf_units": 790,
+    "oxide_units": 784,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-021.pdf",
+    "nupdf_ms": 7.27725,
+    "oxide_ms": 5.84825,
+    "nupdf_units": 3022,
+    "oxide_units": 3023,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-022.pdf",
+    "nupdf_ms": 2.066125,
+    "oxide_ms": 3.418417,
+    "nupdf_units": 1804,
+    "oxide_units": 1804,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-023.pdf",
+    "nupdf_ms": 4.9618329999999995,
+    "oxide_ms": 9.512333,
+    "nupdf_units": 3918,
+    "oxide_units": 3937,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-024.pdf",
+    "nupdf_ms": 8.259917,
+    "oxide_ms": 4.946959,
+    "nupdf_units": 4198,
+    "oxide_units": 4187,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-025.pdf",
+    "nupdf_ms": 1.864292,
+    "oxide_ms": 4.4480830000000005,
+    "nupdf_units": 1409,
+    "oxide_units": 1412,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-026.pdf",
+    "nupdf_ms": 1.662667,
+    "oxide_ms": 2.932875,
+    "nupdf_units": 859,
+    "oxide_units": 859,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-027.pdf",
+    "nupdf_ms": 1.57975,
+    "oxide_ms": 2.791375,
+    "nupdf_units": 859,
+    "oxide_units": 859,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-028.pdf",
+    "nupdf_ms": 2.77,
+    "oxide_ms": 2.762625,
+    "nupdf_units": 762,
+    "oxide_units": 762,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-029.pdf",
+    "nupdf_ms": 3.846958,
+    "oxide_ms": 3.4562500000000003,
+    "nupdf_units": 890,
+    "oxide_units": 890,
+    "nupdf_error": null,
+    "oxide_error": null
+  },
+  {
+    "file": "long/long-030.pdf",
+    "nupdf_ms": 16.819750000000003,
+    "oxide_ms": 44.73825,
+    "nupdf_units": 100459,
+    "oxide_units": 100449,
+    "nupdf_error": null,
+    "oxide_error": null
+  }
+]
