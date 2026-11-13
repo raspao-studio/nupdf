@@ -388,9 +388,9 @@ pub struct Store {
     /// being drawn, by font.
     pub t3_loading: Vec<Object>,
     pub t3_running: Vec<usize>,
-    /// Whether a page's resources, by object number, use blending
-    /// (`pdf_resources_use_blending` from the page).
-    pub blending: HashMap<i32, bool>,
+    /// Whether resource dictionaries, by object number, use blending
+    /// (`pdf_resources_use_blending`), as far as kept.
+    pub blending: crate::run::BlendMemos,
 }
 
 impl Store {

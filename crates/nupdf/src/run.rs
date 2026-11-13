@@ -20,6 +20,7 @@
 //! their font's box until outlines are read (DECISIONS D32).
 
 use crate::fma::Madd;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Structure elements climbed through at most, closing marked structure:
@@ -325,9 +326,173 @@ fn num(obj: &Object) -> i32 {
 }
 
 // The blending scan (pdf-page.c). MuPDF memoizes the answer for each
-// resource dictionary, whichever cycle it was reached in; it is computed
-// afresh here, except for a page's resources, kept from the top (where no
-// cycle bears on it) in the store.
+// resource dictionary, whichever cycle it was reached in. Here an answer is
+// kept with what it rests on, and used again only where the scan would give
+// it again: [`BlendMemo`].
+
+/// A resource dictionary's (or pattern's, or XObject's) answer, with the
+/// objects its scan went through
+/// and how deep it went. A scan reaching the dictionary again gives the same
+/// answer when none of those objects is among the ones it is inside (no
+/// cycle check comes out otherwise) and its depth leaves room for as deep a
+/// scan; when the first scan cut a cycle or stopped at the depth limit
+/// itself, the answer is not kept.
+#[derive(Debug, Clone, Default)]
+pub struct BlendMemo {
+    value: bool,
+    /// Sorted.
+    visited: Vec<i32>,
+    depth: usize,
+}
+
+/// What a kept answer is for: a resource dictionary, a pattern or an
+/// XObject, by object number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlendKind {
+    Resources,
+    Pattern,
+    XObject,
+}
+
+/// Kept blending answers.
+pub type BlendMemos = HashMap<(BlendKind, i32), BlendMemo>;
+
+/// A blending scan, keeping answers in `memo`.
+struct BlendScan<'a> {
+    doc: &'a Document,
+    memo: &'a mut BlendMemos,
+    /// Objects entered, in order.
+    visited: Vec<i32>,
+    /// The deepest the cycle list has been.
+    deepest: usize,
+    /// Whether a cycle or the depth limit stopped the scan somewhere.
+    cut: bool,
+    /// The answers this scan kept.
+    kept: Vec<(BlendKind, i32)>,
+}
+
+impl BlendScan<'_> {
+    /// `pdf_cycle` with the depth limit; false when the scan stops here.
+    fn enter(&mut self, cycle: &mut Vec<i32>, obj: &Object) -> bool {
+        if cycles(cycle, obj) || cycle.len() >= MAX_SCAN_DEPTH {
+            self.cut = true;
+            return false;
+        }
+        cycle.push(num(obj));
+        if num(obj) > 0 {
+            self.visited.push(num(obj));
+        }
+        self.deepest = self.deepest.max(cycle.len());
+        true
+    }
+
+    /// `scan` of `obj`, a `kind` of object, or the answer kept for it
+    /// where it holds.
+    fn kept_or(
+        &mut self,
+        kind: BlendKind,
+        obj: &Object,
+        cycle: &mut Vec<i32>,
+        scan: fn(&mut Self, &Object, &mut Vec<i32>) -> bool,
+    ) -> bool {
+        let n = num(obj);
+        if n > 0
+            && !cycles(cycle, obj)
+            && let Some(m) = self.memo.get(&(kind, n))
+            && cycle.len() + m.depth < MAX_SCAN_DEPTH
+            && !cycle
+                .iter()
+                .any(|&c| c > 0 && m.visited.binary_search(&c).is_ok())
+        {
+            let (value, depth) = (m.value, m.depth);
+            self.visited.extend_from_slice(&m.visited);
+            self.deepest = self.deepest.max(cycle.len() + depth);
+            return value;
+        }
+        let (start, base) = (self.visited.len(), cycle.len());
+        let (outer_cut, outer_deepest) = (std::mem::take(&mut self.cut), self.deepest);
+        self.deepest = base;
+        let out = scan(self, obj, cycle);
+        if n > 0 && !self.cut {
+            let mut visited = self.visited[start..].to_vec();
+            visited.sort_unstable();
+            visited.dedup();
+            self.kept.push((kind, n));
+            self.memo.insert(
+                (kind, n),
+                BlendMemo {
+                    value: out,
+                    visited,
+                    depth: self.deepest - base,
+                },
+            );
+        }
+        self.cut |= outer_cut;
+        self.deepest = self.deepest.max(outer_deepest);
+        out
+    }
+
+    /// `pdf_resources_use_blending`.
+    fn resources(&mut self, rdb: &Object, cycle: &mut Vec<i32>) -> bool {
+        self.kept_or(BlendKind::Resources, rdb, cycle, Self::resources_scan)
+    }
+
+    fn resources_scan(&mut self, rdb: &Object, cycle: &mut Vec<i32>) -> bool {
+        if !self.enter(cycle, rdb) {
+            return false;
+        }
+        let doc = self.doc;
+        let values = |key: &[u8]| -> Vec<Object> {
+            match doc.dict_get(rdb, key) {
+                Object::Dict(d) => d.iter().map(|(_, v)| v.clone()).collect(),
+                _ => Vec::new(),
+            }
+        };
+        let out = values(b"ExtGState")
+            .iter()
+            .any(|g| extgstate_uses_blending(doc, g))
+            || values(b"Pattern").iter().any(|p| self.pattern(p, cycle))
+            || values(b"XObject").iter().any(|x| self.xobject(x, cycle));
+        cycle.pop();
+        out
+    }
+
+    /// `pdf_pattern_uses_blending`.
+    fn pattern(&mut self, dict: &Object, cycle: &mut Vec<i32>) -> bool {
+        self.kept_or(BlendKind::Pattern, dict, cycle, Self::pattern_scan)
+    }
+
+    fn pattern_scan(&mut self, dict: &Object, cycle: &mut Vec<i32>) -> bool {
+        if !self.enter(cycle, dict) {
+            return false;
+        }
+        let doc = self.doc;
+        let res = stored(doc, dict, b"Resources");
+        let out = res.is_some_and(|r| self.resources(&r, cycle))
+            || stored(doc, dict, b"ExtGState").is_some_and(|g| extgstate_uses_blending(doc, &g));
+        cycle.pop();
+        out
+    }
+
+    /// `pdf_xobject_uses_blending`.
+    fn xobject(&mut self, dict: &Object, cycle: &mut Vec<i32>) -> bool {
+        self.kept_or(BlendKind::XObject, dict, cycle, Self::xobject_scan)
+    }
+
+    fn xobject_scan(&mut self, dict: &Object, cycle: &mut Vec<i32>) -> bool {
+        if !self.enter(cycle, dict) {
+            return false;
+        }
+        let doc = self.doc;
+        let group = doc.dict_get(dict, b"Group");
+        let out = doc.dict_get(&group, b"S").is_name(b"Transparency")
+            || (doc.dict_get(dict, b"Subtype").is_name(b"Image")
+                && stored(doc, dict, b"SMask").is_some())
+            || stored(doc, dict, b"Resources").is_some_and(|r| self.resources(&r, cycle));
+        cycle.pop();
+        out
+    }
+}
 
 fn extgstate_uses_blending(doc: &Document, dict: &Object) -> bool {
     match stored(doc, dict, b"BM") {
@@ -338,53 +503,40 @@ fn extgstate_uses_blending(doc: &Document, dict: &Object) -> bool {
 
 /// `pdf_pattern_uses_blending`.
 pub fn pattern_uses_blending(doc: &Document, dict: &Object, cycle: &mut Vec<i32>) -> bool {
-    if cycles(cycle, dict) || cycle.len() >= MAX_SCAN_DEPTH {
-        return false;
-    }
-    cycle.push(num(dict));
-    let res = stored(doc, dict, b"Resources");
-    let out = res.is_some_and(|r| resources_use_blending(doc, &r, cycle))
-        || stored(doc, dict, b"ExtGState").is_some_and(|g| extgstate_uses_blending(doc, &g));
-    cycle.pop();
-    out
+    let mut memo = HashMap::new();
+    BlendScan::new(doc, &mut memo).pattern(dict, cycle)
 }
 
-fn xobject_uses_blending(doc: &Document, dict: &Object, cycle: &mut Vec<i32>) -> bool {
-    if cycles(cycle, dict) || cycle.len() >= MAX_SCAN_DEPTH {
-        return false;
-    }
-    cycle.push(num(dict));
-    let group = doc.dict_get(dict, b"Group");
-    let out = doc.dict_get(&group, b"S").is_name(b"Transparency")
-        || (doc.dict_get(dict, b"Subtype").is_name(b"Image")
-            && stored(doc, dict, b"SMask").is_some())
-        || stored(doc, dict, b"Resources").is_some_and(|r| resources_use_blending(doc, &r, cycle));
-    cycle.pop();
-    out
-}
-
-/// `pdf_resources_use_blending`.
-pub fn resources_use_blending(doc: &Document, rdb: &Object, cycle: &mut Vec<i32>) -> bool {
-    if cycles(cycle, rdb) || cycle.len() >= MAX_SCAN_DEPTH {
-        return false;
-    }
-    cycle.push(num(rdb));
-    let values = |key: &[u8]| -> Vec<Object> {
-        match doc.dict_get(rdb, key) {
-            Object::Dict(d) => d.iter().map(|(_, v)| v.clone()).collect(),
-            _ => Vec::new(),
+impl<'a> BlendScan<'a> {
+    fn new(doc: &'a Document, memo: &'a mut BlendMemos) -> BlendScan<'a> {
+        BlendScan {
+            doc,
+            memo,
+            visited: Vec::new(),
+            deepest: 0,
+            cut: false,
+            kept: Vec::new(),
         }
-    };
-    let out = values(b"ExtGState")
-        .iter()
-        .any(|g| extgstate_uses_blending(doc, g))
-        || values(b"Pattern")
-            .iter()
-            .any(|p| pattern_uses_blending(doc, p, cycle))
-        || values(b"XObject")
-            .iter()
-            .any(|x| xobject_uses_blending(doc, x, cycle));
-    cycle.pop();
+    }
+}
+
+/// `pdf_resources_use_blending`, keeping answers in `memo` (a store's, for
+/// the pages after). A scan that gave warnings keeps none: one kept would
+/// leave out the warnings a scan again would give.
+pub fn resources_use_blending(
+    doc: &Document,
+    rdb: &Object,
+    cycle: &mut Vec<i32>,
+    memo: &mut BlendMemos,
+) -> bool {
+    let mut scan = BlendScan::new(doc, memo);
+    let (out, said) = crate::diag::capture(|| scan.resources(rdb, cycle));
+    if !said.is_empty() {
+        for n in std::mem::take(&mut scan.kept) {
+            scan.memo.remove(&n);
+        }
+        doc.diagnostics().replay(said);
+    }
     out
 }
 
@@ -3987,16 +4139,9 @@ fn run_page_imp(
         .as_ref()
         .is_some_and(|g| doc.dict_get(g, b"S").is_name(b"Transparency"))
         || resources.as_ref().is_some_and(|r| {
-            // Pages sharing their resources by reference scan them once:
-            // from the top, the scan is the same every time.
-            let key = r.as_ref().map(|r| r.num);
-            let memo = store.as_mut().map(|s| &mut s.blending);
-            match (key, memo) {
-                (Some(k), Some(memo)) => *memo
-                    .entry(k)
-                    .or_insert_with(|| resources_use_blending(doc, r, &mut Vec::new())),
-                _ => resources_use_blending(doc, r, &mut Vec::new()),
-            }
+            let mut own = HashMap::new();
+            let memo = store.as_mut().map_or(&mut own, |s| &mut s.blending);
+            resources_use_blending(doc, r, &mut Vec::new(), memo)
         });
     if transparency {
         let cs = match &group {
@@ -4323,6 +4468,41 @@ mod tests {
     }
 
     #[test]
+    fn kept_blending_answers_are_the_ones_a_scan_again_gives() {
+        // 1: forms X (2) and Z (4); X's resources 3 lead back to 1 through
+        // form Y (5); Z is a transparency group. 6 reaches 3 directly, and
+        // 7 holds a form whose resources are 6.
+        let doc = crate::testutil::doc_of(&[
+            "<</XObject<</X 2 0 R/Z 4 0 R>>>>",
+            "<</Subtype/Form/Resources 3 0 R>>",
+            "<</XObject<</Y 5 0 R>>>>",
+            "<</Subtype/Form/Group<</S/Transparency>>>>",
+            "<</Subtype/Form/Resources 1 0 R>>",
+            "<</XObject<</W 8 0 R>>>>",
+            "<</XObject<</V 9 0 R>>>>",
+            "<</Subtype/Form/Resources 3 0 R>>",
+            "<</Subtype/Form/Resources 6 0 R>>",
+        ]);
+        let r = |n: i32| Object::Ref(crate::ObjRef::new(n, 0));
+        let fresh =
+            |n: i32| resources_use_blending(&doc, &r(n), &mut Vec::new(), &mut HashMap::new());
+        for order in [[1, 3, 6, 7], [7, 6, 3, 1], [3, 7, 1, 6]] {
+            let mut memo = HashMap::new();
+            for n in order {
+                let kept = resources_use_blending(&doc, &r(n), &mut Vec::new(), &mut memo);
+                assert_eq!(kept, fresh(n), "{n} after {order:?}");
+                // And from inside another scan's cycle.
+                let mut cycle = vec![2];
+                assert_eq!(
+                    resources_use_blending(&doc, &r(n), &mut cycle, &mut memo),
+                    resources_use_blending(&doc, &r(n), &mut vec![2], &mut HashMap::new()),
+                    "{n} in a cycle after {order:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pages_sharing_blending_resources_each_get_their_group() {
         // Two pages share resources 5, whose graphics state blends; the
         // scan is kept for the second, which is grouped as the first.
@@ -4347,7 +4527,7 @@ mod tests {
             groups.push(log.0.iter().filter(|c| c.starts_with("group")).count());
         }
         assert_eq!(groups, [1, 1]);
-        assert_eq!(store.blending.get(&5), Some(&true));
+        assert!(store.blending.contains_key(&(BlendKind::Resources, 5)));
     }
 
     #[test]
