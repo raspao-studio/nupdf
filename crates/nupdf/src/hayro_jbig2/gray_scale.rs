@@ -1,15 +1,15 @@
 //! Gray-scale image decoding procedure (Annex C).
 
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
-use crate::ScratchBuffers;
-use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
-use crate::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS};
-use crate::decode::generic::{ContextGatherer, decode_bitmap_mmr};
-use crate::decode::{AdaptiveTemplatePixel, Template};
-use crate::error::{OverflowError, Result, bail};
-use crate::simd::{self, Level, Simd, u32x8};
+use crate::hayro_jbig2::ScratchBuffers;
+use crate::hayro_jbig2::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
+use crate::hayro_jbig2::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS};
+use crate::hayro_jbig2::decode::generic::{ContextGatherer, decode_bitmap_mmr};
+use crate::hayro_jbig2::decode::{AdaptiveTemplatePixel, Template};
+use crate::hayro_jbig2::error::{OverflowError, Result, bail};
+use crate::hayro_jbig2::simd::{self, Level, Simd, u32x8};
 
 /// Input parameters to the gray-scale image decoding procedure (Table C.1).
 #[derive(Debug, Clone)]

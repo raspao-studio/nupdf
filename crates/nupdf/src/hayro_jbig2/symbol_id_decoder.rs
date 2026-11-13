@@ -1,9 +1,9 @@
 //! Symbol ID (IAID) decoder (A.3).
 
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
-use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
+use crate::hayro_jbig2::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 
 pub(crate) struct SymbolIdDecoder {
     contexts: Vec<ArithmeticDecoderContext>,

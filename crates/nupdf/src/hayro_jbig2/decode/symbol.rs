@@ -1,26 +1,26 @@
 //! Symbol dictionary segment parsing and decoding (7.4.2, 6.5).
 
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
-use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
-use crate::bitmap::{Bitmap, WORD_BITS};
-use crate::decode::generic::{decode_bitmap_mmr, parse_adaptive_template_pixels};
-use crate::decode::text::{
+use crate::hayro_jbig2::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
+use crate::hayro_jbig2::bitmap::{Bitmap, WORD_BITS};
+use crate::hayro_jbig2::decode::generic::{decode_bitmap_mmr, parse_adaptive_template_pixels};
+use crate::hayro_jbig2::decode::text::{
     DecodeContext, ReferenceCorner, TextRegionContexts, TextRegionFlags, TextRegionHeader,
     TextRegionHuffmanFlags, decode_with,
 };
-use crate::decode::{
+use crate::hayro_jbig2::decode::{
     AdaptiveTemplatePixel, CombinationOperator, RefinementTemplate, RegionSegmentInfo, Template,
     parse_refinement_at_pixels,
 };
-use crate::decode::{generic, generic_refinement};
-use crate::error::{
+use crate::hayro_jbig2::decode::{generic, generic_refinement};
+use crate::hayro_jbig2::error::{
     DecodeError, HuffmanError, OverflowError, ParseError, Result, SymbolError, bail,
 };
-use crate::huffman_table::{HuffmanTable, StandardHuffmanTables};
-use crate::integer_decoder::IntegerDecoder;
-use crate::reader::Reader;
+use crate::hayro_jbig2::huffman_table::{HuffmanTable, StandardHuffmanTables};
+use crate::hayro_jbig2::integer_decoder::IntegerDecoder;
+use crate::hayro_jbig2::reader::Reader;
 
 pub(crate) const MAX_SYMBOLS: u32 = 1 << 20;
 /// nupdf: the most pixels one symbol dictionary may decode.

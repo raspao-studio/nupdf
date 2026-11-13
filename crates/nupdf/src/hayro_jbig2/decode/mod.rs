@@ -7,12 +7,12 @@ pub(crate) mod pattern;
 pub(crate) mod symbol;
 pub(crate) mod text;
 
-use crate::bitmap::Bitmap;
-use crate::decode::RefinementTemplate::{Template0, Template1};
-use crate::error::{DecodeError, ParseError, RegionError, Result, bail, err};
-use crate::reader::Reader;
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::hayro_jbig2::bitmap::Bitmap;
+use crate::hayro_jbig2::decode::RefinementTemplate::{Template0, Template1};
+use crate::hayro_jbig2::error::{DecodeError, ParseError, RegionError, Result, bail, err};
+use crate::hayro_jbig2::reader::Reader;
+use std::vec;
+use std::vec::Vec;
 
 /// A decoded region bitmap with its combination operator.
 #[derive(Debug, Clone)]

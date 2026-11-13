@@ -16,6 +16,10 @@ The JPEG decoder in [crates/nupdf/src/jpeg](crates/nupdf/src/jpeg) is a translat
 
 Changes from the original files: the C code was rewritten in Rust and reorganized into fewer modules (`marker`, `huff`, `arith`, `idct`, and the controllers in `mod.rs`). Only what MuPDF uses is kept: decompression at full scale with the default parameters, one scanline at a time, from a data source that never suspends. Color quantization, merged upsampling, raw data output, buffered-image mode, scaled output, the fast and floating-point IDCTs, and the IDCT sizes that only "SmartScale" block sizes reach were left out. libjpeg's warnings are not reported, as MuPDF discards them. Memory for whole-image coefficient buffers is capped.
 
+## hayro-jbig2
+
+`crates/nupdf/src/hayro_jbig2` is hayro-jbig2 0.4.0 by Laurenz Stampfl (https://github.com/LaurenzV/hayro), under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE` there), with the changes `NUPDF.md` there describes.
+
 ## zlib
 
 The deflate encoder in [crates/nupdf/src/deflate.rs](crates/nupdf/src/deflate.rs) is a translation into Rust of part of zlib 1.3.2 (the copy bundled with MuPDF 1.28.6), so that streams `clean` compresses are the same bytes MuPDF writes. zlib is Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler; its license notice is kept, unaltered, at the top of that file.

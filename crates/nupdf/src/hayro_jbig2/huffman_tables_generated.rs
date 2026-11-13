@@ -4,6 +4,8 @@
 type N = HuffmanNode;
 type L = LeafData;
 
+// nupdf: evaluated at compile time on the tables' constants, never on input.
+#[allow(clippy::unwrap_used)]
 const fn nz(n: u32) -> NonZeroU32 { NonZeroU32::new(n).unwrap() }
 
 /// Standard Huffman table A (Table B.1).

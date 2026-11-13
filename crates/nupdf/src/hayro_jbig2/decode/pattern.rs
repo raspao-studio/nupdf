@@ -1,12 +1,12 @@
 //! Pattern dictionary segment parsing and decoding (7.4.4, 6.7).
 
 use super::{AdaptiveTemplatePixel, Template, generic};
-use crate::ScratchBuffers;
-use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
-use crate::bitmap::{Bitmap, WORD_BITS, Word};
-use crate::error::{OverflowError, ParseError, Result};
-use crate::reader::Reader;
-use alloc::vec::Vec;
+use crate::hayro_jbig2::ScratchBuffers;
+use crate::hayro_jbig2::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
+use crate::hayro_jbig2::bitmap::{Bitmap, WORD_BITS, Word};
+use crate::hayro_jbig2::error::{OverflowError, ParseError, Result};
+use crate::hayro_jbig2::reader::Reader;
+use std::vec::Vec;
 
 /// Decode a pattern dictionary segment (7.4.4.2, 6.7).
 pub(crate) fn decode(

@@ -1,6 +1,6 @@
 # hayro-jbig2 0.4.0, patched for nupdf
 
-This is hayro-jbig2 0.4.0 from crates.io (MIT OR Apache-2.0, see LICENSE-MIT and LICENSE-APACHE), used through `[patch.crates-io]` in the workspace and fuzz manifests. Its example and dev-dependencies were removed from `Cargo.toml`; the only code change is in `src/decode/symbol.rs`.
+This is hayro-jbig2 0.4.0 from crates.io (MIT OR Apache-2.0, see LICENSE-MIT and LICENSE-APACHE), carried as a module of the nupdf crate, since crates.io does not apply a workspace's `[patch]`. As a module: `crate::` paths point into it, `alloc::` is `std::`, its `std` and `simd` features are always on and `image` off (their other branches and `integration.rs` removed). The code changes are the guards below in `decode/symbol.rs`, and two places that panicked on damaged data now fail instead (`decode/generic.rs`, a region shorter than its row count; `huffman_table.rs`, a table too large to index). Each is marked `nupdf:`.
 
 Past the end of its data, the arithmetic decoder keeps returning values, so a damaged symbol dictionary can decode as an endless list of empty export runs or of empty height classes, and decoding never ends. nupdf's fuzzer found both. jbig2dec fails a dictionary after 1000 empty export runs; the patch does the same for runs and, which jbig2dec does not, for height classes. Both fail with `SymbolError::Invalid`.
 
