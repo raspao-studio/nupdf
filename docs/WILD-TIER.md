@@ -21,13 +21,10 @@ Measured on 2026-11-12 at commit de4b887, MuPDF 1.28.6 as the reference, on an M
   - Pages that set an ICC colour space every few operators inflated its profile each time.
   
   MuPDF keeps both in its store; nupdf now does too.
-- **The five runs still over 60 seconds** finish, slower than MuPDF, on files of 4 to 43 MB:
-  - `tables` (98 s and 110 s against 11 s and 24 s);
-  - `sanitize` (48 s against 9 s);
-  - `images` (61 s against 54 s);
-  - `fonts` (61 s).
-  
-  They are performance work to come, not hangs.
+- **Five runs still took over 60 seconds** after those fixes, slower than MuPDF, on files of 4 to 43 MB. Profiled and fixed since, with the same output (user CPU seconds, before and after; MuPDF):
+  - `images` and `fonts` on a file of 7,560 pages sharing one /Resources of 7,560 forms: 64 s and 66 s to 0.04 s (MuPDF's `images` 54 s).
+  - `tables`: 125 s to 3.3 s (MuPDF 126 s) and 105 s to 52 s (MuPDF 83 s).
+  - `sanitize`: 46 s to 24 s (`mutool clean` 9 s). It saves, reparses, scans and verifies its output, so it does more than `clean`; that is what is left.
 
 ## Parity
 
