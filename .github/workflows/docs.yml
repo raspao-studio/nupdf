@@ -1,0 +1,77 @@
+name: docs
+
+# Builds the mdBook in book/ and publishes it to GitHub Pages
+# (https://raspao-studio.github.io/nupdf/). Pages must be set to deploy from
+# GitHub Actions: Settings, Pages, Source.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - book/**
+      - docs/**
+      - eval/REPORT.md
+      - README.md
+      - SECURITY.md
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push waits rather than cancelling one
+# that is already publishing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  MDBOOK_VERSION: v0.5.4
+  MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install mdBook
+        run: |
+          tarball="mdbook-${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_VERSION}/$tarball"
+          echo "${MDBOOK_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/mdbook"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/mdbook"
+          echo "$RUNNER_TEMP/mdbook" >> "$GITHUB_PATH"
+      - run: mdbook --version
+      - run: mdbook build book
+      # mdBook leaves an include it cannot read in the page as written and
+      # still succeeds; publish nothing rather than a page like that.
+      - name: Check every included file was found
+        run: |
+          if grep -rl --include='*.html' '{{#include' book/book; then
+            echo "::error::a page includes a file that does not exist"
+            exit 1
+          fi
+      - name: Check links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          lycheeVersion: v0.24.2
+          args: --offline --include-fragments --no-progress --exclude-path book/book/404.html book/book
+          jobSummary: false
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: book/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
