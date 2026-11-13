@@ -256,6 +256,14 @@ impl Cells {
         let w = self.w;
         &mut self.cell[x + y * w]
     }
+
+    /// Cells `x0..=x1` of row `y`; none past the grid.
+    fn row(&mut self, y: usize, x0: usize, x1: usize) -> &mut [Cell] {
+        let start = y * self.w;
+        self.cell
+            .get_mut(start + x0..=start + x1)
+            .unwrap_or_default()
+    }
 }
 
 /// `grid_walker_data`.
@@ -1111,30 +1119,35 @@ fn mark_cells(g: &mut Grid, s: Rect, baseline: f32, fontsize: f32) -> bool {
     ) else {
         return true;
     };
+    // Row by row: a vector a table's content can cover thousands of cells.
     let c = &mut g.cells;
     if x0 < x1 {
         for y in y0..=y1 {
-            for x in x0..x1 {
-                c.at_mut(x + 1, y).v_crossed += 1;
+            for cell in c.row(y, x0 + 1, x1) {
+                cell.v_crossed += 1;
             }
         }
     }
     if y0 < y1 {
         for y in y0..y1 {
-            for x in x0..=x1 {
-                c.at_mut(x, y + 1).h_crossed += 1;
+            for cell in c.row(y + 1, x0, x1) {
+                cell.h_crossed += 1;
             }
         }
     }
     for y in y0..=y1 {
-        for x in x0..=x1 {
-            let cell = c.at_mut(x, y);
+        let row = c.row(y, x0, x1);
+        if fontsize == 0.0 {
+            for cell in row {
+                cell.full += 1;
+            }
+            continue;
+        }
+        for cell in row {
             cell.full += 1;
-            if fontsize != 0.0 {
-                cell.content = cell.content.union(line_ext);
-                if fontsize > cell.fontsize {
-                    cell.fontsize = fontsize;
-                }
+            cell.content = cell.content.union(line_ext);
+            if fontsize > cell.fontsize {
+                cell.fontsize = fontsize;
             }
         }
     }
