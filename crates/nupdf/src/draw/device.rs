@@ -897,7 +897,8 @@ impl Device for DrawDevice<'_> {
             pix = self.to_model(&pix, cs.as_ref(), model);
         }
         if dw < pix.w && dh < pix.h {
-            let fit = alpha == 1.0;
+            // Type 3 glyphs are not fitted to the grid.
+            let fit = alpha == 1.0 && !self.type3;
             let scaled = transform_pixmap(&pix, &mut ctm, dw, dh, fit, clip).or_else(|| {
                 scale(
                     &pix,
@@ -964,7 +965,8 @@ impl Device for DrawDevice<'_> {
         };
         let mut ctm = subarea_ctm(ctm, part, image.width, image.height);
         if dw < pix.w && dh < pix.h {
-            let fit = alpha == 1.0;
+            // Type 3 glyphs are not fitted to the grid.
+            let fit = alpha == 1.0 && !self.type3;
             let scaled = transform_pixmap(&pix, &mut ctm, dw, dh, fit, clip).or_else(|| {
                 scale(
                     &pix,
@@ -1051,7 +1053,8 @@ impl Device for DrawDevice<'_> {
             dest.copy_rect(parent, bbox);
         }
         if dw < pix.w && dh < pix.h {
-            let scaled = transform_pixmap(&pix, &mut ctm, dw, dh, true, clip).or_else(|| {
+            let fit = !self.type3;
+            let scaled = transform_pixmap(&pix, &mut ctm, dw, dh, fit, clip).or_else(|| {
                 scale(
                     &pix,
                     pix.x as f32,
@@ -2768,5 +2771,47 @@ mod tests {
             &[&image, lab],
         );
         check("lab-cmyk", &cmyk, false, "0b464e2f3f8a72f2987e5553198c0d4c");
+    }
+
+    #[test]
+    fn image_masks_in_type3_glyphs_are_not_fitted_to_the_grid() {
+        // A bitmap font (as TeX writes them): each glyph an image mask.
+        // MuPDF fits images to the pixel grid when it scales them down,
+        // but not in a Type 3 glyph; nupdf did there too, which thickened
+        // small glyphs.
+        let mut bits = String::new();
+        for y in 0..36i32 {
+            let mut row = 0u32;
+            for x in 0..32i32 {
+                let (dx, dy) = (f64::from(x - 13), f64::from(y - 18));
+                let ring = x < 26
+                    && dx * dx / 169.0 + dy * dy / 324.0 < 1.0
+                    && dx * dx / 49.0 + dy * dy / 144.0 >= 1.0;
+                row = row << 1 | u32::from(ring);
+            }
+            bits.push_str(&format!("{row:08x}"));
+        }
+        let glyph = stream(
+            "",
+            &format!(
+                "0 0 0 -49 26 -13 d1 26 0 0 36 0 -49 cm BI /IM true /W 26 /H 36 /BPC 1 /D[1 0] /F/AHx ID {bits}> EI"
+            ),
+        );
+        let pdf = page(
+            128,
+            64,
+            "/Font<</A 5 0 R>>",
+            "BT /A 1 Tf 0.1 0 0 0.1 4 40 Tm (AAAA) Tj 0.25 0 0 0.25 30 40 Tm (AA) Tj 0.333 0 0 0.333 70 30 Tm (AA) Tj ET",
+            &[
+                "<</Type/Font/Subtype/Type3/FontBBox[0 -59 68 174]/FontMatrix[1 0 0 1 0 0]/CharProcs<</a 6 0 R>>/Encoding<</Type/Encoding/Differences[65/a]>>/FirstChar 65/LastChar 65/Widths[30]>>",
+                &glyph,
+            ],
+        );
+        check(
+            "type3-image-mask",
+            &pdf,
+            false,
+            "70d0f519df2e6c4826e938a920599739",
+        );
     }
 }
