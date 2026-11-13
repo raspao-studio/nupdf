@@ -4,6 +4,7 @@
 //! `cargo xtask <command>`: everything that compares nupdf against MuPDF.
 
 mod adversarial;
+mod against;
 mod arlington;
 mod bench;
 mod corpus;
@@ -120,6 +121,10 @@ enum Cmd {
         /// Bench an evenly spaced sample of this many files.
         #[arg(long)]
         sample: Option<usize>,
+        /// Also time this tool on the pairs it can do (`pdf_oxide`, from
+        /// target/bench-venv), MuPDF staying the reference.
+        #[arg(long)]
+        against: Option<String>,
     },
     /// Render one page with MuPDF, nupdf and hayro (a second reference),
     /// and report how far each pair is apart.
@@ -244,7 +249,15 @@ fn main() -> Result<()> {
             pair,
             runs,
             sample,
-        } => bench::run(&root, &tier, pair.as_deref(), runs, sample),
+            against,
+        } => bench::run(
+            &root,
+            &tier,
+            pair.as_deref(),
+            runs,
+            sample,
+            against.as_deref(),
+        ),
         Cmd::Crashes {
             tier,
             sample,

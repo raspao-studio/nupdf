@@ -240,10 +240,21 @@ pub fn run(
     only: Option<&str>,
     runs: usize,
     sample: Option<usize>,
+    against: Option<&str>,
 ) -> Result<()> {
     let mutool = oracle::mutool(root)?;
     let nupdf = crate::build_nupdf(root)?;
     let all = corpus::files(root, tier)?;
+    match against {
+        Some(crate::against::OXIDE) => {
+            return crate::against::run(root, tier, only, runs, sample, &nupdf, &mutool, &all);
+        }
+        Some(other) => bail!(
+            "cannot bench against {other}; only {}",
+            crate::against::OXIDE
+        ),
+        None => {}
+    }
     if only == Some(CONTEXT) {
         return run_context(root, tier, &nupdf, &mutool, &all, runs, sample);
     }
@@ -282,27 +293,13 @@ pub fn run(
         let mut rows = Vec::new();
         let mut short = 0;
         for file in files {
-            let expand = |args: &[&str]| -> Vec<OsString> {
-                args.iter()
-                    .map(|a| match *a {
-                        "{file}" => file.path.clone().into_os_string(),
-                        "{out}" => scratch.clone().into_os_string(),
-                        "{dir}" => scratch_dir.clone().into_os_string(),
-                        a if a.starts_with("oracle/") => root.join(a).into_os_string(),
-                        a if a.starts_with("{dir}/") => {
-                            let _ = std::fs::create_dir_all(&scratch_dir);
-                            scratch_dir.join(&a["{dir}/".len()..]).into_os_string()
-                        }
-                        a => OsString::from(a),
-                    })
-                    .collect()
-            };
-            let (oracle_ms, oracle_rss) = measure(baseline, &expand(pair.oracle), runs)?;
+            let args_for = |args: &[&str]| expand(root, args, &file.path, &scratch, &scratch_dir);
+            let (oracle_ms, oracle_rss) = measure(baseline, &args_for(pair.oracle), runs)?;
             if oracle_ms < pair.min_baseline_ms {
                 short += 1;
                 continue;
             }
-            let (nupdf_ms, nupdf_rss) = measure(&nupdf, &expand(pair.nupdf), runs)?;
+            let (nupdf_ms, nupdf_rss) = measure(&nupdf, &args_for(pair.nupdf), runs)?;
             rows.push(Row {
                 file: file.name.clone(),
                 oracle_ms,
@@ -322,6 +319,31 @@ pub fn run(
     }
     println!("results: {}", out_dir.display());
     Ok(())
+}
+
+/// A pair's arguments for one file: `{file}` is the input, `{out}` a
+/// scratch file, `{dir}` a scratch directory (created when an argument names
+/// a file in it), and `oracle/...` a script in the repository.
+pub(crate) fn expand(
+    root: &Path,
+    args: &[&str],
+    file: &Path,
+    out: &Path,
+    dir: &Path,
+) -> Vec<OsString> {
+    args.iter()
+        .map(|a| match *a {
+            "{file}" => file.as_os_str().to_owned(),
+            "{out}" => out.as_os_str().to_owned(),
+            "{dir}" => dir.as_os_str().to_owned(),
+            a if a.starts_with("oracle/") => root.join(a).into_os_string(),
+            a if a.starts_with("{dir}/") => {
+                let _ = std::fs::create_dir_all(dir);
+                dir.join(&a["{dir}/".len()..]).into_os_string()
+            }
+            a => OsString::from(a),
+        })
+        .collect()
 }
 
 /// The pair that times nupdf's plain text against MuPDF's and, for
@@ -525,7 +547,7 @@ fn render_context(
 }
 
 /// An evenly spaced sample of `n` of `files`, or all of them.
-fn sample_evenly<T>(files: Vec<T>, n: Option<usize>) -> Vec<T> {
+pub(crate) fn sample_evenly<T>(files: Vec<T>, n: Option<usize>) -> Vec<T> {
     let len = files.len();
     match n.filter(|&n| n > 0 && n < len) {
         Some(n) => {
@@ -570,7 +592,7 @@ fn measure(program: &Path, args: &[OsString], runs: usize) -> Result<(f64, u64)>
     Ok((median(&mut times), rss))
 }
 
-fn median(values: &mut [f64]) -> f64 {
+pub(crate) fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let mid = values.len() / 2;
     if values.len().is_multiple_of(2) {
@@ -580,7 +602,7 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
-fn geomean(values: impl Iterator<Item = f64>) -> f64 {
+pub(crate) fn geomean(values: impl Iterator<Item = f64>) -> f64 {
     let (sum, n) = values.fold((0.0, 0usize), |(s, n), v| (s + v.ln(), n + 1));
     if n == 0 {
         f64::NAN
