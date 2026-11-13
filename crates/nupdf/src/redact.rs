@@ -310,12 +310,21 @@ fn redact_page_annotations(doc: &Document, index: i32, red: &Redactor<'_>) -> Re
         })
         .collect();
     for annot in doomed {
-        let popup = doc.dict_get(&annot, b"Popup");
+        let popup = stored(doc, &annot, b"Popup");
         remove_annots(doc, index, |a| {
             a == &annot || (!matches!(popup, Object::Null) && a == &popup)
         })?;
     }
     Ok(())
+}
+
+/// The entry at `key` of the dictionary `obj` as it is stored, a
+/// reference left unresolved, so it can be matched against /Annots.
+fn stored(doc: &Document, obj: &Object, key: &[u8]) -> Object {
+    doc.resolve(obj)
+        .as_dict()
+        .and_then(|d| d.get(key).cloned())
+        .unwrap_or(Object::Null)
 }
 
 /// nupdf's own step after `pdf_redact_page` (the redaction contract):
@@ -340,13 +349,13 @@ pub fn redact_all_annotations(doc: &Document, index: i32, quads: &[Quad]) -> Res
         let rect = doc.to_rect(Some(&doc.dict_get(a, b"Rect")));
         if red.touches(rect) != 0 {
             doomed.push(a.clone());
-            let popup = doc.dict_get(a, b"Popup");
+            let popup = stored(doc, a, b"Popup");
             if !matches!(popup, Object::Null) {
                 doomed.push(popup);
             }
             // A popup's parent goes with it too.
             if doc.dict_get(a, b"Subtype").is_name(b"Popup") {
-                let parent = doc.dict_get(a, b"Parent");
+                let parent = stored(doc, a, b"Parent");
                 if !matches!(parent, Object::Null) {
                     doomed.push(parent);
                 }
@@ -380,7 +389,7 @@ fn remove_field(doc: &Document, widget: &Object) {
     // Field trees deeper than this are taken as cycles.
     for _ in 0..64 {
         let node = Object::Ref(crate::object::ObjRef::new(target, 0));
-        let parent = doc.dict_get(&node, b"Parent");
+        let parent = stored(doc, &node, b"Parent");
         let (holder, key) = match parent.as_ref() {
             Some(p) => (Some(p.num), b"Kids".as_slice()),
             None => (None, b"Fields".as_slice()),
@@ -601,5 +610,307 @@ mod tests {
             Ok(false)
         );
         assert!(!doc.is_edited());
+    }
+
+    use crate::object::ObjRef;
+    use crate::testutil::{doc_of, stream};
+
+    const HELVETICA: &[u8] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+
+    fn opts(image_method: ImageMethod, line_art: LineArt, text: TextMethod) -> RedactOptions {
+        RedactOptions {
+            black_boxes: false,
+            image_method,
+            line_art,
+            text,
+        }
+    }
+
+    /// The page's contents and resources after redacting `area` from a
+    /// page with `resources` drawing `content` (objects 5 on: `extra`).
+    fn redacted(
+        content: &[u8],
+        resources: &str,
+        extra: &[Vec<u8>],
+        area: Quad,
+        options: RedactOptions,
+    ) -> (String, String) {
+        let doc = crate::testutil::page_doc(content, resources, extra);
+        assert_eq!(redact_page(&doc, 0, &[area], options), Ok(true));
+        page_contents(&doc)
+    }
+
+    fn print(obj: &Object) -> String {
+        crate::print::to_string(obj, crate::print::Options::default())
+    }
+
+    fn get(doc: &Document, num: i32, key: &[u8]) -> String {
+        print(&doc.dict_get(&Object::Ref(ObjRef::new(num, 0)), key))
+    }
+
+    fn object(doc: &Document, num: i32) -> String {
+        print(&doc.resolve(&Object::Ref(ObjRef::new(num, 0))))
+    }
+
+    #[test]
+    fn invisible_text_alone_goes_when_asked() {
+        // Golden output from MuPDF's pdf_redact_page with
+        // PDF_REDACT_TEXT_REMOVE_INVISIBLE: render mode 3, and fills or
+        // strokes that are fully transparent, go; the rest stays.
+        let content = b"BT /F1 10 Tf 100 700 Td (Seen) Tj 3 Tr 0 -20 Td (Hidden) Tj 0 Tr q /GA gs 0 -20 Td (Clear) Tj Q 1 Tr 0 -20 Td (Stroked) Tj q /GS gs 0 -20 Td (Unstroked) Tj Q 2 Tr q /GA gs 0 -20 Td (Half) Tj /GS gs 0 -20 Td (Both) Tj Q 7 Tr 0 -20 Td (Clip) Tj ET";
+        let (data, res) = redacted(
+            content,
+            "/Font<</F1 5 0 R>>/ExtGState<</GA<</ca 0>>/GS<</CA 0>>>>",
+            &[HELVETICA.to_vec()],
+            quad(90.0, 500.0, 300.0, 720.0),
+            opts(
+                ImageMethod::None,
+                LineArt::None,
+                TextMethod::RemoveInvisible,
+            ),
+        );
+        assert_eq!(
+            data,
+            "q BT/F1 10 Tf 100 700 TD (Seen)Tj q 31.679993 -20 TD/GA gs -7.7899935 -20 TD ET Q (Stroked)Tj q/GS gs Q q/GA gs (Half)Tj/GS gs Q (Clip)Tj ET Q"
+        );
+        assert_eq!(
+            res,
+            "<</Font<</F1 5 0 R>>/ExtGState<</GA<</ca 0>>/GS<</CA 0>>>>>>"
+        );
+    }
+
+    /// A page drawing a 4x4 grey image twice: through a clip that hides
+    /// it right of x 100 at y 690..730, and in full at y 590..630.
+    fn two_images(method: ImageMethod) -> (String, String) {
+        redacted(
+            b"q 0 0 100 800 re W n q 200 0 0 40 60 690 cm /Im1 Do Q Q q 200 0 0 40 60 590 cm /Im1 Do Q",
+            "/XObject<</Im1 5 0 R>>",
+            &[stream(
+                "/Type/XObject/Subtype/Image/Width 4/Height 4/BitsPerComponent 8/ColorSpace/DeviceGray",
+                &[0x40; 16],
+            )],
+            quad(150.0, 580.0, 200.0, 740.0),
+            opts(method, LineArt::None, TextMethod::Remove),
+        )
+    }
+
+    #[test]
+    fn images_an_area_meets_go_unless_it_meets_only_what_is_hidden() {
+        // Golden output from MuPDF, PDF_REDACT_IMAGE_REMOVE and
+        // PDF_REDACT_IMAGE_REMOVE_UNLESS_INVISIBLE.
+        assert_eq!(
+            two_images(ImageMethod::Remove),
+            (
+                "q 0 0 100 800 re W n q 200 0 0 40 60 690 cm Q Q q 200 0 0 40 60 590 cm Q q Q"
+                    .into(),
+                "<<>>".into()
+            )
+        );
+        assert_eq!(
+            two_images(ImageMethod::RemoveUnlessInvisible),
+            (
+                "q 0 0 100 800 re W n q 200 0 0 40 60 690 cm /Im1 Do Q Q q 200 0 0 40 60 590 cm Q q Q"
+                    .into(),
+                "<</XObject<</Im1 5 0 R>>>>".into()
+            )
+        );
+        // Left alone, both stay, each under a name of its own as forms
+        // are instanced.
+        assert_eq!(
+            two_images(ImageMethod::None),
+            (
+                "q 0 0 100 800 re W n q 200 0 0 40 60 690 cm /Im1 Do Q Q q 200 0 0 40 60 590 cm /Im2 Do Q q Q"
+                    .into(),
+                "<</XObject<</Im1 5 0 R/Im2 5 0 R>>>>".into()
+            )
+        );
+        // Blanked the same way, both uses share one new image, as
+        // pdf_add_image finds the first again. (MuPDF's is object 7: its
+        // Redact annotation took 6.)
+        assert_eq!(
+            two_images(ImageMethod::Pixels),
+            (
+                "q 0 0 100 800 re W n q 200 0 0 40 60 690 cm /Im1 Do Q Q q 200 0 0 40 60 590 cm /Im2 Do Q q Q"
+                    .into(),
+                "<</XObject<</Im1 6 0 R/Im2 6 0 R>>>>".into()
+            )
+        );
+    }
+
+    #[test]
+    fn links_and_free_text_over_an_area_go_with_their_popups() {
+        // As MuPDF's pdf_redact_page_links and _annotations leave /Annots.
+        for annots in ["[6 0 R 7 0 R 8 0 R 9 0 R 10 0 R]", "11 0 R"] {
+            let page = format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots {annots}/Contents 4 0 R>>"
+            );
+            let doc = doc_of(&[
+                "<</Type/Catalog/Pages 2 0 R>>",
+                "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+                &page,
+                "<</Length 5>>stream\n0 0 m\nendstream",
+                "<<>>",
+                "<</Type/Annot/Subtype/Link/Rect[100 100 200 200]>>",
+                "<</Type/Annot/Subtype/Link/Rect[400 400 500 500]>>",
+                "<</Type/Annot/Subtype/FreeText/Rect[120 120 180 180]/Popup 9 0 R>>",
+                "<</Type/Annot/Subtype/Popup/Rect[300 300 350 350]/Parent 8 0 R>>",
+                "<</Type/Annot/Subtype/FreeText/Rect[400 100 450 150]>>",
+                "[6 0 R 7 0 R 8 0 R 9 0 R 10 0 R]",
+            ]);
+            let area = quad(150.0, 150.0, 160.0, 160.0);
+            assert_eq!(
+                redact_page(&doc, 0, &[area], RedactOptions::default()),
+                Ok(true)
+            );
+            let page = doc.page(0).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(print(&doc.dict_get(&page, b"Annots")), "[7 0 R 10 0 R]");
+            // An indirect array is changed where it is stored.
+            if annots == "11 0 R" {
+                assert_eq!(object(&doc, 11), "[7 0 R 10 0 R]");
+            }
+        }
+    }
+
+    #[test]
+    fn marked_content_properties_lose_the_targets() {
+        let m = crate::scrub::Matcher::new(&["SECRET".into()], &[], false)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let doc = crate::testutil::page_doc(
+            b"/Span <</ActualText (SECRET)/Alt (fine)/E (SECRET too)>> BDC BT /F1 10 Tf 100 700 Td (x) Tj ET EMC /Span <</Alt (kept)>> BDC BT /F1 10 Tf 100 600 Td (y) Tj ET EMC",
+            "/Font<</F1 5 0 R>>",
+            &[HELVETICA.to_vec()],
+        );
+        let area = quad(400.0, 400.0, 410.0, 410.0);
+        assert_eq!(
+            redact_page_with(&doc, 0, &[area], RedactOptions::default(), Some(&m)),
+            Ok(true)
+        );
+        let (data, _) = page_contents(&doc);
+        assert!(data.contains("/Span<</Alt(fine)>>BDC"), "{data}");
+        assert!(data.contains("/Span<</Alt(kept)>>BDC"), "{data}");
+        assert!(!data.contains("SECRET"), "{data}");
+    }
+
+    #[test]
+    fn quads_come_back_to_pdf_space() {
+        // A page turned by 90 degrees.
+        let ctm = Matrix {
+            a: 0.0,
+            b: 1.0,
+            c: 1.0,
+            d: 0.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let q = quad_to_pdf(quad(10.0, 20.0, 30.0, 40.0), ctm);
+        assert_eq!(Rect::from_quad(q), Rect::new(20.0, 10.0, 40.0, 30.0));
+    }
+
+    /// A page with /Annots `annots` and a form whose /AcroForm is
+    /// `acroform`; `objects` are 5 onwards.
+    fn form_doc(annots: &str, acroform: &str, objects: &[&str]) -> Document {
+        let catalog = format!("<</Type/Catalog/Pages 2 0 R/AcroForm {acroform}>>");
+        let page = format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots {annots}/Contents 4 0 R>>"
+        );
+        let mut objs = vec![
+            catalog.as_str(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            page.as_str(),
+            "<</Length 0>>stream\n\nendstream",
+        ];
+        objs.extend_from_slice(objects);
+        doc_of(&objs)
+    }
+
+    #[test]
+    fn every_annotation_over_an_area_goes_with_its_field() {
+        // 5: a widget of field 9 (with another widget, 6); 7: a widget that
+        // is its own field; 8: a popup over the area whose parent (10) is
+        // elsewhere; 11: an annotation elsewhere; 13: the only widget of
+        // field 12, itself the only kid of field 14.
+        let doc = form_doc(
+            "[5 0 R 6 0 R 7 0 R 8 0 R 10 0 R 11 0 R 13 0 R null]",
+            "15 0 R",
+            &[
+                "<</Type/Annot/Subtype/Widget/Rect[100 100 120 120]/Parent 9 0 R>>",
+                "<</Type/Annot/Subtype/Widget/Rect[400 400 420 420]/Parent 9 0 R>>",
+                "<</Type/Annot/Subtype/Widget/FT/Tx/T(a)/Rect[100 130 120 150]>>",
+                "<</Type/Annot/Subtype/Popup/Rect[100 160 120 180]/Parent 10 0 R>>",
+                "<</FT/Tx/T(b)/Kids[5 0 R 6 0 R]>>",
+                "<</Type/Annot/Subtype/Text/Rect[500 500 520 520]/Popup 8 0 R>>",
+                "<</Type/Annot/Subtype/Square/Rect[500 100 520 120]>>",
+                "<</T(c)/Kids[13 0 R]/Parent 14 0 R>>",
+                "<</Type/Annot/Subtype/Widget/FT/Tx/Rect[100 190 120 210]/Parent 12 0 R>>",
+                "<</T(d)/Kids[12 0 R]>>",
+                "<</Fields[9 0 R 7 0 R 14 0 R]>>",
+            ],
+        );
+        let area = quad(90.0, 90.0, 130.0, 220.0);
+        assert_eq!(redact_all_annotations(&doc, 0, &[area]), Ok(5));
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            print(&doc.dict_get(&page, b"Annots")),
+            "[6 0 R 11 0 R null]"
+        );
+        // Field 9 keeps its other widget; 7 and, through 12, 14 leave the
+        // form.
+        assert_eq!(get(&doc, 9, b"Kids"), "[6 0 R]");
+        assert_eq!(get(&doc, 12, b"Kids"), "[]");
+        assert_eq!(get(&doc, 15, b"Fields"), "[9 0 R]");
+        // Nothing is over another area.
+        assert_eq!(
+            redact_all_annotations(&doc, 0, &[quad(0.0, 0.0, 1.0, 1.0)]),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn widgets_leave_a_form_held_in_the_catalog() {
+        let widgets = [
+            "<</Type/Annot/Subtype/Widget/FT/Tx/T(a)/Rect[100 100 120 120]>>",
+            "<</Type/Annot/Subtype/Widget/FT/Tx/T(b)/Rect[400 400 420 420]>>",
+            "[5 0 R 6 0 R]",
+        ];
+        let area = quad(90.0, 90.0, 130.0, 130.0);
+        let direct = form_doc("[5 0 R 6 0 R]", "<</Fields[5 0 R 6 0 R]>>", &widgets);
+        assert_eq!(redact_all_annotations(&direct, 0, &[area]), Ok(1));
+        assert_eq!(get(&direct, 1, b"AcroForm"), "<</Fields[6 0 R]>>");
+
+        let indirect = form_doc("[5 0 R 6 0 R]", "<</Fields 7 0 R>>", &widgets);
+        assert_eq!(redact_all_annotations(&indirect, 0, &[area]), Ok(1));
+        assert_eq!(object(&indirect, 7), "[6 0 R]");
+
+        // No form at all: the widget still goes from the page.
+        let none = doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots 7 0 R>>",
+            "null",
+            widgets[0],
+            widgets[1],
+            widgets[2],
+        ]);
+        assert_eq!(redact_all_annotations(&none, 0, &[area]), Ok(1));
+        assert_eq!(object(&none, 7), "[6 0 R]");
+    }
+
+    #[test]
+    fn a_page_without_annotations_loses_none() {
+        let doc = page_doc(CONTENT);
+        assert_eq!(
+            redact_all_annotations(&doc, 0, &[quad(0.0, 0.0, 612.0, 792.0)]),
+            Ok(0)
+        );
+        assert!(redact_all_annotations(&doc, 3, &[]).is_err());
+        assert!(
+            redact_page(
+                &doc,
+                3,
+                &[quad(0.0, 0.0, 1.0, 1.0)],
+                RedactOptions::default()
+            )
+            .is_err()
+        );
     }
 }

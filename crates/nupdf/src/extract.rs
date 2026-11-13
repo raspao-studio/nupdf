@@ -383,21 +383,103 @@ mod tests {
 
     /// A one-page document with Helvetica as F1 and Helvetica-Bold as F2.
     fn page(content: &str) -> StextPage {
+        page_with(content, Options::default())
+    }
+
+    /// The same, with Helvetica-Oblique as F3 and Helvetica-BoldOblique as
+    /// F4 too.
+    fn page_with(content: &str, opts: Options) -> StextPage {
         let pdf = format!(
             "%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
              2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
              3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 400]/Contents 4 0 R/Resources<</Font<<\
              /F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
-             /F2<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>>>>>>>endobj\n\
+             /F2<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>\
+             /F3<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Oblique>>\
+             /F4<</Type/Font/Subtype/Type1/BaseFont/Helvetica-BoldOblique>>>>>>>>endobj\n\
              4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n\
              trailer<</Root 1 0 R/Size 5>>\n",
             content.len()
         );
         let doc = Document::open(pdf.into_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
         let obj = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
-        extract_page(&doc, &obj, Options::default(), Store::default())
+        extract_page(&doc, &obj, opts, Store::default())
             .0
             .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn opts(s: &str) -> Options {
+        Options::parse(s).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn italic_and_bold_italic_runs_are_marked_but_symbols_are_not() {
+        let p = page(
+            "BT /F1 10 Tf 20 370 Td (Plain ) Tj /F3 10 Tf (slanted) Tj /F1 10 Tf ( and ) Tj \
+             /F4 10 Tf (both) Tj /F1 10 Tf ( then ) Tj /F2 10 Tf (+) Tj /F1 10 Tf ( sign.) Tj ET",
+        );
+        assert_eq!(
+            page_markdown(&p),
+            "Plain *slanted* and ***both*** then + sign."
+        );
+    }
+
+    #[test]
+    fn heading_levels_follow_the_size_over_the_body() {
+        let p = page(
+            "BT /F1 15 Tf 20 380 Td (Level two) Tj ET BT /F1 12.5 Tf 20 350 Td (Level three) Tj ET \
+             BT /F1 19 Tf 20 320 Td (Wrapped big) Tj ET BT /F1 19 Tf 20 280 Td (heading) Tj ET \
+             BT /F1 10 Tf 20 240 Td (Body one.) Tj 0 -12 Td (Body two.) Tj 0 -12 Td (Body three.) Tj ET",
+        );
+        assert_eq!(
+            page_markdown(&p),
+            "## Level two\n\n### Level three\n\n# Wrapped big heading\n\nBody one. Body two. Body three."
+        );
+    }
+
+    #[test]
+    fn list_items_continue_only_when_indented_to_their_text() {
+        let p = page(
+            "BT /F1 10 Tf 20 370 Td (\\225 first item) Tj 7.78 -12 Td (runs on here) Tj \
+             -7.78 -12 Td (\\225 second item) Tj 0 -12 Td (not part of it) Tj ET",
+        );
+        assert_eq!(
+            page_markdown(&p),
+            "- first item runs on here\n- second item\n\nnot part of it"
+        );
+    }
+
+    #[test]
+    fn joined_lines_lose_their_hyphen_and_the_space() {
+        let p = page_with(
+            "BT /F1 10 Tf 20 370 Td (A hyphen-) Tj 0 -12 Td (ated word) Tj ET",
+            opts("dehyphenate"),
+        );
+        assert_eq!(page_markdown(&p), "A hyphenated word");
+        let Block::Text(t) = &p.blocks[0] else {
+            panic!("no text block");
+        };
+        assert_eq!(block_text(t), "A hyphenated word\n");
+    }
+
+    #[test]
+    fn blocks_within_structures_are_found_and_counted() {
+        let p = page_with(
+            "BT /F1 10 Tf 20 370 Td (Left column text) Tj ET \
+             BT /F1 10 Tf 300 370 Td (Right) Tj ET \
+             q 10 0 0 10 20 20 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x7f EI Q",
+            opts("segment,preserve-images"),
+        );
+        assert!(matches!(p.blocks[0], Block::Struct(_)));
+        let blocks: Vec<&Block> = p.blocks.iter().collect();
+        let texts: Vec<String> = text_blocks(&blocks).into_iter().map(block_text).collect();
+        assert_eq!(texts, ["Left column text\n", "Right\n"]);
+        assert_eq!(blocks.iter().map(|b| block_len(b)).sum::<usize>(), 21);
+        assert_eq!(body_size(&blocks), 10.0);
+        // Nothing of text: no body size, and no headings.
+        assert_eq!(body_size(&[]), 0.0);
+        let t = text_blocks(&blocks)[0];
+        assert_eq!(block_markdown(t, 0.0).0, 0);
     }
 
     fn lines(p: &StextPage) -> Vec<&StextLine> {

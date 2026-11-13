@@ -2082,3 +2082,632 @@ impl Processor for Sanitize<'_, '_> {
         &mut self.state
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{Point, Quad};
+    use crate::redact::{ImageMethod, LineArt, RedactOptions, TextMethod, redact_page};
+    use crate::testutil::{doc_bytes, stream};
+
+    // The redactions below are pinned to MuPDF 1.28.6: the same document,
+    // a Redact annotation per area, PDFPage.applyRedactions with the same
+    // options, and the page's new contents read back. Areas are in page
+    // space (y down), as the annotations' rectangles were set.
+
+    const HELVETICA: &[u8] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+    const VERTICAL: &[u8] = b"<</Type/Font/Subtype/Type0/BaseFont/Foo/Encoding/Identity-V/DescendantFonts[<</Type/Font/Subtype/CIDFontType2/BaseFont/Foo/CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>/FontDescriptor<</Type/FontDescriptor/FontName/Foo/Flags 4/FontBBox[0 -200 1000 800]/ItalicAngle 0/Ascent 800/Descent -200/CapHeight 700/StemV 80>>/DW2[880 -1000]/W2[67[-500 300 800]]>>]>>";
+
+    fn image() -> Vec<u8> {
+        stream(
+            "/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceGray/BitsPerComponent 8",
+            b"\x10\x20\x30\x40",
+        )
+    }
+
+    /// One page (catalog 1, pages 2, page 3, contents 4), objects from 5,
+    /// with `catalog` and `page` entries added to those dictionaries.
+    fn doc(
+        content: &[u8],
+        resources: &str,
+        extra: &[Vec<u8>],
+        catalog: &str,
+        page: &str,
+    ) -> Document {
+        let mut objs = vec![
+            format!("<</Type/Catalog/Pages 2 0 R{catalog}>>").into_bytes(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!("<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{resources}>>/Contents 4 0 R{page}>>").into_bytes(),
+            stream("", content),
+        ];
+        objs.extend(extra.iter().cloned());
+        doc_bytes(&objs)
+    }
+
+    /// Page-space rectangles as quads in PDF user space.
+    fn areas(rects: &[[f32; 4]]) -> Vec<Quad> {
+        rects
+            .iter()
+            .map(|&[x0, y0, x1, y1]| {
+                let p = |x: f32, y: f32| Point { x, y: 792.0 - y };
+                Quad {
+                    ul: p(x0, y0),
+                    ur: p(x1, y0),
+                    ll: p(x0, y1),
+                    lr: p(x1, y1),
+                }
+            })
+            .collect()
+    }
+
+    fn options(
+        black_boxes: bool,
+        image: ImageMethod,
+        line_art: LineArt,
+        text: TextMethod,
+    ) -> RedactOptions {
+        RedactOptions {
+            black_boxes,
+            image_method: image,
+            line_art,
+            text,
+        }
+    }
+
+    fn redacted(doc: &Document, rects: &[[f32; 4]], opts: RedactOptions) -> String {
+        assert_eq!(redact_page(doc, 0, &areas(rects), opts), Ok(true));
+        contents(
+            doc,
+            &doc.dict_get(&doc.page(0).unwrap_or_else(|e| panic!("{e}")), b"Contents"),
+        )
+    }
+
+    /// The decoded data of the stream `obj` leads to.
+    fn contents(doc: &Document, obj: &Object) -> String {
+        let Object::Stream(s) = doc.resolve(obj) else {
+            panic!("not a stream: {obj:?}");
+        };
+        String::from_utf8_lossy(&doc.stream_data(&s).unwrap_or_else(|e| panic!("{e:?}")))
+            .into_owned()
+    }
+
+    /// The XObject `name` in the page's resources, as it is stored there.
+    fn xobject(doc: &Document, name: &[u8]) -> Object {
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e}"));
+        let xobjects = doc.dict_get(&doc.dict_get(&page, b"Resources"), b"XObject");
+        let Object::Dict(d) = xobjects else {
+            panic!("no XObject resources");
+        };
+        d.get(name).cloned().unwrap_or(Object::Null)
+    }
+
+    fn text_only() -> RedactOptions {
+        options(false, ImageMethod::None, LineArt::None, TextMethod::Remove)
+    }
+
+    #[test]
+    fn removed_glyphs_leave_the_rest_in_place_and_split_arrays() {
+        let content = b"BT /F1 10 Tf 80 Tz 2 Tc 1 Tw 10 700 Td [(Hello) -300 (big world) 50 (again)] TJ (one two) Tj ( ) Tj ET BT /F2 10 Tf 300 700 Td <0043004400450046> Tj [<0043> 200 <00440045>] TJ ET";
+        let doc = doc(
+            content,
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), VERTICAL.to_vec()],
+            "",
+            "",
+        );
+        // The vertical text is measured too, but left alone: its glyph
+        // boxes depend on the substitute font's vertical advance.
+        let rects = [[30.0, 80.0, 60.0, 96.0], [120.0, 80.0, 140.0, 96.0]];
+        assert_eq!(
+            redacted(&doc, &rects, text_only()),
+            "q BT 2 Tc 1 Tw 80 Tz/F1 10 Tf 10 700 TD[(Hell)-2389.7603(orld)32.000123(again)]TJ (o)Tj 129.59203 0 TD (wo)Tj ( )Tj ET BT/F2 10 Tf 300 700 TD <0043004400450046>Tj[<0043>200<00440045>]TJ ET Q"
+        );
+    }
+
+    #[test]
+    fn a_clipping_text_object_that_loses_every_glyph_clips_everything() {
+        let doc = doc(
+            b"q BT 7 Tr /F1 10 Tf 10 700 Td (Hide) Tj ET 0 0 1 rg 0 0 612 792 re f Q 1 0 0 rg 10 10 5 5 re f",
+            "/Font<</F1 5 0 R>>",
+            &[HELVETICA.to_vec()],
+            "",
+            "",
+        );
+        assert_eq!(
+            redacted(&doc, &[[0.0, 80.0, 100.0, 100.0]], text_only()),
+            "q Q q 1 0 0 rg 10 10 5 5 re f Q"
+        );
+    }
+
+    /// Two marked-content sequences with structure elements 8 and 9 whose
+    /// /Alt and /ActualText say what they show.
+    fn structured() -> Document {
+        doc(
+            b"/P <</MCID 0>> BDC BT /F1 10 Tf 10 700 Td (Hi there) Tj ET EMC /P <</MCID 1>> BDC BT /F1 10 Tf 10 650 Td (Hi) Tj ET EMC",
+            "/Font<</F1 5 0 R>>",
+            &[
+                HELVETICA.to_vec(),
+                b"<</Type/StructTreeRoot/ParentTree<</Nums[0 7 0 R]>>>>".to_vec(),
+                b"[8 0 R 9 0 R]".to_vec(),
+                b"<</S/P/K 0/Alt(Hi there)/ActualText(Hi  there)/E(x)/T(t)>>".to_vec(),
+                b"<</S/P/K[<</MCID 1>>]/Alt(Ho)/ActualText(Hi)>>".to_vec(),
+            ],
+            "/StructTreeRoot 6 0 R",
+            "/StructParents 0",
+        )
+    }
+
+    fn element(doc: &Document, num: i32) -> String {
+        let obj = doc.resolve(&Object::Ref(ObjRef::new(num, 0)));
+        crate::print::to_string(&obj, crate::print::Options::default())
+    }
+
+    #[test]
+    fn removed_text_is_cut_from_the_structure_that_describes_it() {
+        // MuPDF steps through /Alt and /ActualText glyph by glyph: what the
+        // redaction removes goes from them, and a string that stops
+        // matching goes whole. It writes the edited ActualText to /Alt.
+        let doc = structured();
+        assert_eq!(
+            redacted(
+                &doc,
+                &[[9.0, 80.0, 21.0, 96.0], [9.0, 130.0, 21.0, 146.0]],
+                text_only()
+            ),
+            "/P<</MCID 0>>BDC q BT/F1 10 Tf 22.220004 700 TD (there)Tj ET EMC /P<</MCID 1>>BDC EMC Q"
+        );
+        assert_eq!(
+            element(&doc, 8),
+            "<</S/P/K 0/Alt( there)/ActualText(Hi  there)>>"
+        );
+        assert_eq!(element(&doc, 9), "<</S/P/K[<</MCID 1>>]/ActualText(Hi)>>");
+
+        let doc = structured();
+        assert_eq!(
+            redacted(&doc, &[[9.0, 80.0, 21.0, 96.0]], text_only()),
+            "/P<</MCID 0>>BDC q BT/F1 10 Tf 22.220004 700 TD (there)Tj ET EMC /P<</MCID 1>>BDC BT/F1 10 Tf 10 650 TD (Hi)Tj ET EMC Q"
+        );
+        assert_eq!(
+            element(&doc, 9),
+            "<</S/P/K[<</MCID 1>>]/Alt(Ho)/ActualText(Hi)>>"
+        );
+
+        let doc = structured();
+        assert_eq!(
+            redacted(
+                &doc,
+                &[[30.0, 80.0, 40.0, 96.0], [9.0, 130.0, 12.0, 146.0]],
+                text_only()
+            ),
+            "/P<</MCID 0>>BDC q BT/F1 10 Tf 10 700 TD (Hi t)Tj 29.450005 0 TD (e)Tj ET EMC /P<</MCID 1>>BDC BT/F1 10 Tf 17.220002 650 TD (i)Tj ET EMC Q"
+        );
+        assert_eq!(
+            element(&doc, 8),
+            "<</S/P/K 0/Alt(Hi  te)/ActualText(Hi  there)>>"
+        );
+        assert_eq!(
+            element(&doc, 9),
+            "<</S/P/K[<</MCID 1>>]/Alt(i)/ActualText(Hi)>>"
+        );
+    }
+
+    #[test]
+    fn line_art_goes_segment_by_segment() {
+        let doc = doc(
+            b"10 10 m 20 20 l 100 100 m 110 110 l S 0 0 50 50 re 200 200 50 50 re f q 0 0 50 50 re 300 300 5 5 re W n 1 0 0 rg 0 0 612 792 re f Q 5 w 400 400 m 400 450 l S /Sh0 sh 0 0 0 0 re f",
+            "/Shading<</Sh0<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 100 0]/Function <</FunctionType 2/Domain[0 1]/C0[1 0 0]/C1[0 0 1]/N 1>>>>>>",
+            &[],
+            "",
+            "",
+        );
+        // A subpath or rectangle an area touches goes, and with it a
+        // painting operator left with nothing; a stroke's width counts.
+        let opts = options(
+            false,
+            ImageMethod::None,
+            LineArt::RemoveIfTouched,
+            TextMethod::None,
+        );
+        assert_eq!(
+            redacted(
+                &doc,
+                &[[0.0, 692.0, 60.0, 800.0], [395.0, 330.0, 405.0, 400.0]],
+                opts
+            ),
+            "q 100 100 m 110 110 l S 200 200 50 50 re f q 0 0 50 50 re 300 300 5 5 re W n 1 0 0 rg Q /Sh0 sh 0 0 0 0 re f Q"
+        );
+    }
+
+    const IMAGES: &[u8] = b"q 100 0 0 100 0 0 cm /Im0 Do Q q 100 0 0 100 200 0 cm /Im0 Do Q q 50 0 0 50 400 0 cm BI /W 2 /H 2 /CS /G ID \x10\x20\x30\x40 EI Q q 50 0 0 50 500 0 cm BI /W 2 /H 2 /CS /G ID \x10\x20\x30\x40 EI Q";
+
+    #[test]
+    fn images_are_blanked_where_covered_and_removed_where_covered_whole() {
+        let doc = doc(IMAGES, "/XObject<</Im0 5 0 R>>", &[image()], "", "");
+        let opts = options(
+            false,
+            ImageMethod::Pixels,
+            LineArt::None,
+            TextMethod::Remove,
+        );
+        let rects = [
+            [0.0, 742.0, 50.0, 792.0],
+            [190.0, 600.0, 400.0, 792.0],
+            [500.0, 742.0, 600.0, 792.0],
+        ];
+        assert_eq!(
+            redacted(&doc, &rects, opts),
+            "q 100 0 0 100 0 0 cm /Im1 Do Q q 100 0 0 100 200 0 cm Q q 50 0 0 50 400 0 cm BI /W 2/H 2/BPC 8/CS/G/D[0 1]/F/AHx ID 10203040> EI Q q 50 0 0 50 500 0 cm Q q Q"
+        );
+        // The blanked copy, its top right pixel white.
+        let Object::Stream(s) = doc.resolve(&xobject(&doc, b"Im1")) else {
+            panic!("no blanked image");
+        };
+        assert_eq!(doc.stream_data(&s).ok(), Some(b"\x10 \xff@".to_vec()));
+    }
+
+    #[test]
+    fn images_an_area_meets_are_removed_and_boxes_drawn() {
+        let content = b"q 100 0 0 100 0 0 cm /Im0 Do Q q 100 0 0 100 200 0 cm /Im0 Do Q q 50 0 0 50 400 0 cm BI /W 2 /H 2 /CS /G ID \x10\x20\x30\x40 EI Q";
+        let doc = doc(content, "/XObject<</Im0 5 0 R>>", &[image()], "", "");
+        let opts = options(true, ImageMethod::Remove, LineArt::None, TextMethod::Remove);
+        assert_eq!(
+            redacted(
+                &doc,
+                &[[0.0, 742.0, 50.0, 792.0], [420.0, 742.0, 430.0, 792.0]],
+                opts
+            ),
+            "q 100 0 0 100 0 0 cm Q q 100 0 0 100 200 0 cm /Im1 Do Q q 50 0 0 50 400 0 cm Q q Q 0 g\n0 0 m\n50 0 l\n50 50 l\n0 50 l\nf\n420 0 m\n430 0 l\n430 50 l\n420 50 l\nf\n"
+        );
+        assert_eq!(xobject(&doc, b"Im1"), Object::Ref(ObjRef::new(5, 0)));
+    }
+
+    #[test]
+    fn each_use_of_a_form_gets_a_copy_redacted_where_it_is_drawn() {
+        let doc = doc(
+            b"q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 300 0 cm /Fm0 Do Q /Fm1 Do /Fm1 Do",
+            "/XObject<</Fm0 6 0 R/Fm1 7 0 R>>/Font<</F1 5 0 R>>",
+            &[
+                HELVETICA.to_vec(),
+                stream(
+                    "/Subtype/Form/BBox[0 0 300 792]/Resources<</Font<</F1 5 0 R>>/XObject<</Im0 8 0 R>>>>",
+                    b"BT /F1 10 Tf 10 700 Td (Secret) Tj ET q 20 0 0 20 10 10 cm /Im0 Do Q",
+                ),
+                stream(
+                    "/Subtype/Form/BBox[0 0 10 10]/Resources<</ExtGState<</G<</CA 1>>>>>>",
+                    b"/G gs 0 0 1 1 re f",
+                ),
+                image(),
+            ],
+            "",
+            "",
+        );
+        let opts = options(
+            false,
+            ImageMethod::Remove,
+            LineArt::None,
+            TextMethod::Remove,
+        );
+        assert_eq!(
+            redacted(&doc, &[[5.0, 80.0, 40.0, 96.0]], opts),
+            "q /Fm1 Do Q q 1 0 0 1 300 0 cm /Fm2 Do Q q /Fm3 Do /Fm4 Do Q"
+        );
+        let copies = [
+            (&b"Fm1"[..], "q q 20 0 0 20 10 10 cm /Im1 Do Q Q"),
+            (
+                b"Fm2",
+                "q BT/F1 10 Tf 10 700 TD (Secret)Tj ET q 20 0 0 20 10 10 cm /Im1 Do Q Q",
+            ),
+            (b"Fm3", "q/G gs 0 0 1 1 re f Q"),
+            (b"Fm4", "q/G gs 0 0 1 1 re f Q"),
+        ];
+        for (name, data) in copies {
+            assert_eq!(contents(&doc, &xobject(&doc, name)), data);
+        }
+        // The originals stay as they were.
+        assert_eq!(
+            contents(&doc, &Object::Ref(ObjRef::new(6, 0))),
+            "BT /F1 10 Tf 10 700 Td (Secret) Tj ET q 20 0 0 20 10 10 cm /Im0 Do Q"
+        );
+    }
+
+    /// Hooks that drop what a test asks for: glyphs by Unicode value,
+    /// everything of some cull kinds, and images as `image` says. Behaviour
+    /// input for the filter, as redaction's hooks are.
+    struct Dropper {
+        glyphs: Vec<i32>,
+        kinds: Vec<Cull>,
+        image: fn(&ShownImage<'_>) -> ImageAction,
+        props: Option<Object>,
+        seen: Vec<(Cull, Rect)>,
+    }
+
+    impl Dropper {
+        fn new() -> Dropper {
+            Dropper {
+                glyphs: Vec::new(),
+                kinds: Vec::new(),
+                image: |_| ImageAction::Keep,
+                props: None,
+                seen: Vec::new(),
+            }
+        }
+    }
+
+    impl Hooks for Dropper {
+        fn filters_text(&self) -> bool {
+            !self.glyphs.is_empty()
+        }
+        fn text_filter(
+            &mut self,
+            ucs: &[i32],
+            _trm: Matrix,
+            _ctm: Matrix,
+            _bbox: Rect,
+            _render: i32,
+            _fill_alpha: f32,
+            _stroke_alpha: f32,
+        ) -> bool {
+            self.glyphs.contains(&ucs[0])
+        }
+        fn culls(&self) -> bool {
+            true
+        }
+        fn cull(&mut self, bbox: Rect, kind: Cull) -> bool {
+            self.seen.push((kind, bbox));
+            self.kinds.contains(&kind)
+        }
+        fn filters_images(&self) -> bool {
+            true
+        }
+        fn image_filter(
+            &mut self,
+            _doc: &Document,
+            _ctm: Matrix,
+            image: ShownImage<'_>,
+            _clip: Rect,
+        ) -> Result<ImageAction, String> {
+            Ok((self.image)(&image))
+        }
+        fn marked_content(&mut self, _props: &Object) -> Option<Object> {
+            self.props.clone()
+        }
+    }
+
+    /// The page's contents through the sanitize filter with `hooks`.
+    fn filtered(doc: &Document, hooks: &mut Dropper) -> Result<String, String> {
+        let opts = Options {
+            recurse: false,
+            instance_forms: true,
+            ascii: true,
+            newlines: false,
+            sanitize: true,
+        };
+        crate::content_clean::filter_page_contents(doc, 0, &opts, hooks)?;
+        let page = doc.page(0).map_err(|e| e.0)?;
+        Ok(contents(doc, &doc.dict_get(&page, b"Contents")))
+    }
+
+    const SHADED: &str = "/Shading<</Sh0<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 100 0]/Function <</FunctionType 2/Domain[0 1]/C0[1 0 0]/C1[0 0 1]/N 1>>>>>>";
+
+    #[test]
+    fn hooks_drop_glyphs_by_their_unicode_in_either_writing_mode() {
+        let doc = doc(
+            b"BT /F1 10 Tf 10 700 Td (abcab) Tj [(xa) 100 (ya)] TJ ET BT /F2 10 Tf 300 700 Td [<0043> 200 <00440045>] TJ ET",
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), VERTICAL.to_vec()],
+            "",
+            "",
+        );
+        let mut hooks = Dropper::new();
+        hooks.glyphs = vec![i32::from(b'a'), 0x44];
+        // As in MuPDF, what was sent is taken to end after the first glyph
+        // dropped, so the move to the next segment leaves that glyph's
+        // advance out. The vertical font's adjustment and advance (DW2)
+        // move down the page: 2 and 10 units, 1200 in the array. Its CIDs
+        // map to Unicode through TrueType-UCS2, so CID 0x44 is U+0044.
+        assert_eq!(
+            filtered(&doc, &mut hooks),
+            Ok("q BT/F1 10 Tf 15.56 700 TD (bc)Tj (b)Tj[(x)100(y)]TJ ET BT/F2 10 Tf 300 700 TD[<0043>1200<0045>]TJ ET Q".into())
+        );
+        // Every glyph the text filter kept went to the culler too.
+        assert!(hooks.seen.iter().all(|(k, _)| *k == Cull::Glyph));
+        assert_eq!(hooks.seen.len(), 7);
+    }
+
+    #[test]
+    fn hooks_cull_glyphs_images_shadings_and_paths() {
+        let doc = doc(
+            b"BT /F1 10 Tf 10 700 Td (ab) Tj ET q 10 0 0 10 0 0 cm /Im0 Do BI /W 1 /H 1 /CS /G ID x EI Q /Sh0 sh 0 0 5 5 re f 0 0 m 5 5 l S 0 0 5 5 re W n",
+            &format!("/Font<</F1 5 0 R>>/XObject<</Im0 6 0 R>>{SHADED}"),
+            &[HELVETICA.to_vec(), image()],
+            "",
+            "",
+        );
+        let mut hooks = Dropper::new();
+        hooks.kinds = vec![
+            Cull::Glyph,
+            Cull::Image,
+            Cull::Shading,
+            Cull::PathFill,
+            Cull::PathStroke,
+            Cull::ClipPathDrop,
+        ];
+        // With every glyph gone the text object is never begun.
+        assert_eq!(filtered(&doc, &mut hooks), Ok("q q Q Q".into()));
+        let kinds: Vec<Cull> = hooks.seen.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            kinds,
+            [
+                Cull::Glyph,
+                Cull::Glyph,
+                Cull::Image,
+                Cull::Image,
+                Cull::Shading,
+                Cull::PathFill,
+                Cull::PathStroke,
+                Cull::ClipPathDrop
+            ]
+        );
+        // The images' boxes are the unit square under the ctm.
+        assert_eq!(hooks.seen[2].1, Rect::new(0.0, 0.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn hooks_remove_or_replace_images() {
+        let content = b"q 10 0 0 10 0 0 cm /Im0 Do BI /W 1 /H 1 /CS /G ID x EI Q";
+        let page = |hooks: &mut Dropper| {
+            let doc = doc(content, "/XObject<</Im0 5 0 R>>", &[image()], "", "");
+            filtered(&doc, hooks)
+        };
+        let mut hooks = Dropper::new();
+        hooks.image = |_| ImageAction::Remove;
+        assert_eq!(page(&mut hooks), Ok("q 10 0 0 10 0 0 cm Q q Q".into()));
+        // An inline image can take another inline image's place, or go
+        // when an XObject is offered instead; an XObject can take another
+        // object's place but not an inline image's.
+        hooks.image = |shown| match shown {
+            ShownImage::Inline(img) => ImageAction::Replace(BiImage {
+                data: b"y".to_vec(),
+                ..(*img).clone()
+            }),
+            ShownImage::XObject(_) => ImageAction::ReplaceWith(5),
+        };
+        assert_eq!(
+            page(&mut hooks),
+            Ok(
+                "q 10 0 0 10 0 0 cm /Im1 Do BI /W 1/H 1/BPC 8/CS/G/D[0 1]/F/AHx ID 79> EI Q q Q"
+                    .into()
+            )
+        );
+        hooks.image = |shown| match shown {
+            ShownImage::Inline(_) => ImageAction::ReplaceWith(5),
+            ShownImage::XObject(_) => ImageAction::Keep,
+        };
+        assert_eq!(
+            page(&mut hooks),
+            Ok("q 10 0 0 10 0 0 cm /Im1 Do Q q Q".into())
+        );
+        hooks.image = |shown| match shown {
+            ShownImage::Inline(img) => ImageAction::Replace((*img).clone()),
+            ShownImage::XObject(_) => ImageAction::Replace(BiImage {
+                width: 1,
+                height: 1,
+                bpc: 8,
+                image_mask: true,
+                colorspace: None,
+                device: false,
+                interpolate: false,
+                decode: Vec::new(),
+                compression: crate::content_write::Compression::Raw,
+                data: Vec::new(),
+            }),
+        };
+        assert_eq!(
+            page(&mut hooks),
+            Err("argument error: an inline image cannot replace an XObject".into())
+        );
+    }
+
+    #[test]
+    fn hooks_rewrite_marked_content_properties() {
+        let doc = doc(
+            b"/Span <</ActualText (secret)>> BDC 0 0 1 1 re f EMC /OC /L1 BDC 0 0 1 1 re f EMC",
+            "/Properties<</L1<</Type/OCG/Name(L)>>>>",
+            &[],
+            "",
+            "",
+        );
+        let mut hooks = Dropper::new();
+        hooks.props = Some(Object::Dict(Arc::new(Dict::new())));
+        // Only a property list given in the stream is offered; a named one
+        // is kept, with its resource.
+        assert_eq!(
+            filtered(&doc, &mut hooks),
+            Ok("/Span<<>>BDC q 0 0 1 1 re f EMC /OC/L1 BDC 0 0 1 1 re f EMC Q".into())
+        );
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            crate::print::to_string(
+                &doc.dict_get(&page, b"Resources"),
+                crate::print::Options::default()
+            ),
+            "<</Properties<</L1<</Type/OCG/Name(L)>>>>>>"
+        );
+    }
+
+    #[test]
+    fn a_form_that_draws_itself_is_copied_once() {
+        // MuPDF overflows its stack on this; nupdf's cycle check stops at
+        // the form being copied and draws it as it is.
+        let doc = doc(
+            b"/Fm0 Do",
+            "/XObject<</Fm0 5 0 R>>",
+            &[stream(
+                "/Subtype/Form/BBox[0 0 10 10]/Resources<</XObject<</Me 5 0 R>>>>",
+                b"/Me Do 0 0 1 1 re f",
+            )],
+            "",
+            "",
+        );
+        assert_eq!(
+            filtered(&doc, &mut Dropper::new()),
+            Ok("q /Fm1 Do Q".into())
+        );
+        let copy = xobject(&doc, b"Fm1");
+        assert_eq!(contents(&doc, &copy), "q /Fm1 Do 0 0 1 1 re f Q");
+        let res = doc.dict_get(&copy, b"Resources");
+        assert_eq!(
+            crate::print::to_string(&res, crate::print::Options::default()),
+            "<</XObject<</Fm1 5 0 R>>>>"
+        );
+    }
+
+    #[test]
+    fn curves_and_clips_are_culled_as_subpaths() {
+        let content = b"10 10 m 20 20 30 30 40 40 c 50 50 60 60 v 70 70 80 80 y h 300 300 m 310 310 320 320 330 330 c 340 340 350 350 v 360 360 370 370 y h S 0 0 10 10 re W f 100 100 10 10 re W* n 0 0 1 rg 0 0 612 792 re f";
+        let rects = [[0.0, 692.0, 90.0, 800.0], [0.0, 682.0, 11.0, 792.0]];
+        // A clip that is filled goes as a clip path; the page-sized fill
+        // is touched, not covered.
+        let page = doc(content, "", &[], "", "");
+        let opts = options(
+            false,
+            ImageMethod::None,
+            LineArt::RemoveIfTouched,
+            TextMethod::Remove,
+        );
+        assert_eq!(
+            redacted(&page, &rects, opts),
+            "q 300 300 m 310 310 320 320 330 330 c 340 340 350 350 v 360 360 370 370 y h S 100 100 10 10 re W* n 0 0 1 rg Q"
+        );
+        let page = doc(content, "", &[], "", "");
+        let opts = options(
+            false,
+            ImageMethod::None,
+            LineArt::RemoveIfCovered,
+            TextMethod::Remove,
+        );
+        assert_eq!(
+            redacted(&page, &rects, opts),
+            "q 300 300 m 310 310 320 320 330 330 c 340 340 350 350 v 360 360 370 370 y h S 100 100 10 10 re W* n 0 0 1 rg 0 0 612 792 re f Q"
+        );
+    }
+
+    #[test]
+    fn the_default_hooks_keep_everything() {
+        let mut hooks = NoHooks;
+        let unit = Rect::new(0.0, 0.0, 1.0, 1.0);
+        assert!(!hooks.filters_text() && !hooks.culls() && !hooks.filters_images());
+        assert!(!hooks.text_filter(&[65], Matrix::IDENTITY, Matrix::IDENTITY, unit, 0, 1.0, 1.0));
+        assert!(!hooks.cull(unit, Cull::Glyph));
+        let page = doc(b"", "", &[], "", "");
+        let img = Object::Null;
+        assert!(matches!(
+            hooks.image_filter(&page, Matrix::IDENTITY, ShownImage::XObject(&img), unit),
+            Ok(ImageAction::Keep)
+        ));
+        assert_eq!(hooks.marked_content(&img), None);
+        let mut data = b"q Q".to_vec();
+        hooks.complete(&mut data);
+        assert_eq!(data, b"q Q");
+    }
+}

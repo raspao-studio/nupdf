@@ -1254,4 +1254,175 @@ mod tests {
             ["LI[• one]", "• second item here/• three"]
         );
     }
+
+    fn underlined(mut l: StextLine, from: usize) -> StextLine {
+        for ch in l.chars.iter_mut().skip(from) {
+            ch.flags |= char_flags::UNDERLINE;
+        }
+        l
+    }
+
+    #[test]
+    fn whole_underlined_lines_are_titles() {
+        // MuPDF marks underlines only when it collects styles; the lines
+        // are made by hand here.
+        let f = Arc::new(Font::new(b"Body"));
+        let body = |y: f32| line(&f, "text text text", 50.0, y, 10.0);
+        let title = |y: f32| underlined(line(&f, "Title", 50.0, y, 10.0), 0);
+        let broken = |lines: Vec<StextLine>| {
+            let mut p = page(lines);
+            paragraph_break(&mut p);
+            texts(&p.blocks)
+        };
+        assert_eq!(
+            broken(vec![title(100.0), body(112.0), body(124.0)]),
+            ["H[Title]", "text text text/text text text"]
+        );
+        // One in the middle splits the block before it, then is a title.
+        assert_eq!(
+            broken(vec![body(100.0), title(112.0), body(124.0)]),
+            ["text text text", "H[Title]", "text text text"]
+        );
+        // So does one at the end.
+        assert_eq!(
+            broken(vec![body(100.0), body(112.0), title(124.0)]),
+            ["text text text/text text text", "H[Title]"]
+        );
+        // A line underlined in part is no title.
+        let half = underlined(line(&f, "Half under", 50.0, 100.0, 10.0), 5);
+        assert_eq!(
+            broken(vec![half, body(112.0)]),
+            ["Half under/text text text"]
+        );
+    }
+
+    /// A 400 by 400 page: Helvetica as F1, Helvetica-Bold as F2, Times as F3.
+    fn pdf_page(content: &str, opts: &str) -> StextPage {
+        let pdf = format!(
+            "%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+             2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+             3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 400]/Contents 4 0 R/Resources<</Font<<\
+             /F1 <</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
+             /F2<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>\
+             /F3<</Type/Font/Subtype/Type1/BaseFont/Times-Roman>>>>>>>>endobj\n\
+             4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n\
+             trailer<</Root 1 0 R/Size 5>>\n",
+            content.len()
+        );
+        let doc =
+            crate::document::Document::open(pdf.into_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
+        let obj = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let opts = crate::stext::Options::parse(opts).unwrap_or_else(|e| panic!("{e}"));
+        crate::stext::extract_page(&doc, &obj, opts, crate::content::Store::default())
+            .0
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// MuPDF's breaks (oracle/js/stext.js with `paragraph-break`) of titles,
+    /// numbered, lettered and bulleted lists, justified text, lines that
+    /// could have fitted before and gaps between lines.
+    #[test]
+    fn a_page_breaks_into_paragraphs_as_mupdf_breaks_it() {
+        let content = "BT /F2 12 Tf 20 380 Td (Bold Title) Tj /F1 10 Tf 0 -12 Td (Body after the bold title goes on) Tj \
+            0 -12 Td (for a second line of body text.) Tj ET \
+            BT /F1 10 Tf 20 330 Td (1. First numbered item that) Tj 12 -12 Td (wraps onto a second line) Tj \
+            -12 -12 Td (2. Second numbered item) Tj 0 -12 Td (3. Third item) Tj ET \
+            BT /F1 10 Tf 20 270 Td (a\\) Letter item one) Tj 0 -12 Td (b\\) Letter item two) Tj \
+            0 -12 Td (iv. Roman item) Tj 0 -12 Td (\\(c\\) Parenthesised) Tj 0 -12 Td (- Dash item) Tj \
+            0 -12 Td (\\225 Bullet item) Tj ET \
+            BT /F1 10 Tf 20 190 Td 3 Tw (Justified text that runs) Tj 0 -12 Td 2.5 Tw (right across the column) Tj \
+            0 -12 Td 2 Tw (to the right hand edge,) Tj 0 -12 Td 0 Tw (then ends.) Tj \
+            0 -12 Td 3 Tw (Another one starts and) Tj 0 -12 Td 0 Tw (stops.) Tj ET \
+            BT /F1 10 Tf 20 100 Td (Short line.) Tj 0 -12 Td (Words that would have fitted on) Tj \
+            0 -12 Td (the line before it start anew.) Tj 0 -14 Td (A gap a little wider than lines) Tj \
+            0 -14 Td (and the same again here.) Tj 0 -12 Td (Then closer lines once more.) Tj ET \
+            BT /F1 10 Tf 230 380 Td (Plain text block) Tj 0 -12 Td (   indented second line) Tj \
+            0 -12 Td (and a third line.) Tj ET \
+            BT /F3 10 Tf 230 330 Td (Times text with ) Tj /F2 10 Tf (bold) Tj /F3 10 Tf ( inside) Tj \
+            0 -12 Td (the line, not a title.) Tj ET \
+            BT /F2 14 Tf 230 280 Td (Big Bold Head) Tj /F2 14 Tf 0 -16 Td (Second Head Line) Tj \
+            /F1 10 Tf 0 -12 Td (then body text under it) Tj ET";
+        let broken = texts(&pdf_page(content, "paragraph-break").blocks);
+        assert_eq!(
+            broken,
+            [
+                "H[Bold Title]",
+                "Body after the bold title goes on/for a second line of body text.",
+                "LI[1. First numbered item that/wraps onto a second line]",
+                "2. Second numbered item/3. Third item",
+                "a) Letter item one/b) Letter item two/iv. Roman item",
+                "LI[(c) Parenthesised]",
+                "- Dash item/\u{2022} Bullet item",
+                "Justified text that runs/right across the column/to the right hand edge,/then ends.",
+                "Another one starts and/stops.",
+                "Short line.",
+                "Words that would have fitted on/the line before it start anew.",
+                "A gap a little wider than lines/and the same again here./Then closer lines once more.",
+                "Plain text block/   indented second line/and a third line.",
+                "Times text with bold inside/the line, not a title.",
+                "H[Big Bold Head/Second Head Line]",
+                "then body text under it"
+            ]
+        );
+        // Within segmented structures too, the same breaks.
+        let p = pdf_page(content, "segment,paragraph-break");
+        let mut flat = Vec::new();
+        fn leaves(blocks: &[Block], out: &mut Vec<String>) {
+            for b in blocks {
+                match b {
+                    Block::Struct(s) if s.standard == "Div" => leaves(&s.blocks, out),
+                    b => out.extend(texts(std::slice::from_ref(b))),
+                }
+            }
+        }
+        leaves(&p.blocks, &mut flat);
+        assert_eq!(flat, broken);
+    }
+
+    /// More of MuPDF's breaks: list items at a block's end, alone, or
+    /// after text; numbers that are no bullet; lines that move back or up
+    /// (left alone); and changes of line height either way.
+    #[test]
+    fn list_edges_line_heights_and_odd_moves_break_as_mupdf_breaks_them() {
+        let content = "BT /F1 10 Tf 20 380 Td (plain text one) Tj 0 -12 Td (plain text two) Tj \
+            0 -12 Td (\\225 last item) Tj ET \
+            BT /F1 10 Tf 20 320 Td (1.) Tj ET \
+            BT /F1 10 Tf 20 290 Td (12 345 numbers) Tj 0 -12 Td (more text here) Tj ET \
+            BT /F1 10 Tf 20 250 Td (Averyverylongword starts) Tj 0 -12 Td (and more) Tj ET \
+            BT /F1 10 Tf 100 210 Td (later) Tj -80 0 Td (earlier) Tj ET \
+            BT /F1 10 Tf 20 170 Td (low) Tj 0 12 Td (high) Tj ET \
+            BT /F1 8 Tf 20 130 Td (small text line) Tj 0 -10 Td (small text again) Tj \
+            /F1 14 Tf 0 -16 Td (Large line) Tj ET \
+            BT /F1 14 Tf 230 380 Td (Large first) Tj 0 -16 Td (Large second) Tj /F1 8 Tf 0 -10 Td (then small) Tj \
+            0 -10 Td (small more) Tj ET \
+            BT /F1 10 Tf 230 300 Td (1\\) item one) Tj 0 -12 Td (2\\) item two) Tj 0 -12 Td (3\\) item three) Tj ET \
+            BT /F1 10 Tf 230 240 Td (\\225) Tj ET \
+            BT /F1 10 Tf 230 210 Td (text before) Tj 0 -12 Td (\\225 item after) Tj 0 -12 Td (more text) Tj \
+            0 -12 Td (and more still) Tj ET \
+            BT /F1 10 Tf 230 140 Td (\\225 item) Tj 12 -12 Td (continued here) Tj -12 -12 Td (not continued) Tj ET";
+        assert_eq!(
+            texts(&pdf_page(content, "paragraph-break").blocks),
+            [
+                "plain text one/plain text two",
+                "LI[\u{2022} last item]",
+                "LI[1.]",
+                "12 345 numbers/more text here",
+                "Averyverylongword starts/and more",
+                "later/earlier",
+                "low/high",
+                "small text line/small text again",
+                "Large line",
+                "Large first",
+                "Large second/then small/small more",
+                "LI[1) item one]",
+                "2) item two/3) item three",
+                "LI[\u{2022}]",
+                "text before",
+                "LI[\u{2022} item after]",
+                "more text/and more still",
+                "LI[\u{2022} item]",
+                "continued here/not continued"
+            ]
+        );
+    }
 }

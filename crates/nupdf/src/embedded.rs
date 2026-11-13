@@ -30,24 +30,17 @@ fn text(doc: &Document, obj: &Object) -> String {
 }
 
 /// `getEmbeddedFiles`: each name in the /EmbeddedFiles tree and its file
-/// specification, in the order a script's record of them has: names that
-/// are array indices first, in number order, then the others as the tree
-/// gives them; a name given twice keeps its first place and its last value.
+/// specification, in the order a script's record of them has: MuJS keeps
+/// an object's properties sorted by their bytes (strcmp), numbers or not;
+/// a name given twice keeps its last value.
 pub fn embedded_files(doc: &Document) -> Vec<(String, Object)> {
     let root = doc.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
     let names = doc.dict_get(&root, b"Names");
     let tree = doc.dict_get(&names, b"EmbeddedFiles");
     let mut found: Vec<(String, Object)> = Vec::new();
     walk(doc, &tree, &mut found, &mut HashSet::new(), 0);
-    let index = |k: &str| -> Option<u32> {
-        k.parse::<u32>()
-            .ok()
-            .filter(|n| *n != u32::MAX && n.to_string() == k)
-    };
-    let (mut numbered, others): (Vec<_>, Vec<_>) =
-        found.into_iter().partition(|(k, _)| index(k).is_some());
-    numbered.sort_by_key(|(k, _)| index(k));
-    numbered.into_iter().chain(others).collect()
+    found.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    found
 }
 
 fn walk(
@@ -206,4 +199,122 @@ pub fn checksum_ok(doc: &Document, fs: &Object) -> Result<bool, String> {
     use md5::Digest;
     let digest = md5::Md5::digest(&data);
     Ok(checksum.len() == 16 && checksum[..] == digest[..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::stream;
+
+    /// Six file specifications in an /EmbeddedFiles tree of two leaves,
+    /// a name given in both.
+    fn attachments() -> Document {
+        let s = |t: &str| t.as_bytes().to_vec();
+        crate::testutil::doc_bytes(&[
+            s("<</Type/Catalog/Pages 2 0 R/Names<</EmbeddedFiles 3 0 R>>>>"),
+            s("<</Type/Pages/Kids[]/Count 0>>"),
+            s("<</Kids[4 0 R 5 0 R]>>"),
+            s("<</Names[(b)6 0 R(10)7 0 R(2)8 0 R(01)9 0 R]>>"),
+            s("<</Names[(b)12 0 R(z)13 0 R(x)14 0 R]>>"),
+            // 6: a name and an embedded file under /F, with every
+            // parameter.
+            s("<</Type/Filespec/F(a.txt)/EF<</F 10 0 R>>>>"),
+            // 7: named under /UF, embedded under /F.
+            s("<</Type/FileSpec/UF(b.txt)/EF<</F 11 0 R>>>>"),
+            // 8: a name and nothing embedded.
+            s("<</Type/Filespec/DOS(c.txt)>>"),
+            // 9: something embedded and no name.
+            s("<</Type/Filespec/EF<</F 11 0 R>>>>"),
+            stream(
+                "/Type/EmbeddedFile/Subtype/text#2Fplain/Params<</Size 5\
+                 /CreationDate(D:20240102030405Z)/ModDate(D:20250102030405Z)\
+                 /CheckSum<5d41402abc4b2a76b9719d911017c592>>>",
+                b"hello",
+            ),
+            stream("/Subtype(odd)/Params<</CheckSum(wrong)>>", b"hello"),
+            // 12: what (b) is in the second leaf.
+            s("<</Type/Filespec/Unix(e.txt)/EF<</Unix 15 0 R>>>>"),
+            s("<</Type/Other/F(f.txt)/EF<</F 10 0 R>>>>"),
+            s("<</Type/Filespec/Mac(g.txt)/EF<</Mac 16 0 R>>>>"),
+            stream("/Params<</CheckSum<00>>>", b"no check"),
+            stream(
+                "/Filter/FlateDecode/Params<</CheckSum(0123456789abcdef)>>",
+                b"bad",
+            ),
+        ])
+    }
+
+    #[test]
+    fn attachments_read_as_mupdf_reads_them() {
+        // getEmbeddedFiles and the filespec functions in `mutool run` on
+        // the same file: names sorted by their bytes.
+        let doc = attachments();
+        let files = embedded_files(&doc);
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["01", "10", "2", "b", "x", "z"]);
+        let report: Vec<(bool, FilespecParams)> = files
+            .iter()
+            .map(|(_, fs)| (is_embedded_file(&doc, fs), filespec_params(&doc, fs)))
+            .collect();
+        let none = FilespecParams {
+            filename: None,
+            mimetype: None,
+            size: -1,
+            created: -1,
+            modified: -1,
+        };
+        let p = |name: &str, mime: &str, size, created, modified| FilespecParams {
+            filename: Some(name.into()),
+            mimetype: Some(mime.into()),
+            size,
+            created,
+            modified,
+        };
+        assert_eq!(
+            report,
+            [
+                (false, none.clone()),
+                (true, p("b.txt", "", 0, -1, -1)),
+                (false, none.clone()),
+                (true, p("e.txt", "application/octet-stream", 0, -1, -1)),
+                (true, p("g.txt", "application/octet-stream", 0, -1, -1)),
+                (false, p("f.txt", "text/plain", 5, 1704164645, 1735787045)),
+            ]
+        );
+        let fs = |name: &str| {
+            files
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, f)| f.clone())
+                .unwrap_or(Object::Null)
+        };
+        assert_eq!(checksum_ok(&doc, &fs("10")), Ok(false));
+        assert_eq!(checksum_ok(&doc, &fs("b")), Ok(true));
+        assert_eq!(checksum_ok(&doc, &fs("2")), Ok(true));
+        // Damaged data reads as far as it goes: nothing here.
+        assert_eq!(checksum_ok(&doc, &fs("x")), Ok(false));
+        assert_eq!(contents(&doc, &fs("x")), Some(Ok(Vec::new())));
+        assert_eq!(contents(&doc, &fs("10")), Some(Ok(b"hello".to_vec())));
+        assert_eq!(contents(&doc, &fs("b")), Some(Ok(b"no check".to_vec())));
+        assert_eq!(contents(&doc, &fs("2")), None);
+        // The checksum that matches.
+        let a = Object::Ref(crate::object::ObjRef::new(6, 0));
+        assert_eq!(checksum_ok(&doc, &a), Ok(true));
+        assert_eq!(file_stream_and_name(&doc, &fs("01")), (None, None));
+    }
+
+    #[test]
+    fn a_tree_that_loops_is_read_once() {
+        // MuPDF's script glue overflows its stack here; nupdf reads each
+        // node once.
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R/Names<</EmbeddedFiles 3 0 R>>>>",
+            "<</Type/Pages/Kids[]/Count 0>>",
+            "<</Kids[4 0 R 3 0 R]>>",
+            "<</Kids[3 0 R]/Names[(a)5 0 R]>>",
+            "<</Type/Filespec/F(a)>>",
+        ]);
+        let names: Vec<String> = embedded_files(&doc).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["a"]);
+    }
 }

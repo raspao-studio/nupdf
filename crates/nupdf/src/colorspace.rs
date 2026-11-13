@@ -166,7 +166,16 @@ impl ColorSpace {
 /// differ only in their profile compare equal, as before profiles were
 /// kept.
 #[derive(Debug, Clone, Default)]
-pub struct IccData(pub Option<std::sync::Arc<[u8]>>);
+pub struct IccData(pub Option<std::sync::Arc<[u8]>>, pub Option<blake3::Hash>);
+
+impl IccData {
+    /// A profile, with its hash taken once: color conversion finds its
+    /// transform by it, for every color drawn.
+    pub fn new(data: std::sync::Arc<[u8]>) -> IccData {
+        let hash = blake3::hash(&data);
+        IccData(Some(data), Some(hash))
+    }
+}
 
 impl PartialEq for IccData {
     fn eq(&self, _: &IccData) -> bool {
@@ -338,7 +347,7 @@ fn load_icc_based(doc: &Document, dict: &Object, cycle: &mut Cycle) -> Result<Co
                 }
                 cs = Some(ColorSpace::Icc(
                     family,
-                    IccData(Some(std::sync::Arc::from(data))),
+                    IccData::new(std::sync::Arc::from(data)),
                 ));
             }
         }
@@ -571,6 +580,15 @@ fn lab_to_srgb(l: f32, a: f32, b: f32) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    /// Conversion finds a profile's transform by its hash, for every color
+    /// drawn: taken once, when the space is loaded.
+    #[test]
+    fn a_profile_is_hashed_once_when_loaded() {
+        let data: std::sync::Arc<[u8]> = std::sync::Arc::from(crate::cms::RGB_ICC);
+        let icc = IccData::new(data.clone());
+        assert_eq!(icc.1, Some(blake3::hash(&data)));
+        assert!(icc.0.is_some_and(|d| std::sync::Arc::ptr_eq(&d, &data)));
+    }
 
     #[test]
     fn indexed_and_device_colors_convert_to_rgb() {
@@ -702,6 +720,360 @@ trailer<</Root 1 0 R/Size 3>>\n"[..],
         ] {
             assert!(messages.contains(&m.to_string()), "{m} in {messages:?}");
         }
+    }
+
+    /// A document with `objects` as objects 2, 3, ...: each a body, which
+    /// may be a stream of binary data.
+    fn doc_of(objects: &[Vec<u8>]) -> Document {
+        let mut file = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n".to_vec();
+        for (i, body) in objects.iter().enumerate() {
+            file.extend_from_slice(format!("{} 0 obj", i + 2).as_bytes());
+            file.extend_from_slice(body);
+            file.extend_from_slice(b"endobj\n");
+        }
+        file.extend_from_slice(
+            format!("trailer<</Root 1 0 R/Size {}>>\n", objects.len() + 2).as_bytes(),
+        );
+        Document::open(file).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
+        let mut s = format!("<<{dict}/Length {}>>stream\n", data.len()).into_bytes();
+        s.extend_from_slice(data);
+        s.extend_from_slice(b"endstream");
+        s
+    }
+
+    /// Object 2 as a colorspace, and the warnings loading it gave.
+    fn load_2(objects: &[Vec<u8>]) -> (Result<ColorSpace, String>, Vec<String>) {
+        let d = doc_of(objects);
+        let before = d.diagnostics().snapshot().len();
+        let cs = load(&d, &Object::Ref(crate::ObjRef::new(2, 0)));
+        let w = d.diagnostics().snapshot()[before..]
+            .iter()
+            .map(|w| w.message.clone())
+            .collect();
+        (cs, w)
+    }
+
+    #[test]
+    fn icc_based_spaces_fall_back_as_in_mupdf() {
+        let rgb = profile(2, b"mntr", b"RGB ", 0);
+        let icc = |dict: &str, data: &[u8]| load_2(&[stream(dict, data)]);
+        // A good profile gives an ICC space of its family, with the bytes.
+        let (cs, w) = icc("/N 3", &rgb);
+        assert_eq!(cs.as_ref().map(ColorSpace::type_name), Ok("RGB"));
+        assert!(matches!(
+            cs,
+            Ok(ColorSpace::Icc(Family::Rgb, IccData(Some(_), _)))
+        ));
+        assert!(w.is_empty(), "{w:?}");
+        // /N larger than the profile's: the profile is used anyway.
+        let (cs, w) = icc("/N 4", &rgb);
+        assert_eq!(cs.map(|c| c.n()), Ok(3));
+        assert_eq!(
+            w,
+            ["ICC colorspace N=4 does not match profile N=3 (using profile)"]
+        );
+        // Smaller: the profile is ignored for the space /N names.
+        let (cs, w) = icc("/N 1", &rgb);
+        assert_eq!(cs, Ok(ColorSpace::Gray));
+        assert_eq!(
+            w,
+            ["ICC colorspace N=1 does not match profile N=3 (ignoring profile)"]
+        );
+        // A broken profile: the alternate, else the device space for /N.
+        let (cs, w) = icc("/N 4", b"junk");
+        assert_eq!(cs, Ok(ColorSpace::Cmyk));
+        assert_eq!(
+            w,
+            [
+                "lcms: Read from memory error.",
+                "format error: cmsOpenProfileFromMem failed",
+                "ignoring broken ICC profile",
+            ]
+        );
+        let (cs, _) = icc("/N 3/Alternate/DeviceGray", b"junk");
+        assert_eq!(cs, Ok(ColorSpace::Gray));
+        let (cs, _) = icc("/N 2", b"junk");
+        assert_eq!(cs, Err("syntax error: invalid ICC colorspace".into()));
+        // A broken alternate is reported and ignored.
+        let (cs, w) = icc("/N 3/Alternate/Foo", &rgb);
+        assert!(matches!(cs, Ok(ColorSpace::Icc(Family::Rgb, _))));
+        assert_eq!(
+            w,
+            [
+                "syntax error: unknown colorspace: Foo",
+                "ignoring broken ICC Alternate colorspace",
+            ]
+        );
+        // The profile must suit the alternate.
+        let (cs, w) = icc("/N 3/Alternate/DeviceCMYK", &rgb);
+        assert_eq!(cs, Ok(ColorSpace::Cmyk));
+        assert_eq!(
+            w,
+            [
+                "syntax error: ICC profile (N=3) is not CMYK",
+                "ignoring broken ICC profile",
+            ]
+        );
+        let (cs, w) = icc(
+            "/N 3/Alternate[/Separation/S/DeviceRGB<</FunctionType 2/Domain[0 1]/N 1>>]",
+            &rgb,
+        );
+        assert!(matches!(cs, Ok(ColorSpace::Separation { .. })));
+        assert_eq!(
+            w,
+            [
+                "syntax error: invalid colorspace type for ICC profile",
+                "ignoring broken ICC profile",
+            ]
+        );
+        // An ICCBased array whose profile is a dictionary, not a stream;
+        // and a dictionary named directly (as /DefaultRGB may be).
+        let (cs, w) = load_2(&[b"[/ICCBased 3 0 R]".to_vec(), b"<</N 3>>".to_vec()]);
+        assert_eq!(cs, Ok(ColorSpace::Rgb));
+        assert_eq!(
+            w,
+            [
+                "format error: object is not a stream",
+                "ignoring broken ICC profile"
+            ]
+        );
+        let (cs, _) = load_2(&[b"<</N 1>>".to_vec()]);
+        assert_eq!(cs, Ok(ColorSpace::Gray));
+    }
+
+    #[test]
+    fn icc_signatures_and_tag_tables_are_read_as_lcms_reads_them() {
+        let d = doc();
+        let fam = |p: &[u8], alt: Option<&ColorSpace>| icc_colorspace(&d, p, alt);
+        let unexpected = |n: usize| {
+            Err(format!(
+                "syntax error: ICC profile has unexpected number of channels: {n}"
+            ))
+        };
+        for (space, want) in [
+            (b"MCH2", unexpected(2)),
+            (b"2CLR", unexpected(2)),
+            (b"MCH7", unexpected(7)),
+            (b"9CLR", unexpected(9)),
+            (b"MCHA", unexpected(10)),
+            (b"FCLR", unexpected(15)),
+            (b"MCH1", Ok(Family::Gray)),
+            (b"LuvK", Ok(Family::Cmyk)),
+            (b"CMY ", Ok(Family::Rgb)),
+            (b"YCbr", Ok(Family::Rgb)),
+        ] {
+            assert_eq!(fam(&profile(2, b"mntr", space, 0), None), want, "{space:?}");
+        }
+        let not =
+            |n: usize, what: &str| Err(format!("syntax error: ICC profile (N={n}) is not {what}"));
+        let rgb = profile(2, b"mntr", b"RGB ", 0);
+        let lab = profile(2, b"mntr", b"Lab ", 0);
+        assert_eq!(fam(&rgb, Some(&ColorSpace::Gray)), not(3, "Gray"));
+        assert_eq!(fam(&lab, Some(&ColorSpace::Rgb)), not(3, "RGB"));
+        assert_eq!(fam(&rgb, Some(&ColorSpace::Lab)), not(3, "Lab"));
+        assert_eq!(fam(&lab, Some(&ColorSpace::Lab)), Ok(Family::Lab));
+        assert_eq!(fam(&rgb, Some(&ColorSpace::Rgb)), Ok(Family::Rgb));
+        // A zero class is accepted; the version's minor nibbles are
+        // clamped to 9 before the comparison with 5.0.
+        let mut p = profile(5, &[0; 4], b"RGB ", 0);
+        p[9] = 0xff;
+        assert_eq!(
+            fam(&p, None),
+            Err("format error: cmsOpenProfileFromMem failed".into())
+        );
+        p[9] = 0;
+        assert_eq!(fam(&p, None), Ok(Family::Rgb));
+        // Tags: empty and out-of-range entries are skipped; a repeated
+        // signature among the rest fails; a table past the data fails.
+        let with_tags = |tags: &[(u32, u32, u32)], size: u32| {
+            let mut p = profile(2, b"mntr", b"RGB ", tags.len() as u32);
+            for &(sig, offset, len) in tags {
+                p.extend(sig.to_be_bytes());
+                p.extend(offset.to_be_bytes());
+                p.extend(len.to_be_bytes());
+            }
+            p.resize(size as usize, 0);
+            p[0..4].copy_from_slice(&size.to_be_bytes());
+            p
+        };
+        let a = u32::from_be_bytes(*b"desc");
+        let ok = with_tags(&[(a, 200, 10), (a, 0, 10), (a, 200, 0), (a, 290, 20)], 300);
+        assert_eq!(fam(&ok, None), Ok(Family::Rgb));
+        let dup = with_tags(&[(a, 200, 10), (a, 220, 10)], 300);
+        assert_eq!(
+            fam(&dup, None),
+            Err("format error: cmsOpenProfileFromMem failed".into())
+        );
+        let mut cut = with_tags(&[(a, 200, 10), (a, 220, 10)], 300);
+        cut.truncate(140);
+        assert_eq!(
+            fam(&cut, None),
+            Err("format error: cmsOpenProfileFromMem failed".into())
+        );
+        assert_eq!(
+            fam(b"", None),
+            Err("format error: cmsOpenProfileFromMem failed".into())
+        );
+        let mut bad = rgb.clone();
+        bad[36] = b'x';
+        assert_eq!(
+            fam(&bad, None),
+            Err("format error: cmsOpenProfileFromMem failed".into())
+        );
+        let messages: Vec<String> = d
+            .diagnostics()
+            .snapshot()
+            .into_iter()
+            .map(|w| w.message)
+            .collect();
+        for m in [
+            "lcms: Unsupported profile version '0x5990000'.",
+            "lcms: Duplicate tag found.",
+            "lcms: Couldn't allocate 0 bytes for profile.",
+            "lcms: not an ICC profile, invalid signature.",
+        ] {
+            assert!(messages.contains(&m.to_string()), "{m} in {messages:?}");
+        }
+    }
+
+    #[test]
+    fn indexed_separation_and_pattern_spaces_load_as_in_mupdf() {
+        // A lookup table in a stream, and a high value clamped to 255.
+        let (cs, _) = load_2(&[
+            b"[/Indexed/DeviceGray 300 3 0 R]".to_vec(),
+            stream("", &[7, 8, 9]),
+        ]);
+        let Ok(ColorSpace::Indexed { high, lookup, .. }) = cs else {
+            panic!("{cs:?}");
+        };
+        assert_eq!(
+            (high, &lookup[..3], lookup.len()),
+            (255, &[7, 8, 9][..], 256)
+        );
+        let (cs, _) = load_2(&[b"[/Indexed/DeviceGray -5 <0102>]".to_vec()]);
+        assert!(
+            matches!(cs, Ok(ColorSpace::Indexed { high: 0, .. })),
+            "{cs:?}"
+        );
+        // An indirect string serves too; anything else indirect must be a
+        // stream.
+        let (cs, _) = load_2(&[b"[/Indexed/DeviceGray 1 3 0 R]".to_vec(), b"(ab)".to_vec()]);
+        assert!(matches!(cs, Ok(ColorSpace::Indexed { lookup, .. }) if lookup == b"ab"));
+        let (cs, _) = load_2(&[b"[/Indexed/DeviceGray 1 3 0 R]".to_vec(), b"5".to_vec()]);
+        assert_eq!(cs, Err("format error: object is not a stream".into()));
+        // DeviceN needs 1 to 32 names.
+        let tint = "<</FunctionType 2/Domain[0 1]/N 1>>";
+        let d = doc();
+        let load_text = |t: &str| load(&d, &parse(t));
+        assert_eq!(
+            load_text(&format!("[/DeviceN [] /DeviceGray {tint}]")),
+            Err("syntax error: too few components in DeviceN colorspace".into())
+        );
+        let names = (0..33)
+            .map(|i| format!("/C{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            load_text(&format!("[/DeviceN [{names}] /DeviceGray {tint}]")),
+            Err("syntax error: too many components in DeviceN colorspace".into())
+        );
+        // Patterns with an underlying space take its shape; calibrated
+        // and Lab spaces are their device counterparts.
+        for (text, want) in [
+            ("[/Pattern /DeviceCMYK]", ColorSpace::Cmyk),
+            ("[/Pattern]", ColorSpace::Gray),
+            ("[/CalGray <<>>]", ColorSpace::Gray),
+            ("[/CalCMYK <<>>]", ColorSpace::Cmyk),
+            ("[/Lab <<>>]", ColorSpace::Lab),
+            ("[/DeviceRGB]", ColorSpace::Rgb),
+        ] {
+            assert_eq!(load_text(text), Ok(want), "{text}");
+        }
+        for text in ["[1 2]", "[]", "5"] {
+            assert_eq!(
+                load_text(text),
+                Err("syntax error: could not parse color space (0 0 R)".into()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn colors_convert_through_every_kind_of_space() {
+        let d = doc_of(&[]);
+        // A separation's tint transform runs with the document; without
+        // one it reads as black.
+        let tint = parse("<</FunctionType 2/Domain[0 1]/C0[1 1 1]/C1[1 0 0]/N 1>>");
+        let sep = ColorSpace::Separation {
+            n: 1,
+            base: Box::new(ColorSpace::Rgb),
+            tint: Box::new(
+                crate::function::load(&d, &tint, 1, 3).unwrap_or_else(|e| panic!("{e}")),
+            ),
+        };
+        assert_eq!(sep.to_rgb(Some(&d), &[1.0]), [1.0, 0.0, 0.0]);
+        assert_eq!(sep.to_rgb(Some(&d), &[0.5]), [1.0, 0.5, 0.5]);
+        assert_eq!(sep.to_rgb(None, &[1.0]), [0.0, 0.0, 0.0]);
+        assert_eq!(sep.device_to_rgb(&[1.0]), [0.0, 0.0, 0.0]);
+        assert_eq!(sep.type_name(), "Separation");
+        // An indexed Lab space scales its table to L 0..100, a and b
+        // -128..127.
+        let lab = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::Lab),
+            high: 0,
+            lookup: vec![255, 128, 128],
+        };
+        let white = lab.to_rgb(None, &[0.0]);
+        assert!(white.iter().all(|&c| c > 0.99), "{white:?}");
+        assert_eq!(lab.type_name(), "Indexed");
+        // Black: the formula's linear toe on both ends.
+        assert_eq!(
+            ColorSpace::Lab.to_rgb(None, &[0.0, 0.0, 0.0]),
+            [0.0, 0.0, 0.0]
+        );
+        let dark = ColorSpace::Lab.to_rgb(None, &[1.0, 0.0, 0.0]);
+        assert!(dark.iter().all(|&c| c > 0.0 && c < 0.02), "{dark:?}");
+        // A custom leaf conversion sees the base color.
+        let gray = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::Gray),
+            high: 0,
+            lookup: vec![51],
+        };
+        assert_eq!(
+            gray.to_rgb_with(None, &[0.0], &|_, c| [c[0], 0.0, 1.0]),
+            [0.2, 0.0, 1.0]
+        );
+        // Nesting past 64 levels converts to black.
+        let mut deep = ColorSpace::Gray;
+        for _ in 0..70 {
+            deep = ColorSpace::Indexed {
+                base: Box::new(deep),
+                high: 0,
+                lookup: vec![255],
+            };
+        }
+        assert_eq!(deep.to_rgb(None, &[0.0]), [0.0, 0.0, 0.0]);
+        for (cs, name, n) in [
+            (ColorSpace::Gray, "Gray", 1),
+            (ColorSpace::Rgb, "RGB", 3),
+            (ColorSpace::Cmyk, "CMYK", 4),
+            (ColorSpace::Lab, "Lab", 3),
+            (
+                ColorSpace::Icc(Family::Cmyk, IccData(None, None)),
+                "CMYK",
+                4,
+            ),
+        ] {
+            assert_eq!((cs.type_name(), cs.n()), (name, n));
+        }
+        // Profiles do not take part in comparisons.
+        assert_eq!(
+            ColorSpace::Icc(Family::Rgb, IccData::new(std::sync::Arc::from(&b"x"[..]))),
+            ColorSpace::Icc(Family::Rgb, IccData(None, None))
+        );
     }
 
     #[test]

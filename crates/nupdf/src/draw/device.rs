@@ -54,6 +54,8 @@ struct State {
     iso: bool,
     /// Pushed by `fz_knockout_begin` around one object.
     ko_temp: bool,
+    /// Drawing a soft mask (`in_smask`): colors convert without ICC.
+    in_smask: bool,
 }
 
 /// A state's group alpha: the one below's, none, or its own.
@@ -75,6 +77,24 @@ fn no_pix() -> Pix {
         alpha: true,
         samples: Vec::new(),
     }
+}
+
+/// `tile_key`: the pattern, its transform without the translation, and
+/// whether the cell has a shape and a group alpha.
+type TileKey = (i32, [u32; 4], bool, bool);
+
+/// A cell kept: its pixels, and its shape and group alpha when the
+/// state it was drawn in had them.
+type TileCell = (Pix, Option<Pix>, Option<Pix>);
+
+fn tile_key(id: i32, ctm: Matrix, shape: bool, ga: bool) -> TileKey {
+    let m = [
+        ctm.a.to_bits(),
+        ctm.b.to_bits(),
+        ctm.c.to_bits(),
+        ctm.d.to_bits(),
+    ];
+    (id, m, shape, ga)
 }
 
 /// A pattern cell being drawn: what `fz_draw_end_tile` repeats it by.
@@ -102,6 +122,7 @@ impl State {
             ko: false,
             iso: false,
             ko_temp: false,
+            in_smask: false,
         }
     }
 }
@@ -110,7 +131,7 @@ pub struct DrawDevice<'d> {
     doc: Option<&'d Document>,
     gel: Gel,
     glyphs: GlyphCache,
-    tiles: std::collections::HashMap<(i32, [u32; 4]), Pix>,
+    tiles: std::collections::HashMap<TileKey, TileCell>,
     /// Images decoded so far, by object, subsampling and whether as a
     /// mask, as MuPDF's store keeps them, and their total size.
     images: ImageCache,
@@ -129,6 +150,13 @@ pub struct DrawDevice<'d> {
 
 /// `fz_rasterizer_graphics_aa_level` for 8 bits: `2 / (8 + 2)`.
 const AA_LEVEL: f32 = 0.2;
+
+/// Whether an image's pixmap has `FZ_PIXMAP_FLAG_INTERPOLATE`: as its
+/// /Interpolate says for images MuPDF streams, always for JPX, which
+/// `fz_load_jpx` decodes into a pixmap with `fz_new_pixmap`'s flags.
+fn interpolates(image: &Image) -> bool {
+    image.interpolate || image.is_jpx
+}
 
 fn flatness(expansion: f32) -> (f32, f32) {
     let expansion = if expansion < f32::EPSILON {
@@ -197,6 +225,21 @@ impl<'d> DrawDevice<'d> {
         self.stack.last().map_or(IRect::EMPTY, |s| s.scissor)
     }
 
+    /// `ri` with `FZ_RI_IN_SOFTMASK` when a soft mask is being drawn.
+    fn ri(&self, ri: u8) -> u8 {
+        if self.stack.last().is_some_and(|s| s.in_smask) {
+            ri | super::color::RI_IN_SOFTMASK
+        } else {
+            ri
+        }
+    }
+
+    /// Whether colors convert through ICC profiles here: not in a soft
+    /// mask.
+    fn icc(&self) -> bool {
+        self.cc.icc && self.ri(0) == 0
+    }
+
     /// `resolve_color` into the pixmap's RGB: the bytes truncated, as
     /// `colorbv[i] = colorfv[i] * 255` does, and alpha after them.
     fn resolve_color(
@@ -217,6 +260,7 @@ impl<'d> DrawDevice<'d> {
         n: usize,
         ri: u8,
     ) -> [u8; MAX_COLORS + 1] {
+        let ri = self.ri(ri);
         let mut out = [0u8; MAX_COLORS + 1];
         let comps = match n {
             0 => [0.0; 3],
@@ -403,6 +447,7 @@ impl<'d> DrawDevice<'d> {
         if let Some(top) = self.stack.last() {
             st.ko = top.ko;
             st.iso = top.iso;
+            st.in_smask = top.in_smask;
         }
         st
     }
@@ -630,39 +675,10 @@ impl Device for DrawDevice<'_> {
     }
 
     fn clip_text(&mut self, text: &Text, ctm: Matrix, scissor: Rect) {
-        if self.full() {
+        if self.full() || !self.push_text_clip(text.bound(None, ctm), scissor) {
             return;
         }
-        let mut bbox = IRect::from_rect(text.bound(None, ctm)).intersect(self.scissor());
-        if !scissor.is_infinite() {
-            bbox = bbox.intersect(IRect::from_rect(scissor));
-        }
-        let di = self.dest_index();
-        let (n, alpha) = match self.stack.get(di).and_then(|s| s.dest.as_ref()) {
-            Some(d) => (d.n, d.alpha),
-            None => (3, false),
-        };
-        let pixmaps = (Pix::new(bbox, 1, true), Pix::new(bbox, n, alpha));
-        let (Ok(mask), Ok(mut dest)) = pixmaps else {
-            let st = self.child(None, None, IRect::EMPTY);
-            self.stack.push(st);
-            return;
-        };
-        if let Some(parent) = self.stack.get(di).and_then(|s| s.dest.as_ref()) {
-            if alpha {
-                dest.clear_with(0);
-            } else {
-                dest.copy_rect(parent, bbox);
-            }
-        }
-        let mut state = self.child(Some(dest), Some(mask), bbox);
-        state.ga = self.clip_ga(bbox, false);
-        state.shape = self.clip_plane(true, bbox, false);
-        state.iso = true;
-        self.stack.push(state);
-        if bbox.is_empty() {
-            return;
-        }
+        let bbox = self.scissor();
         for span in &text.spans {
             let mut tm = span.trm;
             for item in &span.items {
@@ -693,6 +709,35 @@ impl Device for DrawDevice<'_> {
         }
     }
 
+    /// Text stroked with a pattern or shading clips to its strokes. Like
+    /// `stroke_text`, glyphs stroke as outlines where MuPDF has FreeType
+    /// stroke them; Type 3 glyphs draw as they are, as in MuPDF.
+    fn clip_stroke_text(&mut self, text: &Text, stroke: &StrokeState, ctm: Matrix, scissor: Rect) {
+        if self.full() || !self.push_text_clip(text.bound(Some(stroke), ctm), scissor) {
+            return;
+        }
+        let bbox = self.scissor();
+        for span in &text.spans {
+            let mut tm = span.trm;
+            for item in &span.items {
+                if item.gid < 0 {
+                    continue;
+                }
+                tm.e = item.x;
+                tm.f = item.y;
+                if span.font.t3.is_some() {
+                    let mut trm = tm.concat(ctm);
+                    if let Some(g) = self.type3_glyph(&span.font, item.gid, &mut trm, bbox) {
+                        let (x, y) = (trm.e as i32, trm.f as i32);
+                        self.draw_glyph(None, &g, x, y, bbox);
+                    }
+                } else if let Some(path) = outline_glyph(&span.font, item.gid, tm) {
+                    self.stroke_mask_path(&path, stroke, ctm);
+                }
+            }
+        }
+    }
+
     fn fill_shade(&mut self, shade: &Shade, ctm: Matrix, alpha: f32, params: ColorParams) {
         let bbox = IRect::from_rect(shade.bound(ctm)).intersect(self.scissor());
         if bbox.is_empty() || alpha == 0.0 {
@@ -707,6 +752,7 @@ impl Device for DrawDevice<'_> {
         let doc = self.doc;
         let di = self.dest_index();
         let _ = params;
+        let ri = self.ri(1);
         'paint: {
             let Some(dest) = self.stack.get_mut(di).and_then(|s| s.dest.as_mut()) else {
                 break 'paint;
@@ -736,7 +782,7 @@ impl Device for DrawDevice<'_> {
                     }
                 }
             }
-            super::shade::paint_shade(doc, &self.cc, shade, ctm, target, bbox);
+            super::shade::paint_shade(doc, &self.cc, ri, shade, ctm, target, bbox);
             if let Some(t) = temp {
                 dest.paint_pixmap(&t, (alpha * 255.0) as i32);
             }
@@ -788,7 +834,7 @@ impl Device for DrawDevice<'_> {
         let family = src.as_ref().and_then(|c| c.family());
         let plain = |f| {
             family == Some(f)
-                && (!self.cc.icc
+                && (!self.icc()
                     || src
                         .as_ref()
                         .is_some_and(|c| !matches!(c, ColorSpace::Icc(..))))
@@ -837,7 +883,7 @@ impl Device for DrawDevice<'_> {
                 None,
                 (alpha * 255.0) as i32,
                 true,
-                image.interpolate,
+                interpolates(image),
                 ga.as_mut().map(|(_, g)| g),
                 shape.as_mut().map(|(_, g)| g),
             );
@@ -898,7 +944,7 @@ impl Device for DrawDevice<'_> {
                 Some(&colorbv[..=n]),
                 255,
                 true,
-                image.interpolate,
+                interpolates(image),
                 ga.as_mut().map(|(_, g)| g),
                 shape.as_mut().map(|(_, g)| g),
             );
@@ -972,7 +1018,7 @@ impl Device for DrawDevice<'_> {
             None,
             255,
             true,
-            image.interpolate,
+            interpolates(image),
             match &mut ga {
                 Ga::Own(g) => Some(g),
                 _ => None,
@@ -1003,9 +1049,10 @@ impl Device for DrawDevice<'_> {
         let bbox = IRect::from_rect(area).intersect(self.scissor());
         let dest = if luminosity {
             Pix::new(bbox, 1, false).map(|mut d| {
+                let ri = 1 | super::color::RI_IN_SOFTMASK;
                 let bc = self
                     .cc
-                    .gray(self.doc, cs.unwrap_or(&ColorSpace::Gray), backdrop, 1);
+                    .gray(self.doc, cs.unwrap_or(&ColorSpace::Gray), backdrop, ri);
                 d.clear_with((bc * 255.0) as i32 as u8);
                 d
             })
@@ -1015,6 +1062,7 @@ impl Device for DrawDevice<'_> {
         let mut state = State::new(dest.ok(), None, bbox);
         state.ga = Ga::Off;
         state.shape = Ga::Off;
+        state.in_smask = true;
         self.stack.push(state);
     }
 
@@ -1089,6 +1137,7 @@ impl Device for DrawDevice<'_> {
             top.ga = ga;
             top.shape = shape;
             top.iso = true;
+            top.in_smask = false;
         }
     }
 
@@ -1163,11 +1212,24 @@ impl Device for DrawDevice<'_> {
         let mut parent_ga = self.take_ga();
         let mode = blendmode & 15;
         let di = self.dest_index();
+        let mut src = src;
         if let Some(dest) = self.stack.get_mut(di).and_then(|s| s.dest.as_mut()) {
             match &own {
                 // The same group alpha above and below: a plain paint.
                 None if mode == 0 && parent_ga.is_none() => dest.paint_pixmap(&src, a),
-                None => dest.blend_pixmap(&src, a, mode),
+                None => {
+                    // fz_blend_pixmap's "hack": an isolated group's pixels
+                    // take its alpha in place, so the group alpha below is
+                    // painted from them so taken.
+                    if isolated && a < 255 {
+                        for v in &mut src.samples {
+                            *v = mul255(i32::from(*v), a) as u8;
+                        }
+                        dest.blend_pixmap(&src, 255, mode);
+                    } else {
+                        dest.blend_pixmap(&src, a, mode);
+                    }
+                }
                 Some(g) => dest.blend_nonisolated(&src, a, mode, g),
             }
         }
@@ -1203,15 +1265,11 @@ impl Device for DrawDevice<'_> {
         if bbox.y1 == bbox.y0 {
             bbox.y1 = bbox.y0 + 1;
         }
-        let key = (
-            id,
-            [
-                ctm.a.to_bits(),
-                ctm.b.to_bits(),
-                ctm.c.to_bits(),
-                ctm.d.to_bits(),
-            ],
-        );
+        // The cell has a shape and a group alpha of its own when the
+        // state below has them, painted into theirs at the end.
+        let has_shape = self.plane_index(true).is_some();
+        let has_ga = self.plane_index(false).is_some();
+        let key = tile_key(id, ctm, has_shape, has_ga);
         let cached = if id != 0 {
             self.tiles.get(&key).cloned()
         } else {
@@ -1219,10 +1277,27 @@ impl Device for DrawDevice<'_> {
         };
         let hit = cached.is_some();
         let n = self.dest_n();
-        let dest = cached.or_else(|| Pix::new(bbox, n + 1, true).ok());
+        let plane = |on: bool| {
+            if !on {
+                return Ga::Off;
+            }
+            Pix::new(bbox, 1, true).map_or(Ga::Off, Ga::Own)
+        };
+        let (dest, shape, ga) = match cached {
+            Some((d, s, g)) => (
+                Some(d),
+                s.map_or(Ga::Off, Ga::Own),
+                g.map_or(Ga::Off, Ga::Own),
+            ),
+            None => (
+                Pix::new(bbox, n + 1, true).ok(),
+                plane(has_shape),
+                plane(has_ga),
+            ),
+        };
         let mut state = self.child(dest, None, bbox);
-        state.ga = Ga::Off;
-        state.shape = Ga::Off;
+        state.ga = ga;
+        state.shape = shape;
         state.iso = true;
         state.tile = Some(Tile {
             area,
@@ -1250,6 +1325,11 @@ impl Device for DrawDevice<'_> {
         let (Some(t), Some(cell)) = (state.tile, state.dest) else {
             return;
         };
+        let own = |g: Ga| match g {
+            Ga::Own(p) => Some(p),
+            _ => None,
+        };
+        let (cell_shape, cell_ga) = (own(state.shape), own(state.ga));
         let (mut xstep, mut ystep, ctm) = (t.xstep, t.ystep, t.ctm);
         // Steps of less than a subpixel double until they show.
         let threshold = 1.0f32 / (1 << ((8 + 1) >> 1)) as f32;
@@ -1305,42 +1385,53 @@ impl Device for DrawDevice<'_> {
         m.e = cell.x as f32;
         m.f = cell.y as f32;
         if !abandon {
+            // Where the cell repeats, a bound on the count that MuPDF does
+            // not have.
+            let mut at = Vec::new();
+            let mut budget: u64 = 1 << 24;
+            'rows: for y in y0..y1 {
+                for x in x0..x1 {
+                    if budget == 0 {
+                        break 'rows;
+                    }
+                    budget -= 1;
+                    let ttm = m.pre_translate(x as f32 * xstep, y as f32 * ystep);
+                    let (cx, cy) = (ttm.e as i32, ttm.f as i32);
+                    if cx > 0 && cx.wrapping_add(cell.w) < 0 {
+                        continue;
+                    }
+                    if cy > 0 && cy.wrapping_add(cell.h) < 0 {
+                        continue;
+                    }
+                    at.push((cx, cy));
+                }
+            }
+            let repeat = |into: &mut Pix, cell: &Pix| {
+                let mut copy = cell.clone();
+                for &(x, y) in &at {
+                    copy.x = x;
+                    copy.y = y;
+                    into.paint_pixmap_in(&copy, 255, below);
+                }
+            };
             let di = self.dest_index();
             if let Some(dest) = self.stack.get_mut(di).and_then(|s| s.dest.as_mut()) {
-                let mut copy = cell.clone();
-                // A bound on the repeats, which MuPDF does not have.
-                let mut budget: u64 = 1 << 24;
-                'rows: for y in y0..y1 {
-                    for x in x0..x1 {
-                        if budget == 0 {
-                            break 'rows;
-                        }
-                        budget -= 1;
-                        let ttm = m.pre_translate(x as f32 * xstep, y as f32 * ystep);
-                        copy.x = ttm.e as i32;
-                        copy.y = ttm.f as i32;
-                        if copy.x > 0 && copy.x.wrapping_add(copy.w) < 0 {
-                            continue;
-                        }
-                        if copy.y > 0 && copy.y.wrapping_add(copy.h) < 0 {
-                            continue;
-                        }
-                        dest.paint_pixmap_in(&copy, 255, below);
+                repeat(dest, &cell);
+            }
+            // The cell's shape and group alpha onto those below.
+            for (is_shape, plane) in [(true, &cell_shape), (false, &cell_ga)] {
+                if let Some(p) = plane {
+                    let below = self.take_plane(is_shape);
+                    if let Some((i, mut g)) = below {
+                        repeat(&mut g, p);
+                        self.put_plane(is_shape, Some((i, g)));
                     }
                 }
             }
         }
         if t.encache && t.id != 0 {
-            let key = (
-                t.id,
-                [
-                    ctm.a.to_bits(),
-                    ctm.b.to_bits(),
-                    ctm.c.to_bits(),
-                    ctm.d.to_bits(),
-                ],
-            );
-            self.tiles.insert(key, cell);
+            let key = tile_key(t.id, ctm, cell_shape.is_some(), cell_ga.is_some());
+            self.tiles.insert(key, (cell, cell_shape, cell_ga));
         }
     }
 
@@ -1445,11 +1536,13 @@ impl DrawDevice<'_> {
             match color {
                 Some(c) => {
                     dst.span_with_color(bbox.x0, y, cov, c);
+                    // The planes have no colorspace: MuPDF paints them
+                    // with the mask painters, not the color ones.
                     if let Some((_, h)) = shape.as_mut() {
-                        h.span_with_color(bbox.x0, y, cov, &[255]);
+                        h.glyph_alpha_row(bbox.x0, y, cov, 255, rle);
                     }
                     if let Some((_, g)) = ga.as_mut() {
-                        g.span_with_color(bbox.x0, y, cov, &shapebva);
+                        g.glyph_alpha_row(bbox.x0, y, cov, shapebva[0], rle);
                     }
                 }
                 None if rle => dst.glyph_mask_row(bbox.x0, y, cov),
@@ -1505,6 +1598,64 @@ impl DrawDevice<'_> {
 
     /// A path filled white into the top state's mask, as
     /// `fz_draw_clip_text` fills a glyph it cannot render.
+    /// The state `fz_draw_clip_text` and `fz_draw_clip_stroke_text` push
+    /// for text bounded by `area`: a mask for the glyphs and a copy of
+    /// the pixmap. False when there is nothing to draw the glyphs into.
+    fn push_text_clip(&mut self, area: Rect, scissor: Rect) -> bool {
+        let mut bbox = IRect::from_rect(area).intersect(self.scissor());
+        if !scissor.is_infinite() {
+            bbox = bbox.intersect(IRect::from_rect(scissor));
+        }
+        let di = self.dest_index();
+        let (n, alpha) = match self.stack.get(di).and_then(|s| s.dest.as_ref()) {
+            Some(d) => (d.n, d.alpha),
+            None => (3, false),
+        };
+        let pixmaps = (Pix::new(bbox, 1, true), Pix::new(bbox, n, alpha));
+        let (Ok(mask), Ok(mut dest)) = pixmaps else {
+            let st = self.child(None, None, IRect::EMPTY);
+            self.stack.push(st);
+            return false;
+        };
+        if let Some(parent) = self.stack.get(di).and_then(|s| s.dest.as_ref()) {
+            if alpha {
+                dest.clear_with(0);
+            } else {
+                dest.copy_rect(parent, bbox);
+            }
+        }
+        let mut state = self.child(Some(dest), Some(mask), bbox);
+        state.ga = self.clip_ga(bbox, false);
+        state.shape = self.clip_plane(true, bbox, false);
+        state.iso = true;
+        self.stack.push(state);
+        !bbox.is_empty()
+    }
+
+    /// The fallback of `fz_draw_clip_stroke_text`: a glyph's outline
+    /// stroked into the clip's mask.
+    fn stroke_mask_path(&mut self, path: &Path, stroke: &StrokeState, ctm: Matrix) {
+        let (flat, expansion) = flatness(ctm.expansion());
+        let mut linewidth = stroke.linewidth;
+        if linewidth * expansion < AA_LEVEL {
+            linewidth = AA_LEVEL / expansion;
+        }
+        let Some(state) = self.stack.last_mut() else {
+            return;
+        };
+        let Some(mask) = state.mask.as_mut() else {
+            return;
+        };
+        let bbox = mask.bbox().intersect(state.scissor);
+        if flatten_stroke(&mut self.gel, path, stroke, ctm, flat, linewidth, bbox).is_none() {
+            return;
+        }
+        let clip = mask.bbox();
+        self.gel.convert(false, clip, &mut |x, y, m| {
+            mask.span_with_color(x, y, m, &[255])
+        });
+    }
+
     fn fill_mask_path(&mut self, path: &Path, ctm: Matrix) {
         let (flat, _) = flatness(ctm.expansion());
         let Some(state) = self.stack.last_mut() else {
@@ -1561,7 +1712,8 @@ impl DrawDevice<'_> {
         mask: bool,
     ) -> Option<(Pix, Option<ColorSpace>, i32, i32)> {
         let doc = self.doc?;
-        let decoded = match crate::pixmap::from_image(doc, image) {
+        let (dw, dh, l2) = extent_and_factor(image.width, image.height, ctm);
+        let (decoded, l2) = match crate::pixmap::from_image_subsampled(doc, image, l2) {
             Ok(p) => p,
             Err(e) => {
                 doc.diagnostics()
@@ -1569,7 +1721,6 @@ impl DrawDevice<'_> {
                 return None;
             }
         };
-        let (dw, dh, l2) = extent_and_factor(image.width, image.height, ctm);
         let mut pix = Pix {
             x: 0,
             y: 0,
@@ -1610,7 +1761,7 @@ impl DrawDevice<'_> {
             alpha: pix.alpha,
             samples: Vec::with_capacity(pix.w as usize * pix.h as usize * (3 + sa)),
         };
-        let fast_cmyk = !self.cc.icc
+        let fast_cmyk = !self.icc()
             && cs.family() == Some(crate::colorspace::Family::Cmyk)
             && !matches!(cs, ColorSpace::Separation { .. });
         let div255 = |c: i32, a: i32| if a == 0 { 0 } else { (c * 255 + a / 2) / a };
@@ -1637,7 +1788,7 @@ impl DrawDevice<'_> {
                 let key: Vec<u8> = p[..sn].iter().map(|&v| un(v) as u8).collect();
                 *cache.entry(key).or_insert_with_key(|k| {
                     let f: Vec<f32> = k.iter().map(|&v| f32::from(v) / 255.0).collect();
-                    let c = self.cc.rgb(self.doc, cs, &f, 1);
+                    let c = self.cc.rgb(self.doc, cs, &f, self.ri(1));
                     c.map(|v| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8)
                 })
             };
@@ -1764,6 +1915,52 @@ mod tests {
     }
 
     #[test]
+    fn clips_left_open_are_closed_when_the_pixmap_is_taken() {
+        let mut dev = DrawDevice::new(None, white(10, 10));
+        let mut clip = Path::new();
+        clip.move_to(0.0, 0.0);
+        clip.line_to(10.0, 0.0);
+        clip.line_to(0.0, 10.0);
+        clip.close_path();
+        dev.clip_path(&clip, false, Matrix::IDENTITY, Rect::INFINITE);
+        dev.clip_path(&clip, true, Matrix::IDENTITY, Rect::INFINITE);
+        assert!(format!("{dev:?}").contains("depth: 3"));
+        let mut all = Path::new();
+        all.rect_to(0.0, 0.0, 10.0, 10.0);
+        let gray = ColorParams::default();
+        dev.fill_path(
+            &all,
+            false,
+            Matrix::IDENTITY,
+            &ColorSpace::Gray,
+            &[0.0],
+            1.0,
+            gray,
+        );
+        // No pop: the painting inside the clips still lands.
+        let p = dev.into_pix();
+        assert_eq!(px(&p, 1, 1), [0, 0, 0]);
+        assert_eq!(px(&p, 8, 8), [255, 255, 255]);
+    }
+
+    #[test]
+    fn text_clips_take_glyphs_too_big_to_cache_as_paths() {
+        // A 300-point O clips as its outline (unhinted, where MuPDF's is
+        // hinted, so pixels are sampled away from its edges).
+        let pdf = page(
+            200,
+            200,
+            "/Font<</H 5 0 R>>",
+            "BT /H 300 Tf 7 Tr 60 -40 Td (O) Tj ET 1 0 0 rg 0 0 200 200 re f",
+            &["<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"],
+        );
+        let pix = kit::render("clip-big-glyph", &pdf, 1.0, true);
+        assert_eq!(kit::px(&pix, 80, 100), [255, 0, 0]);
+        assert_eq!(kit::px(&pix, 150, 100), [255, 255, 255]);
+        assert_eq!(kit::px(&pix, 10, 100), [255, 255, 255]);
+    }
+
+    #[test]
     fn a_clip_limits_what_is_painted() {
         let mut dev = DrawDevice::new(None, white(10, 10));
         let mut tri = Path::new();
@@ -1787,5 +1984,517 @@ mod tests {
         let p = dev.into_pix();
         assert_eq!(px(&p, 1, 1), [0, 0, 0]);
         assert_eq!(px(&p, 8, 8), [255, 255, 255]);
+    }
+
+    use crate::draw::testkit::{self as kit, check, page, stream};
+
+    /// A page filled red through a luminosity soft mask whose group
+    /// (gray, over a backdrop of `bc`) draws `mask`.
+    fn masked_red(mask: &str, bc: &str, extra: &[&str]) -> Vec<u8> {
+        let group = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 64 64]/Group<</S/Transparency/CS/DeviceGray>>/Resources<</Shading<</S 7 0 R>>/XObject<</I 7 0 R>>>>",
+            mask,
+        );
+        let gs = format!("<</SMask<</S/Luminosity/G 6 0 R/BC[{bc}]>>>>");
+        let mut objs = vec![gs.as_str(), group.as_str()];
+        objs.extend_from_slice(extra);
+        page(
+            64,
+            64,
+            "/ExtGState<</G 5 0 R>>",
+            "/G gs 1 0 0 rg 0 0 64 64 re f",
+            &objs,
+        )
+    }
+
+    #[test]
+    fn soft_masks_convert_colors_with_mupdfs_postscript_profiles() {
+        // With ICC on, MuPDF draws a soft mask's device colors through its
+        // ps_gray, ps_rgb and ps_cmyk profiles (linear, luminance as
+        // PostScript has it), not through the page's: pure red is 0.31
+        // there, 0.51 through sRGB to gray. nupdf used the page's.
+        let pdf = masked_red(
+            "0.2 0.5 0.1 0.1 k 0 0 32 32 re f 0.4 g 32 0 32 32 re f 0 1 0 rg 0 32 32 32 re f 1 0 0 rg 32 32 32 32 re f",
+            "0.2",
+            &[],
+        );
+        let pix = check(
+            "smask-luminosity-icc",
+            &pdf,
+            true,
+            "3261f0f028aaee3f9b48b21e0bcc7e50",
+        );
+        // Red through red's luminance, 0.31: (255, 176, 176).
+        assert_eq!(kit::px(&pix, 48, 16), [255, 176, 176]);
+        check(
+            "smask-luminosity-noicc",
+            &pdf,
+            false,
+            "fc04b2e5a0f6ec9db1bd1a646c552bb5",
+        );
+    }
+
+    const MODES: [&str; 16] = [
+        "Normal",
+        "Multiply",
+        "Screen",
+        "Overlay",
+        "Darken",
+        "Lighten",
+        "ColorDodge",
+        "ColorBurn",
+        "HardLight",
+        "SoftLight",
+        "Difference",
+        "Exclusion",
+        "Hue",
+        "Saturation",
+        "Color",
+        "Luminosity",
+    ];
+
+    /// `/B0` to `/B15`: each blend mode at fill alpha `ca`.
+    fn blend_states(ca: &str) -> String {
+        let mut s = String::from("/ExtGState<<");
+        for (i, m) in MODES.iter().enumerate() {
+            s.push_str(&format!("/B{i}<</BM/{m}/ca {ca}>>"));
+        }
+        s.push_str(">>");
+        s
+    }
+
+    /// A 128-point page of 16 cells, one a blend mode: each a backdrop
+    /// of two colors, then `paint` (with `{x}`, `{y}` its corner) under
+    /// the cell's blend mode.
+    fn blend_page(name: &str, ca: &str, paint: &str, res: &str, extra: &[&str], want: &str) {
+        let mut content = String::new();
+        for i in 0..16 {
+            let (x, y) = ((i % 4) * 32, (i / 4) * 32);
+            content.push_str(&format!(
+                "1 0.5 0 rg {x} {y} 16 32 re f 0.2 0.3 0.8 rg {} {y} 16 32 re f q /B{i} gs {} Q\n",
+                x + 16,
+                paint
+                    .replace("{x}", &x.to_string())
+                    .replace("{y}", &y.to_string())
+                    .replace("{x4}", &(x + 4).to_string())
+                    .replace("{y4}", &(y + 4).to_string())
+                    .replace("{x10}", &(x + 10).to_string())
+                    .replace("{y10}", &(y + 10).to_string()),
+            ));
+        }
+        let res = format!("{}{res}", blend_states(ca));
+        check(name, &page(128, 128, &res, &content, extra), true, want);
+    }
+
+    #[test]
+    fn every_blend_mode_over_a_backdrop() {
+        blend_page(
+            "blend-objects",
+            "0.75",
+            "0.2 0.8 0.4 rg {x4} {y4} 24 24 re f 0.9 0.1 0.6 rg {x10} {y10} 12 12 re f",
+            "",
+            &[],
+            "81166c0b5a40b88bf3d37a46eea5afd6",
+        );
+    }
+
+    #[test]
+    fn blend_modes_composite_isolated_and_non_isolated_groups() {
+        // The same group, isolated then not, blended into each cell.
+        for (name, iso, want) in [
+            (
+                "blend-group-isolated",
+                "true",
+                "265b03b54961f84da04249cfbc631374",
+            ),
+            (
+                "blend-group-nonisolated",
+                "false",
+                "3b9f313bde7f1b9a41bab7100a5d437c",
+            ),
+        ] {
+            let form = stream(
+                &format!(
+                    "/Type/XObject/Subtype/Form/BBox[0 0 32 32]/Group<</S/Transparency/I {iso}>>/Resources<</ExtGState<</H<</ca 0.6/BM/Multiply>>>>>>"
+                ),
+                "0.2 0.8 0.4 rg 4 4 20 20 re f /H gs 0.9 0.1 0.6 rg 10 10 18 18 re f",
+            );
+            blend_page(
+                name,
+                "0.9",
+                "1 0 0 1 {x} {y} cm /G Do",
+                "/XObject<</G 5 0 R>>",
+                &[&form],
+                want,
+            );
+        }
+    }
+
+    #[test]
+    fn knockout_groups_replace_what_they_painted() {
+        // Inside a knockout group each object paints over the group's
+        // backdrop, not over the objects before it: translucent shapes,
+        // a shading and an image, in isolated and non-isolated groups.
+        let form = |iso: &str| {
+            stream(
+                &format!(
+                    "/Type/XObject/Subtype/Form/BBox[0 0 64 64]/Group<</S/Transparency/K true/I {iso}>>/Resources<</ExtGState<</H<</ca 0.5>>/M<</ca 0.7/BM/Multiply>>>>/Shading<</S 7 0 R>>/XObject<</I 8 0 R>>>>"
+                ),
+                "/H gs 1 0 0 rg 4 4 36 36 re f 0 0 1 rg 20 20 36 36 re f
+                 /M gs 0 1 0 rg 12 30 30 30 re f
+                 q 4 0 0 30 30 2 cm /I Do Q
+                 q 40 40 20 20 re W n /S sh Q",
+            )
+        };
+        let content = "0.9 0.9 0.2 rg 0 0 128 128 re f 0.3 g 0 0 64 128 re f
+                       q /A gs /K1 Do Q q 1 0 0 1 0 64 cm /K2 Do Q
+                       q 1 0 0 1 64 32 cm /A gs /K2 Do Q";
+        let k1 = form("true");
+        let k2 = form("false");
+        let shading = "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[40 0 60 0]/Function<</FunctionType 2/Domain[0 1]/C0[1 1 0]/C1[0 1 1]/N 1>>>>";
+        let image = kit::hex_stream(
+            "/Type/XObject/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceRGB/BitsPerComponent 8",
+            &[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
+        );
+        let pdf = page(
+            128,
+            128,
+            "/ExtGState<</A<</ca 0.8/BM/Screen>>>>/XObject<</K1 5 0 R/K2 6 0 R>>",
+            content,
+            &[&k1, &k2, shading, &image],
+        );
+        check(
+            "blend-knockout",
+            &pdf,
+            true,
+            "045fb31560b0d7cf82b4dbc5eaac72cd",
+        );
+    }
+
+    #[test]
+    fn alpha_soft_masks_with_transfer_functions_and_backdrops() {
+        let mask = stream(
+            "/Type/XObject/Subtype/Form/BBox[8 8 120 120]/Group<</S/Transparency>>/Resources<</ExtGState<</H<</ca 0.4>>>>>>",
+            "0 g 16 16 60 60 re f /H gs 60 60 50 50 re f",
+        );
+        let lum = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 128 128]/Group<</S/Transparency/CS/DeviceRGB>>",
+            "1 1 1 rg 0 64 64 64 re f 0 0 1 rg 64 64 64 64 re f",
+        );
+        let pdf = page(
+            128,
+            128,
+            "/ExtGState<</A 5 0 R/T 6 0 R/L 7 0 R>>",
+            "0 0.6 0 rg q /A gs 0 0 128 64 re f Q q /T gs 1 0 0 rg 0 0 64 128 re f Q
+             q /L gs 0.5 0 0.5 rg 0 64 128 64 re f Q",
+            &[
+                "<</SMask<</S/Alpha/G 8 0 R>>>>",
+                "<</SMask<</S/Alpha/G 8 0 R/TR<</FunctionType 2/Domain[0 1]/C0[1]/C1[0]/N 1>>>>>>",
+                "<</SMask<</S/Luminosity/G 9 0 R/BC[0.5 0.5 0.5]>>/CA 0.5>>",
+                &mask,
+                &lum,
+            ],
+        );
+        check(
+            "smask-alpha-transfer",
+            &pdf,
+            true,
+            "a5b8f5a5c866ac325ef5c0222aa9ee32",
+        );
+    }
+
+    #[test]
+    fn clips_nest_and_fill_by_either_rule() {
+        // A rectangle clip, an even-odd clip inside it, a non-zero
+        // triangle; a rotated clip; an empty one hides everything.
+        let pdf = page(
+            128,
+            128,
+            "",
+            "q 8 8 112 112 re W n
+               q 20 20 80 80 re 40 40 40 40 re W* n 0 0 1 rg 0 0 128 128 re f
+                 q 20 20 m 110 64 l 20 110 l h W n 1 0 0 rg 0 0 128 128 re f Q
+               Q
+               q 0.9 0.43 -0.43 0.9 64 0 cm 10 60 m 60 60 l 35 100 l h W n 0 1 0 rg 0 0 128 128 re f Q
+             Q
+             q 0 0 m 0 0 l W n 0 g 0 0 128 128 re f Q
+             q 200 200 10 10 re W n 0 g 0 0 128 128 re f Q",
+            &[],
+        );
+        check(
+            "clip-nested",
+            &pdf,
+            true,
+            "dc9fe1313e602905381214b1aae275b1",
+        );
+    }
+
+    #[test]
+    fn a_page_of_everything_draws_as_mupdf_draws_it() {
+        // Text in every render mode with a Type 3 font among them, pattern
+        // strokes, stencils in a pattern, tiles from the cache, layers.
+        check(
+            "sink",
+            &kit::sink(),
+            true,
+            "52c0e8802b9702cc6bc3fae69dbbcf65",
+        );
+        check(
+            "sink-noicc",
+            &kit::sink(),
+            false,
+            "52c0e8802b9702cc6bc3fae69dbbcf65",
+        );
+    }
+
+    #[test]
+    fn translucent_patterns_paint_through_their_group() {
+        // A pattern filled or stroked at an alpha below 1 runs in a
+        // non-isolated group, whose group alpha the tiles must paint too:
+        // nupdf's did not, so the group composited as nothing.
+        let tile = stream(
+            "/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 8 8]/XStep 8/YStep 8/Resources<<>>",
+            "1 0 0 rg 0 0 4 4 re f 0 0 1 rg 4 4 4 4 re f",
+        );
+        let pdf = page(
+            64,
+            64,
+            "/Pattern<</T 5 0 R>>/ExtGState<</A<</ca 0.5/CA 0.5>>/M<</BM/Multiply/ca 0.7>>>>",
+            "0 1 0 rg 0 0 64 20 re f
+             q /A gs /Pattern cs /T scn 4 4 40 24 re f /Pattern CS /T SCN 6 w 8 40 m 56 56 l S Q
+             q /M gs /Pattern cs /T scn 30 10 30 40 re f Q",
+            &[&tile],
+        );
+        let pix = check(
+            "pattern-alpha",
+            &pdf,
+            true,
+            "65d703989a6c90f48add72529ca13123",
+        );
+        assert_ne!(kit::px(&pix, 30, 50), [255, 255, 255]);
+    }
+
+    #[test]
+    fn text_stroked_in_a_shading_clips_to_its_strokes() {
+        // The draw device did not clip to stroked text: the shading
+        // filled everything and the pop took the clip below with it.
+        // MuPDF strokes these glyphs with FreeType, a level or so off
+        // nupdf's outlines, so pixels are sampled where both agree.
+        let pdf =
+            kit::sink_with("q /Pattern CS /Sh SCN 3 w BT /F1 60 Tf 1 Tr 100 30 Td (I) Tj ET Q");
+        let pix = kit::render("clip-stroke-text", &pdf, 1.0, true);
+        let page = kit::render("sink", &kit::sink(), 1.0, true);
+        // On the stroke: the shading, blue more than red.
+        let on = kit::px(&pix, 105, 78);
+        assert!(on[2] > on[0] + 100, "{on:?}");
+        // Inside the stem, beside it and elsewhere, the page as it was.
+        for (x, y) in [(108, 78), (120, 78), (10, 110), (60, 20), (64, 64)] {
+            assert_eq!(kit::px(&pix, x, y), kit::px(&page, x, y), "at {x}, {y}");
+        }
+    }
+
+    #[test]
+    fn everything_inside_translucent_non_isolated_groups() {
+        // The sink's objects drawn again inside groups that keep a group
+        // alpha and a shape: a non-isolated group, a knockout one inside
+        // it, clips and soft masks within, at alphas below 1.
+        let outer = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 128 128]/Group<</S/Transparency/I false>>/Resources<</ExtGState<</A<</ca 0.6/CA 0.6>>/M 14 0 R/X<</BM/Screen/ca 0.8>>>>/Shading<</S 11 0 R>>/Pattern<</T1 12 0 R/Sh<</PatternType 2/Shading 11 0 R>>>>/Font<</F1 5 0 R/F3 6 0 R>>/XObject<</Im 9 0 R/St 10 0 R/In 19 0 R>>>>",
+            "q 10 10 100 100 re W n 0.5 0 1 rg 0 0 128 128 re f
+               q 30 30 m 100 40 l 60 110 l h W n /A gs /S sh Q
+               q /A gs 20 0 0 20 4 50 cm /Im Do Q
+               q /A gs 0.2 0.6 0.2 rg 20 0 0 20 28 50 cm /St Do Q
+               q /A gs /Pattern cs /Sh scn 20 0 0 20 52 50 cm /St Do Q
+               q /A gs /Pattern cs /T1 scn 76 50 20 20 re f Q
+               q /A gs BT /F1 18 Tf 4 90 Td (Grp) Tj /F3 1 Tf 12 0 0 12 60 90 Tm (ab) Tj ET Q
+               q /M gs 0 0 1 rg 40 76 40 20 re f Q
+               q /X gs /In Do Q
+             Q",
+        );
+        let inner = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 128 128]/Group<</S/Transparency/K true/I false>>/Resources<</ExtGState<</H<</ca 0.5>>>>/Shading<</S 11 0 R>>>>",
+            "/H gs 1 0 0 rg 60 4 40 30 re f 0 1 0 rg 80 14 40 30 re f
+             q 70 0 50 50 re W n /S sh Q",
+        );
+        let mut pdf = String::from_utf8_lossy(&kit::sink_with("q /G gs /Out Do Q")).into_owned();
+        pdf = pdf.replace("/Fm 16 0 R>>", "/Fm 16 0 R/Out 18 0 R>>");
+        pdf = pdf.replace("/Hs<</CA 0.5>>", "/Hs<</CA 0.5>>/G<</ca 0.7/BM/Multiply>>");
+        // The two forms as objects 18 and 19, after the sink's 17.
+        let mut objs: Vec<String> = Vec::new();
+        let body = &pdf[..pdf.find("xref\n").unwrap_or(pdf.len())];
+        for part in body.split(" 0 obj\n").skip(1) {
+            if let Some(end) = part.find("\nendobj\n") {
+                objs.push(part[..end].to_string());
+            }
+        }
+        objs.push(outer);
+        objs.push(inner);
+        let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+        let pdf = kit::pdf_of(&refs);
+        check(
+            "groups-deep",
+            &pdf,
+            true,
+            "1244237e080f712516537fe662f8e703",
+        );
+    }
+
+    #[test]
+    fn knockout_clips_small_masks_cmyk_images_and_fine_tiles() {
+        // A clip in a knockout group (its shape; text there comes out a
+        // level apart from MuPDF, so it is left out), a soft mask
+        // small enough for its transfer function to run per pixel, a
+        // CMYK image shrunk (converted before it is scaled), and a tile
+        // whose steps are too fine to show, which is abandoned.
+        let ko = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 128 128]/Group<</S/Transparency/K true>>/Resources<</Font<</F 9 0 R>>/ExtGState<</H<</ca 0.5>>/O<</ca 1>>>>>>",
+            "/H gs 1 0 0 rg 4 4 60 30 re f
+             /O gs 0 0 1 rg 8 10 30 10 re f /H gs
+             q 30 0 40 40 re W n 0 1 0 rg 20 4 40 30 re f Q",
+        );
+        let mask = stream(
+            "/Type/XObject/Subtype/Form/BBox[70 70 90 90]/Group<</S/Transparency>>",
+            "0 g 70 70 10 20 re f 0.5 g 80 70 10 20 re f",
+        );
+        let cmyk: Vec<u8> = (0..50u32 * 37)
+            .flat_map(|i| {
+                [
+                    (i % 50 * 5) as u8,
+                    (i / 50 * 7) as u8,
+                    60,
+                    (i % 7 * 20) as u8,
+                ]
+            })
+            .collect();
+        let image = kit::hex_stream(
+            "/Type/XObject/Subtype/Image/Width 50/Height 37/ColorSpace/DeviceCMYK/BitsPerComponent 8",
+            &cmyk,
+        );
+        let fine = stream(
+            "/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 1 1]/XStep 0.00001/YStep 0.00001/Resources<<>>",
+            "1 0 0 rg 0 0 1 1 re f",
+        );
+        let pdf = page(
+            128,
+            128,
+            "/XObject<</K 5 0 R/I 7 0 R>>/ExtGState<</M<</SMask<</S/Alpha/G 6 0 R/TR<</FunctionType 2/Domain[0 1]/C0[0.2]/C1[1]/N 2>>>>>>>>/Pattern<</P 8 0 R>>",
+            "0.9 0.9 0.5 rg 0 0 128 128 re f /K Do
+             q /M gs 0 0 0.5 rg 60 60 40 40 re f Q
+             q 30 0 0 22 4 90 cm /I Do Q
+             q /Pattern cs /P scn 100 4 20 20 re f Q",
+            &[
+                &ko,
+                &mask,
+                &image,
+                &fine,
+                "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+            ],
+        );
+        check(
+            "device-edges",
+            &pdf,
+            false,
+            "1a18641729f678f1a2111b0822c5c513",
+        );
+    }
+
+    #[test]
+    fn groups_nest_isolated_in_non_isolated_and_back() {
+        // A non-isolated group holding an isolated one and a non-isolated
+        // one, each translucent and blended, the inner ones holding
+        // translucent shapes and a blended one of their own: the group
+        // alphas below take each one's alpha as it ends.
+        let form = |n: i32, iso: &str, content: &str| {
+            stream(
+                &format!(
+                    "/Type/XObject/Subtype/Form/BBox[0 0 128 128]/Group<</S/Transparency/I {iso}>>/Resources<</XObject<</A 6 0 R/B 7 0 R/C 8 0 R>>/ExtGState<</H<</ca 0.5/BM/Screen>>/D<</ca 0.7/BM/Darken>>/L<</ca 0.6/BM/Luminosity>>>>>>"
+                ),
+                &format!("% {n}\n{content}"),
+            )
+        };
+        let outer = form(
+            5,
+            "false",
+            "0 0.5 0 rg 10 10 108 108 re f
+             q /H gs /A Do Q q /D gs /B Do Q q /L gs /C Do Q",
+        );
+        let a = form(
+            6,
+            "true",
+            "/H gs 1 0 0 rg 20 20 50 50 re f 0 0 1 rg 40 40 50 50 re f",
+        );
+        let b = form(
+            7,
+            "false",
+            "/D gs 1 1 0 rg 60 20 50 40 re f /L gs 0 1 1 rg 70 30 40 50 re f",
+        );
+        let c = form(8, "false", "0.8 0.3 0.9 rg 30 70 60 40 re f");
+        let pdf = page(
+            128,
+            128,
+            "/XObject<</O 5 0 R>>/ExtGState<</M<</BM/Multiply/ca 0.8>>>>",
+            "0.9 0.6 0.3 rg 0 0 128 64 re f q /M gs /O Do Q",
+            &[&outer, &a, &b, &c],
+        );
+        check(
+            "groups-nested",
+            &pdf,
+            true,
+            "cfd7bd825f4d4d3a87a110000ff4e03d",
+        );
+    }
+
+    #[test]
+    fn blend_modes_over_nothing_over_gray_and_in_masks() {
+        // Each blend mode inside an isolated group, half over the group's
+        // own paint and half over nothing; over a gray backdrop (where
+        // saturation has none to keep); and inside a luminosity mask,
+        // where the group is gray.
+        let mut iso = String::from("0.3 0.6 0.9 rg 0 0 128 32 re f\n");
+        let mut gray = String::new();
+        for (i, _) in MODES.iter().enumerate() {
+            let x = i * 8;
+            iso.push_str(&format!("q /B{i} gs 0.9 0.4 0.1 rg {x} 16 8 32 re f Q\n"));
+            gray.push_str(&format!("q /B{i} gs 0.2 0.7 0.4 rg {x} 52 8 12 re f Q\n"));
+        }
+        let res = format!("/Resources<<{}>>", blend_states("1"));
+        let group = stream(
+            &format!(
+                "/Type/XObject/Subtype/Form/BBox[0 0 128 48]/Group<</S/Transparency/I true>>{res}"
+            ),
+            &iso,
+        );
+        let mask = stream(
+            &format!(
+                "/Type/XObject/Subtype/Form/BBox[0 64 128 128]/Group<</S/Transparency/CS/DeviceGray>>{res}"
+            ),
+            &(0..16)
+                .map(|i| {
+                    format!(
+                        "{} g {} 64 8 64 re f q /B{i} gs 0.8 g {} 80 8 30 re f Q\n",
+                        f64::from(i) / 16.0,
+                        i * 8,
+                        i * 8
+                    )
+                })
+                .collect::<String>(),
+        );
+        let states = blend_states("0.9");
+        let inner = &states["/ExtGState<<".len()..states.len() - 2];
+        let pdf = page(
+            128,
+            128,
+            &format!(
+                "/XObject<</G 5 0 R>>/ExtGState<</M<</SMask<</S/Luminosity/G 6 0 R>>>>{inner}>>"
+            ),
+            &format!("/G Do 0.5 g 0 48 128 20 re f {gray} q /M gs 1 0 0 rg 0 64 128 64 re f Q"),
+            &[&group, &mask],
+        );
+        check(
+            "blend-edges",
+            &pdf,
+            true,
+            "e4a7d6ab178c2b97e00847800352e2da",
+        );
     }
 }

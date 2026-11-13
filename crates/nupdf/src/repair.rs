@@ -91,6 +91,8 @@ pub fn scan(data: &[u8], diag: &Diagnostics) -> Result<Scan, String> {
                             if out.roots.is_empty() {
                                 return Err(e);
                             }
+                            // MuPDF reports the syntax error it caught.
+                            diag.warn("error.reported", crate::diag::report::syntax(&e));
                             diag.warn(
                                 "repair.ignoring_rest",
                                 format!("cannot parse object ({num} {generation} R) - ignoring rest of file"),
@@ -307,5 +309,67 @@ mod tests {
         let data = b"%PDF-1.4\n( junk\n1 0 obj 5 endobj\n";
         let scan = scan(data, &Diagnostics::new()).unwrap();
         assert_eq!(scan.list.len(), 1);
+    }
+
+    #[test]
+    fn repair_warns_as_mupdf_does() {
+        // `mutool show FILE trailer 4 5` on the same file: an object
+        // numbered below zero, streams with a short or missing endobj (one
+        // after CR LF), an xref stream's /ID losing to the trailer's, and a
+        // truncated object at the end.
+        let data = b"%PDF-1.4\n%     \n\
+            1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n\
+            2 0 obj <</Type/Pages/Kids[]/Count 0>> endobj\n\
+            -3 0 obj (negative) endobj\n\
+            4 0 obj <</Length 100>> stream\r\nshort\nendstream\n\
+            5 0 obj <</Length 3>> stream\nabc\nendstream\n\
+            6 0 obj <</Type/XRef/Root 1 0 R/ID[<01><02>]/Size 7/W[1 1 1]/Length 0>> stream\n\nendstream endobj\n\
+            trailer <</Root 1 0 R/ID[<03><04>]>>\n\
+            7 0 obj\n";
+        let doc = crate::document::Document::open(data.to_vec()).unwrap();
+        let said: Vec<String> = doc
+            .diagnostics()
+            .snapshot()
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "format error: cannot find startxref",
+                "trying to repair broken xref",
+                "repairing PDF document",
+                "ignoring object with invalid object number (0 0 R)",
+                "object missing 'endobj' token",
+                "object missing 'endobj' token",
+                "syntax error: truncated object",
+                "cannot parse object (7 0 R) - ignoring rest of file"
+            ]
+        );
+        let trailer = doc.trailer();
+        assert_eq!(
+            crate::print::to_string(
+                trailer.get(b"ID").unwrap_or(&Object::Null),
+                Default::default()
+            ),
+            "[<03><04>]"
+        );
+        let data_of = |n| match doc.object(n) {
+            Some(Object::Stream(s)) => doc.stream_data(&s).unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(data_of(4), b"short\n");
+        assert_eq!(data_of(5), b"abc");
+    }
+
+    #[test]
+    fn a_truncated_object_before_any_root_fails_the_scan() {
+        let data = b"%PDF-1.4\n1 0 obj [1] endobj\n2 0 obj";
+        assert_eq!(
+            scan(data, &Diagnostics::new()).err().as_deref(),
+            Some("truncated object")
+        );
+        let unterminated = b"%PDF-1.4\n1 0 obj <</A [1 2";
+        assert!(scan(unterminated, &Diagnostics::new()).is_err());
     }
 }

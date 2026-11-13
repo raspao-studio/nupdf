@@ -50,8 +50,9 @@ pub fn unicode_strict(name: &[u8]) -> u32 {
     agl(name).unwrap_or(0)
 }
 
-/// `strtol` of all of `s` in `base`, 0 unless it all reads.
-fn read_num(s: &[u8], base: u32) -> i64 {
+/// `read_num`: `strtol` of all of `s` in `base`, 0 unless it all reads,
+/// kept in an `int` as MuPDF keeps it (the low 32 bits of the long).
+fn read_num(s: &[u8], base: u32) -> i32 {
     let text = std::str::from_utf8(s).unwrap_or("");
     let t = text.trim_start();
     let (neg, digits) = match t.as_bytes().first() {
@@ -71,8 +72,13 @@ fn read_num(s: &[u8], base: u32) -> i64 {
         return 0;
     }
     // strtol saturates at the long range.
-    let v = i64::from_str_radix(digits, base).unwrap_or(i64::MAX);
-    if neg { -v } else { v }
+    let long = match i64::from_str_radix(digits, base) {
+        Ok(v) if neg => -v,
+        Ok(v) => v,
+        Err(_) if neg => i64::MIN,
+        Err(_) => i64::MAX,
+    };
+    long as i32
 }
 
 /// `fz_unicode_from_glyph_name`: the list, then uniXXXX, uXXXX, aNN, the
@@ -113,14 +119,14 @@ pub fn unicode(name: &[u8]) -> u32 {
     } else if buf.first() == Some(&b'G') {
         let c = read_num(&buf[1..], 16);
         if c > 0 && c < 256 {
-            i64::from(tables::DOS_437[c as usize])
+            i32::from(tables::DOS_437[c as usize])
         } else {
             0
         }
     } else if buf.first() == Some(&b'g') {
         let c = read_num(&buf[1..], 16);
         if c > 0 && c < 258 {
-            i64::from(tables::TRUETYPE_GLYPH_INDEX[c as usize])
+            i32::from(tables::TRUETYPE_GLYPH_INDEX[c as usize])
         } else {
             0
         }
@@ -194,6 +200,54 @@ mod tests {
         assert_eq!(unicode(b"nonsense"), REPLACEMENT);
         assert_eq!(unicode_strict(b"nonsense"), 0);
         assert!(duplicate_names(0x20).contains(&"spacehackarabic"));
+    }
+
+    #[test]
+    fn ligature_underscores_numbers_and_dos_names() {
+        assert_eq!(unicode(b"f_f"), 0xfb00);
+        assert_eq!(unicode(b"f_f_i"), 0xfb03);
+        assert_eq!(unicode(b"f_f_l"), 0xfb04);
+        assert_eq!(unicode(b"f_l"), 0xfb02);
+        // Other names with an underscore read up to it.
+        assert_eq!(unicode(b"f_x"), 0x66);
+        assert_eq!(unicode(b"A_B"), 0x41);
+        assert_eq!(unicode(b"G41"), u32::from(tables::DOS_437[0x41]));
+        assert_eq!(unicode(b"G0"), REPLACEMENT);
+        assert_eq!(unicode(b"g999"), REPLACEMENT);
+        // A bare number, signed as strtol reads it; not past Unicode.
+        assert_eq!(unicode(b"65"), 65);
+        assert_eq!(unicode(b"+66"), 66);
+        assert_eq!(unicode(b"-5"), REPLACEMENT);
+        assert_eq!(unicode(b"1114112"), REPLACEMENT);
+        assert_eq!(unicode(b"99999999999999999999999"), REPLACEMENT);
+        assert_eq!(unicode(b"uniD"), REPLACEMENT);
+        assert_eq!(unicode(b"u0x41"), 0x41);
+        // Past 63 bytes a name is cut.
+        let mut long = b"uni0042".to_vec();
+        long.extend([b'x'; 70]);
+        assert_eq!(unicode(&long), REPLACEMENT);
+        assert!(duplicate_names(0x10ffff).is_empty());
+    }
+
+    #[test]
+    fn numbers_wrap_to_an_int_as_in_c() {
+        // read_num keeps strtol's long in an int: 2^32 + 65 is 65, and an
+        // overflowing negative (LONG_MIN) is 0.
+        assert_eq!(unicode(b"4294967361"), 65);
+        assert_eq!(unicode(b"uni0041"), unicode(b"u100000041"));
+        assert_eq!(unicode(b"-99999999999999999999999"), REPLACEMENT);
+        assert_eq!(read_num(b"-99999999999999999999999", 10), 0);
+        assert_eq!(read_num(b"99999999999999999999999", 10), -1);
+    }
+
+    #[test]
+    fn eight_bit_codes_from_unicode() {
+        assert_eq!(windows_1252_from_unicode(0x41), 0x41);
+        assert_eq!(windows_1252_from_unicode(0x20ac), 0x80);
+        assert_eq!(windows_1252_from_unicode(0x4e00), -1);
+        assert_eq!(windows_1252_from_unicode(0x1f600), -1);
+        assert_eq!(iso8859_7_from_unicode(0x3b1), 0xe1);
+        assert_eq!(koi8u_from_unicode(0x430), 0xc1);
     }
 
     #[test]

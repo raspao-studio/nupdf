@@ -567,7 +567,6 @@ pub(crate) trait Charstrings {
 
 const STACK_SIZE: usize = 48;
 const MAX_SUBR: usize = 16;
-const T1_MAX_SUBRS_CALLS: usize = 8;
 const MAX_HINTS: usize = 96;
 const STORAGE_SIZE: usize = 32;
 
@@ -676,6 +675,10 @@ struct Interp<'a, 'p, 'q> {
     left_bearing: &'q mut (f64, f64),
     instructions: &'q mut u32,
     doing_seac: bool,
+    /// The width operand of a Type 2 charstring, once seen.
+    width: Option<f64>,
+    /// Stop at the width (`width_only`).
+    width_only: bool,
 }
 
 type Step = Result<(), LoadError>;
@@ -724,8 +727,12 @@ impl Interp<'_, '_, '_> {
     }
 
     /// `cf2_doStems`.
-    fn stems(&mut self, vertical: bool) {
+    /// True when only the width was wanted.
+    fn stems(&mut self, vertical: bool) -> bool {
         let count = self.stack.len();
+        if self.width_seen(count & 1 == 1) {
+            return true;
+        }
         let n = (count - (count & 1)) / 2;
         if vertical {
             self.vstems += n;
@@ -733,7 +740,18 @@ impl Interp<'_, '_, '_> {
             self.hstems += n;
         }
         self.stack.clear();
+        false
+    }
+
+    /// The width a Type 2 operator gives, the operand under its own when
+    /// `has` and there was none before; from here the glyph has a width
+    /// (perhaps the default). True when only the width was wanted.
+    fn width_seen(&mut self, has: bool) -> bool {
+        if !self.t1 && has && !self.have_width {
+            self.width = self.stack.first().map(|n| n.v);
+        }
         self.have_width = true;
+        self.width_only
     }
 
     /// `cf2_doFlex`.
@@ -818,6 +836,8 @@ impl Interp<'_, '_, '_> {
             left_bearing: &mut *self.left_bearing,
             instructions: &mut *self.instructions,
             doing_seac: true,
+            width: None,
+            width_only: false,
         };
         sub.run(cs)
     }
@@ -836,11 +856,15 @@ impl Interp<'_, '_, '_> {
                 *at += 1;
                 b
             };
-            let read = |frames: &mut Vec<(&[u8], usize)>| -> Result<u8, LoadError> {
-                let (cs, at) = frames.last_mut().ok_or(LoadError)?;
-                let b = *cs.get(*at).ok_or(LoadError)?;
+            // cf2_buf_readByte: past the end, a zero (its error goes
+            // nowhere).
+            let read = |frames: &mut Vec<(&[u8], usize)>| -> u8 {
+                let Some((cs, at)) = frames.last_mut() else {
+                    return 0;
+                };
+                let b = cs.get(*at).copied().unwrap_or(0);
                 *at += 1;
-                Ok(b)
+                b
             };
             if self.t1 {
                 if !self.results.is_empty() && !matches!(op1, 10 | 11 | 12 | 32..=255) {
@@ -858,19 +882,21 @@ impl Interp<'_, '_, '_> {
                 0 | 2 | 15 | 16 | 17 => {}
                 // hstem, hstemhm.
                 1 | 18 => {
-                    if self.t1 || !self.hintmask_valid {
-                        self.stems(false);
+                    if (self.t1 || !self.hintmask_valid) && self.stems(false) {
+                        return Ok(());
                     }
                 }
                 // vstem, vstemhm.
                 3 | 23 => {
-                    if self.t1 || !self.hintmask_valid {
-                        self.stems(true);
+                    if (self.t1 || !self.hintmask_valid) && self.stems(true) {
+                        return Ok(());
                     }
                 }
                 // vmoveto.
                 4 => {
-                    self.have_width = true;
+                    if self.width_seen(self.stack.len() > 1) {
+                        return Ok(());
+                    }
                     self.cur_y += self.pop()?;
                     self.move_to();
                 }
@@ -928,7 +954,9 @@ impl Interp<'_, '_, '_> {
                 // callsubr, callgsubr.
                 10 | 29 => {
                     let depth = frames.len() - 1;
-                    if (!self.t1 && depth > MAX_SUBR) || (self.t1 && depth > T1_MAX_SUBRS_CALLS) {
+                    // The subroutine stack holds MAX_SUBR levels under the
+                    // charstring (cf2_arrstack_getPointer), for both kinds.
+                    if depth >= MAX_SUBR {
                         return Err(LoadError);
                     }
                     let n = self.pop_int()?;
@@ -949,7 +977,7 @@ impl Interp<'_, '_, '_> {
                     continue;
                 }
                 12 => {
-                    let op2 = read(&mut frames)?;
+                    let op2 = read(&mut frames);
                     match self.escape(op2)? {
                         Flow::Keep => continue,
                         Flow::Clear => {}
@@ -968,7 +996,10 @@ impl Interp<'_, '_, '_> {
                 }
                 // endchar.
                 14 => {
-                    self.have_width = true;
+                    let n = self.stack.len();
+                    if self.width_seen(n == 1 || n == 5) {
+                        return Ok(());
+                    }
                     self.path.close();
                     if !self.t1 && self.stack.len() > 1 {
                         if self.doing_seac {
@@ -988,14 +1019,16 @@ impl Interp<'_, '_, '_> {
                 // hintmask, cntrmask.
                 19 | 20 => {
                     if !(self.stack.len() > 1 && self.hintmask_valid) {
-                        self.stems(true);
+                        if self.stems(true) {
+                            return Ok(());
+                        }
                         let bits = self.hstems + self.vstems;
                         if bits > MAX_HINTS {
                             return Err(LoadError);
                         }
                         if bits > 0 {
                             for _ in 0..bits.div_ceil(8) {
-                                read(&mut frames)?;
+                                read(&mut frames);
                             }
                             if op1 == 19 {
                                 self.hintmask_valid = true;
@@ -1005,14 +1038,18 @@ impl Interp<'_, '_, '_> {
                 }
                 // rmoveto.
                 21 => {
-                    self.have_width = true;
+                    if self.width_seen(self.stack.len() > 2) {
+                        return Ok(());
+                    }
                     self.cur_y += self.pop()?;
                     self.cur_x += self.pop()?;
                     self.move_to();
                 }
                 // hmoveto.
                 22 => {
-                    self.have_width = true;
+                    if self.width_seen(self.stack.len() > 1) {
+                        return Ok(());
+                    }
                     self.cur_x += self.pop()?;
                     self.move_to();
                 }
@@ -1072,8 +1109,8 @@ impl Interp<'_, '_, '_> {
                 }
                 // shortint.
                 28 => {
-                    let b1 = read(&mut frames)?;
-                    let b2 = read(&mut frames)?;
+                    let b1 = read(&mut frames);
+                    let b2 = read(&mut frames);
                     self.push(f64::from(i16::from_be_bytes([b1, b2])), true)?;
                     continue;
                 }
@@ -1124,19 +1161,19 @@ impl Interp<'_, '_, '_> {
                     continue;
                 }
                 247..=250 => {
-                    let b = i32::from(read(&mut frames)?);
+                    let b = i32::from(read(&mut frames));
                     self.push(f64::from((i32::from(op1) - 247) * 256 + b + 108), true)?;
                     continue;
                 }
                 251..=254 => {
-                    let b = i32::from(read(&mut frames)?);
+                    let b = i32::from(read(&mut frames));
                     self.push(f64::from(-(i32::from(op1) - 251) * 256 - b - 108), true)?;
                     continue;
                 }
                 255 => {
                     let mut b = [0u8; 4];
                     for v in &mut b {
-                        *v = read(&mut frames)?;
+                        *v = read(&mut frames);
                     }
                     let v = i32::from_be_bytes(b);
                     if self.t1 {
@@ -1264,18 +1301,18 @@ impl Interp<'_, '_, '_> {
                 self.push(f64::from(u8::from(a == b)), true)?;
                 Ok(Flow::Keep)
             }
-            // callothersubr, in Type 1.
+            // callothersubr, in Type 1; Type 2 leaves the stack.
             16 => {
                 if !self.t1 {
-                    return Ok(Flow::Clear);
+                    return Ok(Flow::Keep);
                 }
                 self.othersubr()?;
                 Ok(Flow::Keep)
             }
-            // pop, in Type 1.
+            // pop, in Type 1; Type 2 leaves the stack.
             17 => {
                 if !self.t1 {
-                    return Ok(Flow::Clear);
+                    return Ok(Flow::Keep);
                 }
                 if self.known_results > 0 {
                     self.known_results -= 1;
@@ -1527,7 +1564,7 @@ pub(crate) fn charstring_cbox(
     cs: &[u8],
 ) -> Result<Option<CBox>, LoadError> {
     let mut points = Points::default();
-    run_charstring(font, cs, &mut points, None)?;
+    run_charstring(font, cs, &mut points, None, false)?;
     Ok(points.cbox())
 }
 
@@ -1536,9 +1573,19 @@ pub(crate) fn charstring_cbox(
 pub(crate) fn charstring_outline(font: &dyn Charstrings, cs: &[u8]) -> Result<Outline, LoadError> {
     let mut points = Points::default();
     let mut out = Outline::default();
-    run_charstring(font, cs, &mut points, Some(&mut out))?;
+    run_charstring(font, cs, &mut points, Some(&mut out), false)?;
     out.end_contour();
     Ok(out)
+}
+
+/// The width operand of a Type 2 charstring as `cff_slot_load` finds it
+/// for `FT_LOAD_ADVANCE_ONLY` (`width_only`): None for the default width;
+/// an error where FreeType fails before the width.
+pub(crate) fn charstring_width(
+    font: &dyn Charstrings,
+    cs: &[u8],
+) -> Result<Option<f64>, LoadError> {
+    run_charstring(font, cs, &mut Points::default(), None, true)
 }
 
 fn run_charstring(
@@ -1546,7 +1593,8 @@ fn run_charstring(
     cs: &[u8],
     points: &mut Points,
     outline: Option<&mut Outline>,
-) -> Result<(), LoadError> {
+    width_only: bool,
+) -> Result<Option<f64>, LoadError> {
     let mut path = Path {
         points,
         outline,
@@ -1578,8 +1626,11 @@ fn run_charstring(
         left_bearing: &mut left_bearing,
         instructions: &mut instructions,
         doing_seac: false,
+        width: None,
+        width_only,
     };
-    interp.run(cs)
+    interp.run(cs)?;
+    Ok(interp.width)
 }
 
 #[cfg(test)]
@@ -1803,5 +1854,378 @@ mod tests {
         assert_eq!(mul_fix(3, 0x8000), 2);
         assert_eq!(mul_fix(-3, 0x8000), -2);
         assert_eq!(mul_fix(1000, 0x10000), 1000);
+    }
+
+    /// Subroutines 0 to 39: each calls the next, and the last draws a
+    /// line. Local subroutine numbers are unbiased here.
+    struct Chain {
+        t1: bool,
+        subrs: Vec<Vec<u8>>,
+    }
+
+    impl Chain {
+        fn new(t1: bool) -> Chain {
+            let mut subrs: Vec<Vec<u8>> = (1..40).map(|i| cs(&[(&[i], 10), (&[], 11)])).collect();
+            subrs.push(cs(&[(&[100, 100], 5), (&[], 11)]));
+            Chain { t1, subrs }
+        }
+    }
+
+    impl Charstrings for Chain {
+        fn is_t1(&self) -> bool {
+            self.t1
+        }
+        fn local_subr(&self, n: i64) -> Option<&[u8]> {
+            self.subrs.get(usize::try_from(n).ok()?).map(Vec::as_slice)
+        }
+        fn global_subr(&self, n: i64) -> Option<&[u8]> {
+            self.local_subr(n)
+        }
+        fn seac_component(&self, _: i64) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    #[test]
+    fn sixteen_levels_of_subroutines_and_no_more() {
+        // MuPDF draws a Type 1 glyph sixteen subroutines deep and fails
+        // one seventeen deep (cf2's subroutine stack); Type 2 alike.
+        for t1 in [true, false] {
+            let font = Chain::new(t1);
+            let deep = |levels: i32, op: u8| {
+                let start = if t1 {
+                    vec![(&[0, 500][..], 13)]
+                } else {
+                    Vec::new()
+                };
+                let mut c = cs(&start);
+                c.extend(cs(&[(&[0, 0], 21), (&[40 - levels], op), (&[], 14)]));
+                charstring_outline(&font, &c).map(|o| o.points)
+            };
+            for op in [10, 29] {
+                assert_eq!(deep(16, op), Ok(vec![(0, 0), (100, 100)]), "{t1} {op}");
+                assert_eq!(deep(17, op), Err(LoadError), "{t1} {op}");
+            }
+        }
+    }
+
+    #[test]
+    fn outlines_transform_translate_scale_and_bound() {
+        let mut o = Outline::default();
+        assert_eq!(o.cbox(), (0, 0, 0, 0));
+        o.points = vec![(10, 20), (-30, 40), (50, -60)];
+        assert_eq!(o.cbox(), (-30, -60, 50, 40));
+        // A quarter turn: x' = -y, y' = x.
+        o.transform(0, -0x10000, 0x10000, 0);
+        assert_eq!(o.points, [(-20, 10), (-40, -30), (60, 50)]);
+        o.translate(5, -5);
+        assert_eq!(o.points, [(-15, 5), (-35, -35), (65, 45)]);
+        o.scale(0x8000, 0x20000);
+        assert_eq!(o.points, [(-8, 10), (-18, -70), (33, 90)]);
+        assert_eq!(div_fix_int(1, 2), 0x8000);
+        assert_eq!(div_fix_int(-3, 2), -0x18000);
+        assert_eq!(div_fix_int(3, -4), -0xc000);
+        assert_eq!(div_fix_int(5, 0), 0x7FFF_FFFF);
+    }
+
+    /// A glyph: its contour count and xMin, then its body.
+    fn glyph(n_contours: i32, x_min: i32, body: &[u8]) -> Vec<u8> {
+        let mut g = words(&[n_contours, x_min, 0, 0, 0]);
+        g.extend(body);
+        g
+    }
+
+    /// The triangle (10, 0) (10, 50) (-40, 0), the last point off the
+    /// curve, its coordinates in every flag form: a positive short x, a
+    /// repeated x, a negative short x; a repeated y, a positive short y, a
+    /// word y.
+    fn triangle(first_flag: u8) -> Vec<u8> {
+        let mut b = words(&[2, 0]);
+        b.extend([first_flag | 1 | 2 | 16 | 32, 1 | 16 | 4 | 32, 2]);
+        b.extend([10, 50]);
+        b.extend([50]);
+        b.extend(words(&[-50]));
+        glyph(1, -40, &b)
+    }
+
+    /// A composite of components (flags, glyph, then the bytes after).
+    fn composite(parts: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (i, (flags, gid, rest)) in parts.iter().enumerate() {
+            let more = if i + 1 < parts.len() {
+                MORE_COMPONENTS
+            } else {
+                0
+            };
+            b.extend((flags | more).to_be_bytes());
+            b.extend(gid.to_be_bytes());
+            b.extend(rest);
+        }
+        glyph(-1, 0, &b)
+    }
+
+    fn points_of(glyphs: &[Vec<u8>], gid: u32) -> Result<Vec<(i64, i64)>, LoadError> {
+        let (data, at) = glyf_font(glyphs);
+        let g = Glyf {
+            data: &data,
+            loca: (0, at),
+            long_loca: true,
+            glyf: (at, data.len() - at),
+            num_glyphs: glyphs.len() as u32,
+        };
+        truetype_points(&g, gid)
+    }
+
+    #[test]
+    fn simple_glyphs_read_every_flag_form() {
+        let tri = vec![(10, 0), (10, 50), (-40, 0)];
+        assert_eq!(points_of(&[triangle(0)], 0), Ok(tri.clone()));
+        // Repeated flags: three points of words.
+        let mut b = words(&[2, 0]);
+        b.extend([1 | ON_REPEAT, 2]);
+        b.extend(words(&[1, 2, 3, 4, 5, 6]));
+        assert_eq!(
+            points_of(&[glyph(1, 0, &b)], 0),
+            Ok(vec![(1, 4), (3, 9), (6, 15)])
+        );
+        // The outline keeps tags and contour ends; an overlap flag on the
+        // first point marks it.
+        let (data, at) = glyf_font(&[triangle(OVERLAP_SIMPLE)]);
+        let g = Glyf {
+            data: &data,
+            loca: (0, at),
+            long_loca: true,
+            glyf: (at, data.len() - at),
+            num_glyphs: 1,
+        };
+        let o =
+            truetype_outline(&g, 0, (0x10000, 0x10000), -40).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            (o.points, o.tags, o.contours, o.overlap),
+            (tri, vec![1, 1, 0], vec![2], true)
+        );
+    }
+
+    #[test]
+    fn broken_simple_glyphs_fail() {
+        let fails = |g: Vec<u8>| {
+            assert_eq!(
+                points_of(std::slice::from_ref(&g), 0),
+                Err(LoadError),
+                "{g:?}"
+            )
+        };
+        // Too many contours, ends that go back, too many points, a body
+        // shorter than its ends, instructions past the end.
+        fails(glyph(0xFFF, 0, &[0; 8]));
+        fails(glyph(2, 0, &words(&[5, 3, 0])));
+        fails(glyph(1, 0, &words(&[0xFFFC - 0x10000, 0])));
+        fails(glyph(2, 0, &words(&[5])));
+        fails(glyph(1, 0, &words(&[0, 9])));
+        // Flags and coordinates cut short, a repeat past the points.
+        fails(glyph(1, 0, &words(&[1, 0])));
+        fails(glyph(1, 0, &[0, 1, 0, 0, 1 | ON_REPEAT]));
+        fails(glyph(1, 0, &[0, 1, 0, 0, 1 | ON_REPEAT, 5]));
+        fails(glyph(1, 0, &[0, 0, 0, 0, 2]));
+        fails(glyph(1, 0, &[0, 0, 0, 0, 0, 0]));
+        // A header shorter than ten bytes.
+        fails(vec![0, 1, 0, 0]);
+        // An empty glyph with a header has no points.
+        assert_eq!(points_of(&[glyph(0, 0, &[])], 0), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn composites_scale_move_and_match_points() {
+        let f2 = |v: f64| ((v * 16384.0) as i16).to_be_bytes().to_vec();
+        let i8s = |a: i8, b: i8| vec![a as u8, b as u8];
+        // Glyph 1 moved by words; glyph 1 at half size, moved by bytes
+        // scaled with it.
+        let c2 = composite(&[
+            (ARGS_ARE_WORDS | ARGS_ARE_XY_VALUES, 1, words(&[-20, 30])),
+            (
+                ARGS_ARE_XY_VALUES | WE_HAVE_A_SCALE | SCALED_COMPONENT_OFFSET,
+                1,
+                [i8s(5, -5), f2(0.5)].concat(),
+            ),
+        ]);
+        // Glyph 1 stretched in y, then glyph 1 turned a quarter and placed
+        // so its point 0 lies on point 1 of the first.
+        let c3 = composite(&[
+            (
+                ARGS_ARE_XY_VALUES | WE_HAVE_AN_XY_SCALE,
+                1,
+                [vec![0, 0], f2(1.0), f2(1.5)].concat(),
+            ),
+            (
+                WE_HAVE_A_2X2,
+                1,
+                [vec![1, 0], f2(0.0), f2(1.0), f2(-1.0), f2(0.0)].concat(),
+            ),
+        ]);
+        // Point numbers as words; one past the points so far; an empty
+        // component; a component that is not there.
+        let c4 = composite(&[
+            (ARGS_ARE_XY_VALUES, 0, vec![9, 9]),
+            (ARGS_ARE_XY_VALUES, 1, vec![0, 0]),
+            (ARGS_ARE_WORDS, 1, words(&[2, 1])),
+        ]);
+        let c5 = composite(&[(0, 1, vec![0, 0]), (0, 1, vec![3, 0])]);
+        let c6 = composite(&[(ARGS_ARE_XY_VALUES, 9, vec![0, 0])]);
+        let c7 = composite(&[(ARGS_ARE_XY_VALUES | WE_HAVE_A_2X2, 1, vec![0, 0])]);
+        let glyphs = [Vec::new(), triangle(0), c2, c3, c4, c5, c6, c7];
+        assert_eq!(
+            points_of(&glyphs, 2),
+            Ok(vec![
+                (-10, 30),
+                (-10, 80),
+                (-60, 30),
+                (8, -3),
+                (8, 22),
+                (-17, -3)
+            ])
+        );
+        assert_eq!(
+            points_of(&glyphs, 3),
+            Ok(vec![
+                (10, 0),
+                (10, 75),
+                (-40, 0),
+                (10, 75),
+                (-40, 75),
+                (10, 25)
+            ])
+        );
+        assert_eq!(
+            points_of(&glyphs, 4),
+            Ok(vec![
+                (10, 0),
+                (10, 50),
+                (-40, 0),
+                (-40, -50),
+                (-40, 0),
+                (-90, -50)
+            ])
+        );
+        assert_eq!(points_of(&glyphs, 5), Err(LoadError));
+        assert_eq!(points_of(&glyphs, 6), Err(LoadError));
+        assert_eq!(points_of(&glyphs, 7), Err(LoadError));
+    }
+
+    #[test]
+    fn composites_scale_their_offsets_with_the_outline() {
+        let c = composite(&[
+            (OVERLAP_COMPOUND | ARGS_ARE_XY_VALUES, 1, vec![10, 0]),
+            (ARGS_ARE_XY_VALUES, 1, vec![0, 0]),
+        ]);
+        let (data, at) = glyf_font(&[triangle(0), triangle(0), c]);
+        let g = Glyf {
+            data: &data,
+            loca: (0, at),
+            long_loca: true,
+            glyf: (at, data.len() - at),
+            num_glyphs: 3,
+        };
+        // At twice the size, the offset doubles; pp1 (xMin less lsb) moves
+        // the outline to the origin.
+        let o = truetype_outline(&g, 2, (0x20000, 0x20000), 0).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(o.overlap);
+        assert_eq!(
+            o.points,
+            [(40, 0), (40, 100), (-60, 0), (20, 0), (20, 100), (-80, 0)]
+        );
+        let o =
+            truetype_outline(&g, 1, (0x20000, 0x20000), -50).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(o.points, [(0, 0), (0, 100), (-100, 0)]);
+    }
+
+    #[test]
+    fn composites_nest_only_so_deep_and_so_wide() {
+        // A chain of 102 composites, each of the next.
+        let mut chain: Vec<Vec<u8>> = (1..102)
+            .map(|i| composite(&[(ARGS_ARE_XY_VALUES, i, vec![0, 0])]))
+            .collect();
+        chain.push(triangle(0));
+        assert_eq!(points_of(&chain, 1).map(|p| p.len()), Ok(3));
+        assert_eq!(points_of(&chain, 0), Err(LoadError));
+        // A tree of composites with two of the next, 17 deep: more loads
+        // than the budget allows.
+        let mut tree: Vec<Vec<u8>> = (1..18)
+            .map(|i| {
+                composite(&[
+                    (ARGS_ARE_XY_VALUES, i, vec![0, 0]),
+                    (ARGS_ARE_XY_VALUES, i, vec![0, 0]),
+                ])
+            })
+            .collect();
+        tree.push(glyph(0, 0, &[]));
+        assert_eq!(points_of(&tree, 3), Ok(Vec::new()));
+        assert_eq!(points_of(&tree, 0), Err(LoadError));
+    }
+
+    #[test]
+    fn loca_entries_short_long_and_past_the_table() {
+        // Short loca: offsets in words. Glyph 1 is empty, glyph 2 runs to
+        // the end of glyf though its next offset is past it.
+        let tri = triangle(0);
+        let mut glyf = tri.clone();
+        glyf.extend(&tri);
+        let n = (tri.len() / 2) as u16;
+        let loca: Vec<u8> = [0, n, n, 3 * n]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect();
+        let data = [loca.clone(), glyf.clone()].concat();
+        let short = Glyf {
+            data: &data,
+            loca: (0, loca.len()),
+            long_loca: false,
+            glyf: (loca.len(), glyf.len()),
+            num_glyphs: 4,
+        };
+        assert_eq!(short.location(0), (0, tri.len()));
+        assert_eq!(short.location(1), (tri.len(), 0));
+        assert_eq!(short.location(2), (tri.len(), tri.len()));
+        // The last entry has no next one; past the entries, nothing.
+        assert_eq!(short.location(3), (0, 0));
+        assert_eq!(short.location(9), (0, 0));
+        assert_eq!(truetype_points(&short, 2).map(|p| p.len()), Ok(3));
+        assert_eq!(truetype_points(&short, 9), Err(LoadError));
+        // Long loca: an offset past glyf, one that goes back, and an end
+        // past glyf that is not the last.
+        let len = glyf.len() as u32;
+        let loca: Vec<u8> = [0, len + 8, 40, 20, len + 4, len]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect();
+        let data = [loca.clone(), glyf.clone()].concat();
+        let long = Glyf {
+            data: &data,
+            loca: (0, loca.len()),
+            long_loca: true,
+            glyf: (loca.len(), glyf.len()),
+            num_glyphs: 6,
+        };
+        assert_eq!(long.location(0), (0, 0));
+        assert_eq!(long.location(1), (0, 0));
+        assert_eq!(long.location(2), (40, glyf.len() - 40));
+        assert_eq!(long.location(3), (0, 0));
+        assert_eq!(long.location(4), (0, 0));
+        assert_eq!(long.location(5), (glyf.len(), 0));
+        // A glyph whose data runs past the font.
+        let cut = Glyf {
+            data: &data[..data.len() - 4],
+            ..long
+        };
+        let loca: Vec<u8> = [0, len].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let data2 = [loca.clone(), glyf].concat();
+        let past = Glyf {
+            data: &data2[..data2.len() - 1],
+            loca: (0, loca.len()),
+            long_loca: true,
+            glyf: (loca.len(), len as usize),
+            num_glyphs: 1,
+        };
+        assert_eq!(truetype_points(&past, 0), Err(LoadError));
+        assert_eq!(cut.location(9), (0, 0));
     }
 }

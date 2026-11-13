@@ -726,4 +726,115 @@ mod tests {
         };
         assert!(p.bound(None, rot).is_empty());
     }
+
+    #[test]
+    fn degenerate_curves_fold_into_lines_and_short_curves() {
+        let start = || {
+            let mut p = Path::new();
+            p.move_to(0.0, 0.0);
+            p.line_to(1.0, 0.0);
+            p
+        };
+        // Every point the current one: nothing after a line.
+        let mut p = start();
+        p.curve_to(1.0, 0.0, 1.0, 0.0, 1.0, 0.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0"]);
+        // First control on the current point, second on the end: a line.
+        let mut p = start();
+        p.curve_to(1.0, 0.0, 5.0, 5.0, 5.0, 5.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0", "l 5 5"]);
+        // Both controls together on the current point: a line.
+        let mut p = start();
+        p.curve_to(1.0, 0.0, 1.0, 0.0, 5.0, 5.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0", "l 5 5"]);
+        // Both controls on the end: a line; the second alone: a y curve.
+        let mut p = start();
+        p.curve_to(5.0, 5.0, 5.0, 5.0, 5.0, 5.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0", "l 5 5"]);
+        let mut p = start();
+        p.curve_to(3.0, 1.0, 5.0, 5.0, 5.0, 5.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0", "c 3 1 5 5 5 5"]);
+        // A v curve whose control is the current point adds a line first,
+        // as MuPDF's does; one back onto the current point adds nothing.
+        let mut p = start();
+        p.curve_to_v(1.0, 0.0, 4.0, 4.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0", "l 4 4", "c 4 4 1 0 4 4"]);
+        let mut p = start();
+        p.curve_to_v(1.0, 0.0, 1.0, 0.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0"]);
+        // A y curve whose control is its end: the same quirk.
+        let mut p = start();
+        p.curve_to_y(4.0, 4.0, 4.0, 4.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0", "l 4 4", "c 4 4 4 4 4 4"]);
+        let mut p = start();
+        p.curve_to_y(1.0, 0.0, 1.0, 0.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0"]);
+        let mut p = start();
+        p.curve_to_y(2.0, 3.0, 4.0, 4.0);
+        assert_eq!(walk(&p), ["m 0 0", "l 1 0", "c 2 3 4 4 4 4"]);
+        // Curves and closes need a current point.
+        let mut p = Path::new();
+        assert!(p.is_empty());
+        assert!(!p.curve_to(1.0, 1.0, 2.0, 2.0, 3.0, 3.0));
+        assert!(!p.curve_to_v(2.0, 2.0, 3.0, 3.0));
+        assert!(!p.curve_to_y(1.0, 1.0, 3.0, 3.0));
+        assert!(!p.close_path());
+        // A degenerate segment straight after a move keeps the point.
+        let mut p = Path::new();
+        p.move_to(2.0, 2.0);
+        p.line_to(2.0, 2.0);
+        assert_eq!(walk(&p), ["m 2 2", "l 2 2"]);
+    }
+
+    #[test]
+    fn bounds_through_a_rotation_take_curves_and_stroke_mitres() {
+        let rot = Matrix {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let skew = Matrix {
+            a: 1.0,
+            b: 0.5,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let mut p = Path::new();
+        p.move_to(0.0, 0.0);
+        p.curve_to(2.0, 8.0, 6.0, 8.0, 8.0, 0.0);
+        p.close_path();
+        p.move_to(20.0, 20.0);
+        // The control points count; the trailing move does not.
+        let b = p.bound(None, skew);
+        assert_eq!(b, Rect::new(0.0, 0.0, 8.0, 11.0));
+        // Rotated a quarter, the rectilinear bounds turn with it.
+        assert_eq!(p.bound(None, rot), Rect::new(-8.0, 0.0, 0.0, 8.0));
+        // Stroked with mitres, the box grows by the miter limit; with a
+        // zero width, by half a pixel; XPS mitres by the limit alone.
+        let s = |linejoin, linewidth| StrokeState {
+            linewidth,
+            linejoin,
+            miterlimit: 4.0,
+            ..StrokeState::default()
+        };
+        let w = |r: Rect| r.x1 - r.x0;
+        let miter = p.bound(Some(&s(LINEJOIN_MITER, 2.0)), skew);
+        let xps = p.bound(Some(&s(LINEJOIN_MITER_XPS, 2.0)), skew);
+        let hair = p.bound(Some(&s(1, 0.0)), skew);
+        assert_eq!(w(miter), 8.0 + 2.0 * 8.0);
+        assert_eq!(w(xps), 8.0 + 2.0 * 4.0);
+        assert_eq!(w(hair), 9.0);
+        let r = adjust_for_stroke(Rect::new(0.0, 0.0, 10.0, 10.0), &s(1, 2.0), skew);
+        assert_eq!(r, Rect::new(-1.0, -1.0, 11.0, 11.0));
+        // A right-angled path skewed is not right-angled any more.
+        let mut sq = Path::new();
+        sq.rect_to(0.0, 0.0, 4.0, 4.0);
+        let b = sq.bound(Some(&s(LINEJOIN_MITER, 2.0)), skew);
+        assert_eq!(w(b), 4.0 + 2.0 * 8.0);
+    }
 }

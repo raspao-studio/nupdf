@@ -1314,6 +1314,485 @@ mod tests {
         );
     }
 
+    /// Loads object 2 of a document holding `body`, returning the function
+    /// (or MuPDF's error) and the warnings loading gave.
+    fn load_body(
+        body: &[u8],
+        m: usize,
+        n: usize,
+    ) -> (Document, Result<Function, String>, Vec<String>) {
+        let doc = doc_with(body);
+        let before = doc.diagnostics().snapshot().len();
+        let f = load(&doc, &Object::Ref(crate::ObjRef::new(2, 0)), m, n);
+        let warnings = doc.diagnostics().snapshot()[before..]
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        (doc, f, warnings)
+    }
+
+    /// Runs a calculator function of one input (`x`, domain -1000..1000)
+    /// with `n` outputs, each with range -1e11..1e11.
+    fn calc(code: &str, x: f32, n: usize) -> Vec<f32> {
+        let range = vec!["-100000000000 100000000000"; n].join(" ");
+        let (doc, obj) = postscript(code, "-1000 1000", &range);
+        let f = load(&doc, &obj, 1, n).unwrap_or_else(|e| panic!("{code}: {e}"));
+        eval1(&doc, &f, &[x])
+    }
+
+    #[track_caller]
+    fn near(got: &[f32], want: &[f32]) {
+        assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                (g - w).abs() <= 1e-4 * w.abs().max(1.0),
+                "{got:?} vs {want:?}"
+            );
+        }
+    }
+
+    const BIG: f32 = 100_000_000_000.0;
+
+    #[test]
+    fn every_calculator_operator_computes_as_in_mupdf() {
+        // (code, outputs); the input is 0 and popped first.
+        let cases: &[(&str, &[f32])] = &[
+            (
+                "-3 abs 2.5 neg abs -2147483648 abs",
+                &[3.0, 2.5, -2_147_483_648.0],
+            ),
+            (
+                "1 2.5 add 3 4 sub 2 3 mul 1.5 2 mul 2147483647 1 add",
+                &[3.5, -1.0, 6.0, 3.0, -2_147_483_648.0],
+            ),
+            (
+                "12 10 and 12 10 or 12 10 xor 5 not -1 not",
+                &[8.0, 14.0, 6.0, -6.0, 0.0],
+            ),
+            (
+                "1 1 eq 1 2 eq and {1}{0} ifelse 1 1 eq 1 2 eq or {1}{0} ifelse \
+                 1 1 eq 1 1 eq xor {1}{0} ifelse 1 2 eq not {1}{0} ifelse",
+                &[0.0, 1.0, 0.0, 1.0],
+            ),
+            ("1 1 atan 0 1 atan -1 0 atan", &[45.0, 0.0, 270.0]),
+            (
+                "1 4 bitshift -16 -2 bitshift 5 40 bitshift 7 0 bitshift",
+                &[16.0, 1_073_741_820_f64 as f32, 5.0, 7.0],
+            ),
+            (
+                "1.2 ceiling -1.2 ceiling 1.7 floor -1.2 floor 2.5 round -2.5 round 3 round \
+                 -1.7 truncate 1.7 truncate 4 truncate",
+                &[2.0, -1.0, 1.0, -2.0, 3.0, -3.0, 3.0, -1.0, 1.0, 4.0],
+            ),
+            ("0 cos 90 sin 180 cos 270 sin", &[1.0, 1.0, -1.0, -1.0]),
+            ("2.7 cvi -2.7 cvi 3 cvr 2.5 cvr", &[2.0, -2.0, 3.0, 2.5]),
+            (
+                "1 4 div 3 0 div -3 0 div 0 -0.0000001 div",
+                &[0.25, BIG, -BIG, -BIG],
+            ),
+            (
+                "1 1 eq {1}{0} ifelse 1 1.0 eq {1}{0} ifelse 1 1 eq 1 2 eq eq {1}{0} ifelse \
+                 2 3 ne {1}{0} ifelse 2.5 2.5 ne {1}{0} ifelse",
+                &[1.0, 1.0, 0.0, 1.0, 0.0],
+            ),
+            ("2 3 exp 4 0.5 exp -8 0.5 exp", &[8.0, 2.0, 1.0]),
+            (
+                "2 3 lt {1}{0} ifelse 2 3 gt {1}{0} ifelse 2.5 2.5 ge {1}{0} ifelse \
+                 2.5 2 le {1}{0} ifelse",
+                &[1.0, 0.0, 1.0, 0.0],
+            ),
+            (
+                "7 2 idiv -7 2 idiv 5 0 idiv -5 0 idiv -2147483648 -1 idiv",
+                &[
+                    3.0,
+                    -3.0,
+                    2_147_483_647.0,
+                    -2_147_483_648.0,
+                    2_147_483_647.0,
+                ],
+            ),
+            (
+                "7 3 mod -7 3 mod 5 0 mod -5 0 mod -2147483648 -1 mod",
+                &[1.0, -1.0, 2_147_483_647.0, -2_147_483_648.0, 0.0],
+            ),
+            (
+                "1 ln 100 log 16 sqrt -1 sqrt 0 ln",
+                &[0.0, 2.0, 4.0, 1.0, -BIG],
+            ),
+            (
+                "5 neg 2.5 neg -2147483648 neg",
+                &[-5.0, -2.5, -2_147_483_648.0],
+            ),
+            // Stack manipulation.
+            ("1 2 3 2 copy", &[1.0, 2.0, 3.0, 2.0, 3.0]),
+            ("1 -1 copy 1 2 exch dup pop", &[1.0, 2.0, 1.0]),
+            ("1 2 3 0 index 3 index", &[1.0, 2.0, 3.0, 3.0, 1.0]),
+            // -1 index copies the slot above the top: the -1 just popped.
+            ("5 -1 index", &[5.0, -1.0]),
+            ("1 2 3 3 1 roll", &[3.0, 1.0, 2.0]),
+            ("1 2 3 3 -1 roll", &[2.0, 3.0, 1.0]),
+            ("1 2 3 4 3 2 roll", &[1.0, 3.0, 4.0, 2.0]),
+            ("1 2 3 3 -3 roll", &[1.0, 2.0, 3.0]),
+            ("1 2 3 3 -2147483648 roll", &[1.0, 2.0, 3.0]),
+            ("1 2 0 1 roll 2 0 roll 1 5 1 roll", &[1.0, 2.0, 1.0]),
+            // Underflow is ignored: missing operands read as 0.
+            ("add pop pop 1", &[1.0]),
+            ("1 return 2", &[1.0]),
+        ];
+        for (code, want) in cases {
+            let got = calc(&format!("{{ pop {code} }}"), 0.0, want.len());
+            near(&got, want);
+        }
+    }
+
+    #[test]
+    fn calculator_control_flow_and_stack_limits() {
+        let f = "{ dup 0 gt { 10 mul } if }";
+        assert_eq!(calc(f, 2.0, 1), [20.0]);
+        assert_eq!(calc(f, -1.0, 1), [-1.0]);
+        let f = "{ dup 0 lt { neg } { dup 1 gt { pop 100 } if } ifelse }";
+        assert_eq!(calc(f, -3.0, 1), [3.0]);
+        assert_eq!(calc(f, 0.5, 1), [0.5]);
+        assert_eq!(calc(f, 7.0, 1), [100.0]);
+        // if and ifelse take only booleans; anything else reads as false
+        // and stays on the stack, as do bools under integer operators.
+        assert_eq!(calc("{ pop 1 { 2 } if }", 0.0, 1), [1.0]);
+        assert_eq!(calc("{ pop 1 1 eq cvi }", 0.0, 1), [0.0]);
+        // The stack holds 99 values; pushes past them are dropped.
+        let pushes: Vec<String> = (0..120).map(|i| i.to_string()).collect();
+        assert_eq!(
+            calc(&format!("{{ pop {} }}", pushes.join(" ")), 0.0, 1),
+            [98.0]
+        );
+        // Booleans written in the code are foreign objects to MuPDF's
+        // interpreter: it warns and stops there.
+        for code in ["{ pop 5 true }", "{ pop 5 false }"] {
+            let (doc, obj) = postscript(code, "0 1", "0 10");
+            let f = load(&doc, &obj, 1, 1).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(eval1(&doc, &f, &[0.0]), [5.0]);
+            assert!(doc.diagnostics().has("function.ps_foreign"));
+        }
+        // Outputs past the function's are zero; missing inputs read as 0.
+        let (doc, obj) = postscript("{ 1 add }", "0 1", "0 10");
+        let f = load(&doc, &obj, 1, 1).unwrap_or_else(|e| panic!("{e}"));
+        let mut out = [9.0; 3];
+        f.eval(&doc, &[], &mut out);
+        assert_eq!(out, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn more_calculator_syntax_errors_are_mupdfs() {
+        let err = |code: &str| {
+            let (doc, obj) = postscript(code, "0 1", "0 1");
+            load(&doc, &obj, 1, 1).err().unwrap_or_default()
+        };
+        let deep = format!("{}{}", "{ ".repeat(102), "} ".repeat(102));
+        assert_eq!(
+            err(&deep),
+            "syntax error: too much nesting in calculator function"
+        );
+        assert_eq!(
+            err("{ { 1 } }"),
+            "syntax error: missing keyword in 'if-else' context"
+        );
+        assert_eq!(
+            err("{ { 1 } ifelse }"),
+            "syntax error: not enough branches for 'ifelse'"
+        );
+        assert_eq!(
+            err("{ { 1 } { 2 } frob }"),
+            "syntax error: unknown keyword in 'if-else' context: 'frob'"
+        );
+        assert_eq!(
+            err("{ 1 ifelse }"),
+            "syntax error: illegally positioned ifelse operator in function"
+        );
+        assert_eq!(
+            err("{ (1) }"),
+            "syntax error: calculator function syntax error"
+        );
+        let doc = doc_with(b"<</FunctionType 4/Domain[0 1]/Range[0 1]>>");
+        assert_eq!(
+            load(&doc, &Object::Ref(crate::ObjRef::new(2, 0)), 1, 1)
+                .err()
+                .as_deref(),
+            Some("format error: object is not a stream")
+        );
+    }
+
+    /// A sampled function with one input over [0 1], two samples and one
+    /// output over [0 1], at `bps` bits per sample.
+    fn ramp(bps: u32, data: &[u8]) -> Result<f32, String> {
+        let mut body = format!(
+            "<</FunctionType 0/Domain[0 1]/Range[0 1]/Size[2]/BitsPerSample {bps}/Length {}>>stream\n",
+            data.len()
+        )
+        .into_bytes();
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\nendstream");
+        let (doc, f, _) = load_body(&body, 1, 1);
+        let f = f?;
+        Ok(eval1(&doc, &f, &[0.25])[0])
+    }
+
+    #[test]
+    fn sample_depths_read_as_mupdf_reads_them() {
+        // Every depth stores the samples 0 and the maximum.
+        for (bps, data) in [
+            (1, &[0x40][..]),
+            (2, &[0x30]),
+            (4, &[0x0f]),
+            (8, &[0x00, 0xff]),
+            (12, &[0x00, 0x0f, 0xff]),
+            (16, &[0, 0, 0xff, 0xff]),
+            (24, &[0, 0, 0, 0xff, 0xff, 0xff]),
+            (32, &[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]),
+        ] {
+            assert_eq!(ramp(bps, data), Ok(0.25), "{bps} bits");
+        }
+        assert_eq!(
+            ramp(7, &[0, 0]),
+            Err("syntax error: sample stream bit depth 7 unsupported".into())
+        );
+        for (bps, data, what) in [
+            (16, &[0, 0][..], "int16"),
+            (24, &[0, 0, 0, 0xff], "int24"),
+            (32, &[0; 5], "int32"),
+        ] {
+            assert_eq!(
+                ramp(bps, data),
+                Err(format!("format error: premature end of file in {what}"))
+            );
+        }
+    }
+
+    #[test]
+    fn sampled_functions_of_several_inputs_interpolate() {
+        // Two inputs: samples indexed x + 2y, 0 255 / 255 0.
+        let body = b"<</FunctionType 0/Domain[0 1 0 1]/Range[0 1]/Size[2 2]/BitsPerSample 8/Length 4>>stream\n\x00\xff\xff\x00\nendstream";
+        let (doc, f, warnings) = load_body(body, 2, 1);
+        let f = f.unwrap_or_else(|e| panic!("{e}"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(eval1(&doc, &f, &[0.25, 0.0]), [0.25]);
+        assert_eq!(eval1(&doc, &f, &[0.0, 0.75]), [0.75]);
+        assert_eq!(eval1(&doc, &f, &[0.5, 0.5]), [0.5]);
+        // Three inputs: the value is x, whatever y and z are.
+        let body = b"<</FunctionType 0/Domain[0 1 0 1 0 1]/Range[0 1]/Size[2 2 2]/BitsPerSample 8/Length 8>>stream\n\x00\xff\x00\xff\x00\xff\x00\xff\nendstream";
+        let (doc, f, _) = load_body(body, 3, 1);
+        let f = f.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(eval1(&doc, &f, &[0.25, 0.5, 0.75]), [0.25]);
+        // Encode and Decode remap: input read backwards, output into
+        // [0.5 1].
+        let body = b"<</FunctionType 0/Domain[0 1]/Range[0 1]/Size[2]/BitsPerSample 8/Encode[1 0]/Decode[0.5 1]/Length 2>>stream\n\x00\xff\nendstream";
+        let (doc, f, _) = load_body(body, 1, 1);
+        let f = f.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(eval1(&doc, &f, &[0.0]), [1.0]);
+        assert_eq!(eval1(&doc, &f, &[1.0]), [0.5]);
+    }
+
+    #[test]
+    fn sampled_function_dictionaries_are_checked_as_in_mupdf() {
+        let sampled = |dict: &str| {
+            let body = format!("<<{dict}/Length 2>>stream\n\x00\x7f\nendstream");
+            let (_, f, w) = load_body(body.as_bytes(), 1, 1);
+            (f.err(), w)
+        };
+        let base = "/FunctionType 0/Domain[0 1]/Range[0 1]/BitsPerSample 8";
+        assert_eq!(
+            sampled(&format!("{base}/Size[]")),
+            (
+                Some("syntax error: too few sample function dimension sizes".into()),
+                vec![]
+            )
+        );
+        assert_eq!(
+            sampled(&format!("{base}/Size[2 2]")),
+            (
+                None,
+                vec!["too many sample function dimension sizes".to_string()]
+            )
+        );
+        assert_eq!(
+            sampled(&format!("{base}/Size[0]")),
+            (
+                None,
+                vec!["non-positive sample function dimension size".to_string()]
+            )
+        );
+        assert_eq!(
+            sampled(&format!("{base}/Size[2]/Encode[0]/Decode[]")),
+            (
+                None,
+                vec![
+                    "wrong number of sample function input mappings".to_string(),
+                    "wrong number of sample function output mappings".to_string(),
+                ]
+            )
+        );
+        assert_eq!(
+            sampled(&format!("{base}/Size[200000000]")),
+            (
+                Some("syntax error: sample function too large".into()),
+                vec![]
+            )
+        );
+        let body = b"<</FunctionType 0/Domain[0 1 0 1]/Range[0 1]/Size[20000 20000]/BitsPerSample 8/Length 2>>stream\n\x00\x7f\nendstream";
+        let (_, f, _) = load_body(body, 2, 1);
+        assert_eq!(
+            f.err().as_deref(),
+            Some("syntax error: sample function too large")
+        );
+        // Domain and Range sizes that disagree with the caller warn.
+        let (_, f, w) = load_body(
+            format!("<<{base}/Size[2]/Length 2>>stream\n\x00\x7f\nendstream").as_bytes(),
+            2,
+            3,
+        );
+        assert!(f.is_ok());
+        assert_eq!(
+            w,
+            [
+                "wrong number of function inputs",
+                "wrong number of function outputs"
+            ]
+        );
+    }
+
+    #[test]
+    fn exponential_functions_warn_and_guard_like_mupdf() {
+        let exp = |dict: &str, m: usize, n: usize, x: f32| {
+            let (doc, f, w) = load_body(format!("<</FunctionType 2{dict}>>").as_bytes(), m, n);
+            let f = f.unwrap_or_else(|e| panic!("{e}"));
+            let mut out = vec![0.0; n];
+            f.eval(&doc, &[x], &mut out);
+            (out, w)
+        };
+        let (out, w) = exp("/Domain[0 1 0 1]/N 1", 1, 1, 0.5);
+        assert_eq!(out, [0.5]);
+        assert_eq!(
+            w,
+            [
+                "wrong number of function inputs",
+                "exponential functions have at most one input"
+            ]
+        );
+        // A fractional exponent of a negative input gives zeros.
+        let (out, w) = exp("/Domain[-1 1]/N 0.5/C0[0.25]/C1[1]", 1, 1, -0.5);
+        assert_eq!(out, [0.0]);
+        assert_eq!(
+            w,
+            ["exponential function input domain includes illegal negative input values"]
+        );
+        // So does a negative exponent of zero.
+        let (out, w) = exp("/Domain[0 1]/N -1/C0[0]/C1[1]", 1, 1, 0.0);
+        assert_eq!(out, [0.0]);
+        assert_eq!(
+            w,
+            ["exponential function input domain includes illegal input value zero"]
+        );
+        let (out, _) = exp("/Domain[-1 1]/N -1/C0[0]/C1[1]", 1, 1, 0.5);
+        assert_eq!(out, [2.0]);
+        // Short constant arrays warn and leave the rest at 0 and 1; Range
+        // clamps.
+        let (out, w) = exp("/Domain[0 1]/N 1/C0[0.5]/C1[]/Range[0 0.75 0 1]", 1, 2, 1.0);
+        assert_eq!(out, [0.75, 1.0]);
+        assert_eq!(
+            w,
+            [
+                "wrong number of C0 constants for exponential function",
+                "wrong number of C1 constants for exponential function",
+            ]
+        );
+    }
+
+    #[test]
+    fn stitching_functions_are_checked_and_split_as_in_mupdf() {
+        let stitch = |dict: &str| {
+            let (doc, f, w) = load_body(format!("<</FunctionType 3{dict}>>").as_bytes(), 1, 1);
+            (doc, f, w)
+        };
+        let id = "<</FunctionType 2/Domain[0 1]/N 1>>";
+        let err = |dict: &str| stitch(dict).1.err().unwrap_or_default();
+        assert_eq!(
+            err("/Domain[0 1]"),
+            "syntax error: stitching function has no input functions"
+        );
+        assert_eq!(
+            err("/Domain[0 1]/Functions[]"),
+            "syntax error: no sub-functions in stitching function"
+        );
+        let many = format!("/Domain[0 1]/Functions[{}]", id.repeat(257));
+        assert_eq!(
+            err(&many),
+            "syntax error: too many sub-functions in stitching function"
+        );
+        assert_eq!(
+            err(&format!("/Domain[0 1]/Functions[{id}]")),
+            "syntax error: stitching function has no bounds"
+        );
+        assert_eq!(
+            err(&format!("/Domain[0 1]/Functions[{id} {id}]/Bounds[]")),
+            "syntax error: too few subfunction boundaries"
+        );
+        assert_eq!(
+            err(&format!(
+                "/Domain[0 1]/Functions[{id} {id} {id}]/Bounds[0.6 0.3]"
+            )),
+            "syntax error: subfunction 1 boundary out of range"
+        );
+        // Warnings: two inputs, a sub-function of two outputs, extra
+        // bounds outside the domain, a short Encode.
+        let (doc, f, w) = stitch(&format!(
+            "/Domain[0 1 0 1]/Functions[{id} <</FunctionType 2/Domain[0 1]/Range[0 1 0 1]/N 1>>]/Bounds[2 3 4]/Encode[0 1]"
+        ));
+        assert!(f.is_ok());
+        assert_eq!(
+            w,
+            [
+                "wrong number of function inputs",
+                "stitching functions have at most one input",
+                "wrong number of function outputs",
+                "wrong number of outputs for sub function 1",
+                "too many subfunction boundaries",
+                "subfunction boundaries outside of input mapping",
+                "wrong number of stitching function input mappings",
+            ]
+        );
+        drop(doc);
+        // One sub-function spans the whole domain; three split it.
+        let (doc, f, _) = stitch(&format!(
+            "/Domain[0 2]/Functions[{id}]/Bounds[]/Encode[0 1]"
+        ));
+        let f = f.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(eval1(&doc, &f, &[1.0]), [0.5]);
+        let (doc, f, _) = stitch(&format!(
+            "/Domain[0 3]/Functions[{id} {id} {id}]/Bounds[1 2]/Encode[0 1 1 0 0 0.5]"
+        ));
+        let f = f.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(eval1(&doc, &f, &[0.5]), [0.5]);
+        assert_eq!(eval1(&doc, &f, &[1.25]), [0.75]);
+        assert_eq!(eval1(&doc, &f, &[3.0]), [0.5]);
+        // A sub-function of two inputs warns twice.
+        let (_, f, w) = stitch(
+            "/Domain[0 1]/Functions[3 0 R]/Bounds[]>>endobj\n3 0 obj<</FunctionType 4/Domain[0 1 0 1]/Range[0 1]/Length 7>>stream\n{ add }\nendstream",
+        );
+        assert!(f.is_ok());
+        assert_eq!(
+            w,
+            [
+                "wrong number of function inputs",
+                "wrong number of inputs for sub function 0"
+            ]
+        );
+        // A zero-width interval maps to its Encode start.
+        let (doc, f, _) = stitch(&format!(
+            "/Domain[0 1]/Functions[{id} {id}]/Bounds[1]/Encode[0 1 0.25 1]"
+        ));
+        let f = f.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(eval1(&doc, &f, &[0.5]), [0.5]);
+        assert_eq!(eval1(&doc, &f, &[1.0]), [0.25]);
+    }
+
     #[test]
     fn sampled_exponential_and_stitching_functions() {
         // Two samples, 8 bits: 0 and 255, so a ramp.

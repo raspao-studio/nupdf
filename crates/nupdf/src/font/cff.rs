@@ -692,9 +692,10 @@ impl Cff {
         self.data.get(s..e)
     }
 
-    /// The advance the charstring of `gid` sets: the width operand of its
-    /// first stack-clearing operator, or the default width. None when the
-    /// glyph does not exist.
+    /// The advance the charstring of `gid` sets, as `cff_slot_load` finds
+    /// it for `FT_Get_Advance`: the width operand of its first
+    /// stack-clearing operator, or the default width. None when the glyph
+    /// does not exist or fails before its width.
     pub fn advance(&self, gid: u32) -> Option<f64> {
         let &(s, e) = self.charstrings.items.get(gid as usize)?;
         let private = self
@@ -703,27 +704,16 @@ impl Cff {
             .cloned()
             .unwrap_or_default();
         let cs = self.data.get(s..e)?;
-        let mut state = Width {
+        let glyph = Glyph {
             font: self,
             private: &private,
-            stack: Vec::new(),
-            hints: 0,
-            depth: 0,
         };
-        Some(match state.run(cs) {
-            Some(Some(w)) => private.nominal_width + w,
-            _ => private.default_width,
-        })
+        match outline::charstring_width(&glyph, cs) {
+            Ok(Some(w)) => Some(private.nominal_width + w),
+            Ok(None) => Some(private.default_width),
+            Err(_) => None,
+        }
     }
-}
-
-/// Enough of the Type 2 interpreter to find a glyph's width.
-struct Width<'a> {
-    font: &'a Cff,
-    private: &'a Private,
-    stack: Vec<f64>,
-    hints: usize,
-    depth: usize,
 }
 
 fn bias(n: usize) -> i64 {
@@ -733,100 +723,6 @@ fn bias(n: usize) -> i64 {
         1131
     } else {
         32768
-    }
-}
-
-impl Width<'_> {
-    /// Some(Some(width)), Some(None) for no width, None at the end of the
-    /// charstring or an error.
-    fn run(&mut self, cs: &[u8]) -> Option<Option<f64>> {
-        if self.depth > 10 {
-            return None;
-        }
-        let mut i = 0;
-        while i < cs.len() {
-            let b0 = cs[i];
-            i += 1;
-            match b0 {
-                28 => {
-                    let v = i16::from_be_bytes([*cs.get(i)?, *cs.get(i + 1)?]);
-                    self.stack.push(f64::from(v));
-                    i += 2;
-                }
-                32..=246 => self.stack.push(f64::from(i32::from(b0) - 139)),
-                247..=250 => {
-                    let b1 = i32::from(*cs.get(i)?);
-                    self.stack
-                        .push(f64::from((i32::from(b0) - 247) * 256 + b1 + 108));
-                    i += 1;
-                }
-                251..=254 => {
-                    let b1 = i32::from(*cs.get(i)?);
-                    self.stack
-                        .push(f64::from(-(i32::from(b0) - 251) * 256 - b1 - 108));
-                    i += 1;
-                }
-                255 => {
-                    let b = cs.get(i..i + 4)?;
-                    let v = i32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-                    self.stack.push(f64::from(v) / 65536.0);
-                    i += 4;
-                }
-                // hstem, vstem, hstemhm, vstemhm.
-                1 | 3 | 18 | 23 => {
-                    if self.stack.len() % 2 == 1 {
-                        return Some(Some(self.stack[0]));
-                    }
-                    return Some(None);
-                }
-                // hintmask, cntrmask: implicit vstem hints first.
-                19 | 20 => {
-                    if self.stack.len() % 2 == 1 {
-                        return Some(Some(self.stack[0]));
-                    }
-                    return Some(None);
-                }
-                // rmoveto.
-                21 => return Some((self.stack.len() > 2).then(|| self.stack[0])),
-                // hmoveto, vmoveto.
-                22 | 4 => return Some((self.stack.len() > 1).then(|| self.stack[0])),
-                // endchar.
-                14 => {
-                    let n = self.stack.len();
-                    return Some((n == 1 || n == 5).then(|| self.stack[0]));
-                }
-                // callsubr, callgsubr.
-                10 | 29 => {
-                    let idx = self.stack.pop()? as i64;
-                    let index = if b0 == 10 {
-                        &self.private.subrs
-                    } else {
-                        &self.font.gsubrs
-                    };
-                    let n = idx + bias(index.len());
-                    let &(s, e) = index.items.get(usize::try_from(n).ok()?)?;
-                    let sub = self.font.data.get(s..e)?.to_vec();
-                    self.depth += 1;
-                    let out = self.run(&sub);
-                    self.depth -= 1;
-                    if out.is_some() {
-                        return out;
-                    }
-                }
-                // return.
-                11 => return None,
-                12 => {
-                    i += 1;
-                    // Arithmetic and other escapes do not clear for a
-                    // width; drop their operands as the stack allows.
-                    self.stack.clear();
-                }
-                // Path operators before any width: no width.
-                _ => return Some(None),
-            }
-            let _ = self.hints;
-        }
-        None
     }
 }
 
@@ -858,5 +754,1360 @@ impl Charstrings for Glyph<'_> {
         let gid = self.font.sids.iter().position(|&s| s == sid)?;
         let &(s, e) = self.font.charstrings.items.get(gid)?;
         self.font.data.get(s..e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// An INDEX with four-byte offsets.
+    fn index(items: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = (items.len() as u16).to_be_bytes().to_vec();
+        if items.is_empty() {
+            return out;
+        }
+        out.push(4);
+        let mut off = 1u32;
+        out.extend(off.to_be_bytes());
+        for i in items {
+            off += i.len() as u32;
+            out.extend(off.to_be_bytes());
+        }
+        for i in items {
+            out.extend(i);
+        }
+        out
+    }
+
+    /// A DICT operand: integers as five bytes (so sizes do not depend on
+    /// values), others as reals.
+    fn operand(v: f64) -> Vec<u8> {
+        if v.fract() == 0.0 {
+            let mut o = vec![29];
+            o.extend((v as i32).to_be_bytes());
+            return o;
+        }
+        let mut nibbles: Vec<u8> = format!("{v}")
+            .bytes()
+            .map(|c| match c {
+                b'0'..=b'9' => c - b'0',
+                b'.' => 0xa,
+                _ => 0xe,
+            })
+            .collect();
+        nibbles.push(0xf);
+        if nibbles.len() % 2 == 1 {
+            nibbles.push(0xf);
+        }
+        let mut o = vec![30];
+        o.extend(nibbles.chunks(2).map(|p| p[0] << 4 | p[1]));
+        o
+    }
+
+    type Dict = Vec<(Vec<f64>, u16)>;
+
+    fn dict(entries: &[(Vec<f64>, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (args, op) in entries {
+            for &a in args {
+                out.extend(operand(a));
+            }
+            if *op >= 1200 {
+                out.extend([12, (*op - 1200) as u8]);
+            } else {
+                out.push(*op as u8);
+            }
+        }
+        out
+    }
+
+    /// A predefined table by its offset, or one written into the font.
+    #[derive(Clone)]
+    enum Table {
+        Predefined(u32),
+        Data(Vec<u8>),
+    }
+
+    #[derive(Clone, Default)]
+    struct Fd {
+        top: Dict,
+        private: Dict,
+        subrs: Vec<Vec<u8>>,
+    }
+
+    /// The parts of a test font. With font dictionaries it is CID-keyed
+    /// (its `top` should then hold a ROS).
+    #[derive(Clone)]
+    struct Build {
+        name: Vec<u8>,
+        top: Dict,
+        strings: Vec<Vec<u8>>,
+        gsubrs: Vec<Vec<u8>>,
+        glyphs: Vec<Vec<u8>>,
+        charset: Table,
+        encoding: Table,
+        private: Fd,
+        fds: Vec<Fd>,
+        fd_select: Vec<u8>,
+    }
+
+    impl Default for Build {
+        fn default() -> Build {
+            Build {
+                name: b"Test".to_vec(),
+                top: Vec::new(),
+                strings: Vec::new(),
+                gsubrs: Vec::new(),
+                glyphs: vec![t2(&[(&[], ENDCHAR)])],
+                charset: Table::Predefined(0),
+                encoding: Table::Predefined(0),
+                private: Fd::default(),
+                fds: Vec::new(),
+                fd_select: Vec::new(),
+            }
+        }
+    }
+
+    #[derive(Clone, Default, PartialEq)]
+    struct Layout {
+        charstrings: usize,
+        charset: usize,
+        encoding: usize,
+        fd_select: usize,
+        fd_array: usize,
+        privates: Vec<(usize, usize)>,
+    }
+
+    impl Build {
+        fn bytes(&self) -> Vec<u8> {
+            let mut layout = Layout::default();
+            loop {
+                let (out, next) = self.assemble(&layout);
+                if next == layout {
+                    return out;
+                }
+                layout = next;
+            }
+        }
+
+        fn assemble(&self, l: &Layout) -> (Vec<u8>, Layout) {
+            let cid = !self.fds.is_empty();
+            let table = |t: &Table, at: usize| match t {
+                Table::Predefined(n) => f64::from(*n),
+                Table::Data(_) => at as f64,
+            };
+            let private_at = |i: usize| {
+                let (o, s) = l.privates.get(i).copied().unwrap_or_default();
+                vec![s as f64, o as f64]
+            };
+            let mut top = self.top.clone();
+            top.push((vec![l.charstrings as f64], 17));
+            top.push((vec![table(&self.charset, l.charset)], 15));
+            if cid {
+                top.push((vec![l.fd_array as f64], 1236));
+                top.push((vec![l.fd_select as f64], 1237));
+            } else {
+                top.push((vec![table(&self.encoding, l.encoding)], 16));
+                top.push((private_at(0), 18));
+            }
+            let mut out = vec![1, 0, 4, 4];
+            out.extend(index(std::slice::from_ref(&self.name)));
+            out.extend(index(&[dict(&top)]));
+            out.extend(index(&self.strings));
+            out.extend(index(&self.gsubrs));
+            let mut next = Layout {
+                charstrings: out.len(),
+                ..Layout::default()
+            };
+            out.extend(index(&self.glyphs));
+            if let Table::Data(d) = &self.charset {
+                next.charset = out.len();
+                out.extend(d);
+            }
+            if let Table::Data(d) = &self.encoding {
+                next.encoding = out.len();
+                out.extend(d);
+            }
+            let fds = if cid {
+                next.fd_select = out.len();
+                out.extend(&self.fd_select);
+                let dicts: Vec<Vec<u8>> = (self.fds.iter().enumerate())
+                    .map(|(i, fd)| {
+                        let mut t = fd.top.clone();
+                        t.push((private_at(i), 18));
+                        dict(&t)
+                    })
+                    .collect();
+                next.fd_array = out.len();
+                out.extend(index(&dicts));
+                &self.fds[..]
+            } else {
+                std::slice::from_ref(&self.private)
+            };
+            for fd in fds {
+                let mut entries = fd.private.clone();
+                if !fd.subrs.is_empty() {
+                    entries.push((vec![0.0], 19));
+                    let len = dict(&entries).len();
+                    entries.last_mut().unwrap_or_else(|| panic!()).0 = vec![len as f64];
+                }
+                let d = dict(&entries);
+                next.privates.push((out.len(), d.len()));
+                out.extend(&d);
+                if !fd.subrs.is_empty() {
+                    out.extend(index(&fd.subrs));
+                }
+            }
+            (out, next)
+        }
+
+        fn open(&self) -> Cff {
+            Cff::open(self.bytes().into()).unwrap_or_else(|e| panic!("{e}"))
+        }
+    }
+
+    /// A Type 2 charstring number.
+    fn num(v: f64) -> Vec<u8> {
+        if v.fract() != 0.0 || !(-32768.0..=32767.0).contains(&v) {
+            let mut o = vec![255];
+            o.extend(((v * 65536.0) as i32).to_be_bytes());
+            return o;
+        }
+        let v = v as i32;
+        match v {
+            -107..=107 => vec![(v + 139) as u8],
+            108..=1131 => vec![((v - 108) / 256 + 247) as u8, ((v - 108) % 256) as u8],
+            -1131..=-108 => vec![((-v - 108) / 256 + 251) as u8, ((-v - 108) % 256) as u8],
+            _ => {
+                let b = (v as i16).to_be_bytes();
+                vec![28, b[0], b[1]]
+            }
+        }
+    }
+
+    /// Operators with their operands; from 1200 an escape, from 2000 a
+    /// raw byte (`op - 2000`), as hint masks are.
+    fn t2(ops: &[(&[f64], u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (args, op) in ops {
+            for &a in *args {
+                out.extend(num(a));
+            }
+            match *op {
+                2000.. => out.push((*op - 2000) as u8),
+                1200.. => out.extend([12, (*op - 1200) as u8]),
+                _ => out.push(*op as u8),
+            }
+        }
+        out
+    }
+
+    const HSTEM: u16 = 1;
+    const VSTEM: u16 = 3;
+    const VMOVETO: u16 = 4;
+    const RLINETO: u16 = 5;
+    const HLINETO: u16 = 6;
+    const VLINETO: u16 = 7;
+    const RRCURVETO: u16 = 8;
+    const CALLSUBR: u16 = 10;
+    const RETURN: u16 = 11;
+    const ENDCHAR: u16 = 14;
+    const HSTEMHM: u16 = 18;
+    const HINTMASK: u16 = 19;
+    const CNTRMASK: u16 = 20;
+    const RMOVETO: u16 = 21;
+    const HMOVETO: u16 = 22;
+    const VSTEMHM: u16 = 23;
+    const RCURVELINE: u16 = 24;
+    const RLINECURVE: u16 = 25;
+    const VVCURVETO: u16 = 26;
+    const HHCURVETO: u16 = 27;
+    const CALLGSUBR: u16 = 29;
+    const VHCURVETO: u16 = 30;
+    const HVCURVETO: u16 = 31;
+    const MASK: u16 = 2000;
+
+    fn sid(name: &str) -> f64 {
+        names::SID_NAMES
+            .iter()
+            .position(|&n| n == name)
+            .unwrap_or_else(|| panic!("{name}")) as f64
+    }
+
+    fn base14(name: &str) -> Cff {
+        let d: Arc<[u8]> = super::super::base14(name).unwrap_or_default().into();
+        Cff::open(d).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    const FLEX: u16 = 1235;
+    const HFLEX: u16 = 1234;
+    const HFLEX1: u16 = 1236;
+    const FLEX1: u16 = 1237;
+
+    /// Glyph names of `rich()` after `.notdef`; past the standard
+    /// strings, they are its String INDEX.
+    const RICH: [&str; 7] = ["A", "acute", "Aacute", "curves", "flex", "subrs", "arith"];
+
+    /// A font whose glyphs use every Type 2 operator.
+    fn rich() -> Build {
+        let curves = t2(&[
+            (&[10.0, 20.0, 30.0, 40.0], HSTEMHM),
+            (&[50.0, 60.0], VSTEMHM),
+            (&[], HINTMASK),
+            (&[], MASK + 0xe0),
+            (&[100.0, 100.0], RMOVETO),
+            (&[], CNTRMASK),
+            (&[], MASK + 0xe0),
+            (&[100.0, 0.0], RLINETO),
+            (&[50.0, 50.0, 50.0], HLINETO),
+            (&[50.0, -50.0], VLINETO),
+            (&[0.0, 50.0, 50.0, 50.0, 50.0, 0.0], RRCURVETO),
+            (&[10.0, 0.0, 20.0, 10.0, 0.0, 20.0, 30.0, 0.0], RCURVELINE),
+            (&[0.0, 10.0, 10.0, 10.0, 10.0, 0.0, 0.0, 10.0], RLINECURVE),
+            (
+                &[5.0, 10.0, 10.0, 10.0, 10.0, 0.0, 10.0, 10.0, 10.0],
+                VVCURVETO,
+            ),
+            (&[5.0, 10.0, 10.0, 10.0, 10.0], HHCURVETO),
+            (
+                &[10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 5.0],
+                VHCURVETO,
+            ),
+            (&[10.0, 10.0, 10.0, 10.0], HVCURVETO),
+            (&[-450.0], HMOVETO),
+            (&[50.0], VMOVETO),
+            (&[10.0, 0.0, 0.0, 10.0], RLINETO),
+            (&[], ENDCHAR),
+        ]);
+        let flex = t2(&[
+            (&[0.0, 100.0], RMOVETO),
+            (
+                &[
+                    10.0, 20.0, 30.0, 20.0, 40.0, 0.0, 40.0, 0.0, 30.0, -20.0, 10.0, -20.0, 50.0,
+                ],
+                FLEX,
+            ),
+            (&[10.0, 20.0, 30.0, 40.0, 10.0, 20.0, 30.0], HFLEX),
+            (
+                &[10.0, 10.0, 20.0, 20.0, 30.0, 30.0, 20.0, -20.0, 10.0],
+                HFLEX1,
+            ),
+            (
+                &[
+                    10.0, 10.0, 20.0, 20.0, 30.0, 0.0, 30.0, 0.0, 20.0, -20.0, 10.0,
+                ],
+                FLEX1,
+            ),
+            (
+                &[5.0, 30.0, 5.0, 40.0, 0.0, 30.0, 0.0, 30.0, -5.0, 40.0, 10.0],
+                FLEX1,
+            ),
+            (&[], ENDCHAR),
+        ]);
+        let subrs = t2(&[
+            (&[400.0, 0.0, 0.0], RMOVETO),
+            (&[-107.0], CALLSUBR),
+            (&[-107.0], CALLGSUBR),
+            (&[-106.0], CALLGSUBR),
+            (&[], ENDCHAR),
+        ]);
+        let arith = t2(&[
+            (&[0.0, 0.0], RMOVETO),
+            (&[2.0, 3.0], 1210),
+            (&[4.0], 1224),
+            (&[2.0], 1212),
+            (&[], 1214),
+            (&[], 1209),
+            (&[], 1227),
+            (&[], RLINETO),
+            (&[1.0, 0.0], 1203),
+            (&[1.0], 1204),
+            (&[], 1205),
+            (&[0.0], 1215),
+            (&[], 1218),
+            (&[16.0], 1226),
+            (&[25.0, 0.0], 1220),
+            (&[0.0], 1221),
+            (&[], 1228),
+            (&[], RLINETO),
+            (&[5.0, 6.0, 7.0, 1.0], 1229),
+            (&[4.0, 1.0], 1230),
+            (&[], RLINETO),
+            (&[1.0, 2.0, 3.0, 4.0], 1222),
+            (&[0.0], 1228),
+            (&[], RLINETO),
+            (&[], 1223),
+            (&[0.0], 1224),
+            (&[5.0], 1210),
+            (&[0.0], RLINETO),
+            (&[9.0, -1.0], 1229),
+            (&[3.0, 9.0], 1229),
+            (&[1.0, 1.0], 1230),
+            (&[], 1218),
+            (&[], 1218),
+            (&[], RLINETO),
+            (&[10.5, 0.0], RLINETO),
+            (&[], ENDCHAR),
+        ]);
+        let mut strings: Vec<Vec<u8>> = RICH[3..].iter().map(|s| s.as_bytes().to_vec()).collect();
+        strings.push(b"Test Bold".to_vec());
+        let mut charset = vec![0];
+        for (i, name) in RICH.iter().enumerate() {
+            let s = if i < 3 {
+                sid(name) as u16
+            } else {
+                391 + i as u16 - 3
+            };
+            charset.extend(s.to_be_bytes());
+        }
+        Build {
+            top: vec![
+                (vec![0.001, 0.0, 0.0, 0.001, 0.0, 0.0], 1207),
+                (vec![-50.5, -200.0, 1000.0, 900.25], 5),
+            ],
+            strings,
+            gsubrs: vec![
+                t2(&[(&[-100.0, 0.0], RLINETO), (&[], RETURN)]),
+                t2(&[(&[0.0, -100.0], RLINETO)]),
+            ],
+            glyphs: vec![
+                t2(&[(&[], ENDCHAR)]),
+                t2(&[
+                    (&[467.0, 100.0, 0.0], RMOVETO),
+                    (&[300.0, 700.0, 300.0, -700.0], RLINETO),
+                    (&[], ENDCHAR),
+                ]),
+                t2(&[
+                    (&[200.0, 650.0], RMOVETO),
+                    (&[50.0, 100.0, 50.0, -100.0], RLINETO),
+                    (&[], ENDCHAR),
+                ]),
+                t2(&[(&[10.0, 20.0, 30.0, 65.0, 194.0], ENDCHAR)]),
+                curves,
+                flex,
+                subrs,
+                arith,
+            ],
+            charset: Table::Data(charset),
+            private: Fd {
+                private: vec![(vec![500.0], 20), (vec![100.0], 21)],
+                subrs: vec![
+                    t2(&[
+                        (&[100.0, 0.0], RLINETO),
+                        (&[-106.0], CALLSUBR),
+                        (&[], RETURN),
+                    ]),
+                    t2(&[(&[0.0, 100.0], RLINETO), (&[], RETURN)]),
+                ],
+                ..Fd::default()
+            },
+            ..Build::default()
+        }
+    }
+
+    fn cbox(x0: f64, y0: f64, x1: f64, y1: f64) -> Option<CBox> {
+        Some(CBox { x0, y0, x1, y1 })
+    }
+
+    fn points(c: &Cff, gid: u32) -> Vec<(i64, i64)> {
+        c.outline(gid).unwrap_or_else(|e| panic!("{e:?}")).0.points
+    }
+
+    // The outlines, boxes and widths below are MuPDF's, from a PDF that
+    // shows each glyph of `rich()` (mutool draw -F svg for the outlines,
+    // Text.getBounds in mutool run for the unhinted boxes, Font.advanceGlyph
+    // for the widths).
+
+    #[test]
+    fn type2_lines_curves_and_hints_draw_as_mupdf_draws_them() {
+        let c = rich().open();
+        assert_eq!(c.num_glyphs(), 8);
+        let gid = c.name_index(b"curves");
+        assert_eq!(gid, 4);
+        #[rustfmt::skip]
+        let want = [
+            (100, 100), (200, 100), (250, 100), (250, 150), (300, 150), (300, 200),
+            (250, 200), (250, 250), (300, 300), (350, 300), (360, 300), (380, 310),
+            (380, 330), (410, 330), (410, 340), (420, 350), (430, 350), (430, 360),
+            (435, 370), (445, 380), (445, 390), (445, 390), (455, 400), (455, 410),
+            (465, 415), (475, 425), (485, 425), (485, 435), (495, 445), (505, 445),
+            (515, 445), (525, 455), (530, 465), (540, 465), (550, 475), (550, 485),
+            (100, 535), (110, 535), (110, 545),
+        ];
+        let (o, top, sub) = c.outline(gid).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(o.points, want);
+        assert_eq!(o.contours, [35, 38]);
+        assert_eq!((top, sub), (1000, 1000));
+        assert_eq!(c.outline_cbox(gid), Ok(cbox(100.0, 100.0, 550.0, 545.0)));
+        assert_eq!(c.advance(gid), Some(500.0));
+    }
+
+    #[test]
+    fn flex_subroutines_and_arithmetic_draw_as_mupdf_draws_them() {
+        let c = rich().open();
+        #[rustfmt::skip]
+        let flex = [
+            (0, 100), (10, 120), (40, 140), (80, 140), (120, 140), (150, 120),
+            (160, 100), (170, 100), (190, 130), (230, 130), (240, 130), (260, 100),
+            (290, 100), (300, 110), (320, 130), (350, 130), (380, 130), (400, 110),
+            (410, 100), (420, 110), (440, 130), (470, 130), (500, 130), (520, 110),
+            (530, 100), (535, 130), (540, 170), (540, 200), (540, 230), (535, 270),
+            (530, 280),
+        ];
+        assert_eq!(points(&c, 5), flex);
+        assert_eq!(c.outline_cbox(5), Ok(cbox(0.0, 100.0, 540.0, 280.0)));
+        // Local subroutines, one calling another, and global ones, one
+        // ending without a return.
+        assert_eq!(
+            points(&c, 6),
+            [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]
+        );
+        assert_eq!(c.advance(6), Some(500.0));
+        // add mul div neg abs dup, and or not eq drop sqrt put get exch,
+        // index roll, ifelse, random; the last half unit is dropped.
+        assert_eq!(
+            points(&c, 7),
+            [
+                (0, 0),
+                (10, 10),
+                (35, 14),
+                (41, 19),
+                (47, 26),
+                (47, 27),
+                (52, 27),
+                (61, 36),
+                (71, 36),
+            ]
+        );
+        assert_eq!(c.outline_cbox(7), Ok(cbox(0.0, 0.0, 71.0, 36.0)));
+    }
+
+    #[test]
+    fn seac_by_endchar_draws_accent_then_base() {
+        let c = rich().open();
+        assert_eq!(points(&c, 1), [(100, 0), (400, 700), (700, 0)]);
+        assert_eq!(points(&c, 2), [(200, 650), (250, 750), (300, 650)]);
+        assert_eq!(
+            points(&c, 3),
+            [
+                (220, 680),
+                (270, 780),
+                (320, 680),
+                (100, 0),
+                (400, 700),
+                (700, 0)
+            ]
+        );
+        assert_eq!(c.outline_cbox(3), Ok(cbox(100.0, 0.0, 700.0, 780.0)));
+        assert_eq!(c.outline_cbox(0), Ok(None));
+        assert_eq!(
+            (c.advance(0), c.advance(1), c.advance(2), c.advance(3)),
+            (Some(500.0), Some(567.0), Some(500.0), Some(110.0))
+        );
+        assert_eq!(c.outline(8).err(), Some(LoadError));
+        assert_eq!(c.outline_cbox(8), Err(LoadError));
+        assert_eq!(c.advance(8), None);
+    }
+
+    /// The width a one-glyph font (default 500, nominal 100) gives this
+    /// charstring, with these local and global subroutines.
+    fn width(glyph: Vec<u8>, subrs: Vec<Vec<u8>>, gsubrs: Vec<Vec<u8>>) -> Option<f64> {
+        let b = Build {
+            gsubrs,
+            glyphs: vec![t2(&[(&[], ENDCHAR)]), glyph],
+            private: Fd {
+                private: vec![(vec![500.0], 20), (vec![100.0], 21)],
+                subrs,
+                ..Fd::default()
+            },
+            ..Build::default()
+        };
+        b.open().advance(1)
+    }
+
+    #[test]
+    fn a_width_is_the_odd_operand_of_the_first_clearing_operator() {
+        let w = |ops: &[(&[f64], u16)]| width(t2(ops), Vec::new(), Vec::new());
+        assert_eq!(w(&[(&[50.0, 10.0, 20.0], HSTEM)]), Some(150.0));
+        assert_eq!(w(&[(&[10.0, 20.0], VSTEM)]), Some(500.0));
+        assert_eq!(w(&[(&[60.0, 10.0, 20.0], HINTMASK)]), Some(160.0));
+        assert_eq!(w(&[(&[10.0, 20.0], CNTRMASK)]), Some(500.0));
+        assert_eq!(w(&[(&[70.0, 5.0], HMOVETO)]), Some(170.0));
+        assert_eq!(w(&[(&[80.0, 5.0], VMOVETO)]), Some(180.0));
+        assert_eq!(w(&[(&[5.0], VMOVETO)]), Some(500.0));
+        assert_eq!(w(&[(&[90.0, 0.0, 0.0], RMOVETO)]), Some(190.0));
+        assert_eq!(w(&[(&[5.0], ENDCHAR)]), Some(105.0));
+        assert_eq!(w(&[(&[1.0, 2.0], ENDCHAR)]), Some(500.0));
+        // Each number encoding.
+        assert_eq!(w(&[(&[1000.0, 1.0, 2.0], HSTEM)]), Some(1100.0));
+        assert_eq!(w(&[(&[2000.0, 1.0, 2.0], HSTEM)]), Some(2100.0));
+        assert_eq!(w(&[(&[-200.0, 1.0, 2.0], HSTEM)]), Some(-100.0));
+        assert_eq!(w(&[(&[50.5, 1.0, 2.0], HSTEM)]), Some(150.5));
+        // Arithmetic leaves its result for the width; a path operator
+        // before any width means the default.
+        assert_eq!(
+            w(&[(&[1.0, 2.0], 1210), (&[30.0, 0.0, 0.0], RMOVETO)]),
+            Some(103.0)
+        );
+        assert_eq!(w(&[(&[10.0, 10.0], RLINETO)]), Some(500.0));
+        // A charstring cut short reads zeros, then ends as endchar would.
+        for (cut, want) in [
+            (vec![247], 208.0),
+            (vec![251], -8.0),
+            (vec![28, 1], 356.0),
+            (vec![255, 0, 0], 100.0),
+            (vec![12], 500.0),
+        ] {
+            assert_eq!(width(cut, Vec::new(), Vec::new()), Some(want));
+        }
+        assert_eq!(width(vec![139], Vec::new(), Vec::new()), Some(100.0));
+        // Through subroutines: a width inside one, none in one that
+        // returns; a call to one that does not exist or calls itself fails.
+        let sub_width = t2(&[(&[40.0, 1.0, 2.0], HSTEM)]);
+        let returns = t2(&[(&[], RETURN)]);
+        let call = |op: u16| t2(&[(&[-107.0], op), (&[30.0, 0.0, 0.0], RMOVETO)]);
+        assert_eq!(
+            width(call(CALLSUBR), vec![sub_width.clone()], Vec::new()),
+            Some(140.0)
+        );
+        assert_eq!(
+            width(call(CALLGSUBR), Vec::new(), vec![returns.clone()]),
+            Some(130.0)
+        );
+        assert_eq!(width(call(CALLSUBR), Vec::new(), Vec::new()), None);
+        assert_eq!(width(vec![10], Vec::new(), Vec::new()), None);
+        let me = t2(&[(&[-107.0], CALLSUBR)]);
+        assert_eq!(width(call(CALLSUBR), vec![me], Vec::new()), None);
+    }
+
+    #[test]
+    fn the_top_dictionary_sets_the_em_box_and_style() {
+        let strings = vec![
+            b"Test".to_vec(),
+            b"Test Bold".to_vec(),
+            b"Test-Black".to_vec(),
+        ];
+        let open = |name: &[u8], top: Dict| {
+            Build {
+                name: name.to_vec(),
+                top,
+                strings: strings.clone(),
+                ..Build::default()
+            }
+            .open()
+        };
+        let c = open(
+            b"Test",
+            vec![
+                (vec![0.0005, 0.0, 0.0, 0.0005, 0.0, 0.0], 1207),
+                (vec![-10.5, -200.0, 600.25, 800.0], 5),
+                (vec![-12.0], 1202),
+                (vec![1.0], 1201),
+                (vec![sid("Bold")], 4),
+            ],
+        );
+        assert_eq!(c.units_per_em, 2000);
+        assert_eq!(c.bbox, [-11, -200, 601, 800]);
+        assert!(c.bold && c.italic && c.fixed_pitch && !c.is_cid);
+        // A FontMatrix that does not scale y takes its skew; an angle
+        // under a degree leans; Medium is not bold.
+        let c = open(
+            b"Test",
+            vec![
+                (vec![0.001, 0.00025, 0.0, 0.0, 0.0, 0.0], 1207),
+                (vec![-0.5], 1202),
+                (vec![sid("Medium")], 4),
+            ],
+        );
+        assert_eq!(c.units_per_em, 4000);
+        assert!(c.italic && !c.bold && !c.fixed_pitch);
+        let c = open(b"Test", vec![(vec![0.0; 6], 1207)]);
+        assert_eq!(c.units_per_em, 1000);
+        // Bold or Black after the family name in the full name.
+        let full = |sid: f64| vec![(vec![sid], 2)];
+        let family = |mut top: Dict| {
+            top.push((vec![391.0], 3));
+            top
+        };
+        assert!(open(b"X", family(full(392.0))).bold);
+        assert!(open(b"X", family(full(393.0))).bold);
+        assert!(!open(b"X", family(full(391.0))).bold);
+        assert!(!open(b"X", family(full(sid("Bold")))).bold);
+        // Without a family name, the font's name less a subset prefix.
+        assert!(open(b"ABCDEF+Test", full(392.0)).bold);
+        assert!(open(b"Test", full(393.0)).bold);
+        assert!(!open(b"abcdef+Test", full(392.0)).bold);
+        assert!(!open(b"Test", full(500.0)).bold);
+        assert!(!open(b"Test", Vec::new()).bold);
+    }
+
+    #[test]
+    fn charsets_in_each_format() {
+        let open = |glyphs: usize, charset: Table| {
+            Cff::open(
+                Build {
+                    glyphs: vec![t2(&[(&[], ENDCHAR)]); glyphs],
+                    charset,
+                    ..Build::default()
+                }
+                .bytes()
+                .into(),
+            )
+        };
+        let names = |c: &Cff| -> Vec<String> {
+            (0..c.num_glyphs())
+                .map(|g| String::from_utf8_lossy(&c.glyph_name(g).unwrap_or_default()).into())
+                .collect()
+        };
+        // Format 1 and 2 ranges.
+        let a = sid("A") as u16;
+        let mut f1 = vec![1];
+        f1.extend(a.to_be_bytes());
+        f1.push(1);
+        f1.extend((a + 10).to_be_bytes());
+        f1.push(0);
+        let c = open(4, Table::Data(f1)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(names(&c), [".notdef", "A", "B", "K"]);
+        assert_eq!(c.name_index(b"K"), 3);
+        assert_eq!(c.name_index(b"Z"), 0);
+        assert_eq!(c.glyph_name(9), None);
+        let mut f2 = vec![2];
+        f2.extend(a.to_be_bytes());
+        f2.extend(2u16.to_be_bytes());
+        let c = open(3, Table::Data(f2)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(names(&c), [".notdef", "A", "B"]);
+        // A range that would pass SID 65535 stops there; a SID past the
+        // strings has no name.
+        let mut f2 = vec![2, 0xff, 0xfd];
+        f2.extend(9u16.to_be_bytes());
+        let c = open(4, Table::Data(f2)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(c.sids, [0, 0xfffd, 0xfffe, 0xffff]);
+        assert_eq!(c.glyph_name(1), None);
+        // The predefined charsets, and fonts with more glyphs than they
+        // name.
+        let c = open(3, Table::Predefined(1)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(names(&c), [".notdef", "space", "exclamsmall"]);
+        let c = open(3, Table::Predefined(2)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(names(&c), [".notdef", "space", "dollaroldstyle"]);
+        assert_eq!(
+            names(&open(3, Table::Predefined(0)).unwrap_or_else(|e| panic!("{e}")))[2],
+            "exclam"
+        );
+        for (n, charset) in [(230, 0), (167, 1), (88, 2)] {
+            assert_eq!(
+                open(n, Table::Predefined(charset)).err(),
+                Some("Invalid_File_Format")
+            );
+        }
+        // An unknown format, and tables cut short.
+        for bad in [
+            vec![3, 0, 0],
+            vec![0, 0],
+            vec![1, 0],
+            vec![1, 0, 34],
+            vec![2, 0, 34, 0],
+        ] {
+            assert_eq!(open(3, Table::Data(bad)).err(), Some("Invalid_File_Format"));
+        }
+        assert_eq!(
+            open(3, Table::Predefined(99999)).err(),
+            Some("Invalid_File_Format")
+        );
+    }
+
+    /// Short, broken and odd charstrings, with what MuPDF makes of each:
+    /// its advance (`Font.advanceGlyph`; 0 where FreeType fails) and its
+    /// outline (mutool draw -F svg of a PDF showing each, unhinted boxes
+    /// from Text.getBounds), in glyph order.
+    #[test]
+    fn broken_and_odd_charstrings_read_as_freetype_reads_them() {
+        let me = t2(&[(&[-107.0], CALLSUBR)]);
+        let b = Build {
+            glyphs: vec![
+                t2(&[(&[], ENDCHAR)]),
+                t2(&[(&[-106.0], CALLSUBR), (&[30.0, 0.0, 0.0], RMOVETO)]),
+                t2(&[(&[-107.0], CALLSUBR), (&[30.0, 0.0, 0.0], RMOVETO)]),
+                vec![247],
+                t2(&[(&[10.0, 10.0], RLINETO)]),
+                t2(&[(&[1.0, 2.0], 1210), (&[30.0, 0.0, 0.0], RMOVETO)]),
+                t2(&[(&[1.0, 2.0], ENDCHAR)]),
+                t2(&[(&[1.0, 2.0], 1210), (&[30.0, 10.0], HSTEM)]),
+                t2(&[(&[5.0, 1.0, 2.0], 1203), (&[30.0, 10.0], HSTEM)]),
+                t2(&[(&[], 1223), (&[30.0, 10.0], HSTEM)]),
+                vec![12],
+                t2(&[(&[4.0, 1.0, 2.0], 1229), (&[30.0, 10.0], HSTEM)]),
+                [
+                    t2(&[(&[100.0, 100.0], RMOVETO), (&[50.0, 50.0], RLINETO)]),
+                    vec![247],
+                ]
+                .concat(),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[50.0, 50.0], RLINETO),
+                    (&[-106.0], CALLSUBR),
+                ]),
+                [
+                    t2(&[(&[100.0, 100.0], RMOVETO), (&[50.0, 50.0], RLINETO)]),
+                    vec![12],
+                ]
+                .concat(),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[50.0, 50.0, 30.0], RLINETO),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[(&[100.0, 100.0], RMOVETO), (&[1.0; 50], RLINETO)]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0], RRCURVETO),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[10.0, 10.0, 10.0], VVCURVETO),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 7.0], RCURVELINE),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 7.0], RLINECURVE),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[10.0, 10.0, 10.0], HVCURVETO),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[10.0, 10.0, 10.0], FLEX),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[50.0], RLINETO),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[], 1218),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[1.0, 0.0], 1212),
+                    (&[0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[10.0, 20.0, 5.0], 1230),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[10.0, 40.0], 1220),
+                    (&[99.0], 1221),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[2.0, 3.0], 1210),
+                    (&[], CALLSUBR),
+                    (&[0.0, 40.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[], RETURN),
+                    (&[40.0, 0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[0.0], 1200),
+                    (&[40.0, 0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[4.0, 4.0, 4.0, 4.0], 1201),
+                    (&[40.0, 0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[4.0, 4.0, 4.0, 4.0], 1206),
+                    (&[40.0, 0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[4.0, 4.0], 1207),
+                    (&[40.0, 0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[4.0, 4.0], 1216),
+                    (&[40.0, 0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[4.0, 4.0], 1233),
+                    (&[40.0, 0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[4.0, 4.0], 1217),
+                    (&[40.0, 0.0], RLINETO),
+                ]),
+                t2(&[
+                    (&[100.0, 100.0], RMOVETO),
+                    (&[0.0, 40.0], RLINETO),
+                    (&[4.0, 4.0], 9),
+                    (&[40.0, 0.0], RLINETO),
+                    (&[4.0, 4.0], 13),
+                    (&[0.0, 10.0], RLINETO),
+                ]),
+            ],
+            private: Fd {
+                private: vec![(vec![500.0], 20), (vec![100.0], 21)],
+                subrs: vec![me],
+                ..Fd::default()
+            },
+            ..Build::default()
+        };
+        let c = b.open();
+        let fail = None;
+        let widths = [
+            Some(500.0),
+            fail,
+            fail,
+            Some(208.0),
+            Some(500.0),
+            Some(103.0),
+            Some(500.0),
+            Some(103.0),
+            Some(500.0),
+            None,
+            Some(500.0),
+            Some(104.0),
+        ];
+        for (g, w) in widths.into_iter().enumerate() {
+            // Glyph 9 uses random, which FreeType seeds per process.
+            if g != 9 {
+                assert_eq!(c.advance(g as u32), w, "glyph {g}");
+            }
+        }
+        for g in 12..c.num_glyphs() {
+            assert_eq!(c.advance(g), Some(500.0), "glyph {g}");
+        }
+        let v = vec![(100, 100), (100, 140)];
+        let vh = vec![(100, 100), (100, 140), (140, 140)];
+        let kept = vec![(100, 100), (100, 140), (104, 144), (144, 144)];
+        let up = vec![(100, 100), (150, 150)];
+        let want: Vec<Option<Vec<(i64, i64)>>> = vec![
+            Some(vec![]),
+            None,
+            None,
+            Some(vec![]),
+            Some(vec![(0, 0), (10, 10)]),
+            Some(vec![]),
+            None,
+            Some(vec![]),
+            Some(vec![]),
+            Some(vec![]),
+            Some(vec![]),
+            Some(vec![]),
+            Some(up.clone()),
+            None,
+            Some(up),
+            None,
+            None,
+            Some(vec![
+                (100, 100),
+                (110, 110),
+                (120, 120),
+                (130, 130),
+                (130, 170),
+            ]),
+            Some(v.clone()),
+            None,
+            None,
+            Some(v.clone()),
+            None,
+            None,
+            None,
+            Some(vec![(100, 100), (32868, 100)]),
+            None,
+            Some(v),
+            None,
+            None,
+            Some(vh.clone()),
+            Some(vh.clone()),
+            Some(vh.clone()),
+            Some(vh.clone()),
+            Some(kept.clone()),
+            Some(vh),
+            Some(kept),
+            Some(vec![(100, 100), (100, 140), (140, 140), (140, 150)]),
+        ];
+        assert_eq!(want.len(), c.num_glyphs() as usize);
+        for (g, w) in want.into_iter().enumerate() {
+            let got = c.outline(g as u32).ok().map(|o| o.0.points);
+            assert_eq!(got, w, "glyph {g}");
+        }
+    }
+
+    /// A font of glyphs named `names` (standard strings) with this
+    /// encoding.
+    fn encoded(names: &[&str], encoding: Table) -> Cff {
+        let mut charset = vec![0];
+        for n in names {
+            charset.extend((sid(n) as u16).to_be_bytes());
+        }
+        Build {
+            glyphs: vec![t2(&[(&[], ENDCHAR)]); names.len() + 1],
+            charset: Table::Data(charset),
+            encoding,
+            ..Build::default()
+        }
+        .open()
+    }
+
+    #[test]
+    fn encodings_in_each_format() {
+        // Format 0: a code per glyph, past the glyphs ignored.
+        let c = encoded(&["A", "B"], Table::Data(vec![0, 3, 65, 66, 67]));
+        assert_eq!((c.codes[65], c.codes[66], c.codes[67]), (1, 2, 0));
+        assert_eq!(c.encoding_count, 4);
+        assert!(c.encoding_offset > 1);
+        // Format 1: ranges, and supplements naming glyphs by SID.
+        let mut f1 = vec![0x81, 2, 65, 1, 250, 9, 2, 200];
+        f1.extend((sid("B") as u16).to_be_bytes());
+        f1.push(201);
+        f1.extend((sid("Z") as u16).to_be_bytes());
+        let c = encoded(&["A", "B", "C"], Table::Data(f1));
+        assert_eq!((c.codes[65], c.codes[66], c.codes[250]), (1, 2, 3));
+        assert_eq!((c.codes[200], c.codes[201], c.codes[255]), (2, 0, 0));
+        assert_eq!(c.encoding_count, 10);
+        // An unknown format, and an offset past the data.
+        let c = encoded(&["A"], Table::Data(vec![2, 1, 65]));
+        assert_eq!((c.encoding_count, c.codes[65]), (0, 0));
+        let c = encoded(&["A"], Table::Predefined(99999));
+        assert_eq!((c.encoding_offset, c.encoding_count), (99999, 0));
+        // The standard and expert encodings, by the glyphs' names.
+        let c = encoded(&["A", "space", "Z"], Table::Predefined(0));
+        assert_eq!((c.codes[65], c.codes[32], c.codes[90]), (1, 2, 3));
+        assert_eq!(c.encoding_count, 91);
+        let c = encoded(&["space", "dollaroldstyle"], Table::Predefined(1));
+        assert_eq!((c.codes[32], c.codes[36], c.codes[65]), (1, 2, 0));
+        assert_eq!((c.encoding_offset, c.encoding_count), (1, 37));
+    }
+
+    /// A CID-keyed font: glyphs 1 to 3 are CIDs 100 to 102. Font
+    /// dictionary 0 has widths 300 and 30 and the top dictionary's em;
+    /// dictionary 1 has widths 700 and 70 and an em of 2000.
+    fn cid(fd_select: Vec<u8>, top_matrix: bool) -> Build {
+        let square = t2(&[
+            (&[100.0, 100.0], RMOVETO),
+            (&[200.0, 0.0, 0.0, 200.0], RLINETO),
+            (&[-107.0], CALLSUBR),
+            (&[], ENDCHAR),
+        ]);
+        let mut charset = vec![2];
+        charset.extend(100u16.to_be_bytes());
+        charset.extend(2u16.to_be_bytes());
+        let mut top = vec![(vec![391.0, 392.0, 0.0], 1230)];
+        if top_matrix {
+            top.push((vec![0.001, 0.0, 0.0, 0.001, 0.0, 0.0], 1207));
+        }
+        Build {
+            top,
+            strings: vec![b"Adobe".to_vec(), b"Identity".to_vec()],
+            glyphs: vec![
+                t2(&[(&[], ENDCHAR)]),
+                t2(&[(&[50.0], ENDCHAR)]),
+                square,
+                t2(&[(&[0.0, 0.0, 65.0, 66.0], ENDCHAR)]),
+            ],
+            charset: Table::Data(charset),
+            fds: vec![
+                Fd {
+                    private: vec![(vec![300.0], 20), (vec![30.0], 21)],
+                    subrs: vec![t2(&[(&[-200.0, 0.0], RLINETO), (&[], RETURN)])],
+                    ..Fd::default()
+                },
+                Fd {
+                    top: vec![(vec![0.0005, 0.0, 0.0, 0.0005, 0.0, 0.0], 1207)],
+                    private: vec![(vec![700.0], 20), (vec![70.0], 21)],
+                    subrs: vec![t2(&[(&[0.0, -200.0], RLINETO), (&[], RETURN)])],
+                },
+            ],
+            fd_select,
+            ..Build::default()
+        }
+    }
+
+    #[test]
+    fn a_cid_font_finds_glyphs_by_cid_and_privates_by_fd_select() {
+        // FDSelect format 0: glyphs 0 and 1 in dictionary 0, 2 and 3 in 1.
+        let c = cid(vec![0, 0, 0, 1, 1], true).open();
+        assert!(c.is_cid);
+        assert_eq!(
+            (c.max_cid(), c.gid_of_cid(101), c.gid_of_cid(7)),
+            (102, 2, 0)
+        );
+        assert_eq!((c.glyph_name(1), c.name_index(b"A")), (None, 0));
+        assert!(!c.bold);
+        let adv: Vec<_> = (0..5).map(|g| c.advance(g)).collect();
+        assert_eq!(
+            adv,
+            [Some(300.0), Some(80.0), Some(700.0), Some(700.0), None]
+        );
+        // CID 101 draws in dictionary 1's units, with its subroutines;
+        // the box comes back in the top dictionary's.
+        let (o, top, sub) = c.outline(101).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(o.points, [(100, 100), (300, 100), (300, 300), (300, 100)]);
+        assert_eq!((top, sub), (1000, 2000));
+        assert_eq!(c.outline_cbox(101), Ok(cbox(50.0, 50.0, 150.0, 150.0)));
+        // CID 0 is glyph 0; a CID with no glyph fails; so does seac,
+        // which a CID font does not have.
+        assert_eq!(c.outline(0).map(|o| o.0.points), Ok(Vec::new()));
+        assert_eq!(c.outline_cbox(0), Ok(None));
+        assert_eq!(c.outline(5).err(), Some(LoadError));
+        assert_eq!(c.outline_cbox(5), Err(LoadError));
+        assert_eq!(c.outline(102).err(), Some(LoadError));
+
+        // FDSelect format 3: glyphs from 2 in dictionary 1, below the
+        // sentinel 3; past it, dictionary 0.
+        let mut f3 = vec![3, 0, 2, 0, 0, 0, 0, 2, 1];
+        f3.extend(3u16.to_be_bytes());
+        let c = cid(f3, false).open();
+        let adv: Vec<_> = (0..4).map(|g| c.advance(g)).collect();
+        assert_eq!(adv, [Some(300.0), Some(80.0), Some(700.0), Some(300.0)]);
+        // Without a top FontMatrix the dictionary's em stands alone.
+        assert_eq!(c.outline(101).map(|o| (o.1, o.2)), Ok((1000, 2000)));
+        // An unknown FDSelect format puts every glyph in dictionary 0.
+        let c = cid(vec![9], true).open();
+        assert_eq!(c.advance(2), Some(300.0));
+        assert_eq!(c.outline_cbox(101), Ok(cbox(100.0, 100.0, 300.0, 300.0)));
+    }
+
+    #[test]
+    fn broken_fonts_are_refused_or_read_as_far_as_they_go() {
+        assert!(!Cff::recognize(&[1, 0, 3, 1]));
+        assert!(!Cff::recognize(&[2, 0, 4, 1]));
+        assert_eq!(
+            Cff::open(vec![1, 0].into()).err(),
+            Some("Unknown_File_Format")
+        );
+        let good = rich().bytes();
+        // A Name INDEX with an offset size of 5; an empty Top DICT INDEX.
+        let mut bad = good.clone();
+        bad[6] = 5;
+        assert_eq!(Cff::open(bad.into()).err(), Some("Invalid_File_Format"));
+        let mut d = vec![1, 0, 4, 4];
+        d.extend(index(&[b"T".to_vec()]));
+        d.extend([0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            Cff::open(d.clone().into()).err(),
+            Some("Invalid_File_Format")
+        );
+        // A Top DICT without CharStrings, or with them at a broken INDEX.
+        let mut no_cs = vec![1, 0, 4, 4];
+        no_cs.extend(index(&[b"T".to_vec()]));
+        no_cs.extend(index(&[dict(&[(vec![1.0], 15)])]));
+        no_cs.extend([0, 0, 0, 0]);
+        assert_eq!(Cff::open(no_cs.into()).err(), Some("Invalid_File_Format"));
+        let mut bad_cs = vec![1, 0, 4, 4];
+        bad_cs.extend(index(&[b"T".to_vec()]));
+        bad_cs.extend(index(&[dict(&[(vec![40.0], 17)])]));
+        bad_cs.extend([0, 0, 0, 0]);
+        bad_cs.resize(40, 0);
+        bad_cs.extend([0, 1, 9]);
+        assert_eq!(Cff::open(bad_cs.into()).err(), Some("Invalid_File_Format"));
+        // A Private DICT past the end, Subrs at a broken INDEX, and an
+        // FDArray at one: default widths, no subroutines.
+        let b = Build {
+            top: vec![(vec![0.0, 99999.0], 18)],
+            glyphs: vec![t2(&[(&[], ENDCHAR)]), t2(&[(&[5.0], ENDCHAR)])],
+            ..Build::default()
+        };
+        let mut bytes = b.bytes();
+        // The Private operator the builder adds comes after the one above;
+        // the first one found wins.
+        let c = Cff::open(std::mem::take(&mut bytes).into()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(c.advance(1), Some(5.0));
+        let b = Build {
+            glyphs: vec![t2(&[(&[], ENDCHAR)]), t2(&[(&[-107.0], CALLSUBR)])],
+            private: Fd {
+                private: vec![(vec![99999.0], 19)],
+                ..Fd::default()
+            },
+            ..Build::default()
+        };
+        assert_eq!(b.open().advance(1), None);
+        let mut b = cid(vec![0, 0, 0, 1, 1], true);
+        b.top.push((vec![99999.0], 1236));
+        let c = b.open();
+        assert_eq!(c.advance(2), Some(0.0));
+        assert_eq!(c.outline(101).map(|o| o.2), Err(LoadError));
+    }
+
+    #[test]
+    fn dict_operands_in_each_encoding() {
+        let d = [
+            28, 0x01, 0x00, // 256
+            29, 0xff, 0xff, 0xff, 0xfe, // -2
+            30, 0xe2, 0xa5, 0xb3, 0xff, // -2.5E3
+            30, 0x1c, 0x2f, // 1E-2
+            30, 0x1d, 0x5f, // 15, the reserved nibble passed over
+            32, 246, 247, 0, 251, 0, 254, 255, // -107 107 108 -108 -1131
+            255, 22, 31, // reserved bytes
+            12, 7, // FontMatrix
+            17,
+        ];
+        let got = read_dict(&d);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0],
+            (
+                1207,
+                vec![
+                    256.0, -2.0, -2500.0, 0.01, 15.0, -107.0, 107.0, 108.0, -108.0, -1131.0
+                ]
+            )
+        );
+        assert_eq!(got[1], (17, Vec::new()));
+        // Operands cut short read zeros; an escape at the end is 1200.
+        assert_eq!(read_dict(&[28, 1]), Vec::new());
+        assert_eq!(read_dict(&[29, 1, 247]), Vec::new());
+        assert_eq!(read_dict(&[247]), Vec::new());
+        assert_eq!(read_dict(&[251, 0, 12]), vec![(1200, vec![-108.0])]);
+        assert_eq!(read_dict(&[30, 0x1a]), Vec::new());
+    }
+
+    #[test]
+    fn index_offsets_are_clamped_to_the_data() {
+        // Two items whose second offset runs back, the last past the end.
+        let d = [0, 3, 1, 1, 3, 2, 9, b'a', b'b', b'c'];
+        let (i, end) = read_index(&d, 0).unwrap_or_else(|| panic!());
+        assert_eq!(i.items, [(7, 9), (9, 9), (9, 10)]);
+        assert_eq!(end, 10);
+        assert_eq!(
+            read_index(&[0, 0], 0).map(|(i, e)| (i.len(), e)),
+            Some((0, 2))
+        );
+        assert!(read_index(&[0, 1, 0, 1, 1], 0).is_none());
+        assert!(read_index(&[0, 1, 1, 1], 0).is_none());
+        assert!(read_index(&[0], 0).is_none());
+    }
+
+    #[test]
+    fn many_subroutines_take_a_bigger_bias() {
+        for (n, bias) in [(1240, 1131.0), (33900, 32768.0)] {
+            let mut subrs = vec![t2(&[(&[], RETURN)]); n];
+            subrs[0] = t2(&[(&[60.0, 1.0, 2.0], VSTEM)]);
+            assert_eq!(
+                width(t2(&[(&[-bias], CALLSUBR)]), subrs.clone(), Vec::new()),
+                Some(160.0)
+            );
+            assert_eq!(
+                width(t2(&[(&[-bias], CALLGSUBR)]), Vec::new(), subrs.clone()),
+                Some(160.0)
+            );
+            subrs[0] = t2(&[(&[70.0, 1.0, 2.0], HSTEM)]);
+            assert_eq!(
+                width(t2(&[(&[-bias], CALLSUBR)]), subrs, Vec::new()),
+                Some(170.0)
+            );
+        }
+    }
+
+    // Boxes and widths of the bundled fonts below are MuPDF's: boxes from
+    // Text.getBounds of a PDF showing each glyph with the base font, widths
+    // from Font.advanceGlyph.
+
+    #[test]
+    fn the_base_fonts_read_as_mupdf_reads_them() {
+        let c = base14("Helvetica");
+        assert!(!c.is_cid && !c.bold && !c.italic && !c.fixed_pitch);
+        assert_eq!(c.units_per_em, 1000);
+        assert_eq!(c.encoding_offset, 0);
+        let a = c.name_index(b"A");
+        assert_eq!((a, c.codes[65]), (34, 34));
+        assert_eq!(c.glyph_name(a).as_deref(), Some(&b"A"[..]));
+        assert_eq!(c.advance(a), Some(667.0));
+        assert_eq!(c.outline_cbox(34), Ok(cbox(17.0, 0.0, 653.0, 729.0)));
+        assert_eq!(c.outline_cbox(72), Ok(cbox(35.0, -218.0, 481.0, 539.0)));
+        assert_eq!(c.outline_cbox(138), Ok(cbox(11.0, 0.0, 950.0, 729.0)));
+        assert_eq!(c.codes[225], 138);
+        let c = base14("Times-BoldItalic");
+        assert!(c.bold && c.italic);
+        assert_eq!(c.outline_cbox(34), Ok(cbox(-67.0, 0.0, 593.0, 683.0)));
+        assert!(base14("Courier").fixed_pitch);
+        assert!(base14("Helvetica-Bold").bold);
+        // Symbol and Dingbats carry encodings of their own.
+        for (name, gid, want) in [
+            ("Symbol", 66, cbox(41.0, -13.0, 622.0, 513.0)),
+            ("ZapfDingbats", 66, cbox(35.0, -14.0, 754.0, 704.0)),
+        ] {
+            let c = base14(name);
+            assert!(c.encoding_offset > 1, "{name}");
+            assert_eq!(c.codes[97], gid, "{name}");
+            assert_eq!(c.outline_cbox(u32::from(gid)), Ok(want), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_seac_in_a_seac_part_too_many_hints_and_repeated_points() {
+        let names = ["A", "acute", "Aacute", "B"];
+        let mut charset = vec![0];
+        for n in names {
+            charset.extend((sid(n) as u16).to_be_bytes());
+        }
+        let mut many = Vec::new();
+        for _ in 0..4 {
+            many.extend(t2(&[(&[1.0; 48], HSTEMHM)]));
+        }
+        many.extend(t2(&[
+            (&[1.0, 1.0], VSTEMHM),
+            (&[], HINTMASK),
+            (&[], ENDCHAR),
+        ]));
+        let c = Build {
+            glyphs: vec![
+                t2(&[(&[], ENDCHAR)]),
+                t2(&[
+                    (&[0.0, 0.0], RMOVETO),
+                    (&[0.0, 0.0, 10.0, 3.0], RLINETO),
+                    (&[10.0, 3.0], 1211),
+                    (&[0.0], RLINETO),
+                    (&[], ENDCHAR),
+                ]),
+                t2(&[(&[0.0, 0.0, 65.0, 65.0], ENDCHAR)]),
+                t2(&[(&[0.0, 0.0, 65.0, 194.0], ENDCHAR)]),
+                many,
+            ],
+            charset: Table::Data(charset),
+            ..Build::default()
+        }
+        .open();
+        // A line to where the pen is adds no point; sub subtracts.
+        assert_eq!(points(&c, 1), [(0, 0), (10, 3), (17, 3)]);
+        // The accent is a seac itself: FreeType refuses the nesting.
+        assert_eq!(points(&c, 2).len(), 6);
+        assert_eq!(c.outline(3).err(), Some(LoadError));
+        // 97 stems are one more than a hint mask holds.
+        assert_eq!(c.outline(4).err(), Some(LoadError));
     }
 }

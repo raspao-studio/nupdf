@@ -406,7 +406,7 @@ fn jpx_colorspace(
                 if family.n() == n {
                     cs = Some(ColorSpace::Icc(
                         family,
-                        colorspace::IccData(Some(std::sync::Arc::from(icc))),
+                        colorspace::IccData::new(std::sync::Arc::from(icc)),
                     ));
                 } else {
                     diag.warn(
@@ -508,6 +508,9 @@ fn jpx_info(data: &[u8]) -> Option<JpxInfo<'_>> {
     let mut steps = 0;
     let mut has_ihdr = false;
     let mut colr: Option<(JpxSpace, Option<&[u8]>)> = None;
+    // Inside the header superbox, where openjpeg skips a jp2c box as an
+    // unknown sub-box.
+    let mut in_header = false;
     while at + 8 <= end && steps < 10_000 {
         steps += 1;
         let len = be32(data, at)? as usize;
@@ -520,6 +523,9 @@ fn jpx_info(data: &[u8]) -> Option<JpxInfo<'_>> {
                 }
                 (at + 16, at.checked_add(be32(data, at + 12)? as usize)?)
             }
+            // openjpeg reads the codestream from the end of the jp2c box
+            // header on, whatever length the box claims.
+            _ if kind == b"jp2c" && !in_header => (at + 8, data.len()),
             l if l < 8 => return None,
             l => (at + 8, at.checked_add(l)?),
         };
@@ -527,6 +533,7 @@ fn jpx_info(data: &[u8]) -> Option<JpxInfo<'_>> {
         match kind {
             b"jp2h" => {
                 at = body;
+                in_header = true;
                 end = next;
                 continue;
             }
@@ -547,11 +554,11 @@ fn jpx_info(data: &[u8]) -> Option<JpxInfo<'_>> {
                     _ => (JpxSpace::Unknown, None),
                 });
             }
-            b"jp2c" => {
+            b"jp2c" if !in_header => {
                 if !has_ihdr {
                     return None;
                 }
-                let (width, height, numcomps) = siz(data.get(body..next)?)?;
+                let (width, height, numcomps) = siz(data.get(body..)?)?;
                 let (color_space, icc) = colr.unwrap_or((JpxSpace::Unknown, None));
                 return Some(JpxInfo {
                     width,
@@ -570,6 +577,7 @@ fn jpx_info(data: &[u8]) -> Option<JpxInfo<'_>> {
         if at >= end && end < data.len() {
             // Past the header superbox: back to the top level.
             end = data.len();
+            in_header = false;
         }
     }
     None
@@ -747,6 +755,595 @@ mod tests {
             decode_array(&d, &inverted, None, 1, 1),
             Some(vec![1.0, 0.0])
         );
+    }
+
+    /// A PDF with `objects` as objects 2, 3, ..., with an xref table.
+    fn pdf_of(objects: &[Vec<u8>]) -> Vec<u8> {
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        let catalog = b"<</Type/Catalog/Pages 2 0 R>>".to_vec();
+        for (i, body) in std::iter::once(&catalog).chain(objects).enumerate() {
+            offsets.push(file.len());
+            file.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            file.extend_from_slice(body);
+            file.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = file.len();
+        file.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
+        for o in offsets {
+            file.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        file.extend_from_slice(
+            format!(
+                "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 2
+            )
+            .as_bytes(),
+        );
+        file
+    }
+
+    fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
+        let mut s = format!("<<{dict}/Length {}>>stream\n", data.len()).into_bytes();
+        s.extend_from_slice(data);
+        s.extend_from_slice(b"\nendstream");
+        s
+    }
+
+    fn img(dict: &str) -> Vec<u8> {
+        stream(dict, &[0; 4])
+    }
+
+    /// What tests/data/image/image.js prints for an image.
+    fn summary(image: &Image) -> String {
+        let num = |v: f32| ((v * 1e4).round() / 1e4).to_string();
+        let list =
+            |v: Option<Vec<String>>| v.map_or("-".to_string(), |v| format!("[{}]", v.join(" ")));
+        let mut s = format!(
+            "{}x{} bpc {} n {} cs {} im {} interp {} decode {} key {}",
+            image.width,
+            image.height,
+            image.bpc,
+            image.n,
+            image.colorspace.as_ref().map_or("-", ColorSpace::type_name),
+            image.image_mask,
+            image.interpolate,
+            list(
+                image
+                    .decode
+                    .as_ref()
+                    .map(|d| d.iter().map(|&v| num(v)).collect())
+            ),
+            list(
+                image
+                    .colorkey
+                    .as_ref()
+                    .map(|k| k.iter().map(i32::to_string).collect())
+            ),
+        );
+        if let Some(m) = &image.mask {
+            s += &format!(" mask ({})", summary(m));
+        }
+        s
+    }
+
+    macro_rules! jpx {
+        ($name:literal) => {
+            include_bytes!(concat!("../tests/data/image/", $name)).as_slice()
+        };
+    }
+
+    /// `jp2` with its colour box replaced by one with method 2 (an ICC
+    /// profile).
+    fn with_icc(jp2: &[u8], profile: &[u8]) -> Vec<u8> {
+        let at = jp2.windows(4).position(|w| w == b"colr").unwrap_or(0) - 4;
+        let len = u32::from_be_bytes([jp2[at], jp2[at + 1], jp2[at + 2], jp2[at + 3]]) as usize;
+        let mut body = vec![2, 0, 0];
+        body.extend_from_slice(profile);
+        let colr = fbox(b"colr", &body);
+        let mut out = [&jp2[..at], &colr[..], &jp2[at + len..]].concat();
+        // The header superbox grows by as much.
+        let h = out.windows(4).position(|w| w == b"jp2h").unwrap_or(0) - 4;
+        let hlen = u32::from_be_bytes([out[h], out[h + 1], out[h + 2], out[h + 3]]) as usize;
+        let hlen = (hlen + colr.len() - len) as u32;
+        out[h..h + 4].copy_from_slice(&hlen.to_be_bytes());
+        out
+    }
+
+    /// An ICC profile header for `space` (see colorspace's tests).
+    fn profile(space: &[u8; 4]) -> Vec<u8> {
+        let mut p = vec![0u8; 132];
+        p[0..4].copy_from_slice(&132u32.to_be_bytes());
+        p[8] = 2;
+        p[12..16].copy_from_slice(b"mntr");
+        p[16..20].copy_from_slice(space);
+        p[36..40].copy_from_slice(b"acsp");
+        p
+    }
+
+    /// Image dictionaries, as objects 2, 3, ... of a file; object 2 is
+    /// loaded.
+    fn cases() -> Vec<(&'static str, Vec<Vec<u8>>)> {
+        let jpx = |dict: &str, data: &[u8]| stream(&format!("/Filter/JPXDecode{dict}"), data);
+        vec![
+            (
+                "rgb",
+                vec![img(
+                    "/Width 2/Height 2/ColorSpace/DeviceRGB/BitsPerComponent 8",
+                )],
+            ),
+            (
+                "abbreviations_first",
+                vec![img(
+                    "/W 3/Width 5/H 1/Height 9/BPC 4/BitsPerComponent 8/CS/G/D[1 0]/I true",
+                )],
+            ),
+            (
+                "default_depth",
+                vec![img("/Width 1/Height 1/ColorSpace/DeviceGray")],
+            ),
+            (
+                "image_mask",
+                vec![img(
+                    "/Width 4/Height 4/ImageMask true/BitsPerComponent 8/ColorSpace/DeviceRGB/Decode[1 0]",
+                )],
+            ),
+            ("zero_width", vec![img("/Width 0/Height 4")]),
+            ("zero_height", vec![img("/Width 4/Height -1")]),
+            (
+                "negative_depth",
+                vec![img("/Width 4/Height 4/BitsPerComponent -2")],
+            ),
+            ("deep", vec![img("/Width 4/Height 4/BitsPerComponent 17")]),
+            (
+                "huge",
+                vec![img(
+                    "/Width 2147483647/Height 2147483647/BitsPerComponent 16/ColorSpace/DeviceCMYK",
+                )],
+            ),
+            (
+                "indexed_default_decode",
+                vec![img(
+                    "/Width 1/Height 1/BitsPerComponent 4/ColorSpace[/Indexed/DeviceRGB 1<000000ffffff>]",
+                )],
+            ),
+            (
+                "lab",
+                vec![img(
+                    "/Width 1/Height 1/ColorSpace[/Lab<<>>]/Decode[0 50 -100 100 0 127]",
+                )],
+            ),
+            (
+                "lab_default",
+                vec![img("/Width 1/Height 1/ColorSpace[/Lab<<>>]")],
+            ),
+            (
+                "short_decode",
+                vec![img("/Width 1/Height 1/ColorSpace/DeviceRGB/Decode[0 1 1]")],
+            ),
+            (
+                "soft_mask",
+                vec![
+                    img("/Width 2/Height 2/ColorSpace/DeviceRGB/SMask 3 0 R"),
+                    img("/Width 2/Height 2/ColorSpace/DeviceGray/BitsPerComponent 8/Decode[1 0]"),
+                ],
+            ),
+            (
+                "matte",
+                vec![
+                    img("/Width 2/Height 2/ColorSpace/DeviceRGB/SMask 3 0 R"),
+                    img("/Width 2/Height 2/ColorSpace/DeviceGray/Matte[0.5 2 -1]"),
+                ],
+            ),
+            (
+                "mask_of_a_mask",
+                vec![
+                    img("/Width 2/Height 2/ColorSpace/DeviceRGB/SMask 3 0 R"),
+                    img("/Width 2/Height 2/ColorSpace/DeviceGray/SMask 4 0 R"),
+                    img("/Width 2/Height 2/ColorSpace/DeviceGray"),
+                ],
+            ),
+            (
+                "stencil_mask",
+                vec![
+                    img("/Width 2/Height 2/ColorSpace/DeviceRGB/SMask/None/Mask 3 0 R"),
+                    img("/Width 2/Height 2/ImageMask true"),
+                ],
+            ),
+            (
+                "color_key",
+                vec![img(
+                    "/Width 2/Height 2/ColorSpace/DeviceRGB/Mask[0 10 20 30 40 50]",
+                )],
+            ),
+            (
+                "bad_color_key",
+                vec![img(
+                    "/Width 2/Height 2/ColorSpace/DeviceRGB/Mask[0 10 20.5 30]",
+                )],
+            ),
+            (
+                "not_a_stream",
+                vec![b"<</Width 2/Height 2/ColorSpace/DeviceRGB>>".to_vec()],
+            ),
+            (
+                "bad_colorspace",
+                vec![img("/Width 2/Height 2/ColorSpace/Foo")],
+            ),
+            // JPEG 2000: size and colour space from the file, the
+            // dictionary's where they agree.
+            ("jpx_rgb", vec![jpx("", jpx!("rgb.jp2"))]),
+            ("jpx_codestream", vec![jpx("", jpx!("rgb.j2k"))]),
+            (
+                "jpx_codestream_cmyk_dict",
+                vec![jpx("/ColorSpace/DeviceCMYK", jpx!("rgb.j2k"))],
+            ),
+            ("jpx_gray", vec![jpx("/Decode[1 0]", jpx!("gray.jp2"))]),
+            ("jpx_rgba", vec![jpx("", jpx!("rgba.jp2"))]),
+            (
+                "jpx_cmyk",
+                vec![jpx("/ColorSpace/DeviceGray", jpx!("cmyk.jp2"))],
+            ),
+            (
+                "jpx_masks",
+                vec![
+                    jpx("/SMask 3 0 R/Mask[1 2 3 4 5 6]", jpx!("rgb.jp2")),
+                    jpx("", jpx!("gray.jp2")),
+                ],
+            ),
+            (
+                "jpx_color_key",
+                vec![jpx("/Mask[1 2 3 4 5 6]", jpx!("rgb.jp2"))],
+            ),
+            (
+                "jpx_icc",
+                vec![jpx("", &with_icc(jpx!("rgb.jp2"), &profile(b"RGB ")))],
+            ),
+            (
+                "jpx_icc_gray",
+                vec![jpx("", &with_icc(jpx!("rgb.jp2"), &profile(b"GRAY")))],
+            ),
+            (
+                "jpx_icc_broken",
+                vec![jpx("", &with_icc(jpx!("rgb.jp2"), b"junk"))],
+            ),
+            ("jpx_junk", vec![jpx("", b"\x00\x00\x00\x0cjunkjunkjunk")]),
+            ("jpx_empty", vec![jpx("", b"x")]),
+            ("jpx_not_a_stream", vec![b"<</Filter/JPXDecode>>".to_vec()]),
+            (
+                "jpx_bad_colorspace",
+                vec![jpx("/ColorSpace/Foo", jpx!("rgb.jp2"))],
+            ),
+            (
+                "jpx_filter_array",
+                vec![stream("/Filter[/JPXDecode]", jpx!("gray.jp2"))],
+            ),
+            (
+                "jpx_dict_colorspace",
+                vec![jpx("/ColorSpace/CalRGB", jpx!("rgb.jp2"))],
+            ),
+            (
+                "jpx_as_soft_mask",
+                vec![
+                    img("/Width 2/Height 2/ColorSpace/DeviceRGB/SMask 3 0 R"),
+                    jpx("/ColorSpace/DeviceRGB/Decode[1 0 1 0 1 0]", jpx!("rgb.jp2")),
+                ],
+            ),
+            (
+                "jpx_soft_mask",
+                vec![
+                    jpx("/SMask 3 0 R", jpx!("rgb.jp2")),
+                    img("/Width 2/Height 2/ColorSpace/DeviceGray"),
+                ],
+            ),
+            // Colour boxes: sRGB over one component, over two; an unknown
+            // enumerated space; an unknown method.
+            (
+                "jpx_srgb_gray",
+                vec![jpx("", &colr(jpx!("gray.jp2"), 1, 16))],
+            ),
+            ("jpx_srgb_two", vec![jpx("", &colr(jpx!("la.jp2"), 1, 16))]),
+            ("jpx_two", vec![jpx("", jpx!("la.jp2"))]),
+            (
+                "jpx_enum_unknown",
+                vec![jpx("", &colr(jpx!("rgb.jp2"), 1, 99))],
+            ),
+            ("jpx_method_3", vec![jpx("", &colr(jpx!("rgb.jp2"), 3, 16))]),
+            (
+                "jpx_enum_cmyk_on_rgb",
+                vec![jpx("", &colr(jpx!("rgb.jp2"), 1, 12))],
+            ),
+            // Box lengths: 0 (to the end), extended, too small.
+            (
+                "jpx_box_to_end",
+                vec![jpx("", &box_len(jpx!("rgb.jp2"), b"jp2c", 0))],
+            ),
+            (
+                "jpx_extended_box",
+                vec![jpx("", &extended(jpx!("rgb.jp2"), b"jp2c"))],
+            ),
+            (
+                "jpx_short_box",
+                vec![jpx("", &box_len(jpx!("rgb.jp2"), b"jp2c", 4))],
+            ),
+            (
+                "jpx_long_box",
+                vec![jpx("", &box_len(jpx!("rgb.jp2"), b"jp2c", 9999))],
+            ),
+            (
+                "jpx_header_to_end",
+                vec![jpx("", &box_len(jpx!("rgb.jp2"), b"jp2h", 0))],
+            ),
+            (
+                "jpx_short_header",
+                vec![jpx("", &box_len(jpx!("rgb.jp2"), b"jp2h", 4))],
+            ),
+            (
+                "jpx_short_colr",
+                vec![jpx("", &box_len(jpx!("rgb.jp2"), b"colr", 4))],
+            ),
+            (
+                "jpx_no_ihdr",
+                vec![jpx("", &rename(jpx!("rgb.jp2"), b"ihdr", b"ihdX"))],
+            ),
+            (
+                "jpx_no_siz",
+                vec![jpx("", &[0xff, 0x4f, 0xff, 0x52, 0, 0, 0, 0])],
+            ),
+            ("jpx_empty_siz", vec![jpx("", &zero_siz(jpx!("rgb.j2k")))]),
+        ]
+    }
+
+    /// Offset of the first box of type `kind` (its length field).
+    fn box_at(data: &[u8], kind: &[u8; 4]) -> usize {
+        data.windows(4).position(|w| w == kind).unwrap_or(4) - 4
+    }
+
+    /// `jp2` with its colour box's method and enumerated space replaced.
+    fn colr(jp2: &[u8], method: u8, enumcs: u32) -> Vec<u8> {
+        let mut out = jp2.to_vec();
+        let at = box_at(jp2, b"colr") + 8;
+        out[at] = method;
+        out[at + 3..at + 7].copy_from_slice(&enumcs.to_be_bytes());
+        out
+    }
+
+    fn box_len(data: &[u8], kind: &[u8; 4], len: u32) -> Vec<u8> {
+        let mut out = data.to_vec();
+        let at = box_at(data, kind);
+        out[at..at + 4].copy_from_slice(&len.to_be_bytes());
+        out
+    }
+
+    fn rename(data: &[u8], kind: &[u8; 4], to: &[u8; 4]) -> Vec<u8> {
+        let mut out = data.to_vec();
+        let at = box_at(data, kind) + 4;
+        out[at..at + 4].copy_from_slice(to);
+        out
+    }
+
+    /// `data` with box `kind` given an extended (64-bit) length.
+    fn extended(data: &[u8], kind: &[u8; 4]) -> Vec<u8> {
+        let at = box_at(data, kind);
+        let len = u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+        let mut b = 1u32.to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(&u64::from(len + 8).to_be_bytes());
+        [&data[..at], &b[..], &data[at + 8..]].concat()
+    }
+
+    /// A codestream whose SIZ has no components.
+    fn zero_siz(j2k: &[u8]) -> Vec<u8> {
+        let mut out = j2k.to_vec();
+        out[40..42].copy_from_slice(&[0, 0]);
+        out
+    }
+
+    /// MuPDF 1.28.6's summary of each case, from image.js.
+    #[rustfmt::skip]
+    const MUPDF_IMAGES: &[(&str, &str)] = &[
+        ("abbreviations_first", "3x1 bpc 4 n 1 cs Gray im false interp true decode [1 0] key -"),
+        ("bad_color_key", "2x2 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("bad_colorspace", "error unknown colorspace: Foo"),
+        ("color_key", "2x2 bpc 8 n 3 cs RGB im false interp false decode - key [0 10 20 30 40 50]"),
+        ("deep", "error image depth is too large: 17"),
+        ("default_depth", "1x1 bpc 8 n 1 cs Gray im false interp false decode - key -"),
+        ("huge", "error image is too large"),
+        ("image_mask", "4x4 bpc 1 n 1 cs - im true interp false decode [1 0] key -"),
+        ("indexed_default_decode", "1x1 bpc 4 n 1 cs Indexed im false interp false decode [0 15] key -"),
+        ("jpx_as_soft_mask", "2x2 bpc 8 n 3 cs RGB im false interp false decode - key - mask (5x3 bpc 8 n 3 cs RGB im false interp false decode - key -)"),
+        ("jpx_bad_colorspace", "error unknown colorspace: Foo"),
+        ("jpx_box_to_end", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_cmyk", "2x2 bpc 8 n 4 cs CMYK im false interp false decode - key -"),
+        ("jpx_codestream", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_codestream_cmyk_dict", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_color_key", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key [1 2 3 4 5 6]"),
+        ("jpx_dict_colorspace", "error unknown colorspace: CalRGB"),
+        ("jpx_empty", "error not enough data to determine image format"),
+        ("jpx_empty_siz", "error Failed to read JPX header"),
+        ("jpx_enum_cmyk_on_rgb", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_enum_unknown", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_extended_box", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_filter_array", "4x2 bpc 8 n 1 cs Gray im false interp false decode - key -"),
+        ("jpx_gray", "4x2 bpc 8 n 1 cs Gray im false interp false decode [1 0] key -"),
+        ("jpx_header_to_end", "error Failed to read JPX header"),
+        ("jpx_icc", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_icc_broken", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_icc_gray", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_junk", "error Failed to read JPX header"),
+        ("jpx_long_box", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_masks", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key [1 2 3 4 5 6]"),
+        ("jpx_method_3", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_no_ihdr", "error Failed to read JPX header"),
+        ("jpx_no_siz", "error Failed to read JPX header"),
+        ("jpx_not_a_stream", "error object is not a stream"),
+        ("jpx_rgb", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_rgba", "3x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_short_box", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("jpx_short_colr", "error Failed to read JPX header"),
+        ("jpx_short_header", "error Failed to read JPX header"),
+        ("jpx_soft_mask", "5x3 bpc 8 n 3 cs RGB im false interp false decode - key - mask (2x2 bpc 8 n 1 cs - im false interp false decode - key -)"),
+        ("jpx_srgb_gray", "4x2 bpc 8 n 1 cs Gray im false interp false decode - key -"),
+        ("jpx_srgb_two", "error unsupported number of components: 2"),
+        ("jpx_two", "2x2 bpc 8 n 1 cs Gray im false interp false decode - key -"),
+        ("lab", "1x1 bpc 8 n 3 cs Lab im false interp false decode [0 0.5 0.1098 0.8941 0.502 1] key -"),
+        ("lab_default", "1x1 bpc 8 n 3 cs Lab im false interp false decode - key -"),
+        ("mask_of_a_mask", "2x2 bpc 8 n 3 cs RGB im false interp false decode - key - mask (2x2 bpc 8 n 1 cs - im false interp false decode - key -)"),
+        ("matte", "2x2 bpc 8 n 3 cs RGB im false interp false decode - key [127 127 255 255 0 0] mask (2x2 bpc 8 n 1 cs - im false interp false decode - key -)"),
+        ("negative_depth", "error image depth is zero (or less)"),
+        ("not_a_stream", "error object is not a stream"),
+        ("rgb", "2x2 bpc 8 n 3 cs RGB im false interp false decode - key -"),
+        ("short_decode", "1x1 bpc 8 n 3 cs RGB im false interp false decode [0 1 1 0 0 0] key -"),
+        ("soft_mask", "2x2 bpc 8 n 3 cs RGB im false interp false decode - key - mask (2x2 bpc 8 n 1 cs - im false interp false decode [1 0] key -)"),
+        ("stencil_mask", "2x2 bpc 8 n 3 cs RGB im false interp false decode - key - mask (2x2 bpc 1 n 1 cs - im true interp false decode - key -)"),
+        ("zero_height", "error image height is zero (or less)"),
+        ("zero_width", "error image width is zero (or less)"),
+    ];
+
+    #[test]
+    fn images_load_as_in_mupdf() {
+        let dump = std::env::var_os("NUPDF_DUMP_IMAGE_CASES");
+        let mut wrong = Vec::new();
+        for (name, objects) in cases() {
+            let file = pdf_of(&objects);
+            if let Some(dir) = &dump {
+                let path = std::path::Path::new(dir).join(format!("{name}.pdf"));
+                std::fs::write(path, &file).unwrap_or_else(|e| panic!("{e}"));
+            }
+            let doc = Document::open(file).unwrap_or_else(|e| panic!("{e:?}"));
+            let got = match load(&doc, &Object::Ref(crate::ObjRef::new(2, 0))) {
+                Ok(image) => summary(&image),
+                Err(e) => format!("error {}", crate::diag::report::strip(&e)),
+            };
+            match MUPDF_IMAGES.iter().find(|c| c.0 == name) {
+                Some((_, want)) if *want == got => {}
+                Some((_, want)) => wrong.push(format!("{name}:\n  got   {got}\n  MuPDF {want}")),
+                None => wrong.push(format!("{name}: no MuPDF result (got {got})")),
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn intents_are_mupdfs_numbers() {
+        for (name, want) in [
+            ("/Perceptual", Some(0)),
+            ("/RelativeColorimetric", Some(1)),
+            ("/Saturation", Some(2)),
+            ("/AbsoluteColorimetric", Some(3)),
+            ("/Other", None),
+            ("1", None),
+        ] {
+            let file = pdf_of(&[img(&format!("/Width 1/Height 1/Intent {name}"))]);
+            let doc = Document::open(file).unwrap_or_else(|e| panic!("{e:?}"));
+            let image = load(&doc, &Object::Ref(crate::ObjRef::new(2, 0)));
+            assert_eq!(image.map(|i| i.intent), Ok(want), "{name}");
+        }
+    }
+
+    #[test]
+    fn jpeg_data_is_the_stream_with_earlier_filters_undone() {
+        let jpeg = b"\xff\xd8\xff\xd9";
+        let hex: String = jpeg.iter().map(|b| format!("{b:02x}")).collect();
+        // (dictionary, data, the JPEG data and its parameters).
+        type Case<'a> = (&'a str, Vec<u8>, Option<(&'a [u8], &'a str)>);
+        let cases: [Case; 6] = [
+            (
+                "/Filter/DCTDecode/DecodeParms<</ColorTransform 0>>",
+                jpeg.to_vec(),
+                Some((jpeg, "<</ColorTransform 0>>")),
+            ),
+            ("/F/DCT", jpeg.to_vec(), Some((jpeg, "null"))),
+            (
+                "/Filter[/AHx/DCTDecode]/DecodeParms[null<</ColorTransform 1>>]",
+                format!("{hex}>").into_bytes(),
+                Some((jpeg, "<</ColorTransform 1>>")),
+            ),
+            (
+                "/Filter[/AHx/DCTDecode]",
+                format!("{hex}>").into_bytes(),
+                Some((jpeg, "null")),
+            ),
+            ("/Filter[/DCTDecode/AHx]", jpeg.to_vec(), None),
+            ("/Filter/FlateDecode", jpeg.to_vec(), None),
+        ];
+        for (dict, data, want) in cases {
+            let file = pdf_of(&[stream(&format!("/Width 1/Height 1{dict}"), &data)]);
+            let doc = Document::open(file).unwrap_or_else(|e| panic!("{e:?}"));
+            let image = load(&doc, &Object::Ref(crate::ObjRef::new(2, 0)))
+                .unwrap_or_else(|e| panic!("{e}"));
+            let got = jpeg_parts(&doc, &image).unwrap_or_else(|e| panic!("{e}"));
+            let got = got.map(|(d, p)| {
+                let p = crate::print::to_string(&p, crate::print::Options::default());
+                (d, p)
+            });
+            let want = want.map(|(d, p)| (d.to_vec(), p.to_string()));
+            assert_eq!(got, want, "{dict}");
+            assert_eq!(
+                jpeg_data(&doc, &image).unwrap_or_default(),
+                want.map(|w| w.0),
+                "{dict}"
+            );
+        }
+        // Inline images have no stream to read.
+        let doc = Document::create().unwrap_or_else(|e| panic!("{e:?}"));
+        let inline = from_inline(&doc, &inline_image(&doc, "/W 1/H 1"));
+        assert_eq!(jpeg_data(&doc, &inline), Ok(None));
+    }
+
+    fn inline_image<'a>(doc: &Document, dict: &str) -> InlineImage<'a> {
+        let diag = doc.diagnostics();
+        let text = format!("<<{dict}>>");
+        let mut lx = crate::lex::Lexer::new(text.as_bytes(), 0, diag);
+        let crate::object::Object::Dict(d) =
+            crate::parse::parse_stm_obj(&mut lx).unwrap_or_else(|e| panic!("{e:?}"))
+        else {
+            panic!("not a dictionary");
+        };
+        InlineImage {
+            dict: (*d).clone(),
+            width: 2,
+            height: 2,
+            bpc: 8,
+            image_mask: false,
+            colorspace: Some(ColorSpace::Rgb),
+            n: 3,
+            data: b"xyz",
+        }
+    }
+
+    #[test]
+    fn inline_images_keep_their_dictionary_and_data() {
+        let doc = Document::create().unwrap_or_else(|e| panic!("{e:?}"));
+        let image = from_inline(
+            &doc,
+            &inline_image(
+                &doc,
+                "/I true/D[1 0 1 0 1 0]/Intent/Saturation/Mask[1 2 3 4 5 6]",
+            ),
+        );
+        assert_eq!(
+            summary(&image),
+            "2x2 bpc 8 n 3 cs RGB im false interp true decode [1 0 1 0 1 0] key [1 2 3 4 5 6]"
+        );
+        assert_eq!(image.intent, Some(2));
+        assert!(image.stream.is_none());
+        assert_eq!(image.inline.as_ref().map(|i| &i.1[..]), Some(&b"xyz"[..]));
+        // A bad color key is dropped without a second warning (the content
+        // parser gave one).
+        let image = from_inline(&doc, &inline_image(&doc, "/Mask[1 2.5]"));
+        assert_eq!(image.colorkey, None);
+        assert!(doc.diagnostics().snapshot().is_empty());
+        // A soft mask dictionary shadows /Mask; anything else yields to it.
+        let image = from_inline(&doc, &inline_image(&doc, "/SMask<<>>/Mask[0 0 0 0 0 0]"));
+        assert_eq!(image.colorkey, None);
+        let image = from_inline(
+            &doc,
+            &inline_image(&doc, "/SMask[1 1 1 1 1 1]/Mask[0 0 0 0 0 0]"),
+        );
+        assert_eq!(image.colorkey, Some(vec![0; 6]));
     }
 
     /// A bare codestream: SOC, then a SIZ segment for a `w` by `h` image

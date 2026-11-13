@@ -248,3 +248,78 @@ pub trait Device {
 
     fn end_metatext(&mut self) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::draw::list::{Cmd, DisplayList};
+
+    #[test]
+    fn names_look_up_as_mupdf_numbers_them() {
+        assert_eq!(lookup_intent(b"Perceptual"), 0);
+        assert_eq!(lookup_intent(b"AbsoluteColorimetric"), 3);
+        assert_eq!(lookup_intent(b"Vivid"), 1);
+        assert_eq!(lookup_blendmode(b"Luminosity"), 15);
+        assert_eq!(lookup_blendmode(b"Compatible"), 0);
+        let names: Vec<_> = [
+            Metatext::ActualText,
+            Metatext::Alt,
+            Metatext::Abbreviation,
+            Metatext::Title,
+        ]
+        .map(Metatext::name)
+        .into();
+        assert_eq!(names, ["ActualText", "Alt", "Abbreviation", "Title"]);
+        assert_eq!(ColorParams::default().ri, 1);
+    }
+
+    /// Counts its fills; every other call falls to the trait's defaults.
+    #[derive(Default)]
+    struct Fills(usize);
+
+    impl Device for Fills {
+        fn fill_path(
+            &mut self,
+            _: &Path,
+            _: bool,
+            _: Matrix,
+            _: &ColorSpace,
+            _: &[f32],
+            _: f32,
+            _: ColorParams,
+        ) {
+            self.0 += 1;
+        }
+    }
+
+    #[test]
+    fn calls_a_device_does_not_implement_do_nothing() {
+        // A page of every kind of call, kept and played to a device that
+        // only counts fills: the rest are ignored, and as no tile is
+        // cached, the fills inside tiles are played too.
+        let pdf = crate::draw::testkit::sink_with(
+            "BT /F1 14 Tf 1 Tr 4 112 Td (Ab) Tj ET q /Pattern CS /Sh SCN BT /F1 16 Tf 1 Tr 100 30 Td (W) Tj ET Q",
+        );
+        let doc = crate::document::Document::open(pdf).unwrap_or_else(|e| panic!("{e:?}"));
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut list = DisplayList::default();
+        let run = crate::run::run_page_contents_with(
+            &doc,
+            &page,
+            &mut list,
+            crate::content::Store::default(),
+            Some("View"),
+            Matrix::IDENTITY,
+        );
+        assert_eq!(run.error, None);
+        let mut fills = Fills::default();
+        list.replay(&mut fills);
+        let want = list
+            .cmds
+            .iter()
+            .filter(|c| matches!(c, Cmd::FillPath(..)))
+            .count();
+        assert!(want > 0);
+        assert_eq!(fills.0, want);
+    }
+}

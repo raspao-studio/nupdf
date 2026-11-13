@@ -197,6 +197,19 @@ impl Walk<'_> {
         }
     }
 
+    /// An additional-actions dictionary: every trigger is an action, and
+    /// those the policy removes go.
+    fn triggers(&mut self, triggers: &Dict, path: &str, depth: usize) -> Dict {
+        let mut kept = Dict::new();
+        for (t, action) in triggers.iter() {
+            let tp = format!("{path}/{}", String::from_utf8_lossy(t));
+            if !self.action_goes(&tp, action) {
+                kept.put(t, self.walk(action, &tp, depth + 1));
+            }
+        }
+        kept
+    }
+
     fn walk(&mut self, obj: &Object, path: &str, depth: usize) -> Object {
         if depth > MAX_DEPTH {
             return obj.clone();
@@ -243,22 +256,16 @@ impl Walk<'_> {
                 b"A" | b"OpenAction" | b"PA" | b"Next" if self.action_goes(&p, value) => continue,
                 // Additional actions: every trigger is an action.
                 b"AA" => {
-                    let aa = doc.resolve(value);
-                    if let (Some(triggers), Object::Dict(_)) = (aa.as_dict(), value) {
-                        let mut kept = Dict::new();
-                        for (t, action) in triggers.iter() {
-                            let tp = format!("{p}/{}", String::from_utf8_lossy(t));
-                            if !self.action_goes(&tp, action) {
-                                kept.put(t, self.walk(action, &tp, depth + 1));
-                            }
-                        }
+                    if let Object::Dict(triggers) = value {
+                        let kept = self.triggers(triggers, &p, depth);
                         if !kept.is_empty() {
                             out.put(key, Object::Dict(Arc::new(kept)));
                         }
                         continue;
                     }
-                    // An /AA of its own object is walked as that object;
-                    // here only whether it is still there matters.
+                    // An /AA of its own object is walked as that object
+                    // (`each_object` knows it for one); here only whether
+                    // it is still there matters.
                     out.put(key, value.clone());
                     continue;
                 }
@@ -329,23 +336,60 @@ fn name_tree_count(doc: &Document, node: &Object) -> usize {
 }
 
 fn top_path(doc: &Document, num: i32) -> String {
-    // The catalog's and the AcroForm's keys are named by where they are.
-    let root = doc.trailer().get(b"Root").cloned();
-    if root.as_ref().and_then(Object::as_ref).map(|r| r.num) == Some(num) {
-        return String::new();
-    }
-    let acroform = root.map(|r| doc.dict_get(&r, b"AcroForm"));
-    if acroform.as_ref().and_then(Object::as_ref).map(|r| r.num) == Some(num) {
+    // The catalog's and the AcroForm's keys are named by where they are:
+    // an /AcroForm or /Names of its own object is walked as what it is.
+    let root = doc.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
+    let catalog = doc.resolve(&root);
+    let held = |key: &[u8]| {
+        catalog
+            .as_dict()
+            .and_then(|d| d.get(key))
+            .and_then(Object::as_ref)
+            .map(|r| r.num)
+    };
+    if held(b"AcroForm") == Some(num) {
         return "/AcroForm".into();
     }
-    let names = doc
-        .trailer()
-        .get(b"Root")
-        .map(|r| doc.dict_get(r, b"Names"));
-    if names.as_ref().and_then(Object::as_ref).map(|r| r.num) == Some(num) {
+    if held(b"Names") == Some(num) {
         return "/Names".into();
     }
     String::new()
+}
+
+/// The objects that are some dictionary's /AA, found in every object
+/// down to the depth limit.
+fn additional_actions(doc: &Document) -> std::collections::HashSet<i32> {
+    fn find(obj: &Object, depth: usize, out: &mut std::collections::HashSet<i32>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let dict = match obj {
+            Object::Dict(d) => d.as_ref(),
+            Object::Stream(s) => &s.dict,
+            Object::Array(a) => {
+                for v in a.iter() {
+                    find(v, depth + 1, out);
+                }
+                return;
+            }
+            _ => return,
+        };
+        for (key, value) in dict.iter() {
+            match (key, value) {
+                (b"AA", Object::Ref(r)) => {
+                    out.insert(r.num);
+                }
+                _ => find(value, depth + 1, out),
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for num in 1..i32::try_from(doc.xref_len()).unwrap_or(i32::MAX) {
+        if let Some(obj) = doc.object(num) {
+            find(&obj, 0, &mut out);
+        }
+    }
+    out
 }
 
 fn each_object(
@@ -354,6 +398,7 @@ fn each_object(
     mut f: impl FnMut(i32, &Object, Walk),
 ) -> Vec<Finding> {
     let mut found = Vec::new();
+    let aa_objects = additional_actions(doc);
     for num in 1..i32::try_from(doc.xref_len()).unwrap_or(i32::MAX) {
         let Some(obj) = doc.object(num) else { continue };
         let mut w = Walk {
@@ -376,8 +421,12 @@ fn each_object(
             f(num, &Object::Null, w);
             continue;
         }
-        let path = top_path(doc, num);
-        let new = w.walk(&obj, &path, 0);
+        let new = match &obj {
+            Object::Dict(d) if aa_objects.contains(&num) => {
+                Object::Dict(Arc::new(w.triggers(d, "/AA", 0)))
+            }
+            _ => w.walk(&obj, &top_path(doc, num), 0),
+        };
         found.extend(w.found.iter().cloned());
         if new != obj {
             f(num, &new, w);
@@ -417,5 +466,105 @@ mod tests {
             host("http://a.b.example.org").as_deref(),
             Some("a.b.example.org")
         );
+    }
+
+    /// Something of each kind, in the places they hang: the catalog's
+    /// /OpenAction and /NeedsRendering, an /AcroForm and /Names of their
+    /// own, a /Next array, additional actions direct and of their own, a
+    /// stream's /AA, a file attachment and nesting past the depth limit.
+    fn active() -> Document {
+        let mut deep = String::from("<</A<</S/Launch/F(deep.exe)>>>>");
+        for _ in 0..70 {
+            deep = format!("[{deep}]");
+        }
+        let objs = [
+            "<</Type/Catalog/Pages 2 0 R/AcroForm 3 0 R/Names 4 0 R/NeedsRendering true\
+             /OpenAction<</S/JavaScript/JS 5 0 R>>>>"
+                .to_string(),
+            "<</Type/Pages/Kids[]/Count 0>>".into(),
+            "<</Fields[]/XFA 6 0 R/CO[]>>".into(),
+            "<</JavaScript<</Kids[7 0 R 7 0 R]>>/EmbeddedFiles<</Names[(a)8 0 R(b)8 0 R]>>>>"
+                .into(),
+            String::from_utf8_lossy(&crate::testutil::stream("", b"app.alert(\n  'hi'  )")).into(),
+            "[]".into(),
+            "<</Names[(one)9 0 R]>>".into(),
+            "<</Type/Filespec/F(a.txt)>>".into(),
+            "<</S/JavaScript/JS(x)>>".into(),
+            // 10: a link whose /Next chain mixes actions.
+            "<</Subtype/Link/A<</S/GoTo/D[0/Fit]/Next[<</S/ImportData/F(in.fdf)>>\
+             <</S/URI/URI(https://www.example.com/x)>><</S/URI/URI(https://evil.test/y)>>]>>>>"
+                .into(),
+            "<</Subtype/Widget/AA 12 0 R/PA<</S/Rendition/JS(play())>>>>".into(),
+            "<</K<</S/SubmitForm/F(http://x/submit)>>/F<</S/Hide>>>>".into(),
+            String::from_utf8_lossy(&crate::testutil::stream(
+                "/AA<</O<</S/Launch/Win<</F(cmd.exe)>>>>>>",
+                b"",
+            ))
+            .into(),
+            "<</Subtype/FileAttachment/FS 8 0 R/AA<</PO<</S/GoToE/F(e.pdf)>>>>>>".into(),
+            deep,
+        ];
+        let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+        crate::testutil::doc_of(&refs)
+    }
+
+    #[test]
+    fn everything_active_is_found_where_it_hangs() {
+        let doc = active();
+        let policy = Policy {
+            attachments: true,
+            uri: UriPolicy::Allow(vec!["Example.com".into()]),
+            ..Policy::default()
+        };
+        let found: Vec<(i32, String, &str, String)> = scan(&doc, &policy)
+            .into_iter()
+            .map(|f| (f.object, f.path, f.kind, f.detail))
+            .collect();
+        let f = |o: i32, p: &str, k: &'static str, d: &str| (o, p.to_string(), k, d.to_string());
+        assert_eq!(
+            found,
+            [
+                f(1, "/NeedsRendering", "xfa", "NeedsRendering"),
+                f(1, "/OpenAction", "javascript", "app.alert( 'hi' )"),
+                f(3, "/AcroForm/XFA", "xfa", "XFA form"),
+                f(3, "/AcroForm/CO", "javascript", "calculation order"),
+                f(4, "/Names/JavaScript", "javascript", "1 document scripts"),
+                f(4, "/Names/EmbeddedFiles", "attachments", "2 embedded files"),
+                f(9, "", "javascript", "x"),
+                f(10, "/A/Next[0]", "import", "in.fdf"),
+                f(10, "/A/Next[2]", "uri", "https://evil.test/y"),
+                f(11, "/PA", "javascript", "play()"),
+                f(12, "/AA/K", "submit", "http://x/submit"),
+                f(13, "/AA/O", "launch", "cmd.exe"),
+                f(14, "/FS", "attachments", "a.txt"),
+                f(14, "/AA/PO", "remote", "e.pdf"),
+            ]
+        );
+        // What sanitize removes, scan no longer finds.
+        assert_eq!(sanitize(&doc, &policy).len(), found.len());
+        assert!(scan(&doc, &policy).is_empty());
+        let print =
+            |n| crate::print::to_string(&doc.object(n).unwrap_or(Object::Null), Default::default());
+        assert_eq!(print(9), "null");
+        assert_eq!(
+            print(10),
+            "<</Subtype/Link/A<</S/GoTo/D[0/Fit]/Next[<</S/URI/URI(https://www.example.com/x)>>]>>>>"
+        );
+        assert_eq!(print(12), "<</F<</S/Hide>>>>");
+        // Links to the web go only when asked.
+        let doc = active();
+        let keep = scan(&doc, &Policy::default());
+        assert!(
+            keep.iter()
+                .all(|f| f.kind != "uri" && f.kind != "attachments")
+        );
+        let all = scan(
+            &doc,
+            &Policy {
+                uri: UriPolicy::Remove,
+                ..Policy::default()
+            },
+        );
+        assert_eq!(all.iter().filter(|f| f.kind == "uri").count(), 2);
     }
 }

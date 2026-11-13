@@ -829,4 +829,75 @@ trailer\n<</Root 1 0 R>>\n",
         assert!(ed.get(&first, b"MediaBox").is_some());
         assert!(ed.get(&first, b"Resources").is_some());
     }
+
+    /// The objects after `rearrange_pages(pages)`, printed from 1, and its
+    /// error.
+    fn rearranged(objects: &[&str], pages: &[i32]) -> (Vec<String>, Option<String>) {
+        let doc = crate::testutil::doc_of(objects);
+        let err = rearrange_pages(&doc, pages).err().map(|e| e.to_string());
+        let n = i32::try_from(objects.len()).unwrap_or(0);
+        ((1..=n).map(|i| text_of(&doc, i)).collect(), err)
+    }
+
+    // Each expectation is what PDFDocument.rearrangePages leaves.
+
+    #[test]
+    fn direct_outlines_change_in_the_new_catalog() {
+        let (objs, err) = rearranged(
+            &[
+                "<</Type/Catalog/Pages 2 0 R/OCProperties<</OCGs[]>>/Outlines<</First 5 0 R/Last 6 0 R/Count 2>>>>",
+                "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+                "<</Type/Page/Parent 2 0 R>>",
+                "<</Type/Page/Parent 2 0 R>>",
+                "<</Title(a)/Next 6 0 R/A<</S/GoTo/D(nowhere)>>>>",
+                "<</Title(b)/Prev 5 0 R/Dest[3 0 R/Fit]>>",
+            ],
+            &[0],
+        );
+        assert_eq!(err, None);
+        assert_eq!(
+            objs[0],
+            "<</Type/Catalog/Pages 2 0 R/Outlines<</First 6 0 R/Last 6 0 R/Count 1>>/OCProperties<</OCGs[]>>>>"
+        );
+        assert_eq!(objs[5], "<</Title(b)/Dest[3 0 R/Fit]>>");
+    }
+
+    #[test]
+    fn an_outline_that_loops_fails() {
+        let (objs, err) = rearranged(
+            &[
+                "<</Type/Catalog/Pages 2 0 R/Outlines 5 0 R>>",
+                "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+                "<</Type/Page/Parent 2 0 R>>",
+                "<</Type/Page/Parent 2 0 R>>",
+                "<</First 6 0 R/Last 6 0 R>>",
+                "<</Title(a)/Dest[3 0 R/Fit]/First 5 0 R>>",
+            ],
+            &[0],
+        );
+        assert_eq!(
+            err.as_deref(),
+            Some("format error: Cycle detected in outlines")
+        );
+        assert_eq!(objs[0], "<</Type/Catalog/Pages 2 0 R/Outlines 5 0 R>>");
+        assert_eq!(objs[1], "<</Type/Pages/Kids[3 0 R]/Count 1>>");
+    }
+
+    #[test]
+    fn a_field_whose_parents_loop_fails() {
+        let (objs, err) = rearranged(
+            &[
+                "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[5 0 R]>>>>",
+                "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+                "<</Type/Page/Parent 2 0 R/Annots[5 0 R]>>",
+                "<</Type/Page/Parent 2 0 R>>",
+                "<</FT/Tx/T(f)/Subtype/Widget/P 3 0 R/Parent 6 0 R>>",
+                "<</T(p)/Parent 5 0 R/Kids[5 0 R]>>",
+            ],
+            &[0],
+        );
+        assert_eq!(err.as_deref(), Some("format error: cycle in parent chain"));
+        assert_eq!(objs[0], "<</Type/Catalog/Pages 2 0 R>>");
+        assert_eq!(objs[2], "<</Type/Page/Parent 2 0 R/Annots[5 0 R]>>");
+    }
 }

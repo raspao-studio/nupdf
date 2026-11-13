@@ -604,5 +604,250 @@ mod tests {
             Ok(options::IGNORE_CASE | options::REGEXP)
         );
         assert!(parse_options("fuzzy").is_err());
+        assert!(parse_options("regexp=maybe").is_err());
+        assert_eq!(parse_options("regexp=no, ignore-case=1"), Ok(1));
+    }
+
+    /// A one-page document: Helvetica as F1; L, Helvetica with fi and fl
+    /// at codes 1 and 2; and M, Helvetica whose ToUnicode makes a an e
+    /// with a combining acute, b a fullwidth A, c a lone acute and d a
+    /// soft hyphen.
+    fn search_doc(content: &str) -> crate::document::Document {
+        let cmap = "/CIDInit/ProcSet findresource begin 12 dict begin begincmap /CMapName/M def \
+            1 begincodespacerange <00><FF> endcodespacerange 4 beginbfchar <61><00650301> \
+            <62><FF21> <63><0301> <64><00AD> endbfchar endcmap CMapName currentdict /CMap \
+            defineresource pop end end";
+        let pdf = format!(
+            "%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+             2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+             3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 400]/Contents 4 0 R/Resources<</Font<<\
+             /F1 <</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
+             /L<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding<</Differences[1/fi/fl]>>>>\
+             /M<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>>>>>>>endobj\n\
+             4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n\
+             5 0 obj<</Length {}>>stream\n{cmap}\nendstream endobj\n\
+             trailer<</Root 1 0 R/Size 6>>\n",
+            content.len(),
+            cmap.len()
+        );
+        crate::document::Document::open(pdf.into_bytes()).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    fn stext(doc: &crate::document::Document, opts: &str) -> StextPage {
+        let obj = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let opts = crate::stext::Options::parse(opts).unwrap_or_else(|e| panic!("{e}"));
+        crate::stext::extract_page(doc, &obj, opts, crate::content::Store::default())
+            .0
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Each hit as its number of quads and its first quad's top left,
+    /// rounded.
+    fn brief(page: &StextPage, needle: &str, opts: &str) -> Result<Vec<(usize, i32, i32)>, String> {
+        let opts = parse_options(opts)?;
+        Ok(search_page(page, needle, opts)?
+            .iter()
+            .map(|h| {
+                let q = h.quads[0];
+                (h.quads.len(), q.ul.x.round() as i32, q.ul.y.round() as i32)
+            })
+            .collect())
+    }
+
+    const PAGE: &str = "BT /F1 12 Tf 20 370 Td (The cat sat on the mat. THE END.) Tj \
+        0 -14 Td (A soft hy\\255) Tj 0 -14 Td (phen and a hard hy-) Tj 0 -14 Td (phen too.) Tj ET \
+        BT /F1 12 Tf 20 290 Td (Caf\\351 and cafe and CAF\\311.) Tj 0 -14 Td (Line one ends) Tj \
+        0 -14 Td (line two starts.) Tj ET \
+        BT /L 12 Tf 20 230 Td (\\001nd o\\002ce) Tj ET \
+        BT /F1 12 Tf 20 200 Td (Numbers 12 and 345 and 6789.) Tj ET \
+        BT /F1 12 Tf 0 1 -1 0 380 100 Tm (vertical words here) Tj ET \
+        BT /F1 12 Tf 20 160 Td (spaced    out    words) Tj ET \
+        BT /F1 12 Tf 20 140 Td [(kerned) -3000 (apart)] TJ ET \
+        BT /M 12 Tf 20 120 Td (abc) Tj ET \
+        BT /M 12 Tf 20 90 Td (sofdtly) Tj 0 -14 Td (hyd) Tj 0 -14 Td (phenated) Tj ET";
+
+    type Expect<'a> = (&'a str, &'a str, Result<&'a [(usize, i32, i32)], &'a str>);
+
+    /// MuPDF's hits (oracle/js/search.js on the same file).
+    #[test]
+    fn hits_on_a_page_are_mupdfs() {
+        let p = stext(&search_doc(PAGE), "");
+        let e = |n: usize| -> Vec<(usize, i32, i32)> {
+            [
+                (1, 34, 17),
+                (1, 109, 17),
+                (1, 33, 45),
+                (1, 33, 59),
+                (1, 88, 97),
+                (1, 36, 111),
+                (1, 59, 111),
+                (1, 69, 111),
+                (1, 32, 125),
+                (1, 61, 157),
+                (1, 52, 187),
+                (1, 367, 294),
+                (1, 367, 217),
+                (1, 367, 206),
+                (1, 45, 227),
+                (1, 26, 247),
+                (1, 43, 247),
+            ][..n]
+                .to_vec()
+        };
+        let mut e_plain = e(17);
+        e_plain.extend([(1, 33, 325), (1, 57, 325)]);
+        let mut e_marks = e(4);
+        e_marks.push((1, 39, 97));
+        e_marks.extend(e(17)[4..].iter().copied());
+        e_marks.extend([(1, 20, 267), (1, 33, 325), (1, 47, 325), (1, 57, 325)]);
+        let cases: &[Expect] = &[
+            ("the", "", Ok(&[(1, 99, 17)])),
+            (
+                "the",
+                "ignore-case",
+                Ok(&[(1, 20, 17), (1, 99, 17), (1, 146, 17)]),
+            ),
+            ("THE", "", Ok(&[(1, 146, 17)])),
+            ("hyphen", "", Ok(&[(2, 20, 311)])),
+            (
+                "hy-phen",
+                "keep-hyphens",
+                Ok(&[(2, 54, 31), (2, 111, 45), (2, 20, 311)]),
+            ),
+            ("hyphen", "keep-hyphens", Ok(&[])),
+            ("cafe", "", Ok(&[(1, 72, 97)])),
+            ("cafe", "ignore-diacritics", Ok(&[(1, 72, 97)])),
+            (
+                "cafe",
+                "ignore-case,ignore-diacritics",
+                Ok(&[(1, 20, 97), (1, 72, 97), (1, 121, 97)]),
+            ),
+            ("caf\u{e9}", "ignore-case", Ok(&[(1, 20, 97), (1, 121, 97)])),
+            ("ends line", "", Ok(&[(2, 69, 111)])),
+            ("ends line", "keep-lines", Ok(&[])),
+            ("find", "", Ok(&[(1, 20, 157)])),
+            ("office", "", Ok(&[])),
+            ("words", "", Ok(&[(1, 367, 259), (1, 102, 227)])),
+            ("out words", "", Ok(&[(2, 72, 227)])),
+            ("kerned apart", "", Ok(&[(2, 20, 247)])),
+            ("A", "", Ok(&[(1, 20, 31), (1, 130, 97)])),
+            (
+                "[0-9]+",
+                "regexp",
+                Ok(&[(1, 72, 187), (1, 112, 187), (1, 159, 187)]),
+            ),
+            ("^[A-Z]", "regexp", Ok(&[(1, 20, 17)])),
+            (
+                "^[A-Z]",
+                "regexp,keep-lines",
+                Ok(&[
+                    (1, 20, 17),
+                    (1, 20, 31),
+                    (1, 20, 97),
+                    (1, 20, 111),
+                    (1, 20, 187),
+                ]),
+            ),
+            ("s$", "regexp,keep-paragraphs", Ok(&[(1, 128, 227)])),
+            ("ends\\nline", "regexp,keep-lines", Ok(&[(2, 69, 111)])),
+            ("x*", "regexp", Ok(&[])),
+            (
+                "\\bthe\\b",
+                "regexp,ignore-case",
+                Ok(&[(1, 20, 17), (1, 99, 17), (1, 146, 17)]),
+            ),
+            (
+                "caf.",
+                "regexp,ignore-case",
+                Ok(&[(1, 20, 97), (1, 72, 97), (1, 121, 97)]),
+            ),
+            (
+                ".$",
+                "regexp,keep-lines",
+                Ok(&[
+                    (1, 199, 17),
+                    (1, 67, 31),
+                    (1, 123, 45),
+                    (1, 67, 59),
+                    (1, 153, 97),
+                    (1, 89, 111),
+                    (1, 93, 125),
+                    (1, 61, 157),
+                    (1, 185, 187),
+                    (1, 367, 206),
+                    (1, 128, 227),
+                    (1, 50, 247),
+                    (1, 117, 247),
+                    (1, 27, 267),
+                    (1, 49, 297),
+                    (1, 57, 325),
+                ]),
+            ),
+            (
+                "[",
+                "regexp",
+                Err("regcomp failure: unterminated character class"),
+            ),
+            ("softly", "", Ok(&[(2, 20, 297)])),
+            ("hyphenated", "", Ok(&[])),
+            (
+                "hy",
+                "keep-hyphens",
+                Ok(&[(1, 54, 31), (1, 111, 45), (1, 20, 311)]),
+            ),
+            ("sof", "keep-hyphens", Ok(&[(1, 31, 31), (1, 20, 297)])),
+            ("", "", Ok(&[])),
+        ];
+        for &(needle, opts, want) in cases {
+            let got = brief(&p, needle, opts);
+            assert_eq!(
+                got,
+                want.map(<[_]>::to_vec).map_err(String::from),
+                "{needle:?} {opts:?}"
+            );
+        }
+        assert_eq!(brief(&p, "e", ""), Ok(e_plain));
+        assert_eq!(brief(&p, "\u{e9}", "ignore-diacritics"), Ok(e_marks));
+    }
+
+    #[test]
+    fn dehyphenated_lines_join_for_search() {
+        // A line that dehyphenation joined reads on into the next, without
+        // its hyphen.
+        let d = search_doc("BT /F1 12 Tf 20 370 Td (A hard hy-) Tj 0 -14 Td (phen here.) Tj ET");
+        let joined = stext(&d, "dehyphenate");
+        let hits = search_page(&joined, "hyphen", 0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0].begin, hits[0].end),
+            (
+                Position {
+                    block: 0,
+                    line: 0,
+                    ch: 7
+                },
+                Position {
+                    block: 0,
+                    line: 1,
+                    ch: 3
+                }
+            )
+        );
+        assert!(
+            search_page(&stext(&d, ""), "hyphen", 0)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn runes_write_as_fz_runetochar_writes_them() {
+        let mut out = Vec::new();
+        for c in [0, 0x41, 0xe9, 0x20ac, 0x1f600, -5, 0x110000] {
+            push_rune(&mut out, c);
+        }
+        let mut want = vec![0xc0, 0x80, 0x41];
+        want.extend("\u{e9}\u{20ac}\u{1f600}\u{fffd}\u{fffd}".as_bytes());
+        assert_eq!(out, want);
     }
 }

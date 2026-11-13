@@ -34,7 +34,7 @@ Changes from the original files: the C code was rewritten in Rust and reduced to
 
 ## ICC profiles
 
-The color profiles in [crates/nupdf/icc](crates/nupdf/icc) (gray, sRGB, SWOP CMYK and Lab) are MuPDF's own (resources/icc in MuPDF 1.28.6), unmodified, Copyright Artifex Software, and part of MuPDF under the GNU AGPL. nupdf's color management ([cms.rs](crates/nupdf/src/cms.rs)) uses them as MuPDF does with lcms2, through moxcms, and computes black point compensation as lcms2 does.
+The color profiles in [crates/nupdf/icc](crates/nupdf/icc) (gray, sRGB, SWOP CMYK and Lab, and the ps_gray, ps_rgb and ps_cmyk profiles MuPDF draws soft masks with) are MuPDF's own (resources/icc in MuPDF 1.28.6; the ps_ ones taken byte for byte from source/fitz/icc/ps_*.icc.h), unmodified, Copyright Artifex Software, and part of MuPDF under the GNU AGPL. nupdf's color management ([cms.rs](crates/nupdf/src/cms.rs)) uses them as MuPDF does with lcms2, through moxcms, and computes black point compensation as lcms2 does.
 
 ## URW base fonts
 

@@ -528,10 +528,22 @@ impl Device for ImageSpy {
     fn fill_image(&mut self, image: &Image, ctm: Matrix, _: f32, _: ColorParams) {
         self.images.push((image.clone(), ctm));
     }
+
+    fn fill_image_mask(
+        &mut self,
+        image: &Image,
+        ctm: Matrix,
+        _: &crate::colorspace::ColorSpace,
+        _: &[f32],
+        _: f32,
+        _: ColorParams,
+    ) {
+        self.images.push((image.clone(), ctm));
+    }
 }
 
-/// Every image drawn under an area has white pixels there; a redacted page
-/// has no thumbnail.
+/// Every image drawn under an area has white pixels there (an image mask
+/// paints none there); a redacted page has no thumbnail.
 fn images(doc: &Document, index: i32, quads: &[Quad], c: &mut Collector) {
     let Ok(page) = doc.page(index) else { return };
     if !matches!(doc.dict_get(&page, b"Thumb"), Object::Null) {
@@ -550,7 +562,7 @@ fn images(doc: &Document, index: i32, quads: &[Quad], c: &mut Collector) {
             .iter()
             .filter(|q| !Rect::from_quad(**q).intersect(area).is_empty())
             .collect();
-        if under.is_empty() || image.image_mask || image.colorspace.is_none() {
+        if under.is_empty() || !image.image_mask && image.colorspace.is_none() {
             continue;
         }
         let Ok(pix) = crate::pixmap::from_image(doc, &image) else {
@@ -566,16 +578,22 @@ fn images(doc: &Document, index: i32, quads: &[Quad], c: &mut Collector) {
             });
             continue;
         };
-        let white = if matches!(
-            pix.colorspace,
-            Some(crate::colorspace::ColorSpace::Cmyk)
-                | Some(crate::colorspace::ColorSpace::Separation { .. })
-        ) {
+        // An image mask's samples are what it paints.
+        let white = if image.image_mask
+            || matches!(
+                pix.colorspace,
+                Some(crate::colorspace::ColorSpace::Cmyk)
+                    | Some(crate::colorspace::ColorSpace::Separation { .. })
+            ) {
             0
         } else {
             255
         };
-        let n = pix.n - usize::from(pix.alpha);
+        let n = if image.image_mask {
+            pix.n
+        } else {
+            pix.n - usize::from(pix.alpha)
+        };
         let mut leaked = 0usize;
         for q in under {
             // The pixels pdf_redact_image_imp blanks: the area's box in
@@ -655,6 +673,26 @@ mod tests {
     }
 
     #[test]
+    fn classes_have_the_report_names() {
+        let names: Vec<&str> = Class::ALL.iter().map(|c| c.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "content_text",
+                "structure",
+                "annotations",
+                "metadata",
+                "outline",
+                "embedded_files",
+                "hidden_content",
+                "images",
+                "history",
+                "javascript",
+            ]
+        );
+    }
+
+    #[test]
     fn page_text_and_hidden_text_leak() {
         let doc = page_doc(format!("BT 3 Tr /F1 12 Tf 72 700 Td ({SECRET}) Tj ET").as_bytes());
         assert_eq!(classes(&doc), [Class::ContentText]);
@@ -702,5 +740,231 @@ mod tests {
         );
         let found = classes(&doc);
         assert!(found.contains(&Class::Structure), "{found:?}");
+    }
+
+    /// A one-page document: the catalog with `catalog` added, the page with
+    /// `page` added drawing `content` with Helvetica as /F1, and `extra`
+    /// as objects 6 onwards.
+    fn doc_with(catalog: &str, page: &str, content: &[u8], extra: &[Vec<u8>]) -> Document {
+        let mut objs = vec![
+            format!("<</Type/Catalog/Pages 2 0 R{catalog}>>").into_bytes(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R{page}>>"
+            )
+            .into_bytes(),
+            crate::testutil::stream("", content),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_vec(),
+        ];
+        objs.extend(extra.iter().cloned());
+        crate::testutil::doc_bytes(&objs)
+    }
+
+    /// The classes found, in order, each once.
+    fn sorted(doc: &Document) -> Vec<Class> {
+        let mut c = classes(doc);
+        c.sort();
+        c.dedup();
+        c
+    }
+
+    #[test]
+    fn each_place_a_string_sits_has_its_class() {
+        let t = SECRET;
+        let cases: [(&str, Class); 9] = [
+            (
+                &format!("/Names<</JavaScript<</Names[(a)<</S/JavaScript/JS({t})>>]>>>>"),
+                Class::JavaScript,
+            ),
+            (
+                &format!("/Names<</EmbeddedFiles<</Names[(f)<</Type/Filespec/F({t})>>]>>>>"),
+                Class::EmbeddedFiles,
+            ),
+            (&format!("/Metadata<</X({t})>>"), Class::Metadata),
+            (&format!("/Outlines<</Title({t})>>"), Class::Outline),
+            (
+                &format!("/PageLabels<</Nums[0<</P({t})>>]>>"),
+                Class::Outline,
+            ),
+            // A destination named by a name in a name tree.
+            (
+                &format!("/Names<</Dests<</Names[/{t}[3 0 R/Fit]]>>>>"),
+                Class::Outline,
+            ),
+            (
+                &format!("/OCProperties<</D<</Name({t})>>>>"),
+                Class::HiddenContent,
+            ),
+            (
+                &format!("/StructTreeRoot<</K<</S/P/T({t})>>>>"),
+                Class::Structure,
+            ),
+            (
+                &format!("/AcroForm<</Fields[<</T({t})>>]>>"),
+                Class::Annotations,
+            ),
+        ];
+        for (catalog, class) in cases {
+            let doc = doc_with(catalog, "", b"", &[]);
+            assert_eq!(sorted(&doc), [class], "{catalog}");
+        }
+        // Anywhere else counts as the page's text.
+        let doc = doc_with(&format!("/Foo({t})"), "", b"", &[]);
+        assert_eq!(sorted(&doc), [Class::ContentText]);
+        // A name elsewhere is no destination.
+        let doc = doc_with(&format!("/Foo/{t}"), "", b"", &[]);
+        assert!(verify(&doc, &targets()).verified());
+    }
+
+    #[test]
+    fn streams_are_matched_by_what_they_hold() {
+        let t = SECRET;
+        // 6: XMP; 7: a script; 8: an embedded file; 9: an appearance that
+        // shows the target with each text operator; 10: a form whose
+        // marked point names it; 11: a stream naming a parent, to be
+        // skipped; 12: an image, whose data is not text.
+        let doc = doc_with(
+            "/Metadata 6 0 R/Names<</JavaScript<</Names[(a)<</S/JavaScript/JS 7 0 R>>]>>\
+             /EmbeddedFiles<</Names[(f)<</Type/Filespec/F(f)/EF<</F 8 0 R>>>>]>>>>",
+            "/Annots[<</Subtype/Text/Rect[0 0 1 1]/AP<</N 9 0 R>>>>]/Resources<</XObject<</X 10 0 R/I 12 0 R>>>>/Foo 11 0 R",
+            b"",
+            &[
+                crate::testutil::stream("/Type/Metadata/Subtype/XML", t.as_bytes()),
+                crate::testutil::stream("", format!("app.alert('{t}')").as_bytes()),
+                crate::testutil::stream("/Type/EmbeddedFile", t.as_bytes()),
+                crate::testutil::stream(
+                    "/Subtype/Form/BBox[0 0 1 1]",
+                    format!("BT ({t}) Tj ({t}) ' 1 2 ({t}) \" [(S) ({t})] TJ ET").as_bytes(),
+                ),
+                crate::testutil::stream(
+                    "/Subtype/Form/BBox[0 0 1 1]",
+                    format!("/P <</Alt({t})>> DP").as_bytes(),
+                ),
+                crate::testutil::stream("/Parent 3 0 R", b"plain"),
+                crate::testutil::stream(
+                    "/Subtype/Image/Width 11/Height 1/BitsPerComponent 8/ColorSpace/DeviceGray",
+                    t.as_bytes(),
+                ),
+            ],
+        );
+        let v = verify(&doc, &targets());
+        let found: Vec<(Class, Option<i32>)> =
+            v.findings.iter().map(|f| (f.class, f.object)).collect();
+        assert!(found.contains(&(Class::Metadata, Some(6))), "{found:?}");
+        assert!(found.contains(&(Class::JavaScript, Some(7))), "{found:?}");
+        assert!(
+            found.contains(&(Class::EmbeddedFiles, Some(8))),
+            "{found:?}"
+        );
+        assert!(found.contains(&(Class::Annotations, Some(9))), "{found:?}");
+        assert!(found.contains(&(Class::Structure, Some(10))), "{found:?}");
+        assert!(!found.iter().any(|(_, o)| *o == Some(12)), "{found:?}");
+    }
+
+    #[test]
+    fn unreachable_streams_are_history_unless_binary_or_too_deep() {
+        let t = SECRET;
+        let deep = format!("{}({t}){}", "[".repeat(40), "]".repeat(40));
+        let doc = doc_with(
+            "",
+            "",
+            b"",
+            &[
+                crate::testutil::stream("", t.as_bytes()),
+                crate::testutil::stream("/Length1 11", t.as_bytes()),
+                crate::testutil::stream("/Subtype/Type1C", t.as_bytes()),
+                deep.into_bytes(),
+                format!("<</Ref 99 0 R/X[({t})]>>").into_bytes(),
+            ],
+        );
+        let objects: Vec<Option<i32>> = verify(&doc, &targets())
+            .findings
+            .iter()
+            .map(|f| f.object)
+            .collect();
+        assert_eq!(objects, [Some(6), Some(10)]);
+    }
+
+    #[test]
+    fn earlier_revisions_are_history() {
+        let path = format!(
+            "{}/../../corpus/smoke/incremental-update.pdf",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let doc = Document::open(std::fs::read(path).unwrap_or_else(|e| panic!("{e}")))
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        let v = verify(&doc, &targets());
+        assert_eq!(v.revisions, 2);
+        assert_eq!(sorted(&doc), [Class::History]);
+    }
+
+    #[test]
+    fn text_only_hidden_layers_show_is_hidden_content() {
+        let doc = doc_with(
+            "/OCProperties<</OCGs[6 0 R]/D<</OFF[6 0 R]>>>>",
+            "/Resources<</Font<</F1 5 0 R>>/Properties<</oc 6 0 R>>>>",
+            format!("/OC /oc BDC BT /F1 12 Tf 72 700 Td ({SECRET}) Tj ET EMC").as_bytes(),
+            &[b"<</Type/OCG/Name(layer)>>".to_vec()],
+        );
+        let v = verify(&doc, &targets());
+        assert_eq!(sorted(&doc), [Class::HiddenContent]);
+        assert_eq!(v.hits_after, [1]);
+    }
+
+    #[test]
+    fn pixels_under_an_area_must_be_blank_after_redaction() {
+        // A grey image at (100, 600) and an image mask at (300, 600), each
+        // 2x2 and 100 wide, and a thumbnail.
+        let content = b"q 100 0 0 100 100 600 cm /Im Do Q q 0 g 100 0 0 100 300 600 cm /M Do Q";
+        let doc = doc_with(
+            "",
+            "/Resources<</XObject<</Im 6 0 R/M 7 0 R>>>>/Thumb 8 0 R",
+            content,
+            &[
+                crate::testutil::stream(
+                    "/Subtype/Image/Width 2/Height 2/BitsPerComponent 8/ColorSpace/DeviceGray",
+                    &[1, 2, 3, 4],
+                ),
+                crate::testutil::stream("/Subtype/Image/Width 2/Height 2/ImageMask true", &[0, 0]),
+                crate::testutil::stream("", b"thumb"),
+            ],
+        );
+        // The left column of each, in page space.
+        let page_quad = |x0: f32, y0: f32, x1: f32, y1: f32| Quad {
+            ul: crate::geometry::Point { x: x0, y: y0 },
+            ur: crate::geometry::Point { x: x1, y: y0 },
+            ll: crate::geometry::Point { x: x0, y: y1 },
+            lr: crate::geometry::Point { x: x1, y: y1 },
+        };
+        let areas = vec![
+            page_quad(90.0, 82.0, 150.0, 202.0),
+            page_quad(290.0, 82.0, 350.0, 202.0),
+        ];
+        let t = Targets {
+            areas: vec![(0, areas.clone())],
+            ..targets()
+        };
+        let before = verify(&doc, &t);
+        let details: Vec<&str> = before.findings.iter().map(|f| f.detail.as_str()).collect();
+        assert_eq!(
+            details,
+            [
+                "a redacted page keeps its thumbnail",
+                "2 pixels under a redacted area are not blanked",
+                "2 pixels under a redacted area are not blanked",
+            ]
+        );
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e}"));
+        let (_, ctm) = doc.page_transform(&page).unwrap_or_else(|e| panic!("{e}"));
+        let pdf: Vec<Quad> = areas
+            .iter()
+            .map(|q| crate::redact::quad_to_pdf(*q, ctm))
+            .collect();
+        let redacted =
+            crate::redact::redact_page(&doc, 0, &pdf, crate::redact::RedactOptions::default());
+        assert_eq!(redacted, Ok(true));
+        let m = Matcher::new(&[], &[], false).unwrap_or_else(|e| panic!("{e}"));
+        crate::scrub::scrub(&doc, &m, &[0]);
+        assert!(verify(&doc, &t).verified());
     }
 }

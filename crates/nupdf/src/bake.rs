@@ -129,31 +129,15 @@ fn annot_ap(doc: &Document, annot: &Object) -> Option<Object> {
     matches!(doc.resolve(&state), Object::Stream(_)).then_some(state)
 }
 
-/// `pdf_dict_get_matrix`: six numbers, else the identity.
-fn matrix_of(doc: &Document, obj: &Object) -> Matrix {
-    match doc.resolve(obj) {
-        Object::Array(a) if a.len() == 6 => {
-            let n = |i: usize| doc.resolve(&a[i]).to_real();
-            Matrix {
-                a: n(0),
-                b: n(1),
-                c: n(2),
-                d: n(3),
-                e: n(4),
-                f: n(5),
-            }
-        }
-        _ => Matrix::IDENTITY,
-    }
-}
-
 /// `get_annot_transform`: the appearance's box, through its matrix, onto
 /// the annotation's /Rect.
 fn annot_transform(doc: &Document, annot: &Object, ap: &Object) -> Matrix {
     let rect = doc.to_rect(Some(&doc.dict_get(annot, b"Rect")));
     let form = doc.resolve(ap);
     let bbox = doc.to_rect(Some(&doc.dict_get(&form, b"BBox")));
-    let bbox: Rect = bbox.transform(matrix_of(doc, &doc.dict_get(&form, b"Matrix")));
+    // `pdf_dict_get_matrix`: an array of any length, missing numbers 0.
+    let matrix = crate::run::to_matrix(doc, &doc.dict_get(&form, b"Matrix"));
+    let bbox: Rect = bbox.transform(matrix);
     let w = (rect.x1 - rect.x0) / (bbox.x1 - bbox.x0);
     let h = (rect.y1 - rect.y0) / (bbox.y1 - bbox.y0);
     // `rect.x0 - bbox.x0 * w`, contracted.
@@ -512,4 +496,232 @@ pub fn bake_document(doc: &Document, annots: bool, widgets: bool) -> Baked {
         }
     }
     baked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{doc_bytes, stream};
+
+    fn print(obj: &Object) -> String {
+        crate::print::to_string(obj, crate::print::Options::default())
+    }
+
+    /// Each page's contents (its streams' data joined by `|`), the
+    /// contents as stored, its resources and annotations; and /AcroForm.
+    fn pages(doc: &Document) -> Vec<String> {
+        let mut out = Vec::new();
+        let n = doc.page_count().unwrap_or(0);
+        for i in 0..n {
+            let page = doc.page(i).unwrap_or_else(|e| panic!("{e}"));
+            let contents = doc.dict_get(&page, b"Contents");
+            let parts: Vec<Object> = match &contents {
+                Object::Array(a) => a.to_vec(),
+                other => vec![other.clone()],
+            };
+            let data: Vec<String> = parts
+                .iter()
+                .filter_map(|p| match doc.resolve(p) {
+                    Object::Stream(s) => doc
+                        .stream_data(&s)
+                        .ok()
+                        .map(|d| String::from_utf8_lossy(&d).into_owned()),
+                    _ => None,
+                })
+                .collect();
+            out.push(format!("PAGE {i} CONTENTS {:?}", data.join("|")));
+            out.push(format!("  RAW {}", print(&raw(doc, &page, b"Contents"))));
+            out.push(format!(
+                "  RES {}",
+                print(&doc.dict_get(&page, b"Resources"))
+            ));
+            out.push(format!(
+                "  ANNOTS {}",
+                print(&doc.dict_get(&page, b"Annots"))
+            ));
+        }
+        let root = doc.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
+        out.push(format!(
+            "ACROFORM {}",
+            print(&doc.dict_get(&root, b"AcroForm"))
+        ));
+        out
+    }
+
+    /// Two pages sharing the resources of their parent; the first draws
+    /// a `q` it leaves open and has its annotations in an array of its
+    /// own: a square, a link, a checkbox showing its /On state and a
+    /// circle with no appearance; the second draws a `Q` below where it
+    /// starts, and has a hidden square and a note whose appearance is
+    /// turned by its matrix.
+    fn objects() -> Vec<Vec<u8>> {
+        vec![
+            b"<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[12 0 R]>>>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2/Resources<</Font<</F1 9 0 R>>>>>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 5 0 R/Annots 7 0 R>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents[6 0 R]/Annots[13 0 R 14 0 R]>>"
+                .to_vec(),
+            stream("", b"q 0 0 10 10 re f"),
+            stream("", b"Q 0 0 5 5 re f"),
+            b"[10 0 R 11 0 R 12 0 R 15 0 R]".to_vec(),
+            stream("/BBox[0 0 10 10]/Matrix[1 0 0 1 0 0]", b"0 0 1 rg 0 0 10 10 re f"),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_vec(),
+            b"<</Type/Annot/Subtype/Square/Rect[20 20 40 40]/AP<</N 8 0 R>>>>".to_vec(),
+            b"<</Type/Annot/Subtype/Link/Rect[0 0 5 5]>>".to_vec(),
+            b"<</Type/Annot/Subtype/Widget/FT/Btn/T(cb)/Rect[50 50 60 60]/AS/On/AP<</N<</On 16 0 R/Off 17 0 R>>>>>>".to_vec(),
+            b"<</Type/Annot/Subtype/Square/F 2/Rect[0 0 10 10]/AP<</N 8 0 R>>>>".to_vec(),
+            b"<</Type/Annot/Subtype/Text/Rect[100 100 120 110]/AP<</N 18 0 R>>>>".to_vec(),
+            b"<</Type/Annot/Subtype/Circle/Rect[100 100 150 150]/C[1 0 0]>>".to_vec(),
+            stream("/BBox[0 0 10 10]", b"0 g 0 0 10 10 re f"),
+            stream("/BBox[0 0 10 10]", b"1 g 0 0 10 10 re f"),
+            stream(
+                "/BBox[0 0 10 20]/Matrix[0 1 -1 0 0 0]",
+                b"0 0 1 RG 0 0 10 20 re S",
+            ),
+        ]
+    }
+
+    #[test]
+    fn appearances_are_drawn_into_the_pages_as_mupdf_bakes_them() {
+        let doc = doc_bytes(&objects());
+        let baked = bake_document(&doc, true, true);
+        assert_eq!(
+            baked,
+            Baked {
+                annots: 4,
+                widgets: 1,
+                pages: 2,
+                unmade: Vec::new(),
+                stopped: None,
+            }
+        );
+        // Golden output from `mutool bake`.
+        let res = "<</Font<</F1 9 0 R>>/XObject<</Annot10 8 0 R/Annot12 16 0 R/Annot15 19 0 R/Annot14 18 0 R>>>>";
+        assert_eq!(
+            pages(&doc),
+            [
+                "PAGE 0 CONTENTS \"q 0 0 10 10 re f|Q\\nq\\n2 0 0 2 20 20 cm\\n/Annot10 Do\\nQ\\nq\\n1 0 0 1 50 50 cm\\n/Annot12 Do\\nQ\\nq\\n1 0 0 1 0 0 cm\\n/Annot15 Do\\nQ\\n\"".to_string(),
+                "  RAW [5 0 R 20 0 R]".into(),
+                format!("  RES {res}"),
+                "  ANNOTS [11 0 R]".into(),
+                "PAGE 1 CONTENTS \"q\\nq\\n|Q 0 0 5 5 re f|Q\\nq\\n1 0 0 1 120 100 cm\\n/Annot14 Do\\nQ\\n\"".into(),
+                "  RAW [21 0 R 6 0 R 22 0 R]".into(),
+                format!("  RES {res}"),
+                "  ANNOTS []".into(),
+                "ACROFORM null".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_appearances_are_made_first() {
+        // A page two levels down the tree, its contents an array of their
+        // own; a square whose /AS names no state, an annotation of no type
+        // MuPDF draws, a text field and a checkbox with no appearance, and
+        // a square whose appearance has a short /Matrix.
+        let doc = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[10 0 R 11 0 R]/DA(/Helv 0 Tf 0 g)>>>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1/Resources<</Font<</F1 9 0 R>>>>>>".to_vec(),
+            b"<</Type/Pages/Parent 2 0 R/Kids[4 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 3 0 R/MediaBox[0 0 200 200]/Contents 5 0 R/Annots[7 0 R 8 0 R 10 0 R 11 0 R 12 0 R]>>".to_vec(),
+            b"[6 0 R]".to_vec(),
+            stream("", b"0 0 1 1 re f"),
+            b"<</Type/Annot/Subtype/Square/Rect[0 0 10 10]/AS/Missing/AP<</N<</On 13 0 R>>>>>>".to_vec(),
+            b"<</Type/Annot/Subtype/Foo/Rect[0 0 10 10]>>".to_vec(),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_vec(),
+            b"<</Type/Annot/Subtype/Widget/FT/Tx/T(name)/V(hello)/Rect[10 10 90 30]/DA(/Helv 12 Tf 0 g)>>".to_vec(),
+            b"<</Type/Annot/Subtype/Widget/FT/Btn/T(cb)/AS/Off/Rect[100 10 110 20]/MK<</CA(4)>>>>".to_vec(),
+            b"<</Type/Annot/Subtype/Square/Rect[20 20 30 30]/AP<</N 13 0 R>>>>".to_vec(),
+            stream("/BBox[0 0 10 10]/Matrix[1 2]", b"0 g 0 0 10 10 re f"),
+        ]);
+        let baked = bake_document(&doc, true, true);
+        assert_eq!((baked.annots, baked.widgets, baked.pages), (3, 2, 1));
+        assert_eq!(
+            baked.unmade,
+            [(
+                0,
+                8,
+                "cannot create appearance stream for Foo annotations".to_string()
+            )]
+        );
+        assert!(doc.diagnostics().has("annot.appearance"));
+        // Golden output from `mutool bake`.
+        assert_eq!(
+            pages(&doc),
+            [
+                "PAGE 0 CONTENTS \"q\\n|0 0 1 1 re f|Q\\nq\\n1 0 0 1 0 0 cm\\n/Annot7 Do\\nQ\\nq\\n1 0 0 1 10 10 cm\\n/Annot10 Do\\nQ\\nq\\n1 0 0 1 100 10 cm\\n/Annot11 Do\\nQ\\nq\\n1 0 0 .5 20 20 cm\\n/Annot12 Do\\nQ\\n\"",
+                "  RAW 5 0 R",
+                "  RES <</Font<</F1 9 0 R>>/XObject<</Annot7 14 0 R/Annot10 16 0 R/Annot11 17 0 R/Annot12 13 0 R>>>>",
+                "  ANNOTS []",
+                "ACROFORM null",
+            ]
+        );
+        assert_eq!(print(&doc.resolve(&reference(5))), "[20 0 R 6 0 R 21 0 R]");
+    }
+
+    #[test]
+    fn resources_held_apart_are_changed_where_they_are() {
+        // A page with no annotations; one with resources of its own, held
+        // apart with their XObjects, drawing a Q below where it starts;
+        // one with no contents inheriting resources held apart.
+        let doc = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 4 0 R 6 0 R]/Count 3/Resources 9 0 R>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 5 0 R>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources 8 0 R/Contents 5 0 R/Annots[7 0 R]>>".to_vec(),
+            stream("", b"Q 0 0 5 5 re f"),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Annots[12 0 R]>>".to_vec(),
+            b"<</Type/Annot/Subtype/Square/Rect[20 20 40 40]/AP<</N 10 0 R>>>>".to_vec(),
+            b"<</XObject 11 0 R>>".to_vec(),
+            b"<</Font<<>>>>".to_vec(),
+            stream("/BBox[0 0 10 10]", b"0 g 0 0 10 10 re f"),
+            b"<<>>".to_vec(),
+            b"<</Type/Annot/Subtype/Square/Rect[50 50 60 60]/AP<</N 10 0 R>>>>".to_vec(),
+        ]);
+        let baked = bake_document(&doc, true, false);
+        assert_eq!((baked.annots, baked.pages), (2, 2));
+        // Golden output from `mutool bake`.
+        let contents: Vec<String> = pages(&doc)
+            .into_iter()
+            .filter(|l| l.contains("CONTENTS") || l.contains("RAW"))
+            .collect();
+        assert_eq!(
+            contents,
+            [
+                "PAGE 0 CONTENTS \"Q 0 0 5 5 re f\"",
+                "  RAW 5 0 R",
+                "PAGE 1 CONTENTS \"q\\nq\\n|Q 0 0 5 5 re f|Q\\nq\\n2 0 0 2 20 20 cm\\n/Annot7 Do\\nQ\\n\"",
+                "  RAW [13 0 R 5 0 R 14 0 R]",
+                "PAGE 2 CONTENTS \"q\\n1 0 0 1 50 50 cm\\n/Annot12 Do\\nQ\\n\"",
+                "  RAW [15 0 R]",
+            ]
+        );
+        let page = |i| doc.page(i).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(print(&raw(&doc, &page(1), b"Resources")), "8 0 R");
+        assert_eq!(print(&raw(&doc, &page(2), b"Resources")), "9 0 R");
+        assert_eq!(print(&doc.resolve(&reference(8))), "<</XObject 11 0 R>>");
+        assert_eq!(
+            print(&doc.resolve(&reference(9))),
+            "<</Font<<>>/XObject<</Annot12 10 0 R>>>>"
+        );
+        assert_eq!(print(&doc.resolve(&reference(11))), "<</Annot7 10 0 R>>");
+    }
+
+    #[test]
+    fn baking_stops_at_a_page_that_does_not_load() {
+        let doc = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 2 0 R]/Count 2>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>".to_vec(),
+        ]);
+        let baked = bake_document(&doc, true, true);
+        assert_eq!(baked.pages, 0);
+        assert!(baked.stopped.is_some(), "{baked:?}");
+        // A page count no file of this size can hold.
+        let no_tree = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[]/Count -1>>".to_vec(),
+        ]);
+        assert!(bake_document(&no_tree, true, true).stopped.is_some());
+    }
 }

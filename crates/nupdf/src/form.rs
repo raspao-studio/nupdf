@@ -177,3 +177,68 @@ pub fn need_appearances(doc: &Document) -> bool {
         Object::Bool(true)
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::ObjRef;
+
+    fn r(n: i32) -> Object {
+        Object::Ref(ObjRef::new(n, 0))
+    }
+
+    fn fields() -> Document {
+        let long = "x".repeat(MAX_NAME + 1);
+        let objs = [
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            "<</Type/Pages/Kids[]/Count 0>>".to_string(),
+            "<</FT/Btn/Ff 65536>>".into(),
+            "<</FT/Btn/Ff 32768>>".into(),
+            "<</FT/Btn>>".into(),
+            "<</FT/Ch/Ff 131072>>".into(),
+            "<</FT/Ch>>".into(),
+            "<</FT/Sig/V<</Type/Sig>>>>".into(),
+            "<</FT/Odd/V 16 0 R>>".into(),
+            // 10, 11: a cycle of parents; 12: a name too long.
+            "<</T(a)/Parent 11 0 R>>".into(),
+            "<</T(b)/Parent 10 0 R>>".into(),
+            format!("<</T({long})>>"),
+            "<</FT/Sig/V<</Type/Other>>>>".into(),
+            "<</FT/Sig/V 5>>".into(),
+            "<</FT/Sig/V<<>>>>".into(),
+            crate::testutil::stream("", b"from a stream")
+                .iter()
+                .map(|&b| b as char)
+                .collect(),
+        ];
+        let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+        crate::testutil::doc_of(&refs)
+    }
+
+    #[test]
+    fn types_values_names_and_signatures_read_as_mupdf_reads_them() {
+        let doc = fields();
+        let types: Vec<&str> = (3..=9).map(|n| type_string(&doc, &r(n))).collect();
+        assert_eq!(
+            types,
+            [
+                "button",
+                "radiobutton",
+                "checkbox",
+                "combobox",
+                "listbox",
+                "signature",
+                "button"
+            ]
+        );
+        assert_eq!(value(&doc, &r(9)), "from a stream");
+        assert_eq!(label(&doc, &r(3)), "Unnamed");
+        assert_eq!(name(&doc, &r(10)), Err("Cycle in field parents".into()));
+        assert_eq!(name(&doc, &r(12)), Err("Field name too long".into()));
+        let signed: Vec<bool> = [8, 13, 14, 15, 3]
+            .iter()
+            .map(|&n| is_signed(&doc, &r(n)))
+            .collect();
+        assert_eq!(signed, [true, false, false, true, false]);
+    }
+}

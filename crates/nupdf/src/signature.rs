@@ -493,4 +493,44 @@ mod tests {
         assert!(validate_hole(b"<12> /X").is_err());
         assert!(validate_hole(b"<12g>").is_err());
     }
+
+    #[test]
+    fn byte_ranges_must_lie_in_the_file() {
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[]/Count 0>>",
+            "<</FT/Sig/V<</ByteRange[-1 5]>>>>",
+            "<</FT/Sig/V<</ByteRange[0 -5]>>>>",
+            "<</FT/Sig/V<</ByteRange[0 99999]>>>>",
+            "<</FT/Sig/V 8 0 R>>",
+            "<</FT/Tx/V(text)>>",
+            "<</Type/Sig/ByteRange[0 10]/Contents<3000>>>",
+        ]);
+        let r = |n| Object::Ref(crate::object::ObjRef::new(n, 0));
+        assert_eq!(
+            byte_range(&doc, &r(3)),
+            Err("offset of signature byte range outside of file".into())
+        );
+        assert_eq!(
+            byte_range(&doc, &r(4)),
+            Err("length of signature byte range negative".into())
+        );
+        assert_eq!(
+            byte_range(&doc, &r(5)),
+            Err("signature byte range extends past end of file".into())
+        );
+        assert!(check_digest(&doc, &r(5)).is_err());
+        // A direct signature dictionary has no /Contents to read.
+        assert!(contents(&doc, &r(3)).is_empty());
+        // Contents that are no PKCS #7 data.
+        assert_eq!(contents(&doc, &r(6)), [0x30, 0x00]);
+        assert_eq!(check_digest(&doc, &r(6)), Ok(UNKNOWN));
+        assert_eq!(signatory(&doc, &r(6)), None);
+        assert_eq!(changed_since_signing(&doc, &r(6)), Ok(true));
+        // Not a signature at all.
+        assert_eq!(check_digest(&doc, &r(7)), Ok("Not signed."));
+        assert_eq!(changed_since_signing(&doc, &r(7)), Ok(false));
+        assert_eq!(signatory(&doc, &r(7)), None);
+        assert!(summary(&doc).is_empty());
+    }
 }

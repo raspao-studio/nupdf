@@ -505,6 +505,7 @@ mod tests {
     use super::*;
     use crate::content_clean::tests::page_doc;
     use crate::object::ObjRef;
+    use crate::testutil::stream;
 
     fn s(text: &str) -> Object {
         Object::String(Arc::from(text.as_bytes()))
@@ -549,5 +550,172 @@ mod tests {
         assert_eq!(get(num, b"Author"), s("Ops"));
         assert_eq!(get(outline, b"Title"), s(" chapter"));
         assert_eq!(get(action, b"JS"), s(""));
+    }
+
+    #[test]
+    fn patterns_are_literal_and_blank_targets_match_nothing() {
+        let m = Matcher::new(&["a.b".into(), "  ".into()], &["x*".into()], false)
+            .unwrap_or_else(|e| panic!("{e}"));
+        // The dot is a dot; the empty matches of x* between the x es
+        // count for nothing.
+        assert_eq!(m.find(b"axb a.b xx"), [(1, 2), (4, 7), (8, 10)]);
+        assert_eq!(m.strip_text(b"nothing here"), None);
+        assert!(Matcher::new(&[], &[], false).is_ok_and(|m| m.is_empty()));
+        assert!(Matcher::new(&[], &["(".into()], false).is_err());
+    }
+
+    /// Object `num`'s entry `key`.
+    fn entry(doc: &Document, num: i32, key: &[u8]) -> Object {
+        doc.dict_get(&Object::Ref(ObjRef::new(num, 0)), key)
+    }
+
+    fn printed(obj: &Object) -> String {
+        crate::print::to_string(obj, crate::print::Options::default())
+    }
+
+    #[test]
+    fn every_kind_of_copy_is_found() {
+        let deep = format!(
+            "{}<</Alt(SECRET deep)>>{}",
+            "<</A".repeat(18),
+            ">>".repeat(18)
+        );
+        let deep_array = format!("{}(SECRET){}", "[".repeat(20), "]".repeat(20));
+        let objects: Vec<Vec<u8>> = vec![
+            // 1
+            b"<</Type/Catalog/Pages 2 0 R/Names<</Dests 10 0 R/EmbeddedFiles 11 0 R>>/Dests 12 0 R\
+              /OCProperties<</OCGs[13 0 R]>>/Metadata 14 0 R/PageLabels<</Nums[0<</P(SECRET-)>>]>>>>"
+                .to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[5 0 R 6 0 R 7 0 R]/Thumb 15 0 R/Contents 4 0 R>>".to_vec(),
+            stream("", b""),
+            // 5: an annotation whose appearance shows a target.
+            b"<</Type/Annot/Subtype/Text/Rect[0 0 10 10]/Contents(the SECRET note)/AP<</N 16 0 R>>>>".to_vec(),
+            // 6: a field whose appearance states show none.
+            b"<</Type/Annot/Subtype/Widget/FT/Tx/T(name)/V(SECRET value)/Rect[0 0 10 10]/AP<</N<</On 17 0 R>>>>>>".to_vec(),
+            // 7: a link to a URI with a target.
+            b"<</Type/Annot/Subtype/Link/Rect[0 0 10 10]/A<</S/URI/URI(http://x/SECRET)>>>>".to_vec(),
+            // 8: a structure element, its /ActualText held indirectly.
+            b"<</Type/StructElem/S/P/Alt(SECRET alt)/ActualText 18 0 R/E(fine)>>".to_vec(),
+            // 9: a script in a stream.
+            b"<</S/JavaScript/JS 19 0 R>>".to_vec(),
+            // 10, 11: name trees, one with kids.
+            b"<</Kids[20 0 R]>>".to_vec(),
+            b"<</Names[(a.txt)21 0 R(b.txt)23 0 R]>>".to_vec(),
+            // 12: old-style destinations.
+            b"<</SECRET[3 0 R/Fit]/keep[3 0 R/Fit]>>".to_vec(),
+            // 13: a layer.
+            b"<</Type/OCG/Name(SECRET layer)>>".to_vec(),
+            // 14: XMP.
+            stream("/Type/Metadata/Subtype/XML", b"<x:xmpmeta>SECRET</x:xmpmeta>"),
+            // 15: a thumbnail.
+            stream("", b"\0\0\0"),
+            // 16, 17: appearance streams.
+            stream("/Subtype/Form", b"BT (SECRET) Tj ET"),
+            stream("/Subtype/Form", b"BT (fine) Tj ET"),
+            // 18, 19
+            b"(SECRET actual)".to_vec(),
+            stream("", b"app.alert('SECRET')"),
+            // 20: a leaf of the destinations tree, its pairs held apart.
+            b"<</Names 24 0 R>>".to_vec(),
+            // 21: a file specification whose file holds a target.
+            b"<</Type/Filespec/F(a.txt)/UF(a.txt)/Desc(a file)/EF<</F 22 0 R>>>>".to_vec(),
+            stream("/Type/EmbeddedFile", b"SECRET data"),
+            // 23: one whose name holds it.
+            b"<</Type/Filespec/F(SECRET.txt)/EF<</F 25 0 R>>/RF<<>>>>".to_vec(),
+            b"[(SECRET dest)[3 0 R/Fit](other)[3 0 R/Fit]]".to_vec(),
+            stream("/Type/EmbeddedFile", b"plain"),
+            // 26: an array object holding a structure dictionary.
+            b"[<</Alt(SECRET in array)>>(x)]".to_vec(),
+            // 27: an image whose dictionary has an /Alt.
+            stream("/Type/XObject/Subtype/Image/Alt(SECRET image)", b"raw"),
+            // 28, 29: nested deeper than the scrub looks.
+            deep.into_bytes(),
+            deep_array.into_bytes(),
+            // 30: text outside annotations and fields.
+            b"<</Contents(SECRET elsewhere)/Title(no target)>>".to_vec(),
+            // 31: a field node with kids.
+            b"<</Kids[6 0 R]/T(SECRET parent)>>".to_vec(),
+        ];
+        let doc = crate::testutil::doc_bytes(&objects);
+        let mut trailer = doc.trailer();
+        let mut info = Dict::new();
+        info.put(b"Title", s("SECRET"));
+        info.put(b"Author", s("Ops"));
+        trailer.put(b"Info", Object::Dict(Arc::new(info)));
+        doc.set_trailer(trailer);
+        let m = Matcher::new(&["SECRET".into()], &[], false).unwrap_or_else(|e| panic!("{e}"));
+        let report = scrub(&doc, &m, &[0]);
+        assert_eq!(
+            report,
+            Report {
+                metadata: 1,
+                xmp: 1,
+                outline: 0,
+                names: 2,
+                embedded_files: 2,
+                annotations: 4,
+                fields: 2,
+                javascript: 1,
+                structure: 4,
+                layers: 1,
+                page_labels: 1,
+                thumbnails: 1,
+            }
+        );
+        // The information dictionary, held directly in the trailer.
+        assert_eq!(
+            printed(doc.trailer().get(b"Info").unwrap_or(&Object::Null)),
+            "<</Author(Ops)>>"
+        );
+        assert_eq!(printed(&entry(&doc, 1, b"Metadata")), "null");
+        assert_eq!(
+            printed(&entry(&doc, 1, b"PageLabels")),
+            "<</Nums[0<</P(-)>>]>>"
+        );
+        assert_eq!(printed(&entry(&doc, 3, b"Thumb")), "null");
+        assert_eq!(printed(&entry(&doc, 5, b"Contents")), "(the  note)");
+        assert_eq!(printed(&entry(&doc, 5, b"AP")), "null");
+        assert_eq!(printed(&entry(&doc, 6, b"V")), "( value)");
+        assert_eq!(printed(&entry(&doc, 6, b"AP")), "<</N<</On 17 0 R>>>>");
+        assert_eq!(printed(&entry(&doc, 7, b"A")), "<</S/URI/URI(http://x/)>>");
+        assert_eq!(printed(&entry(&doc, 8, b"Alt")), "null");
+        assert_eq!(printed(&entry(&doc, 8, b"ActualText")), "null");
+        assert_eq!(printed(&entry(&doc, 8, b"E")), "(fine)");
+        assert_eq!(printed(&entry(&doc, 9, b"JS")), "()");
+        assert_eq!(
+            printed(&doc.resolve(&Object::Ref(ObjRef::new(24, 0)))),
+            "[(other)[3 0 R/Fit]]"
+        );
+        assert_eq!(printed(&entry(&doc, 12, b"SECRET")), "null");
+        assert_eq!(printed(&entry(&doc, 12, b"keep")), "[3 0 R/Fit]");
+        assert_eq!(printed(&entry(&doc, 13, b"Name")), "( layer)");
+        // Both files lose their data; names are cut.
+        assert_eq!(printed(&entry(&doc, 21, b"EF")), "null");
+        assert_eq!(printed(&entry(&doc, 23, b"EF")), "null");
+        assert_eq!(printed(&entry(&doc, 23, b"RF")), "null");
+        assert_eq!(printed(&entry(&doc, 23, b"F")), "(.txt)");
+        assert_eq!(
+            printed(&doc.resolve(&Object::Ref(ObjRef::new(26, 0)))),
+            "[<<>>(x)]"
+        );
+        assert_eq!(printed(&entry(&doc, 27, b"Alt")), "null");
+        let Some(Object::Stream(image)) = doc.object(27) else {
+            panic!("no image")
+        };
+        assert_eq!(doc.stream_data(&image).ok().as_deref(), Some(&b"raw"[..]));
+        // Too deep to look into.
+        assert!(printed(&doc.resolve(&Object::Ref(ObjRef::new(28, 0)))).contains("SECRET"));
+        assert!(printed(&doc.resolve(&Object::Ref(ObjRef::new(29, 0)))).contains("SECRET"));
+        assert_eq!(printed(&entry(&doc, 30, b"Contents")), "( elsewhere)");
+        assert_eq!(printed(&entry(&doc, 31, b"T")), "( parent)");
+    }
+
+    #[test]
+    fn with_no_targets_only_thumbnails_go() {
+        let doc = page_doc(b"");
+        let m = Matcher::new(&[], &[], false).unwrap_or_else(|e| panic!("{e}"));
+        // The page has no thumbnail, and page 5 does not exist.
+        assert_eq!(scrub(&doc, &m, &[0, 5]), Report::default());
     }
 }

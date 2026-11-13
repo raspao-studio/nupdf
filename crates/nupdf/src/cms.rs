@@ -21,6 +21,21 @@ pub const GRAY_ICC: &[u8] = include_bytes!("../icc/gray.icc");
 pub const RGB_ICC: &[u8] = include_bytes!("../icc/rgb.icc");
 pub const CMYK_ICC: &[u8] = include_bytes!("../icc/cmyk.icc");
 pub const LAB_ICC: &[u8] = include_bytes!("../icc/lab.icc");
+/// The profiles MuPDF converts with inside soft masks (`ps_gray` and the
+/// like in colorspace.c).
+pub const PS_GRAY_ICC: &[u8] = include_bytes!("../icc/ps_gray.icc");
+pub const PS_RGB_ICC: &[u8] = include_bytes!("../icc/ps_rgb.icc");
+pub const PS_CMYK_ICC: &[u8] = include_bytes!("../icc/ps_cmyk.icc");
+
+/// The soft-mask profile of a device family (Lab keeps its own).
+pub fn ps_profile(f: Family) -> &'static [u8] {
+    match f {
+        Family::Gray => PS_GRAY_ICC,
+        Family::Rgb => PS_RGB_ICC,
+        Family::Cmyk => PS_CMYK_ICC,
+        Family::Lab => LAB_ICC,
+    }
+}
 
 /// The profile a family's device space has.
 pub fn device_profile(f: Family) -> &'static [u8] {
@@ -32,10 +47,32 @@ pub fn device_profile(f: Family) -> &'static [u8] {
     }
 }
 
-type Key = (blake3::Hash, u8, bool);
+type Key = (blake3::Hash, u8, bool, bool);
 
 /// Transforms to sRGB (or to gray, `to_gray`), by profile and intent; None
 /// for a profile moxcms cannot use.
+/// The hash of one of the built-in profiles, by where it is.
+fn builtin_hash(profile: &[u8]) -> Option<blake3::Hash> {
+    static BUILTIN: OnceLock<Vec<(usize, usize, blake3::Hash)>> = OnceLock::new();
+    let all = BUILTIN.get_or_init(|| {
+        [
+            GRAY_ICC,
+            RGB_ICC,
+            CMYK_ICC,
+            LAB_ICC,
+            PS_GRAY_ICC,
+            PS_RGB_ICC,
+            PS_CMYK_ICC,
+        ]
+        .iter()
+        .map(|p| (p.as_ptr() as usize, p.len(), blake3::hash(p)))
+        .collect()
+    });
+    all.iter()
+        .find(|(at, len, _)| *at == profile.as_ptr() as usize && *len == profile.len())
+        .map(|(_, _, h)| *h)
+}
+
 fn cache() -> &'static Mutex<HashMap<Key, Option<Arc<Transform>>>> {
     static CACHE: OnceLock<Mutex<HashMap<Key, Option<Arc<Transform>>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -115,15 +152,27 @@ fn intent(ri: u8) -> RenderingIntent {
 }
 
 /// The transform from `profile` (of family `family`) to sRGB, or to
-/// MuPDF's gray with `to_gray`.
-pub fn transform(profile: &[u8], family: Family, ri: u8, to_gray: bool) -> Option<Arc<Transform>> {
-    let key = (blake3::hash(profile), ri, to_gray);
+/// MuPDF's gray with `to_gray`; into the soft-mask profiles with `soft`.
+pub fn transform(
+    profile: &[u8],
+    family: Family,
+    ri: u8,
+    to_gray: bool,
+    soft: bool,
+    hash: Option<blake3::Hash>,
+) -> Option<Arc<Transform>> {
+    // Hashing a profile of megabytes for every color drawn made shadings
+    // take minutes: the caller's hash, a built-in's, or this once.
+    let hash = hash
+        .or_else(|| builtin_hash(profile))
+        .unwrap_or_else(|| blake3::hash(profile));
+    let key = (hash, ri, to_gray, soft);
     if let Ok(c) = cache().lock()
         && let Some(t) = c.get(&key)
     {
         return t.clone();
     }
-    let made = make(profile, family, ri, to_gray).map(Arc::new);
+    let made = make(profile, family, ri, to_gray, soft).map(Arc::new);
     if let Ok(mut c) = cache().lock() {
         c.insert(key, made.clone());
     }
@@ -141,7 +190,7 @@ fn options(ri: u8) -> TransformOptions {
 /// CMYK profile's black from a perceptual round trip of Lab black, else
 /// the darkest colorant's; either neutral, its lightness at most 50.
 fn black_point(src: &ColorProfile, family: Family, n: usize) -> Option<[f64; 3]> {
-    let (lin, m) = linear()?;
+    let (lin, m) = linear_of(RGB_ICC)?;
     let into = |t: &moxcms::TransformF32Executor, dev: &[f32]| -> Option<[f64; 3]> {
         let mut rgb = [0f32; 3];
         t.transform(dev, &mut rgb).ok()?;
@@ -172,9 +221,10 @@ fn black_point(src: &ColorProfile, family: Family, n: usize) -> Option<[f64; 3]>
     Some(lab_to_xyz(l, 0.0, 0.0))
 }
 
-/// MuPDF's sRGB with linear curves, and its matrix into XYZ (D50).
-fn linear() -> Option<(ColorProfile, [[f64; 3]; 3])> {
-    let mut p = ColorProfile::new_from_slice(RGB_ICC).ok()?;
+/// MuPDF's sRGB with linear curves (its PostScript RGB, whose curves are
+/// linear and gamut wider, for soft masks), and its matrix into XYZ (D50).
+fn linear_of(base: &[u8]) -> Option<(ColorProfile, [[f64; 3]; 3])> {
+    let mut p = ColorProfile::new_from_slice(base).ok()?;
     let one = moxcms::ToneReprCurve::Parametric(vec![1.0]);
     p.red_trc = Some(one.clone());
     p.green_trc = Some(one.clone());
@@ -198,12 +248,18 @@ fn mul(m: &[[f64; 3]; 3], v: [f32; 3]) -> [f64; 3] {
     ]
 }
 
-fn make(profile: &[u8], family: Family, ri: u8, to_gray: bool) -> Option<Transform> {
+fn make(profile: &[u8], family: Family, ri: u8, to_gray: bool, soft: bool) -> Option<Transform> {
     let src = ColorProfile::new_from_slice(profile).ok()?;
-    let dst = ColorProfile::new_from_slice(if to_gray { GRAY_ICC } else { RGB_ICC }).ok()?;
+    let dst = match (to_gray, soft) {
+        (true, false) => GRAY_ICC,
+        (false, false) => RGB_ICC,
+        (true, true) => PS_GRAY_ICC,
+        (false, true) => PS_RGB_ICC,
+    };
+    let dst = ColorProfile::new_from_slice(dst).ok()?;
     let src_n = family.n();
     let dst_n = if to_gray { 1 } else { 3 };
-    let (lin, lin_to_xyz) = linear()?;
+    let (lin, lin_to_xyz) = linear_of(if soft { PS_RGB_ICC } else { RGB_ICC })?;
     let to_lin = src
         .create_transform_f32(layout(src_n)?, &lin, Layout::Rgb, options(ri))
         .ok()?;
@@ -297,8 +353,8 @@ mod tests {
 
     #[test]
     fn swop_cmyk_lands_near_mupdfs_lcms() {
-        let t =
-            transform(CMYK_ICC, Family::Cmyk, 1, false).unwrap_or_else(|| panic!("no transform"));
+        let t = transform(CMYK_ICC, Family::Cmyk, 1, false, false, None)
+            .unwrap_or_else(|| panic!("no transform"));
         // MuPDF 1.28.6 with ICC on paints these CMYK fills as these sRGB
         // bytes (lcms2, relative colorimetric, black point compensation).
         let cases: [([f32; 4], [u8; 3]); 6] = [

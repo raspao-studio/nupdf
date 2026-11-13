@@ -14,6 +14,8 @@ pub mod list;
 pub mod paint;
 pub mod path;
 pub mod shade;
+#[cfg(test)]
+pub(crate) mod testkit;
 
 use crate::content::Store;
 use crate::document::Document;
@@ -99,7 +101,9 @@ pub fn render_page_with(
 
 /// [`render_page_with`] in `bands` horizontal bands on as many threads:
 /// the page's device calls kept once (a display list) and played into
-/// each band. The pixels are the same as in one piece.
+/// each band. The pixels are MuPDF's for the same bands, which can differ
+/// from one piece by a few levels where strokes and shadings cross a
+/// band's edge: the rasterizer and shadings start from the band.
 #[allow(clippy::too_many_arguments)]
 pub fn render_page_banded(
     doc: &Document,
@@ -246,4 +250,153 @@ pub fn render_page_marked(
         pix: dev.into_pix(),
         error: run.error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{Point, Quad};
+
+    fn sink() -> (Document, Object) {
+        let doc = Document::open(testkit::sink()).unwrap_or_else(|e| panic!("{e:?}"));
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        (doc, page)
+    }
+
+    fn whole(doc: &Document, page: &Object, zoom: f32, region: Option<IRect>) -> Pix {
+        let ctm = Matrix::scale(zoom, zoom);
+        let (r, _) = render_page_with(doc, page, ctm, 1 << 26, region, Store::default(), true);
+        r.unwrap_or_else(|e| panic!("{e}")).pix
+    }
+
+    #[test]
+    fn bands_draw_what_mupdf_draws_band_by_band() {
+        // 1024 pixels square, a megapixel: eight bands of 128 rows, each
+        // a replay of the page's display list on a thread of its own.
+        // The rasterizer and shadings start from each band's scissor, so
+        // bands are not quite the page drawn whole, in MuPDF as here: the
+        // MD5s are of MuPDF's bands (a DrawDevice on a pixmap of each
+        // band's rows, run by `mutool run`).
+        let (doc, page) = sink();
+        let ctm = Matrix::scale(8.0, 8.0);
+        let (banded, _) =
+            render_page_banded(&doc, &page, ctm, 1 << 26, None, Store::default(), 8, true);
+        let banded = banded.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(banded.error, None);
+        assert_eq!(
+            testkit::md5(&banded.pix),
+            "40b5da6c7c235844c175a297d4252032"
+        );
+        assert!(banded.pix != whole(&doc, &page, 8.0, None));
+        // Regions: under a megapixel in one piece, over it in bands.
+        for (zoom, r, want) in [
+            (
+                8.0,
+                IRect::new(100, 0, 1024, 900),
+                "83b0b41ff668d11c09285807396b5e22",
+            ),
+            (
+                10.0,
+                IRect::new(0, 100, 1280, 1280),
+                "98af2eba3779c496d8bce3c6cd2abf6b",
+            ),
+        ] {
+            let ctm = Matrix::scale(zoom, zoom);
+            let (part, _) = render_page_banded(
+                &doc,
+                &page,
+                ctm,
+                1 << 26,
+                Some(r),
+                Store::default(),
+                4,
+                true,
+            );
+            let part = part.unwrap_or_else(|e| panic!("{e}")).pix;
+            assert_eq!(part.bbox(), r);
+            assert_eq!(testkit::md5(&part), want);
+        }
+    }
+
+    #[test]
+    fn small_pages_draw_in_one_piece_whatever_the_bands() {
+        let (doc, page) = sink();
+        for bands in [1, 8] {
+            let (r, _) = render_page_banded(
+                &doc,
+                &page,
+                Matrix::IDENTITY,
+                1 << 26,
+                None,
+                Store::default(),
+                bands,
+                false,
+            );
+            let r = r.unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(testkit::md5(&r.pix), "52c0e8802b9702cc6bc3fae69dbbcf65");
+        }
+    }
+
+    #[test]
+    fn pages_past_the_pixel_limit_or_outside_the_region_fail() {
+        let (doc, page) = sink();
+        let big = render_page(&doc, &page, Matrix::scale(10.0, 10.0), 1000);
+        assert_eq!(
+            big.map(|_| ()),
+            Err("limit error: 1280x1280 pixels is more than 1000".to_string())
+        );
+        for bands in [1, 4] {
+            let (r, _) = render_page_banded(
+                &doc,
+                &page,
+                Matrix::scale(10.0, 10.0),
+                1000,
+                None,
+                Store::default(),
+                bands,
+                true,
+            );
+            assert!(r.is_err_and(|e| e.starts_with("limit error")));
+            let off = Some(IRect::new(5000, 5000, 5100, 5100));
+            let (r, _) = render_page_banded(
+                &doc,
+                &page,
+                Matrix::IDENTITY,
+                1 << 26,
+                off,
+                Store::default(),
+                bands,
+                true,
+            );
+            assert_eq!(r.map(|_| ()), Err("the region is outside the page".into()));
+        }
+        let q = Quad {
+            ul: Point::new(0.0, 0.0),
+            ur: Point::new(1.0, 0.0),
+            ll: Point::new(0.0, 1.0),
+            lr: Point::new(1.0, 1.0),
+        };
+        let marked = render_page_marked(&doc, &page, Matrix::scale(10.0, 10.0), 1000, &[q], true);
+        assert!(marked.is_err_and(|e| e.starts_with("limit error")));
+    }
+
+    #[test]
+    fn marked_quads_shade_and_outline_what_they_cover() {
+        let doc =
+            Document::open(testkit::page(64, 64, "", "", &[])).unwrap_or_else(|e| panic!("{e:?}"));
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        // Page space: y up from the bottom; the pixmap's rows run down.
+        let q = Quad {
+            ul: Point::new(8.0, 40.0),
+            ur: Point::new(40.0, 40.0),
+            ll: Point::new(8.0, 8.0),
+            lr: Point::new(40.0, 8.0),
+        };
+        let ctm = Matrix::scale(1.0, -1.0).concat(Matrix::translate(0.0, 64.0));
+        let r = render_page_marked(&doc, &page, ctm, 1 << 20, &[q], true)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let inside = testkit::px(&r.pix, 24, 40);
+        assert!(inside[0] > inside[1] && inside[1] < 255, "{inside:?}");
+        assert_eq!(testkit::px(&r.pix, 56, 8), [255, 255, 255]);
+    }
 }

@@ -85,11 +85,8 @@ fn compression(doc: &Document, f: &Object, p: &Object) -> Compression {
         Object::Name(n) => n,
         _ => return Compression::Raw,
     };
-    let int = |key: &[u8], default: i32| match doc.dict_get(p, key) {
-        Object::Int(i) => i as i32,
-        Object::Real(r) => r as i32,
-        _ => default,
-    };
+    // pdf_dict_get_int_default: a real rounds to the nearest integer.
+    let int = |key: &[u8], default: i32| doc.dict_get(p, key).to_int_or(default);
     let boolean = |key: &[u8], default: bool| match doc.dict_get(p, key) {
         Object::Bool(b) => b,
         _ => default,
@@ -938,6 +935,65 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&w.out),
             "q BI /W 2/H 1/BPC 8/CS/G/D[0 1]/F/Fl ID zz EI Q"
+        );
+    }
+
+    fn image(compression: Compression, colorspace: Option<ColorSpace>) -> BiImage {
+        BiImage {
+            width: 1,
+            height: 1,
+            bpc: 8,
+            image_mask: false,
+            colorspace,
+            device: true,
+            interpolate: false,
+            decode: vec![0.0, 1.0],
+            compression,
+            data: b"d".to_vec(),
+        }
+    }
+
+    fn bi(img: &BiImage, ahx: bool) -> Result<String, String> {
+        let diag = Diagnostics::default();
+        let mut w = Writer::new(&diag, ahx, false);
+        w.inline_image(img, b"CS0")?;
+        Ok(String::from_utf8_lossy(&w.out).into_owned())
+    }
+
+    #[test]
+    fn inverted_cmyk_jpegs_get_their_decode_array_written() {
+        let jpeg = |invert_cmyk| Compression::Jpeg {
+            color_transform: -1,
+            invert_cmyk,
+        };
+        assert_eq!(
+            bi(&image(jpeg(true), Some(ColorSpace::Cmyk)), false),
+            Ok("BI /W 1/H 1/BPC 8/CS/CMYK/D[0 1]/F/DCT/D[1 0 1 0 1 0 1 0]ID d EI".into())
+        );
+        // Only a four-component image is inverted.
+        assert_eq!(
+            bi(&image(jpeg(true), Some(ColorSpace::Gray)), true),
+            Ok("BI /W 1/H 1/BPC 8/CS/G/D[0 1]/F[/AHx/DCT]ID 64> EI".into())
+        );
+    }
+
+    #[test]
+    fn images_bi_cannot_show_are_errors() {
+        // MuPDF's pdf_out_BI throws for these; JBIG2 and JPEG 2000 data
+        // never reaches it from a content stream, as the parser cannot
+        // find where such inline data ends.
+        for c in [Compression::Jbig2, Compression::Jpx] {
+            assert_eq!(
+                bi(&image(c, Some(ColorSpace::Gray)), false),
+                Err("argument error: unknown compressed buffer type".into())
+            );
+        }
+        assert_eq!(
+            bi(&image(Compression::Raw, None), false),
+            Err(
+                "argument error: BI operator can only show ImageMask, Gray, RGB, or CMYK images"
+                    .into()
+            )
         );
     }
 }

@@ -2611,6 +2611,21 @@ mod tests {
         // A bridge joins both.
         add_plank(&mut rafts, Rect::new(10.0, 4.0, 20.0, 5.0));
         assert_eq!(rafts, [Rect::new(0.0, 0.0, 30.0, 10.0)]);
+
+        // A plank that only touches the first raft, but grows it into a
+        // later one, which joins and is replaced by the last.
+        let mut rafts = Vec::new();
+        add_plank(&mut rafts, Rect::new(0.0, 0.0, 10.0, 10.0));
+        add_plank(&mut rafts, Rect::new(15.0, 5.0, 20.0, 10.0));
+        add_plank(&mut rafts, Rect::new(100.0, 100.0, 110.0, 110.0));
+        add_plank(&mut rafts, Rect::new(10.0, 0.0, 20.0, 1.0));
+        assert_eq!(
+            rafts,
+            [
+                Rect::new(0.0, 0.0, 20.0, 10.0),
+                Rect::new(100.0, 100.0, 110.0, 110.0)
+            ]
+        );
     }
 
     #[test]
@@ -2621,5 +2636,1122 @@ mod tests {
         };
         table_hunt(&mut page);
         assert!(page.blocks.is_empty());
+    }
+
+    use crate::Document;
+    use crate::content::Store;
+    use crate::stext::{Options, extract_page};
+
+    /// A one-page PDF (612 by 792) running `content`, with Helvetica as
+    /// /F1 and Helvetica-Bold as /F2, and `extra` in the page dictionary.
+    fn pdf(content: &str, extra: &str) -> Vec<u8> {
+        let objects = [
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R{extra}\
+                 /Resources<</Font<</F1 5 0 R/F2 6 0 R>>>>>>"
+            ),
+            format!(
+                "<</Length {}>>\nstream\n{content}\nendstream",
+                content.len()
+            ),
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>".to_string(),
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>".to_string(),
+        ];
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        let n = objects.len() + 1;
+        out.extend_from_slice(format!("xref\n0 {n}\n0000000000 65535 f \n").as_bytes());
+        for o in offsets {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer\n<</Size {n}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        out
+    }
+
+    /// The page's structured text with table hunting, vectors and
+    /// `options` (as `mutool` takes them). The expected tables come from
+    /// MuPDF: with `NUPDF_TABLE_DUMP=<dir>`, each page is written there as
+    /// `<name>.pdf`, with its options in `<name>.opts` and nupdf's tables in
+    /// `<name>.rs.txt`, to compare with `mutool run oracle/js/tables.js
+    /// <name>.pdf <options>`.
+    fn hunted(name: &str, content: &str, extra: &str, options: &str) -> StextPage {
+        let bytes = pdf(content, extra);
+        let dump = std::env::var_os("NUPDF_TABLE_DUMP").map(std::path::PathBuf::from);
+        if let Some(dir) = &dump {
+            std::fs::write(dir.join(format!("{name}.pdf")), &bytes)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+            std::fs::write(dir.join(format!("{name}.opts")), options)
+                .unwrap_or_else(|e| panic!("{e:?}"));
+        }
+        let doc = Document::open(bytes).unwrap_or_else(|e| panic!("{e:?}"));
+        let obj = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let opts = Options::parse(&format!("vectors,table-hunt,{options}"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let page = extract_page(&doc, &obj, opts, Store::default())
+            .0
+            .unwrap_or_else(|e| panic!("{e}"));
+        if let Some(dir) = &dump {
+            std::fs::write(
+                dir.join(format!("{name}.rs.txt")),
+                format!("{:?}", tables(&page)),
+            )
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        }
+        page
+    }
+
+    fn cell_text(blocks: &[Block], out: &mut Vec<String>) {
+        for b in blocks {
+            match b {
+                Block::Text(t) => {
+                    for l in &t.lines {
+                        let s = crate::extract::chars_text(&l.chars);
+                        let s = s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
+                        if !s.is_empty() {
+                            out.push(s.to_string());
+                        }
+                    }
+                }
+                Block::Struct(s) => cell_text(&s.blocks, out),
+                _ => {}
+            }
+        }
+    }
+
+    fn kids<'a>(blocks: &'a [Block], standard: &str) -> Vec<&'a [Block]> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Struct(s) if s.standard == standard => Some(&s.blocks[..]),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every table on the page, at any depth, as rows of cells' text (as
+    /// oracle/js/tables.js gives them).
+    fn tables(page: &StextPage) -> Vec<Vec<Vec<String>>> {
+        fn find(blocks: &[Block], out: &mut Vec<Vec<Vec<String>>>) {
+            for b in blocks {
+                let Block::Struct(s) = b else { continue };
+                if s.standard != "Table" {
+                    find(&s.blocks, out);
+                    continue;
+                }
+                let rows = kids(&s.blocks, "TR")
+                    .into_iter()
+                    .map(|row| {
+                        kids(row, "TD")
+                            .into_iter()
+                            .map(|cell| {
+                                let mut lines = Vec::new();
+                                cell_text(cell, &mut lines);
+                                lines.join("\n")
+                            })
+                            .collect()
+                    })
+                    .collect();
+                out.push(rows);
+            }
+        }
+        let mut out = Vec::new();
+        find(&page.blocks, &mut out);
+        out
+    }
+
+    /// Text at `(x, y)` in /F1 at `size`.
+    fn text(x: f32, y: f32, size: f32, s: &str) -> String {
+        format!("BT /F1 {size} Tf {x} {y} Td ({s}) Tj ET\n")
+    }
+
+    #[derive(Clone, Copy)]
+    enum Rules {
+        None,
+        Lines,
+        Rects,
+        Boxes,
+    }
+
+    /// A table of `cells` with its top left at `(x, y)`, columns `w` wide
+    /// and rows `h` high, ruled as `rules` says.
+    fn grid(cells: &[&[&str]], x: f32, y: f32, w: f32, h: f32, rules: Rules) -> String {
+        let mut out = String::from("0.5 w\n");
+        let rows = cells.len();
+        let cols = cells.iter().map(|r| r.len()).max().unwrap_or(0);
+        for (r, row) in cells.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                if !cell.is_empty() {
+                    let (tx, ty) = (x + 4.0 + c as f32 * w, y - (r as f32 + 1.0) * h + 6.0);
+                    out += &text(tx, ty, 10.0, cell);
+                }
+            }
+        }
+        let (x1, y1) = (x + cols as f32 * w, y - rows as f32 * h);
+        match rules {
+            Rules::None => {}
+            Rules::Lines => {
+                for r in 0..=rows {
+                    let yy = y - r as f32 * h;
+                    out += &format!("{x} {yy} m {x1} {yy} l S\n");
+                }
+                for c in 0..=cols {
+                    let xx = x + c as f32 * w;
+                    out += &format!("{xx} {y} m {xx} {y1} l S\n");
+                }
+            }
+            Rules::Rects => {
+                for r in 0..=rows {
+                    let yy = y - r as f32 * h;
+                    out += &format!("{x} {} {} 0.5 re f\n", yy - 0.25, x1 - x);
+                }
+                for c in 0..=cols {
+                    let xx = x + c as f32 * w;
+                    out += &format!("{} {y1} 0.5 {} re f\n", xx - 0.25, y - y1);
+                }
+            }
+            Rules::Boxes => {
+                for r in 0..rows {
+                    for c in 0..cols {
+                        let (bx, by) = (x + c as f32 * w, y - (r as f32 + 1.0) * h);
+                        out += &format!("{bx} {by} {w} {h} re S\n");
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn strs(t: &[&[&str]]) -> Vec<Vec<String>> {
+        t.iter()
+            .map(|r| r.iter().map(|s| s.to_string()).collect())
+            .collect()
+    }
+
+    const ABC: &[&[&str]] = &[
+        &["Name", "Qty", "Price"],
+        &["Apple", "3", "1.20"],
+        &["Pear", "10", "0.85"],
+        &["Plum", "7", "2.05"],
+    ];
+
+    #[test]
+    fn a_table_ruled_by_lines_is_found_cell_by_cell() {
+        let c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        assert_eq!(tables(&hunted("lines", &c, "", "")), [strs(ABC)]);
+    }
+
+    #[test]
+    fn a_table_ruled_by_thin_fills_is_found() {
+        let c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Rects);
+        assert_eq!(tables(&hunted("rects", &c, "", "")), [strs(ABC)]);
+    }
+
+    #[test]
+    fn a_table_of_boxed_cells_is_found() {
+        let c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Boxes);
+        assert_eq!(tables(&hunted("boxes", &c, "", "")), [strs(ABC)]);
+    }
+
+    #[test]
+    fn an_unruled_table_is_found_only_in_a_segment() {
+        // Without segmenting, only rafts of rectangles are candidates.
+        let c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        assert!(tables(&hunted("unruled", &c, "", "")).is_empty());
+        // With it, the segment is gridded from its gaps. Like MuPDF, the
+        // last column is lost: its right edge is the segment's.
+        let c = c + &paragraph(400.0);
+        let got = tables(&hunted("unruled_seg", &c, "", "segment"));
+        let want: &[&[&str]] = &[
+            &["Name", "Qty"],
+            &["Apple", "3"],
+            &["Pear", "10"],
+            &["Plum", "7"],
+        ];
+        assert_eq!(got, [strs(want)]);
+    }
+
+    /// Three lines of running text from `y` down.
+    fn paragraph(y: f32) -> String {
+        (0..3)
+            .map(|i| {
+                text(
+                    72.0,
+                    y - i as f32 * 12.0,
+                    10.0,
+                    "Some paragraph text here that goes on and on.",
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_ruled_table_in_a_segment_is_found_once() {
+        let c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines) + &paragraph(400.0);
+        assert_eq!(tables(&hunted("ruled_seg", &c, "", "segment")), [strs(ABC)]);
+    }
+
+    fn cells(rows: usize, cols: usize) -> Vec<Vec<String>> {
+        (0..rows)
+            .map(|r| (0..cols).map(|c| format!("c{r}{c}")).collect())
+            .collect()
+    }
+
+    fn refs(v: &[Vec<String>]) -> Vec<Vec<&str>> {
+        v.iter()
+            .map(|r| r.iter().map(String::as_str).collect())
+            .collect()
+    }
+
+    #[test]
+    fn two_tables_on_a_page_are_found_in_order() {
+        let big = cells(4, 5);
+        let big_refs = refs(&big);
+        let big_rows: Vec<&[&str]> = big_refs.iter().map(Vec::as_slice).collect();
+        let c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines)
+            + &grid(&big_rows, 72.0, 500.0, 90.0, 20.0, Rules::Lines);
+        assert_eq!(tables(&hunted("two", &c, "", "")), [strs(ABC), big]);
+    }
+
+    /// Rows of `ABC` but the first, under a header `head`, ruled by lines
+    /// `hs` (from x, to x, at y) and `vs` (at x, from y, to y).
+    fn ruled(cells: &[(f32, f32, &str)], hs: &[(f32, f32, f32)], vs: &[(f32, f32, f32)]) -> String {
+        let mut c = String::from("0.5 w\n");
+        for &(x, y, s) in cells {
+            c += &text(x, y, 10.0, s);
+        }
+        for &(x0, x1, y) in hs {
+            c += &format!("{x0} {y} m {x1} {y} l S\n");
+        }
+        for &(x, y0, y1) in vs {
+            c += &format!("{x} {y0} m {x} {y1} l S\n");
+        }
+        c
+    }
+
+    #[test]
+    fn a_header_missing_a_rule_still_has_its_cells() {
+        let mut texts = vec![(76.0, 706.0, "Fruit and count"), (276.0, 706.0, "Price")];
+        for (r, row) in ABC[1..].iter().enumerate() {
+            for (c, s) in row.iter().enumerate() {
+                texts.push((76.0 + c as f32 * 100.0, 686.0 - r as f32 * 20.0, s));
+            }
+        }
+        let hs: Vec<_> = (0..5)
+            .map(|r| (72.0, 372.0, 720.0 - r as f32 * 20.0))
+            .collect();
+        let vs = [
+            (72.0, 720.0, 640.0),
+            (272.0, 720.0, 640.0),
+            (372.0, 720.0, 640.0),
+            (172.0, 700.0, 640.0),
+        ];
+        let got = tables(&hunted("merged_h", &ruled(&texts, &hs, &vs), "", ""));
+        let want: &[&[&str]] = &[
+            &["Fruit and count", "", "Price"],
+            &["Apple", "3", "1.20"],
+            &["Pear", "10", "0.85"],
+            &["Plum", "7", "2.05"],
+        ];
+        assert_eq!(got, [strs(want)]);
+    }
+
+    #[test]
+    fn a_cell_spanning_rows_is_split_by_its_text() {
+        let mut texts = vec![(76.0, 686.0, "Tall")];
+        let names: Vec<String> = (0..4)
+            .flat_map(|r| (1..3).map(move |c| format!("r{r}c{c}")))
+            .collect();
+        for (i, s) in names.iter().enumerate() {
+            let (r, c) = (i / 2, i % 2 + 1);
+            texts.push((76.0 + c as f32 * 100.0, 706.0 - r as f32 * 20.0, s));
+        }
+        let hs: Vec<_> = (0..5)
+            .map(|r| {
+                let x0 = if [0, 3, 4].contains(&r) { 72.0 } else { 172.0 };
+                (x0, 372.0, 720.0 - r as f32 * 20.0)
+            })
+            .collect();
+        let vs: Vec<_> = (0..4)
+            .map(|c| (72.0 + c as f32 * 100.0, 720.0, 640.0))
+            .collect();
+        let got = tables(&hunted("merged_v", &ruled(&texts, &hs, &vs), "", ""));
+        // As MuPDF: rows with no rule between them are still rows when
+        // their dividers are certain.
+        let want: &[&[&str]] = &[
+            &["", "r0c1", "r0c2"],
+            &["Tall", "r1c1", "r1c2"],
+            &["", "r2c1", "r2c2"],
+            &["", "r3c1", "r3c2"],
+        ];
+        assert_eq!(got, [strs(want)]);
+    }
+
+    #[test]
+    fn a_rotated_page_gives_the_table_as_it_is_seen() {
+        let c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        let want: &[&[&str]] = &[
+            &["Plum", "Pear", "Apple", "Name"],
+            &["7", "10", "3", "Qty"],
+            &["2.05", "0.85", "1.20", "Price"],
+        ];
+        assert_eq!(tables(&hunted("rot90", &c, "/Rotate 90", "")), [strs(want)]);
+    }
+
+    #[test]
+    fn a_table_drawn_turned_is_found_turned() {
+        let c = grid(ABC, 72.0, 500.0, 100.0, 20.0, Rules::Lines);
+        let got = tables(&hunted(
+            "cm90",
+            &format!("q 0 1 -1 0 612 0 cm\n{c}Q\n"),
+            "",
+            "",
+        ));
+        let want: &[&[&str]] = &[
+            &["Price", "1.20", "0.85", "2.05"],
+            &["Qty", "3", "10", "7"],
+            &["Name", "Apple", "Pear", "Plum"],
+        ];
+        assert_eq!(got, [strs(want)]);
+        // At an angle, its lines are not rectangles: no table.
+        let c = format!("q 0.866 0.5 -0.5 0.866 100 0 cm\n{c}Q\n");
+        assert!(tables(&hunted("cm30", &c, "", "")).is_empty());
+    }
+
+    /// Only the rules of a `rows` by `cols` grid, as `grid` draws them.
+    fn rules(x: f32, y: f32, w: f32, h: f32, rows: usize, cols: usize) -> String {
+        let blank = vec![""; cols];
+        let cells = vec![&blank[..]; rows];
+        grid(&cells, x, y, w, h, Rules::Lines)
+    }
+
+    #[test]
+    fn a_line_of_text_across_cells_is_cut_between_them() {
+        // Each row one run of text, its pieces pushed apart by kerning:
+        // the characters go to the cells their middles are in.
+        let mut c = String::new();
+        for (r, row) in ABC.iter().enumerate() {
+            c += &format!(
+                "BT /F1 10 Tf 76 {} Td [({}) -7000 ({}) -7000 ({})] TJ ET\n",
+                706 - r * 20,
+                row[0],
+                row[1],
+                row[2]
+            );
+        }
+        c += &rules(72.0, 720.0, 100.0, 20.0, 4, 3);
+        let want: &[&[&str]] = &[
+            &["Name", "", "Qty", "Pri", "ce"],
+            &["Apple", "", "3", "1.20", ""],
+            &["Pear", "1", "0", "0.85", ""],
+            &["Plum", "7", "", "2.05", ""],
+        ];
+        assert_eq!(tables(&hunted("tj", &c, "", "")), [strs(want)]);
+        // The same with runs of spaces.
+        let mut c = String::new();
+        for (r, row) in ABC.iter().enumerate() {
+            c += &text(76.0, 706.0 - r as f32 * 20.0, 10.0, &row.join("        "));
+        }
+        c += &rules(72.0, 720.0, 60.0, 20.0, 4, 3);
+        let want: &[&[&str]] = &[
+            &["Name", "Q", "ty", "Price", ""],
+            &["Apple", "3", "", "1.20", ""],
+            &["Pear", "10", "", "0.85", ""],
+            &["Plum", "7", "", "2.05", ""],
+        ];
+        assert_eq!(tables(&hunted("spaces", &c, "", "")), [strs(want)]);
+    }
+
+    #[test]
+    fn lines_of_a_cell_stay_together() {
+        let two = "line one\nline two";
+        let want = vec![vec![two.to_string(); 3]; 3];
+        // One text object per cell, and one per line.
+        let mut c = String::new();
+        let mut c2 = String::new();
+        for r in 0..3 {
+            for col in 0..3 {
+                let (x, y) = (76 + col * 100, 708 - r * 30);
+                c += &format!("BT /F1 10 Tf 12 TL {x} {y} Td (line one) Tj T* (line two) Tj ET\n");
+                c2 += &text(x as f32, y as f32, 10.0, "line one");
+                c2 += &text(x as f32, y as f32 - 12.0, 10.0, "line two");
+            }
+        }
+        let r = rules(72.0, 720.0, 100.0, 30.0, 3, 3);
+        assert_eq!(
+            tables(&hunted("multi", &(c + &r), "", "")),
+            std::slice::from_ref(&want)
+        );
+        assert_eq!(tables(&hunted("multi2", &(c2 + &r), "", "")), [want]);
+    }
+
+    #[test]
+    fn shaded_rows_make_a_table() {
+        let mut c = String::new();
+        for r in 0..4 {
+            let color = if r % 2 == 0 {
+                "0.9 0.9 0.9"
+            } else {
+                "0.8 0.8 1"
+            };
+            c += &format!("{color} rg 72 {} 300 20 re f\n", 700 - r * 20);
+        }
+        c += "0 g\n";
+        c += &grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        assert_eq!(tables(&hunted("shade", &c, "", "")), [strs(ABC)]);
+        // Fills of the color of one behind them, with nothing between,
+        // are culled.
+        let c = String::from(
+            "0.9 g 72 640 300 80 re f\n0.9 g 72 700 300 20 re f\n0.9 g 72 660 300 20 re f\n0 g\n",
+        ) + &grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        assert_eq!(tables(&hunted("cull", &c, "", "")), [strs(ABC)]);
+    }
+
+    #[test]
+    fn a_fill_behind_a_ruled_table_hides_it() {
+        // The fill joins the rules in one raft, which holds no table.
+        let t = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        let c = format!("1 g 0 0 612 792 re f 0 g\n{t}");
+        assert!(tables(&hunted("page_fill", &c, "", "")).is_empty());
+        let c = format!("0.9 g 60 620 330 120 re f 0 g\n{t}");
+        assert!(tables(&hunted("table_fill", &c, "", "")).is_empty());
+    }
+
+    #[test]
+    fn a_heading_across_columns_spans_them() {
+        let big = cells(6, 4);
+        let big_refs = refs(&big);
+        let rows: Vec<&[&str]> = big_refs.iter().map(Vec::as_slice).collect();
+        let c = text(76.0, 720.0, 10.0, "A heading that spans across two columns")
+            + &grid(&rows, 72.0, 712.0, 100.0, 14.0, Rules::None)
+            + &paragraph(400.0);
+        let got = tables(&hunted("span", &c, "", "segment"));
+        let col = |c: usize| {
+            (0..6)
+                .map(|r| format!("c{r}{c}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let want = vec![
+            vec!["A heading that spans across two columns".to_string()],
+            vec![col(0), col(1)],
+        ];
+        assert_eq!(got, [want]);
+    }
+
+    #[test]
+    fn empty_bordered_rows_and_columns_are_kept() {
+        for (name, t) in [
+            (
+                "empty_col",
+                &[&["a", "", "b"][..], &["c", "", "d"], &["e", "", "f"]][..],
+            ),
+            (
+                "empty_row",
+                &[&["a", "b", "c"], &["", "", ""], &["e", "f", "g"]],
+            ),
+            (
+                "empty_edges",
+                &[
+                    &["", "", ""],
+                    &["a", "b", "c"],
+                    &["e", "f", "g"],
+                    &["", "", ""],
+                ],
+            ),
+            ("empty_sides", &[&["", "a", "b", ""], &["", "e", "f", ""]]),
+            (
+                "gap_in_cell",
+                &[&["Alpha    Beta", "x"], &["Gamma", "y"], &["Delta", "z"]],
+            ),
+        ] {
+            let w = if name == "gap_in_cell" { 150.0 } else { 100.0 };
+            let c = grid(t, 72.0, 720.0, w, 20.0, Rules::Lines);
+            assert_eq!(tables(&hunted(name, &c, "", "")), [strs(t)], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_table_inside_a_cell_regrids_the_outer_one() {
+        let c = grid(
+            &[&["outer a", "outer b"], &["", "outer d"]],
+            72.0,
+            720.0,
+            250.0,
+            100.0,
+            Rules::Lines,
+        ) + &grid(
+            &[&["i1", "i2"], &["i3", "i4"]],
+            80.0,
+            690.0,
+            50.0,
+            20.0,
+            Rules::Lines,
+        );
+        let want: &[&[&str]] = &[
+            &["", "", "", "", ""],
+            &["", "i1", "i2", "", ""],
+            &["", "i3", "i4", "", ""],
+            &["o", "uter a", "", "", "outer b"],
+            &["", "", "", "", "outer d"],
+        ];
+        assert_eq!(tables(&hunted("nested", &c, "", "")), [strs(want)]);
+    }
+
+    #[test]
+    fn overlapping_ruled_tables_make_none() {
+        let c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines)
+            + &grid(ABC, 150.0, 690.0, 100.0, 20.0, Rules::Lines);
+        assert!(tables(&hunted("overlap", &c, "", "")).is_empty());
+    }
+
+    #[test]
+    fn drawings_in_cells() {
+        let t = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        // A curve within the table is not one of its rules.
+        let c = format!("{t}80 650 m 90 660 100 650 110 640 c S\n");
+        assert_eq!(tables(&hunted("curve", &c, "", "")), [strs(ABC)]);
+        // A filled box in the last column is content, and gets a column.
+        let c = format!("{t}1 0 0 rg 300 645 20 5 re f\n");
+        let want: &[&[&str]] = &[
+            &["Name", "Qty", "Price", ""],
+            &["Apple", "3", "1.20", ""],
+            &["Pear", "10", "0.85", ""],
+            &["Plum", "7", "2.05", ""],
+        ];
+        assert_eq!(tables(&hunted("box_in_cell", &c, "", "")), [strs(want)]);
+    }
+
+    #[test]
+    fn a_cells_lines_from_separate_blocks_are_glued() {
+        // Text far away between the first and second lines of the cells
+        // puts them in separate blocks; a cell's two are glued back
+        // together when the second follows on from the first.
+        let page = |spacing: f32| {
+            let mut c = String::new();
+            for (y, s) in [(708.0, "line one"), (708.0 - spacing, "line two")] {
+                for r in 0..3 {
+                    for col in 0..3 {
+                        c += &text(76.0 + col as f32 * 100.0, y - r as f32 * 30.0, 10.0, s);
+                    }
+                }
+                if s == "line one" {
+                    c += &text(76.0, 100.0, 10.0, "Far away footnote");
+                }
+            }
+            c + &rules(72.0, 720.0, 100.0, 30.0, 3, 3)
+        };
+        let want = vec![vec!["line one\nline two".to_string(); 3]; 3];
+        // Overlapping boxes: not glued.
+        let p = hunted("glue13", &page(13.0), "", "");
+        assert_eq!(tables(&p), std::slice::from_ref(&want));
+        assert_eq!(td_blocks(&p), vec![vec![2; 3]; 3]);
+        let p = hunted("glue14", &page(14.0), "", "");
+        assert_eq!(tables(&p), [want]);
+        assert_eq!(td_blocks(&p), vec![vec![1; 3]; 3]);
+    }
+
+    /// How many text blocks each cell of the first table holds.
+    fn td_blocks(page: &StextPage) -> Vec<Vec<usize>> {
+        fn first_table(blocks: &[Block]) -> Option<&[Block]> {
+            blocks.iter().find_map(|b| match b {
+                Block::Struct(s) if s.standard == "Table" => Some(&s.blocks[..]),
+                Block::Struct(s) => first_table(&s.blocks),
+                _ => None,
+            })
+        }
+        let table = first_table(&page.blocks).unwrap_or_default();
+        kids(table, "TR")
+            .into_iter()
+            .map(|row| {
+                kids(row, "TD")
+                    .into_iter()
+                    .map(|cell| cell.iter().filter(|b| matches!(b, Block::Text(_))).count())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `n` lines of `s`, joined by newlines.
+    fn repeat(s: &str, n: usize) -> String {
+        vec![s; n].join("\n")
+    }
+
+    #[test]
+    fn tall_text_in_an_unruled_table_spans_rows() {
+        let body = |c: &mut String| {
+            for r in 0..6 {
+                for col in 1..4 {
+                    let (x, y) = (76.0 + col as f32 * 100.0, 706.0 - r as f32 * 14.0);
+                    *c += &text(x, y, 10.0, &format!("v{r}{col}"));
+                }
+            }
+        };
+        let col = |c: usize| (0..6).map(|r| format!("v{r}{c}")).collect::<Vec<_>>();
+        let para = repeat("Some paragraph text here that goes on and on.", 3);
+        let mut c = String::new();
+        body(&mut c);
+        c += &text(76.0, 690.0, 24.0, "BIG");
+        c += &paragraph(400.0);
+        let want = vec![
+            vec![
+                "BIG".to_string(),
+                col(1).join("\n"),
+                col(2).join("\n"),
+                col(3).join("\n"),
+            ],
+            vec![para.clone(), String::new()],
+        ];
+        assert_eq!(tables(&hunted("vspan", &c, "", "segment")), [want]);
+        // Two lines in the first column instead: they join the second.
+        let mut c = String::new();
+        body(&mut c);
+        c += "BT /F1 10 Tf 12 TL 76 706 Td (two) Tj T* (lines) Tj ET\n";
+        c += &paragraph(400.0);
+        let mut first = col(1);
+        first.extend(["two".to_string(), "lines".to_string()]);
+        let want = vec![
+            vec![first.join("\n"), col(2).join("\n"), col(3).join("\n")],
+            vec![para, String::new()],
+        ];
+        assert_eq!(tables(&hunted("vspan2", &c, "", "segment")), [want]);
+    }
+
+    #[test]
+    fn a_fill_behind_unruled_text_bounds_the_table() {
+        let t = grid(ABC, 72.0, 720.0, 60.0, 20.0, Rules::None);
+        let c = format!("0.9 g 60 500 440 230 re f 0 g\n{t}");
+        assert_eq!(tables(&hunted("bigfill", &c, "", "")), [strs(ABC)]);
+        let c = format!("0.9 g 60 500 440 230 re f 0 g\n{t}0.9 g 520 500 40 40 re f\n");
+        assert_eq!(tables(&hunted("bigfill2", &c, "", "")), [strs(ABC)]);
+    }
+
+    #[test]
+    fn justified_paragraphs_are_not_tables() {
+        let line = "Justified words here and there every line.";
+        let just = |y: f32| -> String {
+            (0..6)
+                .map(|i| text(72.0, y - i as f32 * 12.0, 10.0, line))
+                .collect()
+        };
+        let opts = "segment,paragraph-break";
+        let c = just(700.0) + &grid(ABC, 72.0, 500.0, 100.0, 20.0, Rules::Lines);
+        assert_eq!(tables(&hunted("just", &c, "", opts)), [strs(ABC)]);
+        let c = just(700.0) + &grid(ABC, 72.0, 500.0, 100.0, 20.0, Rules::None);
+        let want: &[&[&str]] = &[
+            &["Name", "Qty"],
+            &["Apple", "3"],
+            &["Pear", "10"],
+            &["Plum", "7"],
+        ];
+        assert_eq!(tables(&hunted("just2", &c, "", opts)), [strs(want)]);
+        let t = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        let c = t.clone() + &just(500.0);
+        assert_eq!(tables(&hunted("just3", &c, "", opts)), [strs(want)]);
+        // Over the table, all but its first line (put below) are taken
+        // into it, as by MuPDF.
+        let over: String = (1..6)
+            .map(|i| text(72.0, 700.0 - i as f32 * 12.0, 10.0, line))
+            .collect();
+        let c = t + &text(72.0, 500.0, 10.0, line) + &over;
+        let want = vec![
+            vec!["Name\nQty".to_string(), "Price".to_string()],
+            vec![
+                format!("Apple\n3\nPear\n10\nPlum\n7\n{}", repeat(line, 5)),
+                "1.20".to_string(),
+            ],
+            vec!["0.85".to_string()],
+            vec!["2.05".to_string()],
+        ];
+        assert_eq!(tables(&hunted("just4", &c, "", opts)), [want]);
+    }
+
+    #[test]
+    fn text_crossing_the_edge_of_a_table() {
+        // Sticking out of the left of a fill: what is outside stays out.
+        let c = String::from("0.9 g 100 640 300 80 re f 0 g\n")
+            + &grid(ABC, 90.0, 720.0, 100.0, 20.0, Rules::None);
+        let want: &[&[&str]] = &[
+            &["ame", "Qty", "Price"],
+            &["pple", "3", "1.20"],
+            &["ear", "10", "0.85"],
+            &["lum", "7", "2.05"],
+        ];
+        assert_eq!(tables(&hunted("stickout", &c, "", "")), [strs(want)]);
+        let c = String::from("0.9 g 100 640 300 80 re f 0 g\n")
+            + &grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        let want: &[&[&str]] = &[
+            &["", "Qty", "Price"],
+            &["", "3", "1.20"],
+            &["", "10", "0.85"],
+            &["", "7", "2.05"],
+        ];
+        assert_eq!(tables(&hunted("stickout2", &c, "", "")), [strs(want)]);
+        // Into a ruled table from the left, and out of it to the right.
+        let t = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        let c = t.clone() + &text(40.0, 650.0, 10.0, "Outside left");
+        let want: &[&[&str]] = &[
+            &["Name", "Qty", "Price"],
+            &["Apple", "3", "1.20"],
+            &["Pear", "10", "0.85"],
+            &["Plum\ne left", "7", "2.05"],
+        ];
+        assert_eq!(tables(&hunted("outside", &c, "", "")), [strs(want)]);
+        let c = t.clone() + &text(330.0, 650.0, 10.0, "Overhanging text here");
+        let want: &[&[&str]] = &[
+            &["Name", "Qty", "Price", ""],
+            &["Apple", "3", "1.20", ""],
+            &["Pear", "10", "0.85", ""],
+            &["Plum", "7", "2.05", "Overhang"],
+        ];
+        assert_eq!(tables(&hunted("overhang", &c, "", "")), [strs(want)]);
+        // Turned text in the last cell.
+        let c = t + "BT /F1 6 Tf 0 1 -1 0 365 642 Tm (up) Tj ET\n";
+        let want: &[&[&str]] = &[
+            &["Name", "Qty", "Price", ""],
+            &["Apple", "3", "1.20", ""],
+            &["Pear", "10", "0.85", ""],
+            &["Plum", "7", "2.05", "up"],
+        ];
+        assert_eq!(tables(&hunted("vert", &c, "", "")), [strs(want)]);
+    }
+
+    #[test]
+    fn rules_of_touching_dashes_are_collated() {
+        let mut c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        for r in 0..5 {
+            for k in (0..300).step_by(2) {
+                c += &format!("{} {} 2 0.5 re f\n", 72 + k, 720 - r * 20);
+            }
+        }
+        for col in 0..4 {
+            for k in (0..80).step_by(2) {
+                c += &format!("{} {} 0.5 2 re f\n", 72 + col * 100, 640 + k);
+            }
+        }
+        assert_eq!(tables(&hunted("dashes", &c, "", "")), [strs(ABC)]);
+        // Dashes with gaps make no raft; stroked lines with them, none.
+        let mut c = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        for r in 0..5 {
+            for k in (0..300).step_by(3) {
+                c += &format!("{} {} 2 0.5 re f\n", 72 + k, 720 - r * 20);
+            }
+        }
+        c += "72 640 m 72 720 l 172 640 m 172 720 l 272 640 m 272 720 l 372 640 m 372 720 l S\n";
+        assert!(tables(&hunted("dashes2", &c, "", "")).is_empty());
+    }
+
+    #[test]
+    fn single_spaces_in_cells_keep_their_words_together() {
+        let t: &[&[&str]] = &[
+            &["1 000", "New York", "a b c"],
+            &["2 500 000", "Los Angeles", "x y"],
+            &["3", "Rome", "z"],
+        ];
+        let c = grid(t, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        assert_eq!(tables(&hunted("words", &c, "", "")), [strs(t)]);
+        let c = grid(t, 72.0, 720.0, 100.0, 20.0, Rules::None) + &paragraph(400.0);
+        let want: &[&[&str]] = &[
+            &["New York", "a b c"],
+            &["Los Angeles", "x y"],
+            &["Rome", "z"],
+        ];
+        assert_eq!(tables(&hunted("words_u", &c, "", "segment")), [strs(want)]);
+    }
+
+    #[test]
+    fn degenerate_grids_are_not_tables() {
+        let one_col: &[&[&str]] = &[&["a"], &["b"], &["c"]];
+        let c = grid(one_col, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        assert!(tables(&hunted("one_col", &c, "", "")).is_empty());
+        let c = grid(&[&["a", "b", "c"]], 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        assert!(tables(&hunted("one_row", &c, "", "")).is_empty());
+        // Drawings across cells that are not rules spoil a table.
+        let t = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        let c = format!("{t}80 650 m 150 700 250 650 350 700 c S\n");
+        assert!(tables(&hunted("curve_across", &c, "", "")).is_empty());
+        let c = format!("{t}100 650 m 250 700 l S\n");
+        assert!(tables(&hunted("diagonal", &c, "", "")).is_empty());
+    }
+
+    #[test]
+    fn rules_past_an_unruled_table_add_margins() {
+        let t = grid(ABC, 72.0, 720.0, 60.0, 20.0, Rules::None);
+        let page = |extra: &str| format!("{t}{extra}{}", paragraph(400.0));
+        for (name, extra) in [
+            ("trim_r", "72 722 m 500 722 l S\n450 722 m 450 640 l S\n"),
+            ("trim_r2", "72 722 m 500 722 l S\n"),
+            ("trim_b", "72 722 m 300 722 l S\n72 600 m 300 600 l S\n"),
+        ] {
+            let got = tables(&hunted(name, &page(extra), "", "segment"));
+            assert_eq!(got, [strs(ABC)], "{name}");
+        }
+        let c = page("20 722 m 300 722 l S\n40 722 m 40 640 l S\n");
+        let want: &[&[&str]] = &[
+            &["", "Name", "Qty", "Price"],
+            &["", "Apple", "3", "1.20"],
+            &["", "Pear", "10", "0.85"],
+            &["", "Plum", "7", "2.05"],
+        ];
+        assert_eq!(tables(&hunted("trim_l", &c, "", "segment")), [strs(want)]);
+        let c = page("72 780 m 300 780 l S\n72 630 m 300 630 l S\n");
+        let want: &[&[&str]] = &[
+            &["Name", "Qty"],
+            &["Apple", "3"],
+            &["Pear", "10"],
+            &["Plum", "7"],
+        ];
+        assert_eq!(tables(&hunted("trim_t", &c, "", "segment")), [strs(want)]);
+    }
+
+    #[test]
+    fn empty_boxes_spanning_cells() {
+        // A tall empty box to the right of four ruled rows.
+        let mut c = String::from("0.5 w\n");
+        for r in 0..4 {
+            for col in 0..2 {
+                let (x, y) = (76.0 + col as f32 * 100.0, 706.0 - r as f32 * 20.0);
+                c += &text(x, y, 10.0, &format!("r{r}c{col}"));
+            }
+        }
+        for r in 0..5 {
+            let x1 = if r == 0 || r == 4 { 372 } else { 272 };
+            c += &format!("72 {y} m {x1} {y} l S\n", y = 720 - r * 20);
+        }
+        for col in 0..4 {
+            c += &format!("{x} 720 m {x} 640 l S\n", x = 72 + col * 100);
+        }
+        let want: Vec<Vec<String>> = (0..4)
+            .map(|r| vec![format!("r{r}c0"), format!("r{r}c1"), String::new()])
+            .collect();
+        assert_eq!(tables(&hunted("empty_box", &c, "", "")), [want]);
+        // A two by two empty box in the middle of a four by four table.
+        let mut c = String::from("0.5 w\n");
+        let mut want = Vec::new();
+        for r in 0..4 {
+            let mut row = Vec::new();
+            for col in 0..4 {
+                if (1..3).contains(&r) && (1..3).contains(&col) {
+                    row.push(String::new());
+                    continue;
+                }
+                let s = format!("r{r}c{col}");
+                c += &text(76.0 + col as f32 * 100.0, 706.0 - r as f32 * 20.0, 10.0, &s);
+                row.push(s);
+            }
+            want.push(row);
+        }
+        for r in 0..5 {
+            let y = 720 - r * 20;
+            if r == 2 {
+                c += &format!("72 {y} m 172 {y} l S\n372 {y} m 472 {y} l S\n");
+            } else {
+                c += &format!("72 {y} m 472 {y} l S\n");
+            }
+        }
+        for col in 0..5 {
+            let x = 72 + col * 100;
+            if col == 2 {
+                c += &format!("{x} 720 m {x} 700 l S\n{x} 660 m {x} 640 l S\n");
+            } else {
+                c += &format!("{x} 720 m {x} 640 l S\n");
+            }
+        }
+        assert_eq!(tables(&hunted("empty_box2", &c, "", "")), [want]);
+    }
+
+    #[test]
+    fn titles_and_captions_around_a_segment_are_trimmed() {
+        let big = cells(6, 4);
+        let big_refs = refs(&big);
+        let rows: Vec<&[&str]> = big_refs.iter().map(Vec::as_slice).collect();
+        let unruled = grid(&rows, 72.0, 712.0, 80.0, 14.0, Rules::None);
+        let ruled = grid(&rows, 72.0, 712.0, 80.0, 14.0, Rules::Lines);
+        let title = text(72.0, 730.0, 12.0, "Table 1: Things");
+        let caption = text(72.0, 610.0, 9.0, "Caption: what it shows");
+        let para = paragraph(400.0);
+        let col = |c: usize| (0..6).map(|r| format!("c{r}{c}")).collect::<Vec<_>>();
+        let two = |a: usize, b: usize| {
+            (0..6)
+                .flat_map(|r| [format!("c{r}{a}"), format!("c{r}{b}")])
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let p3 = repeat("Some paragraph text here that goes on and on.", 3);
+        let got = tables(&hunted(
+            "title",
+            &format!("{title}{unruled}{para}"),
+            "",
+            "segment",
+        ));
+        let want = vec![
+            vec![two(0, 1), col(2).join("\n"), col(3).join("\n")],
+            vec![p3.clone(), String::new()],
+        ];
+        assert_eq!(got, [want]);
+        let got = tables(&hunted(
+            "caption",
+            &format!("{unruled}{caption}{para}"),
+            "",
+            "segment",
+        ));
+        let want = vec![
+            vec![two(0, 1), col(2).join("\n")],
+            vec!["Caption: what it shows".to_string(), String::new()],
+        ];
+        assert_eq!(got, [want]);
+        let c = format!("{title}{unruled}{caption}{para}");
+        assert!(tables(&hunted("title_caption", &c, "", "segment")).is_empty());
+        let c = format!("{title}{ruled}{caption}{para}");
+        assert!(tables(&hunted("ruled_title", &c, "", "segment")).is_empty());
+        let title2 = "BT /F1 12 Tf 14 TL 72 744 Td (Table 1) Tj T* (Things in a list) Tj ET\n";
+        let got = tables(&hunted(
+            "title2",
+            &format!("{title2}{unruled}{para}"),
+            "",
+            "segment",
+        ));
+        let want = vec![
+            vec!["Table 1\nThings in a list".to_string(), String::new()],
+            vec![col(0).join("\n"), col(1).join("\n")],
+        ];
+        assert_eq!(got, [want]);
+    }
+
+    fn structure(standard: &'static str, index: i32, blocks: Vec<Block>) -> Block {
+        let bbox = blocks.iter().fold(Rect::EMPTY, |r, b| r.union(b.bbox()));
+        Block::Struct(crate::stext::StructBlock {
+            bbox,
+            index,
+            standard,
+            raw: standard.to_string(),
+            blocks,
+        })
+    }
+
+    /// The page as MuPDF's `structured` option gives a tagged table: each
+    /// line of text (a cell) in a TD of a TR of a Table, in `wrap` if
+    /// given. The page's vectors, drawn after the last cell's marked
+    /// content, go in the last TD, which MuPDF has not yet closed.
+    fn tag_cells(page: StextPage, cols: usize, wrap: Option<&'static str>) -> StextPage {
+        let mut lines = Vec::new();
+        let mut rest = Vec::new();
+        for b in page.blocks {
+            match b {
+                Block::Text(t) => lines.extend(t.lines.into_iter().map(|l| (t.flags, l))),
+                other => rest.push(other),
+            }
+        }
+        let rows = lines.len().div_ceil(cols);
+        let trs = lines
+            .chunks(cols)
+            .enumerate()
+            .map(|(r, row)| {
+                let tds = row
+                    .iter()
+                    .enumerate()
+                    .map(|(c, (flags, l))| {
+                        let mut blocks = vec![Block::Text(TextBlock {
+                            bbox: l.bbox,
+                            flags: *flags,
+                            lines: vec![l.clone()],
+                        })];
+                        if r + 1 == rows && c + 1 == row.len() {
+                            blocks.append(&mut rest);
+                        }
+                        structure("TD", c as i32, blocks)
+                    })
+                    .collect();
+                structure("TR", r as i32, tds)
+            })
+            .collect();
+        let mut table = structure("Table", 0, trs);
+        if let Some(w) = wrap {
+            table = structure(w, 0, vec![table]);
+        }
+        StextPage {
+            mediabox: page.mediabox,
+            blocks: vec![table],
+        }
+    }
+
+    #[test]
+    fn a_tagged_table_gives_up_its_cells_to_the_one_found() {
+        // Built from the page as nupdf finds it without tables, then
+        // tagged as MuPDF's `structured` option does (nupdf has no such
+        // option yet). MuPDF's answers with it: the found table takes the
+        // cells' contents, leaving the tagged one empty but in place.
+        let ruled = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        let plain = |c: &str| {
+            let doc = Document::open(pdf(c, "")).unwrap_or_else(|e| panic!("{e:?}"));
+            let obj = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+            let opts = Options::parse("vectors").unwrap_or_else(|e| panic!("{e}"));
+            extract_page(&doc, &obj, opts, Store::default())
+                .0
+                .unwrap_or_else(|e| panic!("{e}"))
+        };
+        let empty = vec![vec![String::new(); 3]; 4];
+        for wrap in [None, Some("Div"), Some("Sect")] {
+            let mut page = tag_cells(plain(&ruled), 3, wrap);
+            table_hunt(&mut page);
+            assert_eq!(tables(&page), [strs(ABC), empty.clone()], "{wrap:?}");
+        }
+        // Without rules nothing is found, and the tagged table stays.
+        let unruled = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        for wrap in [None, Some("Div")] {
+            let mut page = tag_cells(plain(&unruled), 3, wrap);
+            table_hunt(&mut page);
+            assert_eq!(tables(&page), [strs(ABC)], "{wrap:?}");
+        }
+    }
+
+    #[test]
+    fn a_boxed_corner_of_an_unruled_table_wins_over_it() {
+        let mut big = cells(6, 4);
+        big[1][1].clear();
+        let big_refs = refs(&big);
+        let rows: Vec<&[&str]> = big_refs.iter().map(Vec::as_slice).collect();
+        let t = grid(&rows, 72.0, 712.0, 80.0, 14.0, Rules::None);
+        let want: &[&[&str]] = &[&["c00", "c01"], &["c10", ""]];
+        for (name, boxed) in [
+            ("contain", "0.5 w 72 684 160 28 re S\n"),
+            ("contain2", "0.5 w 70 682 164 32 re S\n"),
+            (
+                "contain3",
+                "0.5 w 70 682 164 32 re S 152 682 m 152 714 l S\n",
+            ),
+        ] {
+            let c = format!("{t}{boxed}{}", paragraph(400.0));
+            let got = tables(&hunted(name, &c, "", "segment"));
+            assert_eq!(got, [strs(want)], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_fill_is_culled_only_with_nothing_over_it_between() {
+        let t = grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::None);
+        let outer = "0.9 g 72 640 300 80 re f\n0 g\n";
+        let inner = "0.9 g 72 660 300 20 re f\n0 g\n";
+        let between = |s: &str, y: f32| format!("{outer}{}{inner}{t}", text(76.0, y, 10.0, s));
+        let want: &[&[&str]] = &[
+            &["Name", "Qty", "Price"],
+            &["Apple", "3", "1.20"],
+            &["Over\nPear", "10", "0.85"],
+            &["Plum", "7", "2.05"],
+        ];
+        let got = tables(&hunted("cull_between", &between("Over", 666.0), "", ""));
+        assert_eq!(got, [strs(want)]);
+        let got = tables(&hunted("cull_beside", &between("Away", 626.0), "", ""));
+        assert_eq!(got, [strs(ABC)]);
+        let c = format!("0.9 g 72 640 300 80 re f\n0.8 g 72 660 300 20 re f\n0 g\n{t}");
+        assert_eq!(tables(&hunted("cull_color", &c, "", "")), [strs(ABC)]);
     }
 }
