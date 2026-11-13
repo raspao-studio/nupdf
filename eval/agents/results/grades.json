@@ -1,0 +1,442 @@
+[
+ {
+  "arm": "liteparse",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "liteparse",
+  "task": "damaged",
+  "score": 0.75,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file6.pdf (no-header): said unreadable, is ok",
+   "file9.pdf (pages-count-too-high): said unreadable, is ok"
+  ]
+ },
+ {
+  "arm": "liteparse",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "liteparse",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "liteparse",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "liteparse",
+  "task": "merge",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: LiteParse (lit) only parses text, checks complexity, takes page screenshots, or batch-parses; it has no command to write, merge, reorder pages, or set PDF metadata, so out.pdf cannot be produced with it.",
+   "out.pdf not written"
+  ]
+ },
+ {
+  "arm": "liteparse",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "liteparse",
+  "task": "redact",
+  "score": 0.0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: LiteParse (lit) is a read-only parser: its commands parse, is-complex, screenshot and batch-parse only emit text, JSON, markdown or page images, and none can write a redacted PDF copy to out/, so the PDFs cannot be cleaned with the allowed tool.",
+   "content-text.pdf: not written",
+   "invisible-text.pdf: not written",
+   "metadata.pdf: not written",
+   "history.pdf: not written",
+   "annotations.pdf: not written"
+  ]
+ },
+ {
+  "arm": "native",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "damaged",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The Read tool could not give a reliable result for the nine PDFs in inbox/: file1, file2, file3 and file5 were rejected by the API as not valid PDFs, file4 and file6 lack a %PDF- header, and file7, file8 and file9 reported a read but returned no page content, so readability, page counts and first-page text cannot be confirmed without guessing, and the task forbids other tools on the PDF bytes."
+  ]
+ },
+ {
+  "arm": "native",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "damaged",
+  "score": 0.88,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file9.pdf (pages-count-too-high): 1 pages, text ''; is 3, ''"
+  ]
+ },
+ {
+  "arm": "nupdf",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "redact2",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "corpus",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pdf_oxide finds no readable text on pages 2 and 6 of doc06.pdf (blank renders, empty OCR), and it logged broken-stream warnings across the corpus, so the copyright search cannot be trusted to be complete."
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "damaged",
+  "score": 0.75,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file7.pdf (missing-endobj): 1 pages, text ''; is 1, 'No endobj'",
+   "file9.pdf (pages-count-too-high): said unreadable, is ok"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "merge",
+  "score": 1.0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pdf_oxide wrote out.pdf with the correct 3 pages (a.pdf pages 2-3, then b.pdf page 1) and called set_title, but its API has no way to read the Info title back, and xmp_metadata still reports dc_title as Free Culture even after set_title, so I cannot confirm the title is Merged for review."
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "redact",
+  "score": 0.8,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "annotations.pdf: secret still in bytes"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "redact2",
+  "score": 0.4,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "actualtext.pdf: secret still in bytes (reported clean)",
+   "structure-alt.pdf: secret still in bytes",
+   "form-field.pdf: secret still in bytes (reported clean)",
+   "form-xobject.pdf: secret still in pdftotext+mupdf-text+bytes",
+   "outline.pdf: secret still in bytes",
+   "page-labels.pdf: secret still in bytes"
+  ]
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "redact2",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "damaged",
+  "score": 0.25,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file1.pdf (no-xref): said unreadable, is ok",
+   "file3.pdf (broken-xref-offsets): 1 pages, text ''; is 1, 'Skewed'",
+   "file4.pdf (garbage-prefix): said unreadable, is ok",
+   "file6.pdf (no-header): 1 pages, text ''; is 1, 'Stream'",
+   "file7.pdf (missing-endobj): 1 pages, text ''; is 1, 'No endobj'",
+   "file9.pdf (pages-count-too-high): 1 pages, text ''; is 3, ''"
+  ]
+ },
+ {
+  "arm": "python",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "redact2",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ }
+]

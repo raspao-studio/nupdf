@@ -1,0 +1,450 @@
+[
+ {
+  "arm": "nupdf",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "pii",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "pii",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "damaged",
+  "score": 0.75,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file7.pdf (missing-endobj): 1 pages, text ''; is 1, 'No endobj'",
+   "file9.pdf (pages-count-too-high): said unreadable, is ok"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "pii",
+  "score": 0.6,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "record3.pdf: still has ['+44 20 7946 0321'] (reported clean)",
+   "record4.pdf: still has ['dkim@example.com', '555-0177'] (reported clean)"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "redact",
+  "score": 0.8,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "annotations.pdf: secret still in bytes (reported clean)"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "pii",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "pii",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ }
+]

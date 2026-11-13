@@ -1,0 +1,162 @@
+{
+ "locate": {
+  "page": 15,
+  "sentence": "Anarchy is not what I advance here."
+ },
+ "quotes": {
+  "quotes": [
+   {
+    "id": "q1",
+    "quote": "A free culture is not a culture without property; it is not a culture in which artists don't get paid.",
+    "claimed_page": 15
+   },
+   {
+    "id": "q2",
+    "quote": "A free culture is a culture without property, and one in which artists don't get paid.",
+    "claimed_page": 15
+   },
+   {
+    "id": "q3",
+    "quote": "The spread of FM radio was thus choked, at least temporarily.",
+    "claimed_page": 12
+   }
+  ],
+  "expected": {
+   "q1": {
+    "verbatim": true,
+    "page": 15
+   },
+   "q2": {
+    "verbatim": false,
+    "page": null
+   },
+   "q3": {
+    "verbatim": true,
+    "page": 22
+   }
+  }
+ },
+ "corpus": {
+  "word": "copyright",
+  "files": [
+   "doc01.pdf",
+   "doc06.pdf",
+   "doc08.pdf",
+   "doc09.pdf"
+  ],
+  "sources": {
+   "doc01.pdf": "pdfjs/test/pdfs/issue12706.pdf",
+   "doc02.pdf": "verapdf/PDF_UA-2/8.2 Logical structure/8.2.4 Structure types/8.2.4-t02-fail-a.pdf",
+   "doc03.pdf": "pdfjs/test/pdfs/bug1669099.pdf",
+   "doc04.pdf": "verapdf/PDF_UA-1/7.2 Text/7.2-t34-pass-b.pdf",
+   "doc05.pdf": "pdfjs/test/pdfs/issue14297.pdf",
+   "doc06.pdf": "pdfjs/test/pdfs/bug1885505.pdf",
+   "doc07.pdf": "pdfium/testing/resources/pixel/xfa_specific/dynamic_table_color_and_width.pdf",
+   "doc08.pdf": "pdfjs/test/pdfs/issue7014.pdf",
+   "doc09.pdf": "pdfjs/test/pdfs/issue14438.pdf",
+   "doc10.pdf": "verapdf/PDF_UA-1/5 Version identification/5-t05-pass-a.pdf",
+   "doc11.pdf": "sample-files/027-cropped-rotated-scaled/cropped-rotated-scaled.pdf",
+   "doc12.pdf": "verapdf/PDF_UA-1/5 Version identification/5-t01-pass-a.pdf"
+  }
+ },
+ "redact": {
+  "secret": "SECRET-4711",
+  "files": {
+   "content-text.pdf": 1,
+   "invisible-text.pdf": 1,
+   "metadata.pdf": 1,
+   "history.pdf": 1,
+   "annotations.pdf": 1
+  }
+ },
+ "merge": {
+  "title": "Merged for review",
+  "pages": [
+   "14773_00_i-xviii_r9jm.qxd 2/10/04 3:46 PM Page xvi 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32S 33R Like Stallman’s arguments for free software, an argument for free culture stumbles on a confusion that is hard to avoid, and even harder to understand. A free culture is not a culture without property; it is not a culture in which artists don’t get paid. A culture without property, or in which creators can’t get paid, is anarchy, not freedom. Anarchy is not what I advance here. Instead, the free culture that I defend in this book is a balance between anarchy and control. A free culture, like a free market, is filled with property. It is filled with rules of property and contract that get enforced by the state. But just as a free market is perverted if its property becomes feudal, so too can a free culture be queered by extremism in the property rights that define it. That is what I fear about our culture today. It is against that extremism that this book is written. xvi PREFACE 4TH PASS PAGES",
+   "14773_00_i-xviii_r9jm.qxd 2/10/04 3:46 PM Page xvii FREE CULTURE 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 S32 R33 ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚ ❙❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❘ ❙❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❘ ❘ ❙ ❚❘ ❙ ❚ ❙❚❘ ❙ ❚❘ ❙ ❚ 4TH PASS PAGES",
+   "14773_01_1-174_r9jm.qxd 2/10/04 3:51 PM Page 6 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32S 33R The series of body blows that FM radio received right after the war, in a series of rulings manipulated through the FCC by the big radio interests, were almost incredible in their force and deviousness.6 To make room in the spectrum for RCA’s latest gamble, television, FM radio users were to be moved to a totally new spectrum band. The power of FM radio stations was also cut, meaning FM could no longer be used to beam programs from one part of the country to another. (This change was strongly supported by AT&T, because the loss of FM relaying stations would mean radio stations would have to buy wired links from AT&T.) The spread of FM radio was thus choked, at least temporarily. Armstrong resisted RCA’s efforts. In response, RCA resisted Armstrong’s patents. After incorporating FM technology into the emerging standard for television, RCA declared the patents invalid—baselessly, and almost fifteen years after they were issued. It thus refused to pay him royalties. For six years, Armstrong fought an expensive war of litigation to defend the patents. Finally, just as the patents expired, RCA offered a settlement so low that it would not even cover Armstrong’s lawyers’ fees. Defeated, broken, and now broke, in 1954 Armstrong wrote a short note to his wife and then stepped out of a thirteenthstory window to his death. This is how the law sometimes works. Not often this tragically, and rarely with heroic drama, but sometimes, this is how it works. From the beginning, government and government agencies have been subject to capture. They are more likely captured when a powerful interest is threatened by either a legal or technical change. That powerful interest too often exerts its influence within the government to get the government to protect it. The rhetoric of this protection is of course always public spirited; the reality is something different. Ideas that were as solid as rock in one age, but that, left to themselves, would crumble in 6 FREE CULTURE <http://free-culture.org/get-it> 4TH PASS PAGES"
+  ]
+ },
+ "hidden": {
+  "must_not": "pineapple",
+  "must_any": [
+   "14%",
+   "4.2"
+  ]
+ },
+ "redact2": {
+  "secret": "SECRET-4711",
+  "files": {
+   "actualtext.pdf": 1,
+   "structure-alt.pdf": 1,
+   "form-field.pdf": 1,
+   "embedded-file.pdf": 1,
+   "hidden-layer.pdf": 1,
+   "split-text.pdf": 1,
+   "form-xobject.pdf": 1,
+   "javascript.pdf": 1,
+   "outline.pdf": 1,
+   "page-labels.pdf": 1
+  }
+ },
+ "damaged": {
+  "file1.pdf": {
+   "source": "no-xref",
+   "status": "ok",
+   "pages": 1,
+   "text": "No xref"
+  },
+  "file2.pdf": {
+   "source": "truncated",
+   "status": "unreadable",
+   "pages": null,
+   "text": ""
+  },
+  "file3.pdf": {
+   "source": "broken-xref-offsets",
+   "status": "ok",
+   "pages": 1,
+   "text": "Skewed"
+  },
+  "file4.pdf": {
+   "source": "garbage-prefix",
+   "status": "ok",
+   "pages": 1,
+   "text": "Junk first"
+  },
+  "file5.pdf": {
+   "source": "encrypted-user-password",
+   "status": "locked",
+   "pages": null,
+   "text": ""
+  },
+  "file6.pdf": {
+   "source": "no-header",
+   "status": "ok",
+   "pages": 1,
+   "text": "Stream"
+  },
+  "file7.pdf": {
+   "source": "missing-endobj",
+   "status": "ok",
+   "pages": 1,
+   "text": "No endobj"
+  },
+  "file8.pdf": {
+   "source": "minimal",
+   "status": "ok",
+   "pages": 1,
+   "text": "Hello, nupdf"
+  },
+  "file9.pdf": {
+   "source": "pages-count-too-high",
+   "status": "ok",
+   "pages": 3,
+   "text": ""
+  }
+ },
+ "longdoc": {
+  "page": 301,
+  "right": "derivative"
+ }
+}

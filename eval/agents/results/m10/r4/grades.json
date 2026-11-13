@@ -1,0 +1,1762 @@
+[
+ {
+  "arm": "native",
+  "task": "bundle",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "claim",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "columns",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "diff",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "figure",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "formread",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "native",
+  "task": "scans",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The Read tool only shows rendered page images, so it cannot reveal whether a page has a hidden OCR text layer (invisible text); I could only tell that pages 3, 5, 6 and 9 are noise-only scans and pages 1, 2, 4, 7, 8 and 10 are typed text, without telling no-text scans apart from OCR scans."
+  ]
+ },
+ {
+  "arm": "native",
+  "task": "sizes",
+  "score": 0.5,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "landscape [3, 4], is [3, 4, 7]"
+  ]
+ },
+ {
+  "arm": "native",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "attachments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "bundle",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "claim",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "columns",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "comments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "diff",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "figure",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "fill",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "formread",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "links",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "attachments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "bundle",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "claim",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "columns",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "comments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "diff",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "figure",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "fill",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "formread",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "links",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "password",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "pii",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "redact2",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "rotate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "sanitize",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "signature",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "sizes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "password",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "pii",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "redact2",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "rotate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "sanitize",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "signature",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "sizes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "attachments",
+  "score": 0.0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pdf_oxide has no API to read a PDF's embedded-files name tree or the file name and bytes of a FileAttachment annotation; it only exposes embed_file (write) and the annotation's subtype, contents, rect, author and color, so I cannot list the attached files by name or extract budget.csv.",
+   "files [], are ['budget.csv', 'minutes.txt', 'site-photos.json']",
+   "out/budget.csv not written"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "bundle",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "claim",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "columns",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "comments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "damaged",
+  "score": 0.75,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file7.pdf (missing-endobj): 1 pages, text ''; is 1, 'No endobj'",
+   "file9.pdf (pages-count-too-high): said unreadable, is ok"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "diff",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "figure",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "fill",
+  "score": 0.71,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pdf_oxide cannot confirm the contact_by radio selection: it reports the group value 'Phone' on all three radio widgets, does not expose each widget's appearance state, and renders no radio marks in any state, so I cannot verify that Phone is actually selected in out.pdf (the other fields and the Team plan were verified).",
+   "contact_by: value Phone, states ['/Off', '/Off', '/Off']; want /Phone",
+   "terms: value /Yes, states ['/Yes']; want /Agreed"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "formread",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "links",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "bundle",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "claim",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "columns",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "comments",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The PDF Oxide tools return only page text, regions, and layout (classify, auto, extract in text, markdown, html, and structured formats), with no access to PDF annotation objects, so the reviewer comments, their authors, and replies cannot be listed reliably."
+  ]
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "damaged",
+  "score": 0.75,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file7.pdf (missing-endobj): 1 pages, text ''; is 1, 'No endobj'",
+   "file9.pdf (pages-count-too-high): said unreadable, is ok"
+  ]
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "diff",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "figure",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "formread",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The Reason field has all three options (Moving, Correction, Other) marked with [x], and the PDF Oxide tools cannot show the actual checkbox state, so the chosen reason cannot be determined."
+  ]
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "links",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "password",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "signature",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The PDF Oxide tools (auto, classify, extract) return only page text and layout and expose no signature dictionaries, /ByteRange values, or revision history, so I cannot tell whether any of the three files changed after its last signature."
+  ]
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "sizes",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The PDF Oxide MCP tools report only a width and height per page and do not expose the /Rotate value or whether the box is MediaBox or CropBox, so the viewer orientation after rotation and cropping cannot be confirmed."
+  ]
+ },
+ {
+  "arm": "pdf_oxide-mcp",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "password",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "pii",
+  "score": 0.8,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "record4.pdf: still has ['dkim@example.com', '555-0177'] (reported clean)"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "redact",
+  "score": 0.8,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "annotations.pdf: secret still in bytes"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "redact2",
+  "score": 0.4,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "actualtext.pdf: secret still in bytes (reported clean)",
+   "structure-alt.pdf: not written",
+   "form-field.pdf: secret still in bytes (reported clean)",
+   "form-xobject.pdf: not written",
+   "outline.pdf: not written",
+   "page-labels.pdf: not written"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "rotate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "sanitize",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pdf_oxide's sanitize_document removes JavaScript (it neutralized the JavaScript link on script.pdf and kept pages and text unchanged), but the library documents no handling of Launch actions, exposes no way to read action types or the object graph, so I could not confirm that no Launch action remains and did not write out.pdf.",
+   "out.pdf not written"
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "signature",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pdf_oxide's signature verifier rejects every /Contents blob (the CMS data is followed by zero padding, reported as trailing DER data), so the digest check that would show whether signed bytes were altered in place cannot run on nda.pdf, supply.pdf or lease.pdf."
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "sizes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "attachments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "bundle",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "claim",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "columns",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "comments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "damaged",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "diff",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "figure",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "fill",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "formread",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "links",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "bundle",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "claim",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "columns",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The pymupdf4llm extraction returns the two-column page's text out of order (a step fragment sits mid-list and the 'Confirm that the discharge valve is fully closed' step appears after the Notes), and the tool wrote no page image to check the layout, so I cannot confirm where that step sits among the first four steps."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "comments",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The pymupdf4llm MCP tool returns only the page body text as markdown and exposes no annotation data, so the PDF's comments, their authors, their pages and any replies cannot be read or confirmed with the allowed tools."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "corpus",
+  "score": 0.86,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "missed ['doc08.pdf']"
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "damaged",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The allowed pymupdf4llm convert tool returns only markdown text and never reports a page count or a password/encryption flag, so pages and the locked-versus-unreadable status cannot be verified for the nine files without other PDF tools, which are off limits."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "diff",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "figure",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "formread",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The pymupdf4llm convert_pdf_to_markdown tool extracts the form's text but not checkbox states, and it saved no page images, so I cannot tell which Reason option is ticked or whether the billing checkbox is set."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "invoices",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: inv5.pdf (Echo Cloud Hosting) has a 'Grand total' heading with no amount beside it in the pymupdf4llm extraction; the only nearby figure, 9,135.75, appears before a '(continued)' marker and may be a page subtotal, and rendering to images produced no output, so the total cannot be confirmed."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "links",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The pymupdf4llm MCP tool only returns page text as markdown and does not expose link annotations, so the actual target addresses of the clickable links (including the 'Status page' and 'Download the order form' links, whose targets are not shown as text) cannot be determined without guessing."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "locate",
+  "score": 0.5,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "page 13"
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "longdoc",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The phrase is in the afterword, where the author names the derivative right (printed book page 294), but the pymupdf4llm conversion output has no page boundaries, and the page indices of its embedded images give printed-to-PDF offsets that disagree (about 9 to 13), so the 1-based PDF page number cannot be determined with confidence."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "password",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The pymupdf4llm convert_pdf_to_markdown tool has no password parameter and returned 'NoneType' object is not subscriptable on locked.pdf, so the encrypted content could not be read and the wire transfer reference and amount could not be determined."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "quotes",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The text checks are settled (q1 and q3 appear verbatim, q2 does not), but the PDF page numbers cannot be confirmed: the copyright page is PDF page 7 and the printed folios run on to printed page 26, which implies about 45 PDF pages rather than the 40 stated, so the page mapping is uncertain."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "scans",
+  "score": 0.0,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "no_text [5, 6, 9], is [3, 6, 9]",
+   "ocr [3], is [5]"
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "signature",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The only allowed PDF tool (pymupdf4llm convert_pdf_to_markdown) returns extracted page text and exposes no signature fields, byte ranges, or revision history, so it cannot determine whether any file was changed after its last signature."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "sizes",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: The allowed pymupdf4llm MCP tool returns only markdown text and wrote no page images, so it does not report page dimensions, rotation, or cropbox, and the orientation and A4 checks cannot be verified."
+  ]
+ },
+ {
+  "arm": "pymupdf4llm-mcp",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "password",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "pii",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "quotes",
+  "score": 0,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "no readable answer.json (FileNotFoundError)"
+  ]
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "redact2",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "rotate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "sanitize",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "scans",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "signature",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "sizes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "attachments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "bookmarks",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "bundle",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "claim",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "clause",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "columns",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "comments",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "corpus",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "damaged",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pypdf and pdfplumber disagree on file1.pdf, file3.pdf and file4.pdf: pypdf cannot open file1.pdf or file4.pdf at all, while pdfplumber opens both and reports one page each; for file3.pdf pdfplumber finds no document catalog and reports 0 pages, while pypdf reports 1 page reading 'Skewed', so their readability, page counts and first-page text cannot be confirmed with the allowed libraries."
+  ]
+ },
+ {
+  "arm": "python",
+  "task": "diff",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "figure",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "fill",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "formread",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "hidden",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "invoices",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "links",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "longdoc",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "password",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "pii",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "redact2",
+  "score": 0.0,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "actualtext.pdf: not written",
+   "structure-alt.pdf: not written",
+   "form-field.pdf: not written",
+   "embedded-file.pdf: not written",
+   "hidden-layer.pdf: not written",
+   "split-text.pdf: not written",
+   "form-xobject.pdf: not written",
+   "javascript.pdf: not written",
+   "outline.pdf: not written",
+   "page-labels.pdf: not written"
+  ]
+ },
+ {
+  "arm": "python",
+  "task": "rotate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "sanitize",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "scans",
+  "score": 0,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "no readable answer.json (FileNotFoundError)"
+  ]
+ },
+ {
+  "arm": "python",
+  "task": "signature",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "sizes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "table",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ }
+]

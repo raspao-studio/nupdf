@@ -1,0 +1,96 @@
+{
+ "native": {
+  "skip": [
+   "redact",
+   "merge",
+   "redact2",
+   "pii",
+   "bookmarks",
+   "fill",
+   "sanitize",
+   "rotate",
+   "attachments",
+   "password",
+   "signature",
+   "comments",
+   "links"
+  ],
+  "rule": "You may look at the PDFs only with your Read tool, which shows you their pages (pass `pages`, at most 20 pages per call). Do not run any command, script or library on the PDF files."
+ },
+ "python": {
+  "rule": "You may touch the PDFs only from Python, run as `{venv}/bin/python`, using the libraries pypdf and pdfplumber and nothing else that reads or writes PDF."
+ },
+ "pymupdf4llm": {
+  "rule": "You may touch the PDFs only from Python, run as `{venv}/bin/python`, using the libraries pymupdf4llm and pymupdf (fitz) and nothing else that reads or writes PDF."
+ },
+ "pdf_oxide": {
+  "rule": "You may touch the PDFs only from Python, run as `{venv}/bin/python`, using the library pdf_oxide and nothing else that reads or writes PDF. `help(pdf_oxide)` describes it."
+ },
+ "liteparse": {
+  "rule": "You may touch the PDFs only with the LiteParse command-line tool, run as `{lit}`, and nothing else that reads or writes PDF. `{lit} --help` describes it.",
+  "skip": [
+   "redact2",
+   "fill",
+   "sanitize",
+   "rotate",
+   "attachments"
+  ]
+ },
+ "nupdf": {
+  "rule": "You may touch the PDFs only with the nupdf command-line tool, run as `{nupdf}`, and nothing else that reads or writes PDF. `{nupdf} guide` describes it, and `{nupdf} <command> --help` each command."
+ },
+ "nupdf-mcp": {
+  "rule": "You may touch the PDFs only with the tools of the nupdf MCP server (named mcp__nupdf__*), and nothing else that reads or writes PDF.",
+  "mcp": {
+   "nupdf": {
+    "command": "{nupdf}",
+    "args": [
+     "mcp"
+    ]
+   }
+  },
+  "skip": []
+ },
+ "pymupdf4llm-mcp": {
+  "rule": "You may touch the PDFs only with the tools of the pymupdf4llm MCP server (named mcp__pymupdf4llm__*), and nothing else that reads or writes PDF.",
+  "mcp": {
+   "pymupdf4llm": {
+    "command": "{pymupdf4llm_mcp}",
+    "args": [
+     "stdio"
+    ]
+   }
+  },
+  "skip": [
+   "redact",
+   "merge",
+   "redact2",
+   "pii",
+   "bookmarks",
+   "fill",
+   "sanitize",
+   "rotate",
+   "attachments"
+  ]
+ },
+ "pdf_oxide-mcp": {
+  "rule": "You may touch the PDFs only with the tools of the PDF Oxide MCP server (named mcp__pdf_oxide__*), and nothing else that reads or writes PDF.",
+  "mcp": {
+   "pdf_oxide": {
+    "command": "{pdf_oxide_mcp}",
+    "args": []
+   }
+  },
+  "skip": [
+   "redact",
+   "merge",
+   "redact2",
+   "pii",
+   "bookmarks",
+   "fill",
+   "sanitize",
+   "rotate",
+   "attachments"
+  ]
+ }
+}

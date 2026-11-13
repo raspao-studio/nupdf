@@ -1,0 +1,214 @@
+[
+ {
+  "arm": "nupdf",
+  "task": "damaged",
+  "score": 0.88,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file9.pdf (pages-count-too-high): 1 pages, text ''; is 3, ''"
+  ]
+ },
+ {
+  "arm": "nupdf",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "damaged",
+  "score": 0.88,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file9.pdf (pages-count-too-high): 1 pages, text ''; is 3, ''"
+  ]
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf-mcp",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "nupdf",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "damaged",
+  "score": 0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pdf_oxide gives results I cannot verify for three damaged files: file7.pdf has 8 objects but its page comes back blank after the library recovers from a bad stream /Length, file9.pdf reports 3 pages yet only page 1 can be found, and file2.pdf is truncated but still returns a made-up blank page, so I cannot be sure of their status, page counts or text."
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "merge",
+  "score": 1.0,
+  "pass": false,
+  "gave_up": true,
+  "notes": [
+   "gave up: pdf_oxide merged the pages correctly, but it cannot read back the /Info title, and the only title it can read (XMP dc:title) still says \"Free Culture\", so I cannot confirm the title is \"Merged for review\"."
+  ]
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "damaged",
+  "score": 0.88,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file9.pdf (pages-count-too-high): 1 pages, text ''; is 3, ''"
+  ]
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "damaged",
+  "score": 0.88,
+  "pass": false,
+  "gave_up": false,
+  "notes": [
+   "file9.pdf (pages-count-too-high): 1 pages, text ''; is 3, ''"
+  ]
+ },
+ {
+  "arm": "python",
+  "task": "locate",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "merge",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "quotes",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ },
+ {
+  "arm": "python",
+  "task": "redact",
+  "score": 1.0,
+  "pass": true,
+  "gave_up": false,
+  "notes": []
+ }
+]

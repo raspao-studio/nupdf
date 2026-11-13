@@ -1,0 +1,380 @@
+[
+ {
+  "file": "deep-array",
+  "tool": "nupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.05,
+  "timed_out": false,
+  "peak_mb": 6
+ },
+ {
+  "file": "deep-array",
+  "tool": "mupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.05,
+  "timed_out": false,
+  "peak_mb": 6
+ },
+ {
+  "file": "deep-array",
+  "tool": "pymupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.27,
+  "timed_out": false,
+  "peak_mb": 57
+ },
+ {
+  "file": "deep-array",
+  "tool": "pypdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.21,
+  "timed_out": false,
+  "peak_mb": 38
+ },
+ {
+  "file": "deep-array",
+  "tool": "pdf_oxide",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.15,
+  "timed_out": false,
+  "peak_mb": 31
+ },
+ {
+  "file": "deep-array",
+  "tool": "liteparse",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.23,
+  "timed_out": false,
+  "peak_mb": 80
+ },
+ {
+  "file": "filter-chain",
+  "tool": "nupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.02,
+  "timed_out": false,
+  "peak_mb": 8
+ },
+ {
+  "file": "filter-chain",
+  "tool": "mupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.04,
+  "timed_out": false,
+  "peak_mb": 7
+ },
+ {
+  "file": "filter-chain",
+  "tool": "pymupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.26,
+  "timed_out": false,
+  "peak_mb": 58
+ },
+ {
+  "file": "filter-chain",
+  "tool": "pypdf",
+  "exit": 1,
+  "signal": null,
+  "seconds": 0.27,
+  "timed_out": false,
+  "peak_mb": 38
+ },
+ {
+  "file": "filter-chain",
+  "tool": "pdf_oxide",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.16,
+  "timed_out": false,
+  "peak_mb": 31
+ },
+ {
+  "file": "filter-chain",
+  "tool": "liteparse",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.2,
+  "timed_out": false,
+  "peak_mb": 80
+ },
+ {
+  "file": "flate-bomb",
+  "tool": "nupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 1.0,
+  "timed_out": false,
+  "peak_mb": 545
+ },
+ {
+  "file": "flate-bomb",
+  "tool": "mupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 2.81,
+  "timed_out": false,
+  "peak_mb": 5
+ },
+ {
+  "file": "flate-bomb",
+  "tool": "pymupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 11.54,
+  "timed_out": false,
+  "peak_mb": 55
+ },
+ {
+  "file": "flate-bomb",
+  "tool": "pypdf",
+  "exit": 1,
+  "signal": null,
+  "seconds": 1.06,
+  "timed_out": false,
+  "peak_mb": 189
+ },
+ {
+  "file": "flate-bomb",
+  "tool": "pdf_oxide",
+  "exit": 0,
+  "signal": null,
+  "seconds": 3.78,
+  "timed_out": false,
+  "peak_mb": 1917
+ },
+ {
+  "file": "flate-bomb",
+  "tool": "liteparse",
+  "exit": 0,
+  "signal": null,
+  "seconds": 8.76,
+  "timed_out": false,
+  "peak_mb": 1152
+ },
+ {
+  "file": "many-ops",
+  "tool": "nupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 7.18,
+  "timed_out": false,
+  "peak_mb": 320
+ },
+ {
+  "file": "many-ops",
+  "tool": "mupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 11.1,
+  "timed_out": false,
+  "peak_mb": 248
+ },
+ {
+  "file": "many-ops",
+  "tool": "pymupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 4.99,
+  "timed_out": false,
+  "peak_mb": 294
+ },
+ {
+  "file": "many-ops",
+  "tool": "pypdf",
+  "exit": 1,
+  "signal": null,
+  "seconds": 5.03,
+  "timed_out": false,
+  "peak_mb": 471
+ },
+ {
+  "file": "many-ops",
+  "tool": "pdf_oxide",
+  "exit": 0,
+  "signal": null,
+  "seconds": 1.11,
+  "timed_out": false,
+  "peak_mb": 400
+ },
+ {
+  "file": "many-ops",
+  "tool": "liteparse",
+  "exit": 0,
+  "signal": null,
+  "seconds": 37.86,
+  "timed_out": false,
+  "peak_mb": 4908
+ },
+ {
+  "file": "page-count",
+  "tool": "nupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.02,
+  "timed_out": false,
+  "peak_mb": 4
+ },
+ {
+  "file": "page-count",
+  "tool": "mupdf",
+  "exit": 1,
+  "signal": null,
+  "seconds": 0.02,
+  "timed_out": false,
+  "peak_mb": 4
+ },
+ {
+  "file": "page-count",
+  "tool": "pymupdf",
+  "exit": 1,
+  "signal": null,
+  "seconds": 0.19,
+  "timed_out": false,
+  "peak_mb": 55
+ },
+ {
+  "file": "page-count",
+  "tool": "pypdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.18,
+  "timed_out": false,
+  "peak_mb": 38
+ },
+ {
+  "file": "page-count",
+  "tool": "pdf_oxide",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.12,
+  "timed_out": false,
+  "peak_mb": 31
+ },
+ {
+  "file": "page-count",
+  "tool": "liteparse",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.18,
+  "timed_out": false,
+  "peak_mb": 80
+ },
+ {
+  "file": "self-form",
+  "tool": "nupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.01,
+  "timed_out": false,
+  "peak_mb": 5
+ },
+ {
+  "file": "self-form",
+  "tool": "mupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.03,
+  "timed_out": false,
+  "peak_mb": 5
+ },
+ {
+  "file": "self-form",
+  "tool": "pymupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.2,
+  "timed_out": false,
+  "peak_mb": 56
+ },
+ {
+  "file": "self-form",
+  "tool": "pypdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.16,
+  "timed_out": false,
+  "peak_mb": 38
+ },
+ {
+  "file": "self-form",
+  "tool": "pdf_oxide",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.11,
+  "timed_out": false,
+  "peak_mb": 30
+ },
+ {
+  "file": "self-form",
+  "tool": "liteparse",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.09,
+  "timed_out": false,
+  "peak_mb": 75
+ },
+ {
+  "file": "xref-size",
+  "tool": "nupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.02,
+  "timed_out": false,
+  "peak_mb": 5
+ },
+ {
+  "file": "xref-size",
+  "tool": "mupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.02,
+  "timed_out": false,
+  "peak_mb": 6
+ },
+ {
+  "file": "xref-size",
+  "tool": "pymupdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.22,
+  "timed_out": false,
+  "peak_mb": 57
+ },
+ {
+  "file": "xref-size",
+  "tool": "pypdf",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.18,
+  "timed_out": false,
+  "peak_mb": 39
+ },
+ {
+  "file": "xref-size",
+  "tool": "pdf_oxide",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.13,
+  "timed_out": false,
+  "peak_mb": 31
+ },
+ {
+  "file": "xref-size",
+  "tool": "liteparse",
+  "exit": 0,
+  "signal": null,
+  "seconds": 0.17,
+  "timed_out": false,
+  "peak_mb": 80
+ }
+]

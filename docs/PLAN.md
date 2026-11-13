@@ -297,11 +297,18 @@ Exit: ≥98% of standard-tier pages within the pixel threshold of `mutool draw` 
 - [x] `diff`: compare two PDFs by text, structure and pixels. `nupdf diff` (D44): pages lined up by their text, then lines with content ids on each side; structure as named parts; pixels with counts and boxes in points
 - [x] `guide` (compact usage text for models), `schema <command>` (JSON Schema), and a `SKILL.md` for Claude Code. D45: the guide (1.6 KB) and `skills/nupdf/SKILL.md` made from the CLI's definition; 27 schemas read off the reports on the smoke tier and 400 standard-tier files by `cargo xtask schemas`, checked against 150 others
 - [x] Freeze schemas at v1, with a changelog. Every report is `nupdf.<command>/v1`; [SCHEMA-CHANGELOG](SCHEMA-CHANGELOG.md) says what a version promises and what changes it
-- [ ] Agent eval: about 30 graded tasks (extract invoice fields, redact PII across a bundle, split by bookmarks, fill a form, find a clause, triage scanned pages). Arms: nupdf CLI, nupdf MCP, the default Python PDF skill, pymupdf4llm-mcp and pdf_oxide. Measure success, wall time, tool calls and tokens
+- [x] Agent eval: about 30 graded tasks (extract invoice fields, redact PII across a bundle, split by bookmarks, fill a form, find a clause, triage scanned pages). Arms: nupdf CLI, nupdf MCP, the default Python PDF skill, pymupdf4llm-mcp and pdf_oxide. Measure success, wall time, tool calls and tokens. 30 tasks, eight arms (also native page images, the pymupdf4llm and PDF Oxide libraries, and PDF Oxide's MCP server), five runs each on Haiku 5.5: 1,045 graded runs (eval/REPORT.md, `eval/agents/results/m10`)
 
 Exit: both nupdf arms beat every baseline on success rate and on median tokens per solved task.
 
-Exit status, 2026-11-12: not met, and left for later. Eleven graded tasks (the earlier nine's locate, quotes, damaged, merge and redact; invoice fields over six layouts, PII across a bundle, splitting at bookmarks, an amended contract clause, scanned-page triage, a ruled table), on five arms, run headless in Claude Code: two pilots on Opus 5.5 at high effort, and all eleven on Haiku 5.5. Success ties: on Haiku the two nupdf arms, pypdf and PyMuPDF solved all eleven, pdf_oxide eight (it reported leaking files as clean). On tokens nupdf loses: a median of about 11,800 per solved task against PyMuPDF's 8,300 and pypdf's 9,700, spent on reading help, on an outline nupdf had no command for, and over MCP on a call per file. The pilots found and fixed an MCP bug (text output hidden behind its report) and cut the guide from 8 KB to 1.6 KB. Why nupdf spends more is the work to come back to. The tasks, graders and runner are on the `eval/pilot` branch.
+Exit status, 2026-11-13: met for the MCP arm, not for the CLI.
+- **Success, both arms:** the two nupdf arms solved all 150 of their runs. The best baselines were pymupdf4llm at 147, the python arm (pypdf, pdfplumber) at 145, PDF Oxide's bindings at 108, its MCP server at 79 of 105, and pymupdf4llm-mcp at 38 of 105.
+- **Tokens:** on the tasks both solved, every baseline spent more than nupdf over MCP, from 1.16x (pymupdf4llm) to 2.14x (PDF Oxide's bindings). The CLI spent more than two of them: the pymupdf4llm and python arms used 0.86x and 0.95x its tokens. pymupdf4llm-mcp's median per solved run (4,617) is lower than nupdf's only because it solved the cheapest tasks.
+- **Wall time:** nupdf was faster than every arm, as CLI and as MCP.
+- **Tool calls:** even, at a median of 7 a run.
+
+The M10 work that got here: `extract --format layout` (agents had rendered pages to pair labels with values), file lists for MCP tools, and the three gaps the larger task set found (radio groups, files on annotations, interleaved columns). The CLI's extra tokens are what is left.
+
 
 ## M9: Coverage
 
