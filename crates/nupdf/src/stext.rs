@@ -1926,10 +1926,11 @@ pub fn extract_page(
     extract_page_parts(doc, page, opts, store, crate::page_run::Parts::CONTENTS)
 }
 
-/// [`extract_page`] of the `parts` of the page asked for: with
-/// [`Parts::ALL`](crate::page_run::Parts::ALL), `fz_run_page` into the
-/// stext device, the text of annotations' and widgets' appearances after
-/// the contents'.
+/// [`extract_page`] of the `parts` of the page asked for. Any but the
+/// contents alone is the structured text `mutool draw -F txt` gathers:
+/// `fz_run_page` into a display list (`list_run`), played into the stext
+/// device, the text of annotations' and widgets' appearances after the
+/// contents'.
 pub fn extract_page_parts(
     doc: &Document,
     page: &Object,
@@ -1946,7 +1947,20 @@ pub fn extract_page_parts(
     let run = if parts == crate::page_run::Parts::CONTENTS {
         crate::run::run_page_contents_for(doc, page, &mut dev, store, usage)
     } else {
-        crate::page_run::run_page_parts(doc, page, &mut dev, store, usage, Matrix::IDENTITY, parts)
+        // mutool draw keeps the page in a display list and plays it into
+        // the stext device, culled as the list culls it.
+        let mut list = crate::draw::list::DisplayList::default();
+        let run = crate::page_run::run_page_parts(
+            doc,
+            page,
+            &mut list,
+            store,
+            usage,
+            Matrix::IDENTITY,
+            parts,
+        );
+        crate::list_run::replay(&list, &mut dev);
+        run
     };
     let page = match run.error {
         Some(e) => Err(e),
