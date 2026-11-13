@@ -34,6 +34,16 @@ fn one(data: &[u8]) {
         };
         let icc = i % 2 == 0;
         let store = Default::default();
-        let _ = nupdf::draw::render_page_banded(&doc, &page, ctm, 1 << 20, None, store, 2, icc);
+        let _ = nupdf::draw::render_page_banded(
+            &doc,
+            &page,
+            ctm,
+            1 << 20,
+            None,
+            store,
+            2,
+            icc,
+            nupdf::draw::Parts::ALL,
+        );
     }
 }

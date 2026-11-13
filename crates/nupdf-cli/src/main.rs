@@ -291,6 +291,11 @@ enum Command {
         /// output is the same at every count (DECISIONS D37).
         #[arg(long)]
         threads: Option<usize>,
+        /// For `--format text`: the page contents' text alone, without the
+        /// text of annotations and form fields that `mutool draw -F txt`
+        /// gives after it. The other formats always have the contents' alone.
+        #[arg(long)]
+        no_annots: bool,
     },
     /// Find a needle in the pages' text, as MuPDF searches: each hit with
     /// its quads, its text and the content ids of its characters.
@@ -408,8 +413,8 @@ enum Command {
         #[arg(long)]
         ignore_case: bool,
     },
-    /// Render pages as `mutool draw` paints them (page contents, without
-    /// annotations), into page-NNNN.png (or .ppm) files.
+    /// Render pages as `mutool draw` paints them (page contents, then
+    /// annotations, then form fields), into page-NNNN.png (or .ppm) files.
     Render {
         file: PathBuf,
         /// Where to write the images.
@@ -441,6 +446,10 @@ enum Command {
         /// as `mutool draw -N`.
         #[arg(long)]
         no_icc: bool,
+        /// Draw the page contents alone, without annotations and form
+        /// fields, as `page.runPageContents`.
+        #[arg(long)]
+        no_annots: bool,
     },
     /// Each page's tables as rows of cells, found as MuPDF's table hunting
     /// finds them (`stext --options table-hunt`).
@@ -1088,6 +1097,7 @@ fn run(cli: Cli) -> ExitCode {
             cursor,
             fields,
             threads,
+            no_annots,
         } => {
             let usage = |message: String| Failure {
                 exit: Exit::Usage,
@@ -1111,6 +1121,11 @@ fn run(cli: Cli) -> ExitCode {
                 cursor: cursor.as_deref(),
                 fields: fields.as_deref(),
                 threads: *threads,
+                parts: if *format == extract::Format::Text && !*no_annots {
+                    nupdf::page_run::Parts::ALL
+                } else {
+                    nupdf::page_run::Parts::CONTENTS
+                },
                 pretty: cli.pretty,
             };
             let extracted = match extract::extract(&doc, &facts.doc_id, &args) {
@@ -1466,6 +1481,7 @@ fn run(cli: Cli) -> ExitCode {
             region,
             threads,
             no_icc,
+            no_annots,
         } => open(file).and_then(|(doc, facts)| {
             let region = region
                 .as_deref()
@@ -1490,6 +1506,11 @@ fn run(cli: Cli) -> ExitCode {
                 max_pixels: *max_pixels,
                 threads: (*threads).max(1),
                 icc: !*no_icc,
+                parts: if *no_annots {
+                    nupdf::draw::Parts::CONTENTS
+                } else {
+                    nupdf::draw::Parts::ALL
+                },
             };
             let body = render::render(&doc, pages.as_deref(), dir, *format, &settings).map_err(
                 |message| Failure {

@@ -37,6 +37,9 @@ pub struct Args<'a> {
     pub cursor: Option<&'a str>,
     pub fields: Option<&'a str>,
     pub threads: Option<usize>,
+    /// What of each page the text comes from: the contents, or for text
+    /// as `mutool draw -F txt` writes it, annotations and widgets too.
+    pub parts: nupdf::page_run::Parts,
     /// Whether the JSON is laid out again: pages written on the threads
     /// are then kept as values, not as compact text.
     pub pretty: bool,
@@ -475,7 +478,8 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
         Some(threads) => {
             // Each page is made ready on the thread that extracted it.
             let job = |index: i32, doc: &Document, page: &Result<Object, String>, store: Store| {
-                let (r, store) = nupdf::parallel::run_page(doc, page, args.options, store);
+                let (r, store) =
+                    nupdf::parallel::run_page(doc, page, args.options, store, args.parts);
                 (prepare(index as usize + 1, r, &fields, args), store)
             };
             nupdf::parallel::with_workers(doc, threads, &job, |run| {
@@ -567,7 +571,8 @@ fn walk(
                     Err("page object is not a dictionary".to_string())
                 }
                 Ok(obj) => {
-                    let (result, next_store) = stext::extract_page(doc, &obj, args.options, store);
+                    let (result, next_store) =
+                        stext::extract_page_parts(doc, &obj, args.options, store, args.parts);
                     store = next_store;
                     result.map_err(|e| nupdf::diag::report::strip(&e).to_string())
                 }

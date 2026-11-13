@@ -42,16 +42,18 @@ fn page_object(doc: &Document, index: i32) -> Result<Object, String> {
     Ok(obj)
 }
 
-/// A page's structured text with `opts`, on `store`, which it gives back.
+/// A page's structured text with `opts`, from the `parts` of it asked
+/// for, on `store`, which it gives back.
 pub fn run_page(
     doc: &Document,
     page: &Result<Object, String>,
     opts: Options,
     store: Store,
+    parts: crate::page_run::Parts,
 ) -> (PageResult, Store) {
     match page {
         Ok(obj) => {
-            let (result, store) = stext::extract_page(doc, obj, opts, store);
+            let (result, store) = stext::extract_page_parts(doc, obj, opts, store, parts);
             (
                 result.map_err(|e| crate::diag::report::strip(&e).to_string()),
                 store,
@@ -70,7 +72,13 @@ pub fn sequential<'a>(
 ) -> impl Iterator<Item = PageResult> + 'a {
     let mut store = Store::default();
     indices.iter().map(move |&i| {
-        let (r, next) = run_page(doc, &page_object(doc, i), opts, std::mem::take(&mut store));
+        let (r, next) = run_page(
+            doc,
+            &page_object(doc, i),
+            opts,
+            std::mem::take(&mut store),
+            crate::page_run::Parts::CONTENTS,
+        );
         store = next;
         r
     })
@@ -209,7 +217,7 @@ pub fn map_pages<T: Send>(
     f: &(dyn Fn(usize, PageResult) -> T + Sync),
 ) -> Vec<T> {
     run_pages(doc, indices, threads, &|i, doc, page, store| {
-        let (r, store) = run_page(doc, page, opts, store);
+        let (r, store) = run_page(doc, page, opts, store, crate::page_run::Parts::CONTENTS);
         (f(i, r), store)
     })
 }
@@ -513,7 +521,13 @@ mod tests {
             for threads in [1, 2, 8] {
                 let doc = smoke(name);
                 let job = |_, doc: &Document, page: &Result<Object, String>, store| {
-                    run_page(doc, page, Options::default(), store)
+                    run_page(
+                        doc,
+                        page,
+                        Options::default(),
+                        store,
+                        crate::page_run::Parts::CONTENTS,
+                    )
                 };
                 let got: Vec<Vec<PageResult>> = with_workers(&doc, threads, &job, |run| {
                     rounds.iter().map(|r| run(r)).collect()

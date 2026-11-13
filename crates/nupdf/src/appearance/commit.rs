@@ -23,6 +23,29 @@ fn reference(num: i32) -> Object {
     Object::Ref(ObjRef::new(num, 0))
 }
 
+/// `pdf_new_xobject`'s dictionary for `f`, with `res` as its resources.
+pub fn xobject_dict(f: &Form, res: Option<Dict>) -> Dict {
+    let mut form = Dict::new();
+    form.put(b"Type", Object::name(b"XObject"));
+    form.put(b"Subtype", Object::name(b"Form"));
+    form.put(b"BBox", rect_object(f.bbox));
+    let m = f.matrix;
+    form.put(
+        b"Matrix",
+        Object::Array(Arc::new(
+            [m.a, m.b, m.c, m.d, m.e, m.f]
+                .iter()
+                .map(|&v| Object::Real(v))
+                .collect(),
+        )),
+    );
+    if let Some(res) = res {
+        form.put(b"Resources", Object::Dict(Arc::new(res)));
+    }
+    form.put(b"Length", Object::Int(f.content.len() as i64));
+    form
+}
+
 /// Writes appearances into one document, keeping the font objects made so
 /// far (`doc->resources.fonts`).
 #[derive(Debug, Default)]
@@ -93,25 +116,7 @@ impl Committer {
     /// fonts it needs; its number.
     pub fn form(&mut self, doc: &Document, f: &Form) -> i32 {
         let res = f.resources.as_ref().map(|r| self.resources(doc, r));
-        let mut form = Dict::new();
-        form.put(b"Type", Object::name(b"XObject"));
-        form.put(b"Subtype", Object::name(b"Form"));
-        form.put(b"BBox", rect_object(f.bbox));
-        let m = f.matrix;
-        form.put(
-            b"Matrix",
-            Object::Array(Arc::new(
-                [m.a, m.b, m.c, m.d, m.e, m.f]
-                    .iter()
-                    .map(|&v| Object::Real(v))
-                    .collect(),
-            )),
-        );
-        if let Some(res) = res {
-            form.put(b"Resources", Object::Dict(Arc::new(res)));
-        }
-        form.put(b"Length", Object::Int(f.content.len() as i64));
-        doc.add_stream(form, f.content.clone())
+        doc.add_stream(xobject_dict(f, res), f.content.clone())
     }
 
     /// `pdf_update_appearance` writing a new appearance back: the
