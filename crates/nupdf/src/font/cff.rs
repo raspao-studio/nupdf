@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 hum
 // Following FreeType 2 src/cff/cffload.c, src/cff/cffparse.c,
-// src/cff/cffobjs.c and src/psaux/psintrp.c (glyph widths), Copyright (C)
+// src/cff/cffobjs.c, src/cff/cffgload.c (the font matrix) and
+// src/psaux/psintrp.c (glyph widths), Copyright (C)
 // 1996-2025 by David Turner, Robert Wilhelm, and Werner Lemberg, and Adobe
 // Systems Incorporated, used under the FreeType License (NOTICE.md).
 
@@ -44,6 +45,54 @@ struct Private {
     /// The font dictionary's units per em, as `cff_face_init` works it
     /// out from its FontMatrix and the top one's.
     units_per_em: u32,
+    /// The FontMatrix left once its scale is taken out (16.16), with its
+    /// offset in font units, when that is not the identity.
+    matrix: Option<[i64; 6]>,
+}
+
+/// `cff_face_init`'s normalized FontMatrix: divided by its vertical
+/// scale (or its yx when that is 0), in 16.16, with the offset in whole
+/// font units. None for the identity, which leaves outlines as they are.
+fn normalized_matrix(m: &[f64]) -> Option<[i64; 6]> {
+    if m.len() < 6 {
+        return None;
+    }
+    let temp = if m[3] != 0.0 { m[3].abs() } else { m[1].abs() };
+    if temp == 0.0 || !temp.is_finite() {
+        return None;
+    }
+    let fixed = |v: f64| {
+        let f = (v / temp * 65536.0).round();
+        if f.is_finite() {
+            f.clamp(-2147483648.0, 2147483647.0) as i64
+        } else {
+            0
+        }
+    };
+    let offset = |v: f64| fixed(v) >> 16;
+    let out = [
+        fixed(m[0]),
+        fixed(m[1]),
+        fixed(m[2]),
+        fixed(m[3]),
+        offset(m[4]),
+        offset(m[5]),
+    ];
+    (out != [0x10000, 0, 0, 0x10000, 0, 0]).then_some(out)
+}
+
+/// `FT_Outline_Transform` by a normalized FontMatrix, then
+/// `FT_Outline_Translate` by its offset, as `cff_slot_load` does before
+/// scaling.
+fn apply_matrix(o: &mut outline::Outline, m: &[i64; 6]) {
+    let [xx, yx, xy, yy, ox, oy] = *m;
+    for p in &mut o.points {
+        let (x, y) = *p;
+        *p = (
+            outline::mul_fix(x, xx) + outline::mul_fix(y, xy) + ox,
+            outline::mul_fix(x, yx) + outline::mul_fix(y, yy) + oy,
+        );
+    }
 }
 
 /// The units per em a FontMatrix gives: one over its vertical scale.
@@ -269,6 +318,12 @@ impl Cff {
                     let sub = get(&fd, 1207)
                         .filter(|m| m.len() >= 4)
                         .and_then(|m| matrix_upm(m));
+                    // A font dictionary without a matrix of its own takes
+                    // the top one's; one with its own is concatenated in
+                    // FreeType, which nupdf leaves at its scale.
+                    if get(&fd, 1207).is_none() {
+                        private.matrix = get(&top, 1207).and_then(|m| normalized_matrix(m));
+                    }
                     private.units_per_em = match sub {
                         Some(sub) if top_matrix => {
                             let scaling = if top_upm > 1 && sub > 1 {
@@ -289,6 +344,7 @@ impl Cff {
         } else {
             let mut p = font.load_private(&top);
             p.units_per_em = font.units_per_em;
+            p.matrix = get(&top, 1207).and_then(|m| normalized_matrix(m));
             font.privates.push(p);
             let enc = first(&top, 16, 0.0) as usize;
             font.load_encoding(enc, num_glyphs);
@@ -374,6 +430,7 @@ impl Cff {
             nominal_width: first(&private, 21, 0.0),
             subrs,
             units_per_em: self.units_per_em,
+            matrix: None,
         }
     }
 
@@ -628,13 +685,35 @@ impl Cff {
             .get(self.fd_of(gid as usize))
             .cloned()
             .unwrap_or_default();
-        let cbox = outline::charstring_cbox(
-            &Glyph {
-                font: self,
-                private: &private,
-            },
-            cs,
-        )?;
+        let glyph = Glyph {
+            font: self,
+            private: &private,
+        };
+        let cbox = match &private.matrix {
+            None => outline::charstring_cbox(&glyph, cs)?,
+            // The control box of the transformed outline.
+            Some(m) => {
+                let mut o = outline::charstring_outline(&glyph, cs)?;
+                apply_matrix(&mut o, m);
+                o.points.iter().fold(None, |b: Option<CBox>, &(x, y)| {
+                    let (x, y) = (x as f64, y as f64);
+                    Some(match b {
+                        None => CBox {
+                            x0: x,
+                            y0: y,
+                            x1: x,
+                            y1: y,
+                        },
+                        Some(b) => CBox {
+                            x0: b.x0.min(x),
+                            y0: b.y0.min(y),
+                            x1: b.x1.max(x),
+                            y1: b.y1.max(y),
+                        },
+                    })
+                })
+            }
+        };
         // A font dictionary with units of its own is scaled to the top
         // dictionary's (`cff_slot_load`).
         let (top, sub) = (self.units_per_em, private.units_per_em);
@@ -676,13 +755,16 @@ impl Cff {
             .get(self.fd_of(gid as usize))
             .cloned()
             .unwrap_or_default();
-        let o = outline::charstring_outline(
+        let mut o = outline::charstring_outline(
             &Glyph {
                 font: self,
                 private: &private,
             },
             cs,
         )?;
+        if let Some(m) = &private.matrix {
+            apply_matrix(&mut o, m);
+        }
         Ok((o, self.units_per_em, private.units_per_em))
     }
 
@@ -2109,5 +2191,60 @@ mod tests {
         assert_eq!(c.outline(3).err(), Some(LoadError));
         // 97 stems are one more than a hint mask holds.
         assert_eq!(c.outline(4).err(), Some(LoadError));
+    }
+
+    #[test]
+    fn a_skewed_font_matrix_slants_the_outlines() {
+        // FreeType applies what is left of the FontMatrix once its scale
+        // is the em (here a slant of 0.3) to every outline and control
+        // box; nupdf took only the em from it, so oblique faces made by
+        // their matrix drew upright.
+        let glyph = t2(&[
+            (&[500.0, 100.0, 0.0], RMOVETO),
+            (&[400.0], HLINETO),
+            (&[600.0], VLINETO),
+            (&[-400.0], HLINETO),
+            (&[], ENDCHAR),
+        ]);
+        let build = Build {
+            top: vec![(vec![0.001, 0.0, 0.0003, 0.001, 0.0, 0.0], 1207)],
+            glyphs: vec![t2(&[(&[], ENDCHAR)]), glyph],
+            ..Build::default()
+        };
+        let c = build.open();
+        assert_eq!(c.units_per_em, 1000);
+        let (o, _, _) = c.outline(1).unwrap_or_else(|e| panic!("{e:?}"));
+        // x + 0.3 y: the top edge moves 180 units right of the bottom.
+        assert_eq!(o.points, [(100, 0), (500, 0), (680, 600), (280, 600)]);
+        let b = c.outline_cbox(1).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            b,
+            Some(CBox {
+                x0: 100.0,
+                y0: 0.0,
+                x1: 680.0,
+                y1: 600.0
+            })
+        );
+        // And drawn: a space (code 32, glyph 1 of the ISOAdobe charset)
+        // in an embedded Type1C font, as mutool draw draws it.
+        let font = crate::draw::testkit::hex_stream("/Subtype/Type1C", &build.bytes());
+        let pdf = crate::draw::testkit::page(
+            128,
+            128,
+            "/Font<</F 5 0 R>>",
+            "BT /F 100 Tf 10 10 Td ( ) Tj ET",
+            &[
+                "<</Type/Font/Subtype/Type1/BaseFont/Test/FirstChar 32/LastChar 32/Widths[1000]/FontDescriptor 6 0 R>>",
+                "<</Type/FontDescriptor/FontName/Test/Flags 32/FontBBox[0 0 1000 1000]/ItalicAngle 0/Ascent 1000/Descent 0/CapHeight 700/StemV 80/FontFile3 7 0 R>>",
+                &font,
+            ],
+        );
+        crate::draw::testkit::check(
+            "font-cff-skewed-matrix",
+            &pdf,
+            false,
+            "c1d3fddf1b1125b3baaaef1fb1250d77",
+        );
     }
 }
