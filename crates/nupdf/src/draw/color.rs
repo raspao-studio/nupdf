@@ -103,6 +103,27 @@ impl Converter {
         cs.to_rgb_with(doc, color, &|leaf, c| self.leaf(leaf, c, ri, false))
     }
 
+    /// `fz_convert_color` to DeviceCMYK without color management, for
+    /// transparency groups that blend in CMYK: down to the device, ICC or
+    /// Lab color an indexed or separation space comes to, then by the
+    /// device formulas (`gray_to_cmyk`, `rgb_to_cmyk`, `lab_to_cmyk`).
+    pub fn cmyk(&self, doc: Option<&Document>, cs: &ColorSpace, color: &[f32]) -> [f32; 4] {
+        let cs = self.default_of(cs);
+        let out = std::cell::Cell::new(None);
+        let rgb = cs.to_rgb_with(doc, color, &|leaf, c| {
+            let v = |i: usize| c.get(i).copied().unwrap_or(0.0);
+            let rgb = leaf.device_to_rgb(c);
+            out.set(Some(match leaf.family() {
+                Some(Family::Gray) => [0.0, 0.0, 0.0, 1.0 - v(0)],
+                Some(Family::Cmyk) => [v(0), v(1), v(2), v(3)],
+                _ => rgb_to_cmyk(rgb),
+            }));
+            rgb
+        });
+        // Without a leaf (nothing to evaluate a tint with), the RGB given.
+        out.get().unwrap_or_else(|| rgb_to_cmyk(rgb))
+    }
+
     /// `fz_convert_color` to DeviceGray, for luminosity soft masks.
     pub fn gray(&self, doc: Option<&Document>, cs: &ColorSpace, color: &[f32], ri: u8) -> f32 {
         let cs = self.default_of(cs);
@@ -123,6 +144,13 @@ impl Converter {
             _ => self.leaf(cs, color, ri, true)[0],
         }
     }
+}
+
+/// `rgb_to_cmyk`: black is the least of the inks.
+pub fn rgb_to_cmyk(rgb: [f32; 3]) -> [f32; 4] {
+    let (c, m, y) = (1.0 - rgb[0], 1.0 - rgb[1], 1.0 - rgb[2]);
+    let k = c.min(m.min(y));
+    [c - k, m - k, y - k, k]
 }
 
 /// MuPDF's non-ICC conversions to gray: gray as it is, RGB and CMYK by

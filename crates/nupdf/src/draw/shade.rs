@@ -249,7 +249,7 @@ impl Painter<'_> {
     }
 }
 
-/// A color in `cs` as `n` device components (1 gray, 3 RGB).
+/// A color in `cs` as `n` device components (1 gray, 3 RGB, 4 CMYK).
 fn convert(
     doc: Option<&Document>,
     cc: &Converter,
@@ -257,11 +257,15 @@ fn convert(
     cs: &ColorSpace,
     input: &[f32],
     n: usize,
-) -> [f32; 3] {
+) -> [f32; 4] {
     match n {
-        0 => [0.0; 3],
-        1 => [cc.gray(doc, cs, input, ri), 0.0, 0.0],
-        _ => cc.rgb(doc, cs, input, ri),
+        0 => [0.0; 4],
+        1 => [cc.gray(doc, cs, input, ri), 0.0, 0.0, 0.0],
+        4 => cc.cmyk(doc, cs, input),
+        _ => {
+            let [r, g, b] = cc.rgb(doc, cs, input, ri);
+            [r, g, b, 0.0]
+        }
     }
 }
 
@@ -846,7 +850,7 @@ pub fn paint_shade(
         let colors = if stride > 0 {
             None
         } else {
-            Some(dest_colors.min(3))
+            Some(dest_colors.min(4))
         };
         let ncomp = if stride > 0 { 1 } else { shade.colorspace.n() };
         let mut pt = Painter {
@@ -881,8 +885,8 @@ pub fn paint_shade(
             .function
             .get(i * stride..(i + 1) * stride)
             .unwrap_or(&[]);
-        let col = convert(doc, cc, ri, &shade.colorspace, f, dest_colors.min(3));
-        for k in 0..dest_colors.min(3) {
+        let col = convert(doc, cc, ri, &shade.colorspace, f, dest_colors.min(4));
+        for k in 0..dest_colors.min(4) {
             row[k] = (col[k] * 255.0) as u8;
         }
         row[dest_colors] = (f.get(cn).copied().unwrap_or(1.0) * 255.0) as u8;
