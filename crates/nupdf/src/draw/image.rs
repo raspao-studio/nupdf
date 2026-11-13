@@ -1382,6 +1382,66 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_images_shown_small_decode_in_the_idct_as_mupdf_does() {
+        // MuPDF hands a JPEG's share of the subsampling (up to 2^3) to
+        // libjpeg, whose reduced IDCTs (4x4, 2x2, 1x1 and their 2:1
+        // shapes for subsampled chroma) make other samples than a full
+        // decode averaged in blocks, which nupdf did. Each picture is
+        // shown at a half, a quarter and an eighth (l2factor 1 to 3), and
+        // turned a quarter at a half.
+        let hex = |data: &[u8]| -> String {
+            let mut h: String = data.iter().map(|b| format!("{b:02x}")).collect();
+            h.push('>');
+            h
+        };
+        macro_rules! jpeg {
+            ($name:literal, $cs:literal) => {
+                crate::draw::testkit::stream(
+                    concat!(
+                        "/Type/XObject/Subtype/Image/Width 37/Height 29/ColorSpace/",
+                        $cs,
+                        "/BitsPerComponent 8/Filter[/ASCIIHexDecode/DCTDecode]"
+                    ),
+                    &hex(include_bytes!(concat!(
+                        "../../tests/data/jpeg/",
+                        $name,
+                        ".jpg"
+                    ))),
+                )
+            };
+        }
+        let images = [
+            jpeg!("base420", "DeviceRGB"),
+            jpeg!("base422", "DeviceRGB"),
+            jpeg!("base440", "DeviceRGB"),
+            jpeg!("base411", "DeviceRGB"),
+            jpeg!("base444", "DeviceRGB"),
+            jpeg!("base13", "DeviceRGB"),
+            jpeg!("mixed", "DeviceRGB"),
+            jpeg!("sep44", "DeviceRGB"),
+            jpeg!("prog", "DeviceRGB"),
+            jpeg!("gray", "DeviceGray"),
+            jpeg!("cmyk", "DeviceCMYK"),
+        ];
+        let mut content = String::new();
+        for i in 0..images.len() {
+            let y = 4 + 11 * i;
+            content.push_str(&format!(
+                "q 12 0 0 10 4 {y} cm /I{i} Do Q q 5 0 0 4 20 {y} cm /I{i} Do Q \
+                 q 1 0 0 1 28 {y} cm /I{i} Do Q q 0 10 -12 0 46 {y} cm /I{i} Do Q\n"
+            ));
+        }
+        image_page(
+            "image-jpeg-scaled",
+            &content,
+            &images,
+            &[],
+            false,
+            "4ab6073f5fe0a28339f70ef3d1bad801",
+        );
+    }
+
+    #[test]
     fn jpx_images_decode_and_draw() {
         // Codestreams MuPDF wrote (tests/data/render/README.md).
         let gray = include_bytes!("../../tests/data/render/gray8.j2k");

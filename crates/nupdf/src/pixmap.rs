@@ -166,10 +166,12 @@ pub fn from_image(doc: &Document, image: &Image) -> Result<Pixmap, String> {
 }
 
 /// An image's pixmap decoded to be shown `2^l2` times smaller, as
-/// `compressed_image_get_pixmap` does it: the samples of images that
-/// stream (not JPX, indexed or /Matte ones) are averaged in blocks as
-/// they are read, before decode arrays and color keys apply. The rest
-/// of the factor, for the caller's `fz_subsample_pixmap`, comes back.
+/// `compressed_image_get_pixmap` does it: JPEG images (not /Matte ones)
+/// are decoded up to 8 times smaller by libjpeg's scaled IDCTs, then the
+/// samples of images that stream (not JPX, indexed or /Matte ones) are
+/// averaged in blocks as they are read, before decode arrays and color
+/// keys apply. The rest of the factor, for the caller's
+/// `fz_subsample_pixmap`, comes back.
 pub fn from_image_subsampled(
     doc: &Document,
     image: &Image,
@@ -191,7 +193,7 @@ pub fn from_image_subsampled(
         let mut out = vec![0; len as usize];
         let n = st.read(&mut out);
         out.truncate(n);
-        return decomp(doc, image, &out, l2);
+        return decomp(doc, image, &out, (w as usize, h as usize), l2);
     }
     let Some(stream) = &image.stream else {
         return Err(report::format("image has no data"));
@@ -203,43 +205,58 @@ pub fn from_image_subsampled(
         let data = doc.stream_data(&s).map_err(|e| e.report())?;
         return jpx_pixmap(doc, image, &data).map(|p| (p, l2));
     }
-    // What the read of each row needs, whole rows of packed samples.
     let (w, h) = (image.width.max(0) as u64, image.height.max(0) as u64);
-    let row = (image.bpc.max(0) as u64 * image.n as u64 * w).div_ceil(8);
-    let len = row.saturating_mul(h);
-    if len > doc.limits().max_decoded_bytes as u64 {
-        return Err("limit error: image too large".into());
-    }
     let data = match crate::image::jpeg_parts(doc, image)? {
-        // JPEG data is patched before it is decoded.
+        // JPEG data is patched before it is decoded, and decoded as small
+        // as it can be, up to an eighth: `l2factor` goes to the decoder, and
+        // the image is that many times smaller (`fz_decomp_image_from_stream`).
         Some((mut jpeg, params)) => {
             crate::image::patch_jpeg_height(&mut jpeg, image.height);
-            let mut dict = crate::object::Dict::new();
-            dict.put(b"Filter", Object::name(b"DCTDecode"));
-            if !matches!(params, Object::Null) {
-                dict.put(b"DecodeParms", params);
+            let matte = image.colorkey.is_some() && image.mask.is_some();
+            let native = if matte { 0 } else { l2.min(3) };
+            let f = 1u64 << native;
+            let (w, h) = ((w + f - 1) >> native, (h + f - 1) >> native);
+            let row = (image.bpc.max(0) as u64 * image.n as u64 * w).div_ceil(8);
+            let len = row.saturating_mul(h);
+            if len > doc.limits().max_decoded_bytes as u64 {
+                return Err("limit error: image too large".into());
             }
-            let resolve = |o: &Object| doc.resolve(o);
-            let diag = doc.diagnostics();
-            let raw = crate::stream::Stream::memory(&jpeg, diag);
-            let mut st = crate::filter::open_filters(raw, &dict, &resolve, None, None, true)
-                .map_err(|e| e.report())?;
+            let color_transform = params
+                .as_dict()
+                .and_then(|d| d.get(b"ColorTransform"))
+                .map_or(-1, |v| doc.resolve(v).to_int_or(-1));
+            let raw = crate::stream::Stream::memory(&jpeg, doc.diagnostics());
+            let mut st = crate::dct::open_scaled(raw, color_transform, native);
             let mut out = vec![0; len as usize];
             let n = st.read(&mut out);
             out.truncate(n);
-            out
+            return decomp(doc, image, &out, (w as usize, h as usize), l2 - native);
         }
-        None => doc
-            .image_samples(&s, len as usize)
-            .map_err(|e| e.report())?,
+        None => {
+            // What the read of each row needs, whole rows of packed samples.
+            let row = (image.bpc.max(0) as u64 * image.n as u64 * w).div_ceil(8);
+            let len = row.saturating_mul(h);
+            if len > doc.limits().max_decoded_bytes as u64 {
+                return Err("limit error: image too large".into());
+            }
+            doc.image_samples(&s, len as usize)
+                .map_err(|e| e.report())?
+        }
     };
-    decomp(doc, image, &data, l2)
+    decomp(doc, image, &data, (w as usize, h as usize), l2)
 }
 
-/// `fz_decomp_image_from_stream` at full size, from the decoded samples.
-fn decomp(doc: &Document, image: &Image, data: &[u8], l2: u32) -> Result<(Pixmap, u32), String> {
+/// `fz_decomp_image_from_stream` from the decoded samples, `w` by `h` of
+/// them (the image's size, or less as JPEG decodes it), subsampled by
+/// `l2` as they stream in where that can be done.
+fn decomp(
+    doc: &Document,
+    image: &Image,
+    data: &[u8],
+    (w, h): (usize, usize),
+    l2: u32,
+) -> Result<(Pixmap, u32), String> {
     let diag = doc.diagnostics();
-    let (w, h) = (image.width.max(0) as usize, image.height.max(0) as usize);
     let n = image.n;
     let bpc = image.bpc;
     let use_colorkey = image.colorkey.is_some();
