@@ -74,7 +74,16 @@ pub fn render(name: &str, pdf: &[u8], zoom: f32, icc: bool) -> Pix {
     let doc = Document::open(pdf.to_vec()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
     let page = doc.page(0).unwrap_or_else(|e| panic!("{name}: {e:?}"));
     let ctm = Matrix::scale(zoom, zoom);
-    let (out, _) = super::render_page_with(&doc, &page, ctm, 1 << 26, None, Store::default(), icc);
+    let (out, _) = super::render_page_with(
+        &doc,
+        &page,
+        ctm,
+        1 << 26,
+        None,
+        Store::default(),
+        icc,
+        super::Parts::CONTENTS,
+    );
     let out = out.unwrap_or_else(|e| panic!("{name}: {e}"));
     if let Some(e) = &out.error {
         panic!("{name}: {e}");

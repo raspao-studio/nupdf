@@ -4,8 +4,10 @@
 // (pdf_write_widget_appearance, pdf_write_tx_widget_appearance,
 // pdf_write_ch_widget_appearance, pdf_write_sig_widget_appearance,
 // pdf_update_button_appearance, draw_push_button, draw_check_button,
-// draw_radio_button), source/pdf/pdf-annot.c (pdf_annot_MK_BG,
-// pdf_annot_MK_BC and their RGB forms) and source/pdf/pdf-form.c
+// draw_radio_button, pdf_signature_appearance_unsigned), source/pdf/pdf-annot.c
+// (pdf_annot_MK_BG, pdf_annot_MK_BC and their RGB forms,
+// pdf_set_annot_appearance_from_display_list), source/pdf/pdf-layout.c
+// (pdf_layout_fit_text) and source/pdf/pdf-form.c
 // (pdf_button_field_on_state), Copyright (C) 2004-2026 Artifex Software, Inc.
 
 //! Form widgets' appearances: text fields, combo and list boxes and
@@ -585,6 +587,107 @@ pub fn button(doc: &Document, field: &Object, ctm: Matrix) -> Result<ButtonSynth
     Ok(ButtonSynthesis {
         annot: w.annot,
         forms: vec![("N", Some(b"Off".to_vec()), off), ("N", Some(on), yes)],
+    })
+}
+
+/// The appearance MuPDF shows an unsigned signature field with
+/// (`pdf_signature_appearance_unsigned`, a display list made into a form
+/// by `pdf_set_annot_appearance_from_display_list`): an orange arrow
+/// across the top of the field, a sixth of its height, with "SIGN" fitted
+/// in white (`pdf_layout_fit_text`). The list is drawn in page space onto
+/// the field's box there (`pdf_annot_rect` under `ctm`), the form's box is
+/// that box turned upright, and the form is written here directly rather
+/// than through MuPDF's PDF-writing device, so its bytes are not MuPDF's,
+/// only what it draws.
+pub fn unsigned_signature(doc: &Document, widget: &Object, ctm: Matrix) -> Result<Form, String> {
+    use std::fmt::Write;
+    let rect = crate::annot::rect(doc, widget, ctm).ok_or("the widget has no /Rect")?;
+    // Page space to the form's: y up from the box's bottom.
+    let flip = Matrix {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: -1.0,
+        e: -rect.x0,
+        f: rect.y1,
+    };
+    let bbox = rect.transform(flip);
+    let mut r = rect;
+    r.y1 = r.y0 + (r.y1 - r.y0) / 6.0;
+    r.x1 = (r.y1 - r.y0).madd(4.0, r.x0);
+    let font = fonts::base14("Helvetica")?;
+    // pdf_layout_fit_text: "SIGN" always fits one line four heights wide.
+    let size = (r.y1 - r.y0) / 1.2;
+    let mut trm = Matrix::scale(size, -size);
+    trm.e += r.x0;
+    trm.f += r.y1;
+    let mut glyphs = Vec::new();
+    let mut tbounds = Rect::EMPTY;
+    for c in "SIGN".chars() {
+        let gid = fonts::encode_character(&font, c as i32);
+        glyphs.push((c, trm.e, trm.f));
+        tbounds = tbounds.union(crate::fontdesc::bound_glyph(&font, gid, trm));
+        trm = trm.pre_translate(fonts::advance(&font, gid), 0.0);
+    }
+    if !tbounds.is_empty() {
+        tbounds = Rect::new(
+            tbounds.x0 - 1.0,
+            tbounds.y0 - 1.0,
+            tbounds.x1 + 1.0,
+            tbounds.y1 + 1.0,
+        );
+    }
+    let xadj = (r.x0 + r.x1 - tbounds.x0 - tbounds.x1) / 2.0;
+    let yadj = (r.y0 + r.y1 - tbounds.y0 - tbounds.y1) / 2.0;
+    let mut out = Vec::new();
+    let mut s = String::new();
+    let num = |out: &mut Vec<u8>, v: f32| {
+        crate::print::fmtfloat(v, out);
+        out.push(b' ');
+    };
+    out.extend_from_slice(b"q\n");
+    for v in [flip.a, flip.b, flip.c, flip.d, flip.e, flip.f] {
+        num(&mut out, v);
+    }
+    out.extend_from_slice(b"cm\n0.95 0.33 0.18 rg\n");
+    let half = (r.y1 - r.y0) / 2.0;
+    let path = [
+        (r.x0, r.y0, "m"),
+        (r.x1, r.y0, "l"),
+        (r.x1 + half, (r.y0 + r.y1) / 2.0, "l"),
+        (r.x1, r.y1, "l"),
+        (r.x0, r.y1, "l"),
+    ];
+    for (x, y, op) in path {
+        num(&mut out, x);
+        num(&mut out, y);
+        out.extend_from_slice(op.as_bytes());
+        out.push(b'\n');
+    }
+    out.extend_from_slice(b"h f\n1 1 1 rg\nBT\n/Helv 1 Tf\n");
+    for (c, x, y) in glyphs {
+        for v in [size, 0.0, 0.0, -size, x + xadj, y + yadj] {
+            num(&mut out, v);
+        }
+        s.clear();
+        let _ = writeln!(s, "Tm <{:02X}> Tj", c as u32);
+        out.extend_from_slice(s.as_bytes());
+    }
+    out.extend_from_slice(b"ET\nQ\n");
+    let mut helv = Dict::new();
+    helv.put(b"Type", Object::name(b"Font"));
+    helv.put(b"Subtype", Object::name(b"Type1"));
+    helv.put(b"BaseFont", Object::name(b"Helvetica"));
+    helv.put(b"Encoding", Object::name(b"WinAnsiEncoding"));
+    let mut fonts_dict = Dict::new();
+    fonts_dict.put(b"Helv", Object::Dict(std::sync::Arc::new(helv)));
+    let mut res = Dict::new();
+    res.put(b"Font", Object::Dict(std::sync::Arc::new(fonts_dict)));
+    Ok(Form {
+        bbox,
+        matrix: Matrix::IDENTITY,
+        resources: Some(res),
+        content: out,
     })
 }
 

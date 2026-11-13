@@ -22,6 +22,7 @@ use crate::document::Document;
 use crate::geometry::{IRect, Matrix};
 use crate::object::Object;
 
+pub use crate::page_run::Parts;
 pub use device::DrawDevice;
 pub use paint::Pix;
 
@@ -48,11 +49,39 @@ pub fn render_page(
     ctm: Matrix,
     max_pixels: u64,
 ) -> Result<Rendered, String> {
-    render_page_with(doc, page, ctm, max_pixels, None, Store::default(), true).0
+    render_page_with(
+        doc,
+        page,
+        ctm,
+        max_pixels,
+        None,
+        Store::default(),
+        true,
+        Parts::CONTENTS,
+    )
+    .0
+}
+
+/// The page's `parts` run into `dev` for "View" under `ctm`.
+fn run_parts(
+    doc: &Document,
+    page: &Object,
+    dev: &mut dyn crate::device::Device,
+    store: Store,
+    ctm: Matrix,
+    parts: Parts,
+) -> crate::run::PageRun {
+    if parts == Parts::CONTENTS {
+        return crate::run::run_page_contents_with(doc, page, dev, store, Some("View"), ctm);
+    }
+    crate::page_run::run_page_parts(doc, page, dev, store, Some("View"), ctm, parts)
 }
 
 /// [`render_page`] of the part of the page in `region` (pixels), with a
-/// store kept from page to page.
+/// store kept from page to page, drawing the `parts` of it asked for:
+/// [`Parts::ALL`] as `mutool draw` (`fz_run_page`), [`Parts::CONTENTS`] as
+/// `page.runPageContents`.
+#[allow(clippy::too_many_arguments)]
 pub fn render_page_with(
     doc: &Document,
     page: &Object,
@@ -61,6 +90,7 @@ pub fn render_page_with(
     region: Option<IRect>,
     store: Store,
     icc: bool,
+    parts: Parts,
 ) -> (Result<Rendered, String>, Store) {
     let bbox = match page_bbox(doc, page, ctm) {
         Ok(b) => b,
@@ -89,7 +119,7 @@ pub fn render_page_with(
     pix.clear_with(255);
     let mut dev = DrawDevice::new(Some(doc), pix);
     dev.cc.icc = icc;
-    let run = crate::run::run_page_contents_with(doc, page, &mut dev, store, Some("View"), ctm);
+    let run = run_parts(doc, page, &mut dev, store, ctm, parts);
     (
         Ok(Rendered {
             pix: dev.into_pix(),
@@ -114,9 +144,10 @@ pub fn render_page_banded(
     store: Store,
     bands: usize,
     icc: bool,
+    parts: Parts,
 ) -> (Result<Rendered, String>, Store) {
     if bands <= 1 {
-        return render_page_with(doc, page, ctm, max_pixels, region, store, icc);
+        return render_page_with(doc, page, ctm, max_pixels, region, store, icc, parts);
     }
     let bbox = match page_bbox(doc, page, ctm) {
         Ok(b) => region.map_or(b, |r| b.intersect(r)),
@@ -137,10 +168,10 @@ pub fn render_page_banded(
     // or bands of fewer than 128 rows, the page is drawn in one piece.
     let bands = bands.min((bbox.height() / 128).max(1) as usize);
     if bands <= 1 || (bbox.width() as u64 * bbox.height() as u64) < 1 << 20 {
-        return render_page_with(doc, page, ctm, max_pixels, region, store, icc);
+        return render_page_with(doc, page, ctm, max_pixels, region, store, icc, parts);
     }
     let mut list = list::DisplayList::default();
-    let run = crate::run::run_page_contents_with(doc, page, &mut list, store, Some("View"), ctm);
+    let run = run_parts(doc, page, &mut list, store, ctm, parts);
     let bands = bands.min(bbox.height().max(1) as usize);
     let h = bbox.height() as usize;
     let rows: Vec<IRect> = (0..bands)
@@ -195,8 +226,8 @@ pub fn render_page_banded(
     )
 }
 
-/// The page rendered with `quads` (page space) shaded in translucent red
-/// and outlined: a preview of what a redaction removes.
+/// The whole page rendered with `quads` (page space) shaded in
+/// translucent red and outlined: a preview of what a redaction removes.
 pub fn render_page_marked(
     doc: &Document,
     page: &Object,
@@ -217,14 +248,9 @@ pub fn render_page_marked(
     pix.clear_with(255);
     let mut dev = DrawDevice::new(Some(doc), pix);
     dev.cc.icc = icc;
-    let run = crate::run::run_page_contents_with(
-        doc,
-        page,
-        &mut dev,
-        Store::default(),
-        Some("View"),
-        ctm,
-    );
+    // The page as `mutool draw` shows it, annotations and widgets too: a
+    // redaction removes those over its areas as well.
+    let run = run_parts(doc, page, &mut dev, Store::default(), ctm, Parts::ALL);
     use crate::device::{ColorParams, Device};
     let red = [0.86f32, 0.1, 0.1];
     let stroke = crate::path::StrokeState {
@@ -265,7 +291,16 @@ mod tests {
 
     fn whole(doc: &Document, page: &Object, zoom: f32, region: Option<IRect>) -> Pix {
         let ctm = Matrix::scale(zoom, zoom);
-        let (r, _) = render_page_with(doc, page, ctm, 1 << 26, region, Store::default(), true);
+        let (r, _) = render_page_with(
+            doc,
+            page,
+            ctm,
+            1 << 26,
+            region,
+            Store::default(),
+            true,
+            Parts::CONTENTS,
+        );
         r.unwrap_or_else(|e| panic!("{e}")).pix
     }
 
@@ -279,8 +314,17 @@ mod tests {
         // band's rows, run by `mutool run`).
         let (doc, page) = sink();
         let ctm = Matrix::scale(8.0, 8.0);
-        let (banded, _) =
-            render_page_banded(&doc, &page, ctm, 1 << 26, None, Store::default(), 8, true);
+        let (banded, _) = render_page_banded(
+            &doc,
+            &page,
+            ctm,
+            1 << 26,
+            None,
+            Store::default(),
+            8,
+            true,
+            Parts::CONTENTS,
+        );
         let banded = banded.unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(banded.error, None);
         assert_eq!(
@@ -311,6 +355,7 @@ mod tests {
                 Store::default(),
                 4,
                 true,
+                Parts::CONTENTS,
             );
             let part = part.unwrap_or_else(|e| panic!("{e}")).pix;
             assert_eq!(part.bbox(), r);
@@ -331,6 +376,7 @@ mod tests {
                 Store::default(),
                 bands,
                 false,
+                Parts::CONTENTS,
             );
             let r = r.unwrap_or_else(|e| panic!("{e}"));
             assert_eq!(testkit::md5(&r.pix), "52c0e8802b9702cc6bc3fae69dbbcf65");
@@ -355,6 +401,7 @@ mod tests {
                 Store::default(),
                 bands,
                 true,
+                Parts::CONTENTS,
             );
             assert!(r.is_err_and(|e| e.starts_with("limit error")));
             let off = Some(IRect::new(5000, 5000, 5100, 5100));
@@ -367,6 +414,7 @@ mod tests {
                 Store::default(),
                 bands,
                 true,
+                Parts::CONTENTS,
             );
             assert_eq!(r.map(|_| ()), Err("the region is outside the page".into()));
         }
