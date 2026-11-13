@@ -283,7 +283,7 @@ MuPDF reference: `fitz/draw-*.c`, `colorspace.c`, `color-lcms.c`, `separation.c`
 
 - [x] Rasterizer decision: vello_cpu, tiny-skia, or a port of `draw-edge`/`draw-paint`, chosen by measured pixel parity and speed. A port (DECISIONS D41): MuPDF's anti-aliasing, FreeType's glyph rasterizer and MuPDF's 8-bit painters put any other rasterizer outside the threshold on most text
 - [x] Paths and strokes (joins, caps, dashes), clipping, glyphs (outlines and Type3), images (every color space, decode arrays, stencil and soft masks, interpolation), shadings 1–7, patterns, transparency groups, soft masks, blend modes, knockout, overprint simulation, ICC through moxcms. Overprint: MuPDF simulates it only for subtractive destinations, and `render` draws RGB, so there is nothing to simulate; ICC: moxcms with lcms2's black point compensation, within 1 of MuPDF on SWOP CMYK. Known differences in D41
-- [x] Band-parallel rendering within a page, and page-parallel across pages: `--threads` runs pages in parallel and plays a large page's display list into bands, with identical pixels
+- [x] Band-parallel rendering within a page, and page-parallel across pages: `--threads` runs pages in parallel and plays a large page's display list into bands, with the pixels MuPDF's bands have (a few levels off one piece where strokes and shadings cross a band's edge, in MuPDF too)
 - [x] `render`: PNG output for a page or region, set DPI, and `--max-pixels` to fit vision-model budgets (also PPM, and `--no-icc` for `mutool draw -N`)
 - [x] Redaction previews for `--dry-run`: `--preview DIR` draws each page with targets, the areas shaded red
 - [x] hayro as a second reference renderer, for triaging MuPDF disagreements: `cargo xtask triage FILE --page N` renders with MuPDF, nupdf and hayro and gives each pair's distance
@@ -315,7 +315,7 @@ Exit status, 2026-11-12: not met, and left for later. Eleven graded tasks (the e
 
 ## M10: Hardening and public release
 
-- [ ] Wild tier: a sample of 100k+ files runs crash-free; publish the parity report
+- [x] Wild tier: a sample of 100k+ files runs crash-free; publish the parity report. 100,000 Common Crawl files, 15 commands each: no signals and, after the fixes it found, no panics; parity on a 1,000-file sample 99.3% or better for every check but rendering (94.0% of pages within the pixel threshold). docs/WILD-TIER.md
 - [ ] Continuous fuzzing (apply to OSS-Fuzz), SECURITY.md, a threat model
 - [ ] The public case: parity, safety, performance and agent-eval results against MuPDF and the alternatives
 - [ ] Publish to crates.io, make the repository public, ship a docs site
