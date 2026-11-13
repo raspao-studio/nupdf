@@ -423,7 +423,7 @@ impl Matrix {
 }
 
 /// `fz_irect`: a box in whole pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct IRect {
     pub x0: i32,
     pub y0: i32,

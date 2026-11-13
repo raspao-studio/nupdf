@@ -21,16 +21,20 @@ use crate::image::Image;
 use crate::shade::Shade;
 use crate::text::Text;
 
-use super::image::{extent_and_factor, gridfit, paint_image, scale, subsample, transform_pixmap};
+use super::image::{
+    area_extent, decode_area, extent_and_factor, gridfit, paint_image, scale, src_area,
+    subarea_ctm, subsample, transform_pixmap,
+};
 use super::path::{flatten_fill, flatten_stroke};
 
 /// Clips nested deeper than this are not drawn (MuPDF grows its stack
 /// until memory runs out).
 const MAX_STACK: usize = 4096;
 
-/// Decoded images by object number, generation, subsampling and whether
-/// as a mask.
-type ImageCache = std::collections::HashMap<(i32, i32, u32, bool), (Pix, Option<ColorSpace>)>;
+/// Decoded images by object number, generation, subsampling, whether as a
+/// mask, and the part of the image held.
+type ImageCache =
+    std::collections::HashMap<(i32, i32, u32, bool, IRect), (Pix, Option<ColorSpace>)>;
 
 /// `fz_draw_state`: a pixmap of its own when a clip needed one (else the
 /// one below is painted), the mask that puts it back, and the scissor.
@@ -823,10 +827,15 @@ impl Device for DrawDevice<'_> {
         if image.width == 0 || image.height == 0 || clip.is_empty() {
             return;
         }
-        let mut ctm = if self.type3 { ctm } else { gridfit(ctm) };
-        let Some((mut pix, cs, dw, dh)) = self.decode(image, ctm, false) else {
+        let ctm = if self.type3 { ctm } else { gridfit(ctm) };
+        let area = src_area(ctm, image.width, image.height, clip);
+        if area.is_empty() {
+            return;
+        }
+        let Some((mut pix, cs, dw, dh, part)) = self.decode(image, ctm, false, area) else {
             return;
         };
+        let mut ctm = subarea_ctm(ctm, part, image.width, image.height);
         // The colorspace as the page's defaults replace it: DeviceGray
         // paints as it is (MuPDF's gray to RGB painter), DeviceRGB needs
         // nothing; without color management any gray or RGB space is so.
@@ -908,10 +917,15 @@ impl Device for DrawDevice<'_> {
             return;
         }
         let clip = self.dest_bbox().intersect(self.scissor());
-        let mut ctm = if self.type3 { ctm } else { gridfit(ctm) };
-        let Some((mut pix, _, dw, dh)) = self.decode(image, ctm, true) else {
+        let ctm = if self.type3 { ctm } else { gridfit(ctm) };
+        let area = src_area(ctm, image.width, image.height, clip);
+        if area.is_empty() {
+            return;
+        }
+        let Some((mut pix, _, dw, dh, part)) = self.decode(image, ctm, true, area) else {
             return;
         };
+        let mut ctm = subarea_ctm(ctm, part, image.width, image.height);
         if dw < pix.w && dh < pix.h {
             let fit = alpha == 1.0;
             let scaled = transform_pixmap(&pix, &mut ctm, dw, dh, fit, clip).or_else(|| {
@@ -966,7 +980,12 @@ impl Device for DrawDevice<'_> {
             self.stack.push(empty);
             return;
         }
-        let mut ctm = if self.type3 { ctm } else { gridfit(ctm) };
+        let ctm = if self.type3 { ctm } else { gridfit(ctm) };
+        let area = src_area(ctm, image.width, image.height, clip);
+        if area.is_empty() {
+            self.stack.push(empty);
+            return;
+        }
         let mut bbox = IRect::from_rect(Rect::new(0.0, 0.0, 1.0, 1.0).transform(ctm))
             .intersect(self.scissor());
         if !scissor.is_infinite() {
@@ -976,10 +995,11 @@ impl Device for DrawDevice<'_> {
             self.stack.push(empty);
             return;
         }
-        let Some((mut pix, _, dw, dh)) = self.decode(image, ctm, true) else {
+        let Some((mut pix, _, dw, dh, part)) = self.decode(image, ctm, true, area) else {
             self.stack.push(empty);
             return;
         };
+        let mut ctm = subarea_ctm(ctm, part, image.width, image.height);
         let di = self.dest_index();
         let (n, alpha) = match self.stack.get(di).and_then(|s| s.dest.as_ref()) {
             Some(d) => (d.n, d.alpha),
@@ -1675,45 +1695,61 @@ impl DrawDevice<'_> {
     }
 
     /// `fz_get_pixmap_from_image` (with `mask`, the alpha-only form of
-    /// `fz_get_pixmap_mask_from_image`): the image decoded and subsampled
-    /// for `ctm`, its colorspace, and the size it shows at.
+    /// `fz_get_pixmap_mask_from_image`) for the image pixels in `area`
+    /// (from `src_area`): the image decoded and subsampled for `ctm`, its
+    /// colorspace, the size it shows at, and the part of the image the
+    /// pixmap holds (for `subarea_ctm`). A decoded part is looked for
+    /// first, then the whole image, as MuPDF's store is searched.
     fn decode(
         &mut self,
         image: &Image,
         ctm: Matrix,
         mask: bool,
-    ) -> Option<(Pix, Option<ColorSpace>, i32, i32)> {
-        let (dw, dh, l2) = extent_and_factor(image.width, image.height, ctm);
-        let key = match &image.stream {
-            Some(crate::object::Object::Ref(r)) => Some((r.num, r.generation, l2, mask)),
+        area: IRect,
+    ) -> Option<(Pix, Option<ColorSpace>, i32, i32, IRect)> {
+        let (w, h) = (image.width, image.height);
+        let whole = IRect::new(0, 0, w, h);
+        let (_, _, l2) = extent_and_factor(w, h, ctm);
+        let bpp = image.bpc.saturating_mul(image.n as i32);
+        let part = decode_area(area, w, h, bpp, l2);
+        let id = match &image.stream {
+            Some(crate::object::Object::Ref(r)) => Some((r.num, r.generation)),
             _ => None,
         };
-        if let Some(k) = key
-            && let Some((pix, cs)) = self.images.get(&k)
-        {
-            return Some((pix.clone(), cs.clone(), dw, dh));
+        if let Some((num, generation)) = id {
+            for r in [part, whole] {
+                if let Some((pix, cs)) = self.images.get(&(num, generation, l2, mask, r)) {
+                    let (dw, dh) = area_extent(ctm, r, w, h);
+                    return Some((pix.clone(), cs.clone(), dw, dh, r));
+                }
+            }
         }
-        let out = self.decode_imp(image, ctm, mask)?;
-        if let Some(k) = key {
-            let size = out.0.samples.len();
+        let (dw, dh) = area_extent(ctm, part, w, h);
+        let (pix, cs, used) = self.decode_imp(image, l2, mask, part)?;
+        if let Some((num, generation)) = id {
+            let size = pix.samples.len();
             // A bound on what is kept, MuPDF's store being bounded too.
             if self.image_bytes + size <= 1 << 29 {
                 self.image_bytes += size;
-                self.images.insert(k, (out.0.clone(), out.1.clone()));
+                self.images
+                    .insert((num, generation, l2, mask, used), (pix.clone(), cs.clone()));
             }
         }
-        Some(out)
+        Some((pix, cs, dw, dh, used))
     }
 
+    /// The image decoded for `l2` and `part`; with the part it holds,
+    /// which is the whole image for images MuPDF cannot cut (JPX).
     fn decode_imp(
         &self,
         image: &Image,
-        ctm: Matrix,
+        l2: u32,
         mask: bool,
-    ) -> Option<(Pix, Option<ColorSpace>, i32, i32)> {
+        part: IRect,
+    ) -> Option<(Pix, Option<ColorSpace>, IRect)> {
         let doc = self.doc?;
-        let (dw, dh, l2) = extent_and_factor(image.width, image.height, ctm);
-        let (decoded, l2) = match crate::pixmap::from_image_subsampled(doc, image, l2) {
+        let whole = IRect::new(0, 0, image.width, image.height);
+        let (decoded, l2, used) = match crate::pixmap::from_image_area(doc, image, l2, Some(part)) {
             Ok(p) => p,
             Err(e) => {
                 doc.diagnostics()
@@ -1740,7 +1776,7 @@ impl DrawDevice<'_> {
             pix.alpha = true;
             cs = None;
         }
-        Some((pix, cs, dw, dh))
+        Some((pix, cs, used.unwrap_or(whole)))
     }
 
     /// `fz_convert_pixmap` to RGB: through the color converter, MuPDF's
