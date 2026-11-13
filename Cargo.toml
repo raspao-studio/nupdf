@@ -1,19 +1,19 @@
 [workspace]
 resolver = "3"
 members = ["crates/nupdf", "crates/nupdf-cli", "xtask"]
-exclude = ["vendor"]
 default-members = ["crates/nupdf", "crates/nupdf-cli"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.92"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/raspao-studio/nupdf"
 authors = ["hum <hello@byhum.dev>"]
+homepage = "https://raspao-studio.github.io/nupdf/"
 
 [workspace.dependencies]
-nupdf = { path = "crates/nupdf" }
+nupdf = { path = "crates/nupdf", version = "0.1.0" }
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
