@@ -1,16 +1,21 @@
-// Oracle for the `render` checks: each page's contents drawn as
-// Page.runPageContents draws them into a white DeviceRGB pixmap (no
-// annotations: each page loses its /Annots before it is loaded, as for
-// the stext checks), written as PPM into the scratch directory.
-// Usage: mutool run oracle/js/render.js <file> <dir> <dpi> [icc]
+// Oracle for the `render` checks: each page drawn into a white DeviceRGB
+// pixmap, written as PPM into the scratch directory. By default, the
+// page's contents as Page.runPageContents draws them (no annotations: each
+// page loses its /Annots before it is loaded, as for the stext checks);
+// with "annots", the whole page as Page.run (fz_run_page, what
+// `mutool draw` draws) draws it: contents, annotations, then widgets.
+// Usage: mutool run oracle/js/render.js <file> <dir> <dpi> [icc] [annots]
 //
-// Color management is off unless the fourth argument is "icc", so colors
-// convert by MuPDF's device formulas.
+// Color management is off unless "icc" is given, so colors convert by
+// MuPDF's device formulas.
 
 var doc = Document.openDocument(scriptArgs[0]);
 var dir = scriptArgs[1];
 var dpi = Number(scriptArgs[2] || "72");
-if (scriptArgs[3] !== "icc") disableICC();
+var flags = scriptArgs.slice(3);
+var icc = flags.indexOf("icc") >= 0;
+var annots = flags.indexOf("annots") >= 0;
+if (!icc) disableICC();
 var zoom = dpi / 72;
 var ctm = [zoom, 0, 0, zoom, 0, 0];
 
@@ -31,7 +36,7 @@ for (var p = 0; p < (out.page_count || 0); p++) {
   try {
     var obj = doc.findPage(p);
     if (!obj.isDictionary()) throw new Error("page object is not a dictionary");
-    obj.delete("Annots");
+    if (!annots) obj.delete("Annots");
     var page = doc.loadPage(p);
     var b = page.getBounds();
     var r = [b[0] * zoom, b[1] * zoom, b[2] * zoom, b[3] * zoom];
@@ -44,7 +49,8 @@ for (var p = 0; p < (out.page_count || 0); p++) {
     var pix = new Pixmap(ColorSpace.DeviceRGB, bbox, false);
     pix.clear(255);
     var dev = new DrawDevice(Matrix.identity, pix);
-    page.runPageContents(dev, ctm);
+    if (annots) page.run(dev, ctm);
+    else page.runPageContents(dev, ctm);
     dev.close();
     var name = "page-" + pad(p + 1) + ".ppm";
     pix.saveAsPNM(dir + "/" + name);
