@@ -11,17 +11,16 @@ The crate is `no_std` compatible but requires an allocator to be available.
 This crate forbids unsafe code via a crate-level attribute.
 */
 
-#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
+// nupdf: style lints of nupdf's workspace that the upstream code does not follow.
+#![allow(missing_debug_implementations, clippy::too_many_arguments)]
 #![allow(missing_docs)]
 
-extern crate alloc;
-
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use core::ops::ControlFlow;
+use std::collections::BTreeMap;
+use std::vec::Vec;
 
-use crate::arithmetic_decoder::ArithmeticDecoderContext;
+use crate::hayro_jbig2::arithmetic_decoder::ArithmeticDecoderContext;
 
 /// A reusable context for decoding JBIG2 images.
 #[derive(Default)]
@@ -53,9 +52,6 @@ pub trait Decoder {
     fn next_line(&mut self);
 }
 
-#[cfg(feature = "image")]
-pub mod integration;
-
 mod arithmetic_decoder;
 mod bitmap;
 mod decode;
@@ -78,7 +74,7 @@ pub use error::{
     SegmentError, SymbolError, TemplateError,
 };
 
-use crate::file::parse_segments_sequential;
+use crate::hayro_jbig2::file::parse_segments_sequential;
 use bitmap::Bitmap;
 use decode::CombinationOperator;
 use decode::generic;

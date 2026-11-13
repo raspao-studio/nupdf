@@ -192,14 +192,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adbed896e99325bc312778bb9c9c289d795d51c12775c44dd5e4352f679c7e46"
 
 [[package]]
-name = "hayro-jbig2"
-version = "0.4.0"
-dependencies = [
- "fearless_simd",
- "hayro-ccitt",
-]
-
-[[package]]
 name = "hayro-jpeg2000"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -294,8 +286,9 @@ dependencies = [
  "aes",
  "blake3",
  "brotli-decompressor",
+ "fearless_simd",
  "flate2",
- "hayro-jbig2",
+ "hayro-ccitt",
  "hayro-jpeg2000",
  "md-5",
  "memchr",

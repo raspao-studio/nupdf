@@ -1,21 +1,23 @@
 //! Text region segment parsing and decoding (7.4.3, 6.4).
 
-use alloc::vec::Vec;
 use core::iter;
+use std::vec::Vec;
 
 use super::{
     AdaptiveTemplatePixel, CombinationOperator, RefinementTemplate, RegionSegmentInfo,
     parse_refinement_at_pixels, parse_region_segment_info,
 };
 use super::{RegionBitmap, generic_refinement};
-use crate::ScratchBuffers;
-use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
-use crate::bitmap::Bitmap;
-use crate::error::{HuffmanError, OverflowError, ParseError, Result, SymbolError, bail};
-use crate::huffman_table::{HuffmanTable, StandardHuffmanTables, TableLine};
-use crate::integer_decoder::IntegerDecoder;
-use crate::reader::Reader;
-use crate::symbol_id_decoder::SymbolIdDecoder;
+use crate::hayro_jbig2::ScratchBuffers;
+use crate::hayro_jbig2::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
+use crate::hayro_jbig2::bitmap::Bitmap;
+use crate::hayro_jbig2::error::{
+    HuffmanError, OverflowError, ParseError, Result, SymbolError, bail,
+};
+use crate::hayro_jbig2::huffman_table::{HuffmanTable, StandardHuffmanTables, TableLine};
+use crate::hayro_jbig2::integer_decoder::IntegerDecoder;
+use crate::hayro_jbig2::reader::Reader;
+use crate::hayro_jbig2::symbol_id_decoder::SymbolIdDecoder;
 
 /// Decode a text region segment (6.4).
 pub(crate) fn decode(

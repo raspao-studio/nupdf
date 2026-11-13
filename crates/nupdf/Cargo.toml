@@ -14,7 +14,9 @@ blake3.workspace = true
 brotli-decompressor = "6"
 # zlib-rs: a pure-Rust port of zlib, so corrupt-stream behavior matches MuPDF's zlib.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-hayro-jbig2 = { version = "0.4", default-features = false, features = ["simd"] }
+# Dependencies of the JBIG2 decoder carried in src/hayro_jbig2.
+fearless_simd = "1.0.0"
+hayro-ccitt = { version = "0.5.0", default-features = false }
 moxcms = { version = "0.9", default-features = false, features = ["lut"] }
 hayro-jpeg2000 = { version = "0.5", default-features = false, features = ["simd"] }
 md-5 = "0.11"

@@ -365,7 +365,7 @@ fn jbig2dec_walk(data: &[u8], diag: &Diagnostics) -> Walk {
 pub fn load_globals(
     data: &[u8],
     diag: &Diagnostics,
-) -> Result<Option<hayro_jbig2::Globals>, String> {
+) -> Result<Option<crate::hayro_jbig2::Globals>, String> {
     if data.is_empty() {
         return Ok(None);
     }
@@ -375,13 +375,13 @@ pub fn load_globals(
         return Err(fail());
     }
     let data = walk.patched.as_deref().unwrap_or(data);
-    hayro_jbig2::Globals::new(data, &hayro_jbig2::DecodeSettings::default())
+    crate::hayro_jbig2::Globals::new(data, &crate::hayro_jbig2::DecodeSettings::default())
         .map(Some)
         .map_err(|_| fail())
 }
 
 /// `fz_open_jbig2d` for an embedded stream.
-pub fn open(chain: Stream<'_>, globals: Option<hayro_jbig2::Globals>) -> Stream<'_> {
+pub fn open(chain: Stream<'_>, globals: Option<crate::hayro_jbig2::Globals>) -> Stream<'_> {
     let diag = chain.diag();
     Stream::new(
         Jbig2 {
@@ -396,7 +396,7 @@ pub fn open(chain: Stream<'_>, globals: Option<hayro_jbig2::Globals>) -> Stream<
 
 struct Jbig2<'a> {
     chain: Stream<'a>,
-    globals: Option<hayro_jbig2::Globals>,
+    globals: Option<crate::hayro_jbig2::Globals>,
     page: Option<Vec<u8>>,
     idx: usize,
 }
@@ -409,7 +409,7 @@ struct Rows {
     bit: usize,
 }
 
-impl hayro_jbig2::Decoder for Rows {
+impl crate::hayro_jbig2::Decoder for Rows {
     fn push_pixel(&mut self, black: bool) {
         if black && let Some(b) = self.data.get_mut(self.row * self.stride + self.bit / 8) {
             *b &= !(0x80 >> (self.bit % 8));
@@ -461,13 +461,13 @@ impl Jbig2<'_> {
             data = patched;
         }
         let header = data.starts_with(&FILE_ID);
-        let settings = hayro_jbig2::DecodeSettings::default();
+        let settings = crate::hayro_jbig2::DecodeSettings::default();
         let file;
         let page = if header {
-            file = hayro_jbig2::File::new(&data, &settings).map_err(|_| fail())?;
+            file = crate::hayro_jbig2::File::new(&data, &settings).map_err(|_| fail())?;
             file.page(0).ok_or_else(fail)?
         } else {
-            hayro_jbig2::Page::new_embedded(&data, self.globals.as_ref(), &settings)
+            crate::hayro_jbig2::Page::new_embedded(&data, self.globals.as_ref(), &settings)
                 .map_err(|_| fail())?
         };
         let (w, h) = (page.width() as usize, page.height() as usize);

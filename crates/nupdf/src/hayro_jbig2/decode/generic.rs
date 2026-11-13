@@ -3,11 +3,11 @@
 use super::{
     AdaptiveTemplatePixel, RegionBitmap, RegionSegmentInfo, Template, parse_region_segment_info,
 };
-use crate::ScratchBuffers;
-use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
-use crate::bitmap::{Bitmap, WORD_BITS, WORD_BYTES, WORD_SHIFT, Word};
-use crate::error::{ParseError, RegionError, Result, TemplateError, bail};
-use crate::reader::Reader;
+use crate::hayro_jbig2::ScratchBuffers;
+use crate::hayro_jbig2::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
+use crate::hayro_jbig2::bitmap::{Bitmap, WORD_BITS, WORD_BYTES, WORD_SHIFT, Word};
+use crate::hayro_jbig2::error::{ParseError, RegionError, Result, TemplateError, bail};
+use crate::hayro_jbig2::reader::Reader;
 
 /// Generic region decoding procedure (6.2).
 pub(crate) fn decode(
@@ -140,8 +140,14 @@ pub(crate) fn parse<'a>(
     // in the segment's region segment information field." (7.4.6.4)
     if had_unknown_length {
         // Length has already been validated during segment parsing.
-        let (head, tail) = data.split_at(data.len() - 4);
-        let row_count = u32::from_be_bytes(tail.try_into().unwrap());
+        // nupdf: checked here too, so that damaged data fails rather than panics.
+        let Some(split) = data.len().checked_sub(4) else {
+            bail!(RegionError::InvalidDimension);
+        };
+        let (head, tail) = data.split_at(split);
+        let mut count = [0u8; 4];
+        count.copy_from_slice(tail);
+        let row_count = u32::from_be_bytes(count);
 
         if row_count > region_info.height {
             bail!(RegionError::InvalidDimension);

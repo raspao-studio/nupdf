@@ -1,16 +1,16 @@
 //! Halftone region segment parsing and decoding (7.4.5, 6.6).
 
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
 use super::RegionBitmap;
 use super::pattern::PatternDictionary;
 use super::{CombinationOperator, RegionSegmentInfo, Template, parse_region_segment_info};
-use crate::ScratchBuffers;
-use crate::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS};
-use crate::error::{OverflowError, ParseError, RegionError, Result, bail};
-use crate::gray_scale::{GrayScaleParams, decode_gray_scale_image};
-use crate::reader::Reader;
+use crate::hayro_jbig2::ScratchBuffers;
+use crate::hayro_jbig2::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS};
+use crate::hayro_jbig2::error::{OverflowError, ParseError, RegionError, Result, bail};
+use crate::hayro_jbig2::gray_scale::{GrayScaleParams, decode_gray_scale_image};
+use crate::hayro_jbig2::reader::Reader;
 
 /// Decode a halftone region segment (7.4.5.2, 6.6).
 pub(crate) fn decode(
