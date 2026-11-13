@@ -15,6 +15,8 @@
 #   text        non-whitespace characters, `extract_text` with its defaults
 #   text-fast   the same with `extract_tables=False`, its speed-first mode
 #   render      pages with any non-white pixel, `render_pixmap` at 72 dpi
+#   render-png  pages written as PNG by `render_page` at 72 dpi (the bench
+#               counts the pages with ink from the files)
 #   tables      tables found by `extract_tables`
 #   annots      annotations `get_annotations` lists
 #   forms       fields `get_form_fields` lists
@@ -129,6 +131,15 @@ def main(op, path, out):
             if pm is not None and len(pm.data) and pm.data.count(255) != len(pm.data):
                 units += 1
             del pm
+    elif op == "render-png":
+        def page(i):
+            with open(f"{out}/p{i + 1}.png", "wb") as f:
+                f.write(doc.render_page(i, dpi=72))
+
+        # Pages with ink are counted by the bench from the files, as for
+        # the other tools' PNGs.
+        _, failed = per_page(doc, n, clock, None, page)
+        units = n - failed
     elif op in ("tables", "annots"):
         get = doc.extract_tables if op == "tables" else doc.get_annotations
         with open(out, "w", encoding="utf-8") as f:
