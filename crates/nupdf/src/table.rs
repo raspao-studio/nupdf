@@ -11,11 +11,13 @@
 //! are transcribed into `Table`, `TR` and `TD` structures with a grid
 //! block.
 
+use std::collections::HashMap;
+
 use crate::fma::Madd;
 use crate::geometry::Rect;
 use crate::stext::{
-    Block, GridBlock, GridDivider, GridPositions, StextLine, StextPage, TextBlock, char_flags,
-    vector_flags,
+    Block, GridBlock, GridDivider, GridPositions, StextLine, StextPage, TextBlock, VectorBlock,
+    char_flags, vector_flags,
 };
 use crate::stext_tree::{Iter, Kind, Lists, PAGE};
 
@@ -2331,10 +2333,9 @@ fn drop_contained(list: &mut [Potential], lo: usize, hi: usize, at: usize) -> us
     j
 }
 
-/// `cull_unhelpful_background_fills`: an opaque fill within another of the
-/// same color, with nothing between them over it, removed.
-fn cull_unhelpful_background_fills(t: &mut Lists) {
-    let opaque = |b: Option<&Block>| match b {
+/// A rectangle filled and not stroked.
+fn opaque_fill(b: Option<&Block>) -> Option<VectorBlock> {
+    match b {
         Some(Block::Vector(v))
             if v.flags & vector_flags::IS_RECTANGLE != 0
                 && v.flags & vector_flags::IS_STROKED == 0 =>
@@ -2342,7 +2343,60 @@ fn cull_unhelpful_background_fills(t: &mut Lists) {
             Some(*v)
         }
         _ => None,
-    };
+    }
+}
+
+/// `cull_unhelpful_background_fills`: an opaque fill within another of the
+/// same color, with nothing between them over it, removed.
+fn cull_unhelpful_background_fills(t: &mut Lists) {
+    if t.lists.len() == 1 {
+        cull_flat(t);
+    } else {
+        cull_walk(t);
+    }
+}
+
+/// [`cull_unhelpful_background_fills`] on a page without structure: the
+/// same fills removed, the ones that may lie within each found among
+/// those of its color rather than by walking the rest of the page after
+/// it. A page of a million blocks and tens of thousands of fills walked
+/// fourteen billion blocks (MuPDF walks them too).
+fn cull_flat(t: &mut Lists) {
+    let order = t.children(PAGE);
+    let boxes: Vec<Rect> = order.iter().map(|&n| t.bbox(n)).collect();
+    let fills: Vec<Option<VectorBlock>> = order.iter().map(|&n| opaque_fill(t.leaf(n))).collect();
+    let mut by_color: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (p, f) in fills.iter().enumerate() {
+        if let Some(v) = f {
+            by_color.entry(v.argb).or_default().push(p);
+        }
+    }
+    let mut kept = vec![true; order.len()];
+    for p in 0..order.len() {
+        let Some(v) = fills[p].filter(|v| kept[p] && v.argb >> 24 == 0xff) else {
+            continue;
+        };
+        let Some(same) = by_color.get(&v.argb) else {
+            continue;
+        };
+        for &q in &same[same.partition_point(|&q| q <= p)..] {
+            let within = fills[q].is_some_and(|v2| v.bbox.contains(v2.bbox));
+            if !kept[q] || !within {
+                continue;
+            }
+            let b2box = boxes[q];
+            let clear = (p + 1..q).all(|k| !kept[k] || b2box.intersect(boxes[k]).is_empty());
+            if clear && t.nodes[order[q]].prev.is_some() {
+                t.unlink(PAGE, order[q]);
+                kept[q] = false;
+            }
+        }
+    }
+}
+
+/// [`cull_unhelpful_background_fills`] as MuPDF walks it.
+fn cull_walk(t: &mut Lists) {
+    let opaque = opaque_fill;
     let mut iter = t.begin_dfs();
     let mut budget = t.nodes.len() * 4 + 4;
     while !t.eod_dfs(iter) {
@@ -3048,6 +3102,44 @@ mod tests {
         &["Pear", "10", "0.85"],
         &["Plum", "7", "2.05"],
     ];
+
+    #[test]
+    fn fills_are_culled_by_color_as_by_walking_the_page() {
+        // Fills of three colors, one not opaque, some stroked or not
+        // rectangles, nested and overlapping, with images between.
+        let mut seed = 12345u32;
+        let mut next = |n: u32| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) % n
+        };
+        let mut blocks = Vec::new();
+        for _ in 0..400 {
+            let (x, y) = (next(100) as f32, next(100) as f32);
+            let (w, h) = (next(60) as f32, next(60) as f32);
+            let bbox = Rect::new(x, y, x + w, y + h);
+            if next(8) == 0 {
+                blocks.push(Block::Image(crate::stext::ImageBlock {
+                    bbox,
+                    transform: crate::geometry::Matrix::IDENTITY,
+                }));
+                continue;
+            }
+            let flags = match next(6) {
+                0 => vector_flags::IS_STROKED | vector_flags::IS_RECTANGLE,
+                1 => 0,
+                _ => vector_flags::IS_RECTANGLE,
+            };
+            let argb = [0xff00_0000, 0xffff_ffff, 0x80ff_ffff][next(3) as usize];
+            blocks.push(Block::Vector(VectorBlock { bbox, flags, argb }));
+        }
+        let mut walked = Lists::new(blocks.clone());
+        cull_walk(&mut walked);
+        let mut flat = Lists::new(blocks.clone());
+        cull_flat(&mut flat);
+        let (walked, flat) = (walked.into_blocks(), flat.into_blocks());
+        assert!(walked.len() < blocks.len(), "nothing culled");
+        assert_eq!(format!("{flat:?}"), format!("{walked:?}"));
+    }
 
     #[test]
     fn candidates_find_the_same_looking_only_at_the_blocks_near_them() {
