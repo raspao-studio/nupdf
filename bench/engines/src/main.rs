@@ -162,6 +162,9 @@ mod nupdf_side {
                             None,
                             store,
                             true,
+                            // Page contents only, as pdf_oxide renders here
+                            // (render_annotations: false).
+                            nupdf::page_run::Parts::CONTENTS,
                         ),
                         Err(e) => (Err(e.clone()), store),
                     };
