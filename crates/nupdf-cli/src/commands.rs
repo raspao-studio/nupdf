@@ -506,10 +506,18 @@ pub fn sanitize(
             .unwrap_or(0);
         counts.insert(f.kind.into(), (n + 1).into());
     }
-    // The output, read back and scanned again: nothing may be left.
+    // The output, read back and scanned again: nothing may be left. A save
+    // that said nothing is the one written: the same document saves the
+    // same again, and a large one takes long to.
+    let mut saved = None;
     let left = if plan.verify {
-        let bytes = nupdf::write::save(doc, &plan.options)
-            .map_err(|e| input_failure("input.unloadable_object", e.message))?;
+        let (bytes, said) = nupdf::diag::capture(|| nupdf::write::save(doc, &plan.options));
+        let quiet = said.is_empty();
+        doc.diagnostics().replay(said);
+        let bytes = bytes.map_err(|e| input_failure("input.unloadable_object", e.message))?;
+        if quiet {
+            saved = Some(bytes.clone());
+        }
         let out = Document::open(bytes).map_err(|e| {
             input_failure("verify.failed", format!("the output does not open: {e:?}"))
         })?;
@@ -554,7 +562,7 @@ pub fn sanitize(
         "counts": counts,
         "clean": left.as_ref().map(Vec::is_empty),
     });
-    write_document(doc, facts, &plan, "nupdf.sanitize/v1", body)
+    super::write_saved(doc, facts, &plan, "nupdf.sanitize/v1", body, saved)
 }
 
 /// `flatten`: annotations and form fields drawn into their pages and

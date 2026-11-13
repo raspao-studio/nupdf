@@ -2313,7 +2313,20 @@ fn write_document(
     schema: &str,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, Failure> {
-    let (output, verification) = save_checked(doc, plan)?;
+    write_saved(doc, facts, plan, schema, body, None)
+}
+
+/// [`write_document`], with the bytes a save of `doc` as it is now gave
+/// when the command has them already.
+fn write_saved(
+    doc: &Document,
+    facts: &FileFacts,
+    plan: &Clean,
+    schema: &str,
+    body: serde_json::Value,
+    saved: Option<Vec<u8>>,
+) -> Result<serde_json::Value, Failure> {
+    let (output, verification) = save_checked_from(doc, plan, saved)?;
     let mut fields = serde_json::Map::new();
     fields.insert("applied".into(), plan.apply.into());
     if let serde_json::Value::Object(b) = body {
@@ -2335,6 +2348,15 @@ fn save_checked(
     doc: &Document,
     plan: &Clean,
 ) -> Result<(serde_json::Value, serde_json::Value), Failure> {
+    save_checked_from(doc, plan, None)
+}
+
+/// [`save_checked`], with the bytes of a save already made, if any.
+fn save_checked_from(
+    doc: &Document,
+    plan: &Clean,
+    saved: Option<Vec<u8>>,
+) -> Result<(serde_json::Value, serde_json::Value), Failure> {
     // pdf_clean_file: "cannot authenticate password".
     if doc.needs_password() && plan.password.is_none() {
         return Err(Failure {
@@ -2343,24 +2365,27 @@ fn save_checked(
             message: "the empty password does not open the document: pass --password".into(),
         });
     }
-    let bytes = nupdf::write::save(doc, &plan.options).map_err(|e| {
-        let message =
-            nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default()).to_string();
-        // MuPDF's refusals of an incremental write are argument errors.
-        if plan.options.incremental && message.starts_with("Can't do incremental") {
-            Failure {
-                exit: Exit::Usage,
-                code: "usage.incremental",
-                message,
+    let saved = saved.map(Ok);
+    let bytes = saved
+        .unwrap_or_else(|| nupdf::write::save(doc, &plan.options))
+        .map_err(|e| {
+            let message = nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
+                .to_string();
+            // MuPDF's refusals of an incremental write are argument errors.
+            if plan.options.incremental && message.starts_with("Can't do incremental") {
+                Failure {
+                    exit: Exit::Usage,
+                    code: "usage.incremental",
+                    message,
+                }
+            } else {
+                Failure {
+                    exit: Exit::Input,
+                    code: "input.unloadable_object",
+                    message,
+                }
             }
-        } else {
-            Failure {
-                exit: Exit::Input,
-                code: "input.unloadable_object",
-                message,
-            }
-        }
-    })?;
+        })?;
     let verification = plan.verify.then(|| {
         let v = nupdf::write::verify(doc, &bytes, plan.password, &plan.options);
         if v.verified() {
