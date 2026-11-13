@@ -2683,6 +2683,60 @@ fn navigation_reports_outline_labels_links_and_attachments() {
     assert_eq!(none["attachments"], serde_json::json!([]));
 }
 
+/// A page with a FileAttachment annotation that embeds budget.csv, and no
+/// /EmbeddedFiles tree.
+fn annotation_attachment_pdf(name: &str) -> PathBuf {
+    let data = "a,b\n1,2\n";
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Annots [4 0 R] >>".to_string(),
+        "<< /Type /Annot /Subtype /FileAttachment /Rect [10 10 30 30] /Contents (the budget) \
+         /FS 5 0 R >>"
+            .to_string(),
+        "<< /Type /Filespec /F (budget.csv) /UF (budget.csv) /EF << /F 6 0 R >> >>".to_string(),
+        format!(
+            "<< /Type /EmbeddedFile /Subtype /text#2Fcsv /Params << /Size {} >> /Length {} >>\nstream\n{data}\nendstream",
+            data.len(),
+            data.len()
+        ),
+    ];
+    let mut pdf = String::from("%PDF-1.7\n");
+    for (i, o) in objs.iter().enumerate() {
+        pdf.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+    }
+    pdf.push_str("trailer\n<< /Size 7 /Root 1 0 R >>\n");
+    let path = scratch(name);
+    std::fs::write(&path, pdf).unwrap();
+    path
+}
+
+#[test]
+fn files_attached_to_annotations_are_listed_and_extracted() {
+    let path = annotation_attachment_pdf("annot-attachment.pdf");
+    let file = path.to_str().unwrap();
+    // `annots` names the file, as `getFilespec` and `getFilespecParams` read it.
+    let annots = report_of(&["annots", file]);
+    let a = &annots["pages"][0]["annots"][0];
+    assert_eq!(a["type"], "FileAttachment");
+    assert_eq!(a["file"]["filename"], "budget.csv");
+    assert_eq!(a["file"]["embedded"], true);
+    assert_eq!(a["file"]["mimetype"], "text/csv");
+    // `attachments` keeps the name tree's list as MuPDF's, and adds the
+    // annotations' files beside it.
+    let dir = scratch("annot-attachment-out");
+    let _ = std::fs::remove_dir_all(&dir);
+    let found = report_of(&["attachments", file, "--extract", dir.to_str().unwrap()]);
+    assert_eq!(found["attachments"], serde_json::json!([]));
+    let b = &found["annotation_attachments"][0];
+    assert_eq!(b["annot"], "p1.a1");
+    assert_eq!(b["page"], 1);
+    assert_eq!(b["filename"], "budget.csv");
+    assert_eq!(b["length"], 8);
+    let written = std::fs::read(dir.join(b["file"].as_str().unwrap())).unwrap();
+    assert_eq!(written, b"a,b\n1,2\n");
+}
+
 /// A page with a ruled 3x3 table: a header row and two rows of numbers.
 fn table_pdf(name: &str) -> PathBuf {
     let rows = [

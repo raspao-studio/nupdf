@@ -131,6 +131,16 @@ for (var i = 0; i < n; i++) {
       if (a.hasVertices()) v.vertices = a.getVertices();
       if (a.hasQuadPoints()) v.quad_points = a.getQuadPoints();
       if (a.hasInkList()) v.ink_list = a.getInkList();
+      if (a.hasFilespec()) {
+        var fs = a.getFilespec();
+        var p = doc.getFilespecParams(fs);
+        v.file = {
+          filename: p.filename === undefined ? null : p.filename,
+          embedded: doc.isEmbeddedFile(fs),
+          mimetype: p.mimetype === undefined ? null : p.mimetype,
+          size: p.size === undefined ? null : p.size,
+        };
+      }
       if (synthesize) v.synthesis = made[k] ? synthesis(a, before[k]) : null;
       entry.annots.push(v);
     }
