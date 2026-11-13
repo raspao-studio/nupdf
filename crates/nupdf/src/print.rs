@@ -83,8 +83,45 @@ impl Fmt<'_> {
     }
 
     fn puts(&mut self, s: &[u8]) {
-        for &c in s {
-            self.putc(c);
+        let Some((&first, rest)) = s.split_first() else {
+            return;
+        };
+        self.putc(first);
+        self.more(rest);
+    }
+
+    /// The rest of a token [`Fmt::putc`] began: no separator is pending
+    /// after a character, so each is `putc`'s plain append.
+    fn more(&mut self, s: &[u8]) {
+        let Some(&last) = s.last() else {
+            return;
+        };
+        self.out.extend_from_slice(s);
+        self.col = match s.iter().rposition(|&c| c == b'\n') {
+            Some(i) => s.len() - 1 - i,
+            None => self.col + s.len(),
+        };
+        self.last = last;
+    }
+
+    /// An integer, as `%d` writes it.
+    fn int(&mut self, v: i64) {
+        let mut buf = [0u8; 20];
+        let mut at = buf.len();
+        let mut n = v.unsigned_abs();
+        loop {
+            at -= 1;
+            buf[at] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        if v < 0 {
+            self.putc(b'-');
+            self.more(&buf[at..]);
+        } else {
+            self.puts(&buf[at..]);
         }
     }
 
@@ -94,33 +131,38 @@ impl Fmt<'_> {
         }
     }
 
+    /// A string's bytes, after its `(`.
     fn str_out(&mut self, s: &[u8]) {
+        let mut out = Vec::with_capacity(s.len());
         for &c in s {
             match c {
-                b'\n' => self.puts(b"\\n"),
-                b'\r' => self.puts(b"\\r"),
-                b'\t' => self.puts(b"\\t"),
-                8 => self.puts(b"\\b"),
-                12 => self.puts(b"\\f"),
-                b'(' => self.puts(b"\\("),
-                b')' => self.puts(b"\\)"),
-                b'\\' => self.puts(b"\\\\"),
-                c if !(32..127).contains(&c) => {
-                    self.putc(b'\\');
-                    self.putc(b'0' + ((c / 64) & 7));
-                    self.putc(b'0' + ((c / 8) & 7));
-                    self.putc(b'0' + (c & 7));
-                }
-                c => self.putc(c),
+                b'\n' => out.extend_from_slice(b"\\n"),
+                b'\r' => out.extend_from_slice(b"\\r"),
+                b'\t' => out.extend_from_slice(b"\\t"),
+                8 => out.extend_from_slice(b"\\b"),
+                12 => out.extend_from_slice(b"\\f"),
+                b'(' => out.extend_from_slice(b"\\("),
+                b')' => out.extend_from_slice(b"\\)"),
+                b'\\' => out.extend_from_slice(b"\\\\"),
+                c if !(32..127).contains(&c) => out.extend_from_slice(&[
+                    b'\\',
+                    b'0' + ((c / 64) & 7),
+                    b'0' + ((c / 8) & 7),
+                    b'0' + (c & 7),
+                ]),
+                c => out.push(c),
             }
         }
+        self.more(&out);
     }
 
+    /// A string's bytes in hex, after its `<`.
     fn hex_out(&mut self, s: &[u8]) {
-        for &b in s {
-            self.putc(hex_digit(b >> 4));
-            self.putc(hex_digit(b & 15));
-        }
+        let out: Vec<u8> = s
+            .iter()
+            .flat_map(|&b| [hex_digit(b >> 4), hex_digit(b & 15)])
+            .collect();
+        self.more(&out);
     }
 
     fn string(&mut self, s: &[u8]) {
@@ -145,14 +187,21 @@ impl Fmt<'_> {
     fn name(&mut self, n: &[u8]) {
         self.putc(b'/');
         // MuPDF's names are C strings.
-        for &c in n.iter().take_while(|&&c| c != 0) {
-            if is_delim(c) || is_white(c) || c == b'#' || !(32..127).contains(&c) {
-                self.putc(b'#');
-                self.putc(hex_digit(c >> 4));
-                self.putc(hex_digit(c & 15));
-            } else {
-                self.putc(c);
+        let n = n.split(|&c| c == 0).next().unwrap_or_default();
+        if n.iter()
+            .all(|&c| !(is_delim(c) || is_white(c) || c == b'#' || !(32..127).contains(&c)))
+        {
+            self.more(n);
+        } else {
+            let mut out = Vec::with_capacity(n.len() + 8);
+            for &c in n {
+                if is_delim(c) || is_white(c) || c == b'#' || !(32..127).contains(&c) {
+                    out.extend_from_slice(&[b'#', hex_digit(c >> 4), hex_digit(c & 15)]);
+                } else {
+                    out.push(c);
+                }
             }
+            self.more(&out);
         }
         self.sep = true;
     }
@@ -252,11 +301,14 @@ impl Fmt<'_> {
                 self.sep = true;
             }
             Object::Ref(r) => {
-                self.puts(format!("{} {} R", r.num, r.generation).as_bytes());
+                self.int(i64::from(r.num));
+                self.putc(b' ');
+                self.int(i64::from(r.generation));
+                self.puts(b" R");
                 self.sep = true;
             }
             Object::Int(i) => {
-                self.puts(i.to_string().as_bytes());
+                self.int(*i);
                 self.sep = true;
             }
             Object::Real(f) => {
@@ -668,13 +720,78 @@ fn grisu(v: f32) -> (Vec<u8>, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object::ObjRef;
+    use crate::object::{Dict, ObjRef};
     use std::sync::Arc;
 
     fn real(f: f32) -> String {
         let mut out = Vec::new();
         format_real(f, &mut out);
         String::from_utf8(out).unwrap_or_default()
+    }
+
+    /// Tokens of every kind side by side, tight and spaced, as the
+    /// writer and the comparisons print them.
+    fn sampler() -> Object {
+        let d = |entries: Vec<(&[u8], Object)>| {
+            let mut d = Dict::new();
+            for (k, v) in entries {
+                d.put(k, v);
+            }
+            Object::Dict(Arc::new(d))
+        };
+        let s = |b: &[u8]| Object::String(Arc::from(b));
+        let n = |b: &[u8]| Object::Name(Arc::from(b));
+        let mut long = Vec::new();
+        for i in 0..40 {
+            long.push(Object::Int(i * 1_234_567 - 9_000_000));
+            long.push(n(b"N"));
+            long.push(s(b"line\nbreak (x) \\ \t\x08\x0c\x01\xff"));
+        }
+        d(vec![
+            (b"Type", n(b"Page")),
+            (b"A", Object::Array(Arc::new(long))),
+            (b"Odd#Key", n(b"a b/c#d\x7f\x00tail")),
+            (b"Min", Object::Int(i64::MIN)),
+            (b"Max", Object::Int(i64::MAX)),
+            (b"Zero", Object::Int(0)),
+            (b"R", Object::Ref(ObjRef::new(12, 3))),
+            (b"Hex", s(b"\xfe\xff\x00A")),
+            (b"Bin", s(&[0, 1, 2, 3, 200, 201])),
+            (b"Empty", s(b"")),
+            (b"EmptyName", n(b"")),
+            (
+                b"Nested",
+                d(vec![(
+                    b"K",
+                    Object::Array(Arc::new(vec![
+                        Object::Null,
+                        Object::Bool(true),
+                        Object::Real(-0.5),
+                        n(b"X"),
+                        Object::Int(-7),
+                    ])),
+                )]),
+            ),
+        ])
+    }
+
+    #[test]
+    fn tokens_print_byte_for_byte_as_mupdf_writes_them() {
+        let obj = sampler();
+        for (tight, ascii) in [(true, false), (false, false), (true, true), (false, true)] {
+            let mut out = Vec::new();
+            print(&obj, Options { tight, ascii }, &mut out);
+            let mut crc = flate2::Crc::new();
+            crc.update(&out);
+            // From the printer before it wrote a token's characters at once.
+            let want = [
+                (2398, 0x984b_5cf6),
+                (2836, 0x9696_fa6b),
+                (2064, 0xee0b_0e6e),
+                (2424, 0x9aae_19dd),
+            ][usize::from(tight) * 2 + usize::from(ascii)];
+            assert_eq!((out.len(), crc.sum()), want, "tight {tight} ascii {ascii}");
+        }
     }
 
     #[test]
