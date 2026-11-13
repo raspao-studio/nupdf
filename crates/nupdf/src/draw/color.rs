@@ -90,6 +90,14 @@ impl Converter {
                 _ => {}
             }
         }
+        if !self.icc && cs.family() == Some(Family::Lab) {
+            // MuPDF's formulas for Lab without color management.
+            let v = |i: usize| color.get(i).copied().unwrap_or(0.0);
+            if gray {
+                return [v(0) / 100.0, 0.0, 0.0];
+            }
+            return lab_to_rgb([v(0), v(1), v(2)]);
+        }
         let rgb = cs.device_to_rgb(color);
         if gray {
             return [gray_from(cs, color, rgb), 0.0, 0.0];
@@ -112,7 +120,10 @@ impl Converter {
         let out = std::cell::Cell::new(None);
         let rgb = cs.to_rgb_with(doc, color, &|leaf, c| {
             let v = |i: usize| c.get(i).copied().unwrap_or(0.0);
-            let rgb = leaf.device_to_rgb(c);
+            let rgb = match leaf.family() {
+                Some(Family::Lab) => lab_to_rgb([v(0), v(1), v(2)]),
+                _ => leaf.device_to_rgb(c),
+            };
             out.set(Some(match leaf.family() {
                 Some(Family::Gray) => [0.0, 0.0, 0.0, 1.0 - v(0)],
                 Some(Family::Cmyk) => [v(0), v(1), v(2), v(3)],
@@ -144,6 +155,29 @@ impl Converter {
             _ => self.leaf(cs, color, ri, true)[0],
         }
     }
+}
+
+/// `lab_to_rgb` (color-fast.c): MuPDF's formula for Lab (L 0..100, a and
+/// b -128..127) into RGB without color management.
+pub fn lab_to_rgb(lab: [f32; 3]) -> [f32; 3] {
+    use crate::fma::Madd;
+    let fung = |x: f32| {
+        if x >= 6.0 / 29.0 {
+            x * x * x
+        } else {
+            (108.0 / 841.0) * (x - (4.0 / 29.0))
+        }
+    };
+    let m = (lab[0] + 16.0) / 116.0;
+    let l = m + lab[1] / 500.0;
+    let n = m - lab[2] / 200.0;
+    let (x, y, z) = (fung(l), fung(m), fung(n));
+    // `a * x + b * y + c * z` as clang fuses it.
+    let row = |a: f32, b: f32, c: f32| c.madd(z, a.madd(x, b * y));
+    let r = row(3.240449, -1.537136, -0.498531) * 0.830026;
+    let g = row(-0.969265, 1.876011, 0.041556) * 1.05452;
+    let b = row(0.055643, -0.204026, 1.057229) * 1.1003;
+    [r, g, b].map(|v| v.clamp(0.0, 1.0).sqrt())
 }
 
 /// `rgb_to_cmyk`: black is the least of the inks.
