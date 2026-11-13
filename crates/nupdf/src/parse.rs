@@ -8,7 +8,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::lex::{Lexer, Token};
+use crate::lex::{Lexer, RawToken, Token};
 use crate::object::{Dict, MAX_OBJECT_NUMBER, ObjRef, Object};
 
 /// Nesting limit for arrays and dictionaries. MuPDF recurses without one;
@@ -33,11 +33,13 @@ pub fn parse_array(lx: &mut Lexer, depth: usize) -> Result<Vec<Object>, SyntaxEr
         return err("nesting too deep");
     }
     let mut out = Vec::new();
+    // Names and strings are lexed into one buffer, kept from token to token.
+    let mut buf = Vec::new();
     // Up to two pending integers that may turn out to be "a b R".
     let (mut a, mut b, mut n) = (0i64, 0i64, 0u8);
     loop {
-        let tok = lx.next_token();
-        if !matches!(tok, Token::Int(_) | Token::R) {
+        let tok = lx.next_raw(&mut buf);
+        if !matches!(tok, RawToken::Int(_) | RawToken::R) {
             if n > 0 {
                 out.push(Object::Int(a));
             }
@@ -46,15 +48,15 @@ pub fn parse_array(lx: &mut Lexer, depth: usize) -> Result<Vec<Object>, SyntaxEr
             }
             n = 0;
         }
-        if matches!(tok, Token::Int(_)) && n == 2 {
+        if matches!(tok, RawToken::Int(_)) && n == 2 {
             out.push(Object::Int(a));
             a = b;
             n -= 1;
         }
         match tok {
-            Token::Eof => return err("array not closed before end of file"),
-            Token::CloseArray => return Ok(out),
-            Token::Int(i) => {
+            RawToken::Eof => return err("array not closed before end of file"),
+            RawToken::CloseArray => return Ok(out),
+            RawToken::Int(i) => {
                 if n == 0 {
                     a = i;
                 }
@@ -63,20 +65,20 @@ pub fn parse_array(lx: &mut Lexer, depth: usize) -> Result<Vec<Object>, SyntaxEr
                 }
                 n += 1;
             }
-            Token::R => {
+            RawToken::R => {
                 if n != 2 {
                     return err("cannot parse indirect reference in array");
                 }
                 out.push(Object::Ref(ObjRef::from_i64(a, b)));
                 n = 0;
             }
-            Token::OpenArray => out.push(Object::Array(Arc::new(parse_array(lx, depth + 1)?))),
-            Token::OpenDict => out.push(Object::Dict(Arc::new(parse_dict(lx, depth + 1)?))),
-            Token::Name(name) => out.push(Object::Name(Arc::from(name))),
-            Token::Real(f) => out.push(Object::Real(f)),
-            Token::String(s) => out.push(Object::String(Arc::from(s))),
-            Token::True => out.push(Object::Bool(true)),
-            Token::False => out.push(Object::Bool(false)),
+            RawToken::OpenArray => out.push(Object::Array(Arc::new(parse_array(lx, depth + 1)?))),
+            RawToken::OpenDict => out.push(Object::Dict(Arc::new(parse_dict(lx, depth + 1)?))),
+            RawToken::Name => out.push(Object::Name(Arc::from(&buf[..]))),
+            RawToken::Real(f) => out.push(Object::Real(f)),
+            RawToken::String => out.push(Object::String(Arc::from(&buf[..]))),
+            RawToken::True => out.push(Object::Bool(true)),
+            RawToken::False => out.push(Object::Bool(false)),
             _ => out.push(Object::Null),
         }
     }
@@ -87,39 +89,42 @@ pub fn parse_dict(lx: &mut Lexer, depth: usize) -> Result<Dict, SyntaxError> {
         return err("nesting too deep");
     }
     let mut dict = Dict::new();
-    let mut tok = lx.next_token();
+    // Names and strings are lexed into one buffer, kept from token to token.
+    let mut buf = Vec::new();
+    let is_id = |tok: RawToken, buf: &[u8]| tok == RawToken::Keyword && buf == b"ID";
+    let mut tok = lx.next_raw(&mut buf);
     loop {
-        if tok == Token::CloseDict {
+        if tok == RawToken::CloseDict {
             return Ok(dict);
         }
         // Inline images: "BI <dict> ID" ends the dictionary.
-        if tok.is_keyword(b"ID") {
+        if is_id(tok, &buf) {
             return Ok(dict);
         }
-        let Token::Name(key) = tok else {
+        if tok != RawToken::Name {
             return err("invalid key in dict");
-        };
-        let key: Arc<[u8]> = Arc::from(key);
+        }
+        let key: Arc<[u8]> = Arc::from(&buf[..]);
 
-        let value = match lx.next_token() {
-            Token::OpenArray => Object::Array(Arc::new(parse_array(lx, depth + 1)?)),
-            Token::OpenDict => Object::Dict(Arc::new(parse_dict(lx, depth + 1)?)),
-            Token::Name(n) => Object::Name(Arc::from(n)),
-            Token::Real(f) => Object::Real(f),
-            Token::String(s) => Object::String(Arc::from(s)),
-            Token::True => Object::Bool(true),
-            Token::False => Object::Bool(false),
-            Token::Null => Object::Null,
-            Token::Int(a) => {
-                let next = lx.next_token();
-                if matches!(next, Token::CloseDict | Token::Name(_)) || next.is_keyword(b"ID") {
+        let value = match lx.next_raw(&mut buf) {
+            RawToken::OpenArray => Object::Array(Arc::new(parse_array(lx, depth + 1)?)),
+            RawToken::OpenDict => Object::Dict(Arc::new(parse_dict(lx, depth + 1)?)),
+            RawToken::Name => Object::Name(Arc::from(&buf[..])),
+            RawToken::Real(f) => Object::Real(f),
+            RawToken::String => Object::String(Arc::from(&buf[..])),
+            RawToken::True => Object::Bool(true),
+            RawToken::False => Object::Bool(false),
+            RawToken::Null => Object::Null,
+            RawToken::Int(a) => {
+                let next = lx.next_raw(&mut buf);
+                if matches!(next, RawToken::CloseDict | RawToken::Name) || is_id(next, &buf) {
                     dict.insert(key, Object::Int(a));
                     tok = next;
                     continue;
                 }
                 let mut value = None;
-                if let Token::Int(b) = next
-                    && lx.next_token() == Token::R
+                if let RawToken::Int(b) = next
+                    && lx.next_raw(&mut buf) == RawToken::R
                 {
                     value = Some(Object::Ref(ObjRef::from_i64(a, b)));
                 }
@@ -137,7 +142,7 @@ pub fn parse_dict(lx: &mut Lexer, depth: usize) -> Result<Dict, SyntaxError> {
             _ => Object::Null,
         };
         dict.insert(key, value);
-        tok = lx.next_token();
+        tok = lx.next_raw(&mut buf);
     }
 }
 
