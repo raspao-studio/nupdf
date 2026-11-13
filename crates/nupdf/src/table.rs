@@ -517,9 +517,9 @@ fn is_header(standard: &str) -> bool {
 
 /// `all_blocks_are_justified_or_headers`: a column of justified text,
 /// with headings but not only headings.
-fn all_justified_or_headers(t: &Lists, list: usize, bounds: Rect) -> bool {
+fn all_justified_or_headers(t: &Lists, near: Option<&Near>, list: usize, bounds: Rect) -> bool {
     let mut just_headers = true;
-    for n in t.children(list) {
+    for n in blocks(t, near, list, |near| near.across(bounds)) {
         if t.bbox(n).intersect(bounds).is_empty() {
             continue;
         }
@@ -527,7 +527,7 @@ fn all_justified_or_headers(t: &Lists, list: usize, bounds: Rect) -> bool {
             if is_header(t.lists[d].standard) {
                 continue;
             }
-            if !all_justified_or_headers(t, d, bounds) {
+            if !all_justified_or_headers(t, near, d, bounds) {
                 return false;
             }
         }
@@ -554,16 +554,17 @@ fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
 /// `walk_to_find_content`: where text starts and stops, across and down.
 fn walk_to_find_content(
     t: &Lists,
+    near: Option<&Near>,
     xs: &mut Vec<Edge>,
     ys: &mut Vec<Edge>,
     list: usize,
     bounds: Rect,
     depth: usize,
 ) {
-    for n in t.children(list) {
+    for n in blocks(t, near, list, |near| near.across(bounds)) {
         if let Some(d) = t.down(n) {
             if depth < 64 && !bounds.intersect(t.bbox(n)).is_empty() {
-                walk_to_find_content(t, xs, ys, d, bounds, depth + 1);
+                walk_to_find_content(t, near, xs, ys, d, bounds, depth + 1);
             }
             continue;
         }
@@ -665,15 +666,16 @@ enum Background {
 /// outside it reaches into.
 fn whittle_background(
     t: &Lists,
+    near: Option<&Near>,
     list: usize,
     mut obounds: Rect,
     bounds: Rect,
     depth: usize,
 ) -> Rect {
-    for n in t.children(list) {
+    for n in blocks(t, near, list, |near| near.across_or_down(bounds)) {
         if let Some(d) = t.down(n) {
             if depth < 64 {
-                obounds = whittle_background(t, d, obounds, bounds, depth + 1);
+                obounds = whittle_background(t, near, d, obounds, bounds, depth + 1);
             }
             continue;
         }
@@ -705,6 +707,7 @@ fn whittle_background(
 /// before any content inside, which the table is then stretched to.
 fn background_hunt(
     t: &Lists,
+    near: Option<&Near>,
     g: &mut Grid,
     list: usize,
     bounds: Rect,
@@ -713,10 +716,11 @@ fn background_hunt(
 ) -> Background {
     let outside =
         |r: Rect| r.x0 < obounds.x0 || r.x1 > obounds.x1 || r.y0 < obounds.y0 || r.y1 > obounds.y1;
-    for n in t.children(list) {
+    let gbounds = g.bounds;
+    for n in blocks(t, near, list, |near| near.across(gbounds)) {
         if let Some(d) = t.down(n) {
             if depth < 64 {
-                let found = background_hunt(t, g, d, bounds, obounds, depth + 1);
+                let found = background_hunt(t, near, g, d, bounds, obounds, depth + 1);
                 if found != Background::KeepSearching {
                     return found;
                 }
@@ -781,7 +785,7 @@ fn background_hunt(
 }
 
 /// `walk_for_background`.
-fn walk_for_background(t: &Lists, g: &mut Grid, list: usize) -> Background {
+fn walk_for_background(t: &Lists, near: Option<&Near>, g: &mut Grid, list: usize) -> Background {
     let (xl, yl) = (g.xpos.list.len(), g.ypos.list.len());
     let bounds = Rect::new(
         g.xpos.list[0].min,
@@ -789,8 +793,8 @@ fn walk_for_background(t: &Lists, g: &mut Grid, list: usize) -> Background {
         g.xpos.list[xl - 1].max,
         g.ypos.list[yl - 1].max,
     );
-    let obounds = whittle_background(t, list, Rect::INFINITE, bounds, 0);
-    background_hunt(t, g, list, bounds, obounds, 0)
+    let obounds = whittle_background(t, near, list, Rect::INFINITE, bounds, 0);
+    background_hunt(t, near, g, list, bounds, obounds, 0)
 }
 
 // ---- grid lines -----------------------------------------------------------
@@ -835,9 +839,10 @@ fn collate_small_vector_run(t: &Lists, at: &mut usize) -> Rect {
     r
 }
 
-/// `walk_grid_lines` (`mark` false: dividers placed and reinforced) and
-/// `walk_grid_lines2` (`mark` true: cell borders recorded).
-fn walk_grid_lines(t: &Lists, g: &mut Grid, list: usize, mark: bool, depth: usize) {
+/// The rectangles `walk_grid_lines` looks at, in its order: each
+/// unstyled rectangle with the run of small vectors after it that it
+/// collates into one.
+fn grid_runs(t: &Lists, list: usize, depth: usize, out: &mut Vec<Rect>) {
     let mut at = t.lists[list].first;
     let mut budget = t.nodes.len() + 1;
     while let Some(mut n) = at {
@@ -847,7 +852,7 @@ fn walk_grid_lines(t: &Lists, g: &mut Grid, list: usize, mark: bool, depth: usiz
         budget -= 1;
         if let Some(d) = t.down(n) {
             if depth < 64 {
-                walk_grid_lines(t, g, d, mark, depth + 1);
+                grid_runs(t, d, depth + 1, out);
             }
             at = t.nodes[n].next;
             continue;
@@ -856,32 +861,232 @@ fn walk_grid_lines(t: &Lists, g: &mut Grid, list: usize, mark: bool, depth: usiz
             && v.flags & vector_flags::IS_RECTANGLE != 0
             && v.flags & VECTOR_STYLED == 0
         {
-            let r = collate_small_vector_run(t, &mut n).intersect(g.bounds);
-            if r.is_valid() {
-                let (w, h) = (r.x1 - r.x0, r.y1 - r.y0);
-                if w > h && h < 2.0 {
-                    if mark {
-                        g.h_line2(r.x0, r.x1, r.y0, r.y1);
-                    } else {
-                        g.find(true, (r.y0 + r.y1) / 2.0, false);
-                    }
-                } else if w < h && w < 2.0 {
-                    if mark {
-                        g.v_line2(r.y0, r.y1, r.x0, r.x1);
-                    } else {
-                        g.find(false, (r.x0 + r.x1) / 2.0, false);
-                    }
-                } else if mark {
-                    g.hv_line2(r.x0, r.x1, r.y0, r.y1);
-                } else {
-                    g.find(false, r.x0, false);
-                    g.find(false, r.x1, false);
-                    g.find(true, r.y0, false);
-                    g.find(true, r.y1, false);
-                }
-            }
+            out.push(collate_small_vector_run(t, &mut n));
         }
         at = t.nodes[n].next;
+    }
+}
+
+/// `walk_grid_lines` (`mark` false: dividers placed and reinforced) and
+/// `walk_grid_lines2` (`mark` true: cell borders recorded), over the
+/// rectangles [`grid_runs`] gives.
+fn walk_grid_lines(t: &Lists, near: Option<&Near>, g: &mut Grid, list: usize, mark: bool) {
+    let mut own = Vec::new();
+    let (runs, picked) = match near {
+        Some(near) => (
+            &near.runs[..],
+            near.runs_across.query(g.bounds.y0, g.bounds.y1, g.bounds),
+        ),
+        None => {
+            grid_runs(t, list, 0, &mut own);
+            (&own[..], None)
+        }
+    };
+    let picked = picked.unwrap_or_else(|| (0..runs.len() as u32).collect());
+    for i in picked {
+        let r = runs[i as usize].intersect(g.bounds);
+        if !r.is_valid() {
+            continue;
+        }
+        let (w, h) = (r.x1 - r.x0, r.y1 - r.y0);
+        if w > h && h < 2.0 {
+            if mark {
+                g.h_line2(r.x0, r.x1, r.y0, r.y1);
+            } else {
+                g.find(true, (r.y0 + r.y1) / 2.0, false);
+            }
+        } else if w < h && w < 2.0 {
+            if mark {
+                g.v_line2(r.y0, r.y1, r.x0, r.x1);
+            } else {
+                g.find(false, (r.x0 + r.x1) / 2.0, false);
+            }
+        } else if mark {
+            g.hv_line2(r.x0, r.x1, r.y0, r.y1);
+        } else {
+            g.find(false, r.x0, false);
+            g.find(false, r.x1, false);
+            g.find(true, r.y0, false);
+            g.find(true, r.y1, false);
+        }
+    }
+}
+
+// ---- where the blocks are -------------------------------------------------
+
+/// Spans along one axis, kept by the stretch of the axis they reach into,
+/// so that those meeting a stretch are found without looking at the rest.
+struct Bands {
+    lo: f32,
+    step: f32,
+    buckets: Vec<Vec<u32>>,
+    /// Spans without finite ends, and long ones: always among those found.
+    always: Vec<u32>,
+    count: u32,
+}
+
+impl Bands {
+    /// `spans[i]` is item i's extent, either way round; None when it has
+    /// none that can be placed.
+    fn new(spans: &[Option<(f32, f32)>]) -> Bands {
+        let finite = |s: &Option<(f32, f32)>| s.filter(|(a, b)| a.is_finite() && b.is_finite());
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for (a, b) in spans.iter().filter_map(finite) {
+            lo = lo.min(a.min(b));
+            hi = hi.max(a.max(b));
+        }
+        let k = (spans.len() / 4).clamp(1, 4096);
+        let step = if hi > lo { (hi - lo) / k as f32 } else { 1.0 };
+        let mut bands = Bands {
+            lo,
+            step,
+            buckets: vec![Vec::new(); k],
+            always: Vec::new(),
+            count: spans.len() as u32,
+        };
+        for (i, s) in spans.iter().enumerate() {
+            match finite(s) {
+                Some((a, b)) => {
+                    let (b0, b1) = (bands.bucket(a.min(b)), bands.bucket(a.max(b)));
+                    if b1 - b0 > k / 8 {
+                        bands.always.push(i as u32);
+                    } else {
+                        for bucket in &mut bands.buckets[b0..=b1] {
+                            bucket.push(i as u32);
+                        }
+                    }
+                }
+                None => bands.always.push(i as u32),
+            }
+        }
+        bands
+    }
+
+    /// The bucket holding `v`; the ends hold all beyond them.
+    fn bucket(&self, v: f32) -> usize {
+        let last = self.buckets.len() - 1;
+        let i = ((v - self.lo) / self.step).floor();
+        if i >= last as f32 {
+            last
+        } else if i > 0.0 {
+            i as usize
+        } else {
+            0
+        }
+    }
+
+    /// The items, in order, whose spans meet `a..=b` (either way round),
+    /// perhaps with some that do not. None, standing for all of them, when
+    /// the stretch is not finite, or `whole`, the rectangle it is from, is
+    /// infinite: intersected with it, a rectangle stays as it is.
+    fn query(&self, a: f32, b: f32, whole: Rect) -> Option<Vec<u32>> {
+        if !a.is_finite() || !b.is_finite() || whole.is_infinite() {
+            return None;
+        }
+        let (b0, b1) = (self.bucket(a.min(b)), self.bucket(a.max(b)));
+        let mut out = self.always.clone();
+        for bucket in &self.buckets[b0..=b1] {
+            out.extend_from_slice(bucket);
+        }
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
+    }
+
+    fn all(&self) -> Vec<u32> {
+        (0..self.count).collect()
+    }
+}
+
+/// A page without structure, its blocks kept by height (across) and by
+/// width (down), and the rectangles of its grid lines by height. A
+/// candidate's walks then look only at the blocks that can change what
+/// they find: those whose height meets the candidate's (or, for its
+/// margins, whose height or width does), in page order. Each of a page's
+/// thousands of candidates would otherwise walk every block several times.
+struct Near {
+    blocks: Vec<usize>,
+    across: Bands,
+    down: Bands,
+    runs: Vec<Rect>,
+    runs_across: Bands,
+}
+
+impl Near {
+    fn new(t: &Lists) -> Option<Near> {
+        if t.lists.len() != 1 {
+            return None;
+        }
+        let blocks = t.children(PAGE);
+        // A text block reaches as far as its lines do.
+        let extent = |n: usize| {
+            let mut r = t.bbox(n);
+            if let Some(Block::Text(b)) = t.leaf(n) {
+                for l in &b.lines {
+                    let lb = l.bbox;
+                    if [lb.x0, lb.y0, lb.x1, lb.y1].iter().any(|v| v.is_nan()) {
+                        return None;
+                    }
+                    r = Rect::new(
+                        r.x0.min(lb.x0).min(lb.x1),
+                        r.y0.min(lb.y0).min(lb.y1),
+                        r.x1.max(lb.x0).max(lb.x1),
+                        r.y1.max(lb.y0).max(lb.y1),
+                    );
+                }
+            }
+            Some(r)
+        };
+        let extents: Vec<Option<Rect>> = blocks.iter().map(|&n| extent(n)).collect();
+        let across: Vec<_> = extents.iter().map(|r| r.map(|r| (r.y0, r.y1))).collect();
+        let down: Vec<_> = extents.iter().map(|r| r.map(|r| (r.x0, r.x1))).collect();
+        let mut runs = Vec::new();
+        grid_runs(t, PAGE, 0, &mut runs);
+        let runs_across: Vec<_> = runs.iter().map(|r| Some((r.y0, r.y1))).collect();
+        Some(Near {
+            blocks,
+            across: Bands::new(&across),
+            down: Bands::new(&down),
+            runs,
+            runs_across: Bands::new(&runs_across),
+        })
+    }
+
+    /// The blocks whose height meets `r`'s.
+    fn across(&self, r: Rect) -> Vec<usize> {
+        let picked = self
+            .across
+            .query(r.y0, r.y1, r)
+            .unwrap_or_else(|| self.across.all());
+        picked.iter().map(|&i| self.blocks[i as usize]).collect()
+    }
+
+    /// The blocks whose height or width meets `r`'s.
+    fn across_or_down(&self, r: Rect) -> Vec<usize> {
+        let (Some(mut a), Some(d)) = (
+            self.across.query(r.y0, r.y1, r),
+            self.down.query(r.x0, r.x1, r),
+        ) else {
+            return self.blocks.clone();
+        };
+        a.extend(d);
+        a.sort_unstable();
+        a.dedup();
+        a.iter().map(|&i| self.blocks[i as usize]).collect()
+    }
+}
+
+/// The blocks of `list` a walk looks at: those `pick` gives on a page kept
+/// in `near`, else all of them.
+fn blocks(
+    t: &Lists,
+    near: Option<&Near>,
+    list: usize,
+    pick: impl FnOnce(&Near) -> Vec<usize>,
+) -> Vec<usize> {
+    match near {
+        Some(near) if list == PAGE => pick(near),
+        _ => t.children(list),
     }
 }
 
@@ -2032,13 +2237,13 @@ fn score_table(g: &Grid) -> f32 {
 }
 
 /// `find_table`: whether `g.bounds` holds a table, and its grid.
-fn find_table(t: &Lists, g: &mut Grid) -> bool {
-    if all_justified_or_headers(t, PAGE, g.bounds) {
+fn find_table(t: &Lists, near: Option<&Near>, g: &mut Grid) -> bool {
+    if all_justified_or_headers(t, near, PAGE, g.bounds) {
         return false;
     }
     if !g.has_positions {
         let (mut xs, mut ys) = (Vec::new(), Vec::new());
-        walk_to_find_content(t, &mut xs, &mut ys, PAGE, g.bounds, 0);
+        walk_to_find_content(t, near, &mut xs, &mut ys, PAGE, g.bounds, 0);
         sanitize(&mut xs);
         sanitize(&mut ys);
         if xs.len() < 2 || ys.len() < 2 {
@@ -2055,10 +2260,10 @@ fn find_table(t: &Lists, g: &mut Grid) -> bool {
         g.has_positions = true;
     }
     g.cells = Cells::new(g.xpos.list.len(), g.ypos.list.len());
-    walk_for_background(t, g, PAGE);
+    walk_for_background(t, near, g, PAGE);
     // Lines refine the dividers, then mark the cells' borders.
-    walk_grid_lines(t, g, PAGE, false, 0);
-    walk_grid_lines(t, g, PAGE, true, 0);
+    walk_grid_lines(t, near, g, PAGE, false);
+    walk_grid_lines(t, near, g, PAGE, true);
     if g.xpos.list.len() <= 2 || g.ypos.list.len() <= 2 {
         return false;
     }
@@ -2203,7 +2408,8 @@ fn area(r: Rect) -> f32 {
 /// do not overlap, and transcribed.
 fn hunt(t: &mut Lists, mut list: Vec<Potential>, limit: f32) {
     cull_unhelpful_background_fills(t);
-    list.retain_mut(|p| find_table(t, &mut p.data));
+    let near = Near::new(t);
+    list.retain_mut(|p| find_table(t, near.as_ref(), &mut p.data));
     // Tables within ones from rafts go.
     let rafts: Vec<Rect> = list
         .iter()
@@ -2842,6 +3048,62 @@ mod tests {
         &["Pear", "10", "0.85"],
         &["Plum", "7", "2.05"],
     ];
+
+    #[test]
+    fn candidates_find_the_same_looking_only_at_the_blocks_near_them() {
+        // Tables ruled each way, text around and between them, stray
+        // rules and boxes, and fills behind some of it.
+        let mut c = String::from("0.9 g 60 380 480 370 re f 0 g\n");
+        c += &grid(ABC, 72.0, 720.0, 100.0, 20.0, Rules::Lines);
+        c += &grid(ABC, 72.0, 600.0, 60.0, 18.0, Rules::Rects);
+        c += &grid(ABC, 300.0, 600.0, 70.0, 16.0, Rules::Boxes);
+        c += &grid(ABC, 72.0, 450.0, 90.0, 14.0, Rules::None);
+        for i in 0..12 {
+            let (x, y) = (40.0 + i as f32 * 45.0, 300.0 - (i % 4) as f32 * 30.0);
+            c += &text(x, y, 9.0, "word");
+            c += &format!(
+                "{x} {} 30 0.5 re f\n{} {y} 0.5 25 re f\n",
+                y - 3.0,
+                x + 33.0
+            );
+            c += &format!("{} {} 12 12 re S\n", x + 5.0, y - 40.0);
+        }
+        let doc = Document::open(pdf(&c, "")).unwrap_or_else(|e| panic!("{e:?}"));
+        let obj = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let opts = Options::parse("vectors").unwrap_or_else(|e| panic!("{e}"));
+        let page = extract_page(&doc, &obj, opts, Store::default())
+            .0
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut t = Lists::new(page.blocks);
+        cull_unhelpful_background_fills(&mut t);
+        let mut list: Vec<Potential> = flotilla(&t)
+            .into_iter()
+            .map(|r| potential(r, true))
+            .collect();
+        push_segment_areas(&t, &mut list, PAGE, Rect::INFINITE, 0);
+        for r in [
+            Rect::INFINITE,
+            Rect::EMPTY,
+            Rect::new(0.0, 0.0, 612.0, 792.0),
+            Rect::new(70.0, 640.0, 380.0, 725.0),
+            Rect::new(300.0, 500.0, 60.0, 400.0),
+            Rect::new(f32::NAN, 0.0, 612.0, 792.0),
+            Rect::new(-1e30, 380.0, 1e30, 460.0),
+        ] {
+            list.push(potential(r, false));
+        }
+        let near = Near::new(&t).unwrap_or_else(|| panic!("a page without structure"));
+        let mut found = 0;
+        for p in &list {
+            let (mut all, mut some) = (p.data.clone(), p.data.clone());
+            let a = find_table(&t, None, &mut all);
+            let b = find_table(&t, Some(&near), &mut some);
+            assert_eq!(a, b, "{:?}", p.data.bounds);
+            assert_eq!(format!("{all:?}"), format!("{some:?}"));
+            found += usize::from(a);
+        }
+        assert!(found >= 3, "{found} of {}", list.len());
+    }
 
     #[test]
     fn a_table_ruled_by_lines_is_found_cell_by_cell() {
