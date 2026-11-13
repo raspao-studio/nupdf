@@ -1,0 +1,576 @@
+{
+ "locate": {
+  "page": 15,
+  "sentence": "Anarchy is not what I advance here."
+ },
+ "quotes": {
+  "quotes": [
+   {
+    "id": "q1",
+    "quote": "A free culture is not a culture without property; it is not a culture in which artists don't get paid.",
+    "claimed_page": 15
+   },
+   {
+    "id": "q2",
+    "quote": "A free culture is a culture without property, and one in which artists don't get paid.",
+    "claimed_page": 15
+   },
+   {
+    "id": "q3",
+    "quote": "The spread of FM radio was thus choked, at least temporarily.",
+    "claimed_page": 12
+   }
+  ],
+  "expected": {
+   "q1": {
+    "verbatim": true,
+    "page": 15
+   },
+   "q2": {
+    "verbatim": false,
+    "page": null
+   },
+   "q3": {
+    "verbatim": true,
+    "page": 22
+   }
+  }
+ },
+ "corpus": {
+  "word": "copyright",
+  "files": [
+   "doc04.pdf",
+   "doc05.pdf",
+   "doc08.pdf",
+   "doc09.pdf"
+  ],
+  "sources": {
+   "doc01.pdf": "verapdf/PDF_UA-1/7.2 Text/7.2-t19-fail-c.pdf",
+   "doc02.pdf": "verapdf/PDF_A-2b/6.4 Interactive forms/6.4.2 XFA forms/veraPDF test suite 6-4-2-t01-fail-a.pdf",
+   "doc03.pdf": "pdfjs/test/pdfs/perf_text_standard14.pdf",
+   "doc04.pdf": "pdfjs/test/pdfs/issue14438.pdf",
+   "doc05.pdf": "pdfjs/test/pdfs/issue7014.pdf",
+   "doc06.pdf": "pdfjs/test/pdfs/issue14847.pdf",
+   "doc07.pdf": "pdfjs/test/pdfs/issue6410.pdf",
+   "doc08.pdf": "pdfjs/test/pdfs/issue12706.pdf",
+   "doc09.pdf": "pdfjs/test/pdfs/tracemonkey_a11y.pdf",
+   "doc10.pdf": "pdfjs/test/pdfs/signed_verified.pdf",
+   "doc11.pdf": "pdfium/testing/resources/pixel/xfa_specific/standard_symbols.pdf",
+   "doc12.pdf": "verapdf/PDF_UA-2/8.2 Logical structure/8.2.5 Additional requirements for specific structure types/8.2.5.25 List (L, LI, LBody)/8.2.5.25-t01-fail-a.pdf"
+  }
+ },
+ "redact": {
+  "secret": "SECRET-4711",
+  "files": {
+   "content-text.pdf": 1,
+   "invisible-text.pdf": 1,
+   "metadata.pdf": 1,
+   "history.pdf": 1,
+   "annotations.pdf": 1
+  }
+ },
+ "merge": {
+  "title": "Merged for review",
+  "pages": [
+   "14773_00_i-xviii_r9jm.qxd 2/10/04 3:46 PM Page xvi 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32S 33R Like Stallman’s arguments for free software, an argument for free culture stumbles on a confusion that is hard to avoid, and even harder to understand. A free culture is not a culture without property; it is not a culture in which artists don’t get paid. A culture without property, or in which creators can’t get paid, is anarchy, not freedom. Anarchy is not what I advance here. Instead, the free culture that I defend in this book is a balance between anarchy and control. A free culture, like a free market, is filled with property. It is filled with rules of property and contract that get enforced by the state. But just as a free market is perverted if its property becomes feudal, so too can a free culture be queered by extremism in the property rights that define it. That is what I fear about our culture today. It is against that extremism that this book is written. xvi PREFACE 4TH PASS PAGES",
+   "14773_00_i-xviii_r9jm.qxd 2/10/04 3:46 PM Page xvii FREE CULTURE 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 S32 R33 ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚ ❙❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❘ ❙❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❙ ❚❘ ❘ ❘ ❙ ❚❘ ❙ ❚ ❙❚❘ ❙ ❚❘ ❙ ❚ 4TH PASS PAGES",
+   "14773_01_1-174_r9jm.qxd 2/10/04 3:51 PM Page 6 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32S 33R The series of body blows that FM radio received right after the war, in a series of rulings manipulated through the FCC by the big radio interests, were almost incredible in their force and deviousness.6 To make room in the spectrum for RCA’s latest gamble, television, FM radio users were to be moved to a totally new spectrum band. The power of FM radio stations was also cut, meaning FM could no longer be used to beam programs from one part of the country to another. (This change was strongly supported by AT&T, because the loss of FM relaying stations would mean radio stations would have to buy wired links from AT&T.) The spread of FM radio was thus choked, at least temporarily. Armstrong resisted RCA’s efforts. In response, RCA resisted Armstrong’s patents. After incorporating FM technology into the emerging standard for television, RCA declared the patents invalid—baselessly, and almost fifteen years after they were issued. It thus refused to pay him royalties. For six years, Armstrong fought an expensive war of litigation to defend the patents. Finally, just as the patents expired, RCA offered a settlement so low that it would not even cover Armstrong’s lawyers’ fees. Defeated, broken, and now broke, in 1954 Armstrong wrote a short note to his wife and then stepped out of a thirteenthstory window to his death. This is how the law sometimes works. Not often this tragically, and rarely with heroic drama, but sometimes, this is how it works. From the beginning, government and government agencies have been subject to capture. They are more likely captured when a powerful interest is threatened by either a legal or technical change. That powerful interest too often exerts its influence within the government to get the government to protect it. The rhetoric of this protection is of course always public spirited; the reality is something different. Ideas that were as solid as rock in one age, but that, left to themselves, would crumble in 6 FREE CULTURE <http://free-culture.org/get-it> 4TH PASS PAGES"
+  ]
+ },
+ "hidden": {
+  "must_not": "pineapple",
+  "must_any": [
+   "14%",
+   "4.2"
+  ]
+ },
+ "redact2": {
+  "secret": "SECRET-4711",
+  "files": {
+   "actualtext.pdf": 1,
+   "structure-alt.pdf": 1,
+   "form-field.pdf": 1,
+   "embedded-file.pdf": 1,
+   "hidden-layer.pdf": 1,
+   "split-text.pdf": 1,
+   "form-xobject.pdf": 1,
+   "javascript.pdf": 1,
+   "outline.pdf": 1,
+   "page-labels.pdf": 1
+  }
+ },
+ "damaged": {
+  "file1.pdf": {
+   "source": "no-xref",
+   "status": "ok",
+   "pages": 1,
+   "text": "No xref"
+  },
+  "file2.pdf": {
+   "source": "truncated",
+   "status": "unreadable",
+   "pages": null,
+   "text": ""
+  },
+  "file3.pdf": {
+   "source": "broken-xref-offsets",
+   "status": "ok",
+   "pages": 1,
+   "text": "Skewed"
+  },
+  "file4.pdf": {
+   "source": "garbage-prefix",
+   "status": "ok",
+   "pages": 1,
+   "text": "Junk first"
+  },
+  "file5.pdf": {
+   "source": "encrypted-user-password",
+   "status": "locked",
+   "pages": null,
+   "text": ""
+  },
+  "file6.pdf": {
+   "source": "no-header",
+   "status": "ok",
+   "pages": 1,
+   "text": "Stream"
+  },
+  "file7.pdf": {
+   "source": "missing-endobj",
+   "status": "ok",
+   "pages": 1,
+   "text": "No endobj"
+  },
+  "file8.pdf": {
+   "source": "minimal",
+   "status": "ok",
+   "pages": 1,
+   "text": "Hello, nupdf"
+  },
+  "file9.pdf": {
+   "source": "pages-count-too-high",
+   "status": "ok",
+   "pages": 3,
+   "text": "",
+   "pages_any": [
+    1,
+    3
+   ]
+  }
+ },
+ "longdoc": {
+  "page": 301,
+  "right": "derivative"
+ },
+ "invoices": {
+  "inv1.pdf": {
+   "vendor": "Acme Office Supply",
+   "invoice_number": "AOS-20417",
+   "date": "2026-03-04",
+   "total": 1200.0
+  },
+  "inv2.pdf": {
+   "vendor": "Bright Widgets GmbH",
+   "invoice_number": "BW-7781",
+   "date": "2026-02-11",
+   "total": 393.25
+  },
+  "inv3.pdf": {
+   "vendor": "Cobalt Software Inc",
+   "invoice_number": "CS-0099-A",
+   "date": "2026-01-30",
+   "total": 4800.0
+  },
+  "inv4.pdf": {
+   "vendor": "Delta Utilities",
+   "invoice_number": "DU-55120",
+   "date": "2026-03-15",
+   "total": 212.4
+  },
+  "inv5.pdf": {
+   "vendor": "Echo Cloud Hosting",
+   "invoice_number": "ECH-3301",
+   "date": "2026-02-28",
+   "total": 9135.75
+  },
+  "inv6.pdf": {
+   "vendor": "Fjord Freight AS",
+   "invoice_number": "FF-2026-118",
+   "date": "2026-03-22",
+   "total": 640.0
+  }
+ },
+ "pii": {
+  "record1.pdf": {
+   "remove": [
+    "ana.ruiz@example.com",
+    "+1 415 555 0134"
+   ],
+   "keep": "Ana Ruiz joined the platform team in 2024 and leads the on-call rotation."
+  },
+  "record2.pdf": {
+   "remove": [
+    "b.okafor@example.org",
+    "(212) 555-0198"
+   ],
+   "keep": "Ben Okafor joined the platform team in 2024 and leads the on-call rotation."
+  },
+  "record3.pdf": {
+   "remove": [
+    "chen.wei@mail.example.net",
+    "+44 20 7946 0321"
+   ],
+   "keep": "Chen Wei joined the platform team in 2024 and leads the on-call rotation."
+  },
+  "record4.pdf": {
+   "remove": [
+    "dkim@example.com",
+    "555-0177"
+   ],
+   "keep": "Dana Kim joined the platform team in 2024 and leads the on-call rotation."
+  },
+  "record5.pdf": {
+   "remove": [
+    "eli.novak@example.co.uk",
+    "+49 30 901820 44"
+   ],
+   "keep": "Eli Novak joined the platform team in 2024 and leads the on-call rotation."
+  }
+ },
+ "bookmarks": {
+  "parts": [
+   {
+    "title": "Executive summary",
+    "pages": [
+     "[Executive summary / 1]",
+     "[Executive summary / 2]"
+    ]
+   },
+   {
+    "title": "Market review",
+    "pages": [
+     "[Market review / 1]",
+     "[Market review / 2]",
+     "[Market review / 3]"
+    ]
+   },
+   {
+    "title": "Financials",
+    "pages": [
+     "[Financials / 1]",
+     "[Financials / 2]",
+     "[Financials / 3]",
+     "[Financials / 4]"
+    ]
+   },
+   {
+    "title": "Appendix",
+    "pages": [
+     "[Appendix / 1]",
+     "[Appendix / 2]",
+     "[Appendix / 3]"
+    ]
+   }
+  ]
+ },
+ "clause": {
+  "section": "14.2",
+  "days": 45
+ },
+ "scans": {
+  "no_text": [
+   3,
+   6,
+   9
+  ],
+  "ocr": [
+   5
+  ]
+ },
+ "table": {
+  "header": [
+   "Region",
+   "Product",
+   "Q1",
+   "Q2",
+   "Q3",
+   "Q4"
+  ],
+  "rows": [
+   [
+    "North",
+    "Basic plan",
+    "120",
+    "135",
+    "150",
+    "160"
+   ],
+   [
+    "North",
+    "Pro plan",
+    "80",
+    "95",
+    "101",
+    "120"
+   ],
+   [
+    "South",
+    "Basic plan",
+    "60",
+    "64",
+    "70",
+    "71"
+   ],
+   [
+    "South",
+    "Pro plan with priority support",
+    "40",
+    "44",
+    "52",
+    "58"
+   ],
+   [
+    "East",
+    "Basic plan",
+    "200",
+    "210",
+    "190",
+    "230"
+   ],
+   [
+    "East",
+    "Pro plan",
+    "150",
+    "149",
+    "160",
+    "171"
+   ],
+   [
+    "West",
+    "Basic plan",
+    "90",
+    "91",
+    "99",
+    "105"
+   ],
+   [
+    "West",
+    "Pro plan",
+    "70",
+    "75",
+    "78",
+    "90"
+   ]
+  ]
+ },
+ "fill": {
+  "fields": {
+   "applicant.name": [
+    "text",
+    "Maria Lopez-Garcia"
+   ],
+   "applicant.email": [
+    "text",
+    "maria.lopez@example.org"
+   ],
+   "start_date": [
+    "text",
+    "2026-12-01"
+   ],
+   "plan": [
+    "text",
+    "Team"
+   ],
+   "contact_by": [
+    "button",
+    "Phone"
+   ],
+   "newsletter": [
+    "button",
+    "Yes"
+   ],
+   "terms": [
+    "button",
+    "Agreed"
+   ]
+  }
+ },
+ "formread": {
+  "policyholder": "Sofia Brandt",
+  "policy_number": "HB-220-5813",
+  "new_address": "14 Linden Close, Harrogate HG2 8QP",
+  "effective_date": "2026-11-30",
+  "update_billing": true,
+  "reason": "Correction",
+  "notes": ""
+ },
+ "comments": {
+  "comments": [
+   {
+    "page": 1,
+    "author": "Sam Ortiz",
+    "text": "Lead with the customer quote, not the product name."
+   },
+   {
+    "page": 1,
+    "author": "Lee Park",
+    "text": "Agreed, I will move the quote up."
+   },
+   {
+    "page": 2,
+    "author": "Sam Ortiz",
+    "text": "Is this figure confirmed by the co-operative?"
+   },
+   {
+    "page": 2,
+    "author": "Ravi Menon",
+    "text": "Add the launch date here"
+   },
+   {
+    "page": 3,
+    "author": "Lee Park",
+    "text": "Remove this: legal says we cannot claim 'best in class'."
+   }
+  ]
+ },
+ "links": {
+  "links": [
+   [
+    1,
+    "https://docs.example.org/guide/start"
+   ],
+   [
+    1,
+    "https://example.net/offer?id=7&src=pdf"
+   ],
+   [
+    1,
+    "https://status.example.com/"
+   ],
+   [
+    3,
+    "https://forms.example.org/f/1234"
+   ],
+   [
+    3,
+    "https://status.example.com/"
+   ]
+  ]
+ },
+ "diff": {
+  "changes": [
+   {
+    "kind": "removed",
+    "before": [
+     "company VPN on public networks"
+    ]
+   },
+   {
+    "kind": "changed",
+    "before": [
+     "3 days per week"
+    ],
+    "after": [
+     "2 days per week"
+    ]
+   },
+   {
+    "kind": "added",
+    "after": [
+     "every six months"
+    ]
+   }
+  ]
+ },
+ "password": {
+  "reference": "WT-88213-K",
+  "amount": 14250.0
+ },
+ "attachments": {
+  "files": [
+   "budget.csv",
+   "minutes.txt",
+   "site-photos.json"
+  ],
+  "extract": "budget.csv",
+  "data": "item,q1,q2\nTravel,1200,950\nSoftware,3400,3400\nTraining,800,1250\n"
+ },
+ "signature": {
+  "changed": {
+   "nda.pdf": false,
+   "supply.pdf": true,
+   "lease.pdf": false
+  }
+ },
+ "sanitize": {
+  "actions": 5,
+  "pages": 2,
+  "keep": [
+   "Expense claim form",
+   "Claims over EUR 500 need a receipt for every item.",
+   "Approval",
+   "Claims are approved by the budget holder within ten working days."
+  ]
+ },
+ "rotate": {
+  "pages": 6
+ },
+ "columns": {
+  "keys": [
+   [
+    "main breaker on the control panel"
+   ],
+   [
+    "suction valve"
+   ],
+   [
+    "bleed screw"
+   ],
+   [
+    "discharge valve is fully closed"
+   ],
+   [
+    "switch the main breaker on",
+    "holding it down for two seconds"
+   ],
+   [
+    "quarter turn"
+   ],
+   [
+    "grinding or rattling"
+   ],
+   [
+    "station logbook"
+   ]
+  ]
+ },
+ "figure": {
+  "caption": "Figure 3. Water withdrawn at the Ostrava plant fell after the closed-loop cooling retrofit in 2024.",
+  "water_2025": 97
+ },
+ "sizes": {
+  "landscape": [
+   3,
+   4,
+   7
+  ],
+  "a4": [
+   2,
+   4,
+   8
+  ]
+ },
+ "bundle": {
+  "count": 10,
+  "total": 549.05,
+  "largest": "r097.pdf"
+ },
+ "claim": {
+  "policy_number": "PX-4471-0932",
+  "date_of_loss": "2026-09-03",
+  "claim_amount": 8450.0,
+  "deductible": 500.0,
+  "adjuster": "Priya Natarajan"
+ }
+}

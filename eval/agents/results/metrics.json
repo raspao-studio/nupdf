@@ -1,0 +1,778 @@
+[
+ {
+  "arm": "native",
+  "task": "locate",
+  "tool_calls": 5,
+  "tool_errors": 0,
+  "output_tokens": 1823,
+  "context_added": 25463,
+  "requests": 5,
+  "largest_result_chars": 1582682,
+  "tools": {
+   "Read": 2,
+   "Bash": 1,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "native",
+  "task": "quotes",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 3500,
+  "context_added": 44092,
+  "requests": 5,
+  "largest_result_chars": 2258426,
+  "tools": {
+   "Read": 3,
+   "Bash": 2,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "native",
+  "task": "corpus",
+  "tool_calls": 16,
+  "tool_errors": 0,
+  "output_tokens": 3409,
+  "context_added": 52784,
+  "requests": 6,
+  "largest_result_chars": 282470,
+  "tools": {
+   "Read": 13,
+   "Bash": 1,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "native",
+  "task": "hidden",
+  "tool_calls": 4,
+  "tool_errors": 0,
+  "output_tokens": 906,
+  "context_added": 8283,
+  "requests": 4,
+  "largest_result_chars": 33044,
+  "tools": {
+   "Read": 2,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "locate",
+  "tool_calls": 6,
+  "tool_errors": 0,
+  "output_tokens": 1788,
+  "context_added": 8493,
+  "requests": 6,
+  "largest_result_chars": 1332,
+  "tools": {
+   "Read": 1,
+   "Bash": 3,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "quotes",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 4657,
+  "context_added": 14453,
+  "requests": 7,
+  "largest_result_chars": 7447,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "corpus",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 3460,
+  "context_added": 11110,
+  "requests": 7,
+  "largest_result_chars": 1992,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "redact",
+  "tool_calls": 10,
+  "tool_errors": 0,
+  "output_tokens": 11249,
+  "context_added": 25140,
+  "requests": 10,
+  "largest_result_chars": 8813,
+  "tools": {
+   "Read": 1,
+   "Bash": 8,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "merge",
+  "tool_calls": 5,
+  "tool_errors": 0,
+  "output_tokens": 2036,
+  "context_added": 7917,
+  "requests": 5,
+  "largest_result_chars": 1248,
+  "tools": {
+   "Read": 1,
+   "Bash": 3,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "hidden",
+  "tool_calls": 5,
+  "tool_errors": 0,
+  "output_tokens": 1948,
+  "context_added": 8355,
+  "requests": 5,
+  "largest_result_chars": 1197,
+  "tools": {
+   "Read": 1,
+   "Bash": 2,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "locate",
+  "tool_calls": 6,
+  "tool_errors": 0,
+  "output_tokens": 1992,
+  "context_added": 8115,
+  "requests": 6,
+  "largest_result_chars": 1352,
+  "tools": {
+   "Read": 1,
+   "Bash": 4,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "quotes",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 3452,
+  "context_added": 10854,
+  "requests": 7,
+  "largest_result_chars": 2585,
+  "tools": {
+   "Read": 1,
+   "Bash": 4,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "corpus",
+  "tool_calls": 11,
+  "tool_errors": 0,
+  "output_tokens": 4961,
+  "context_added": 14471,
+  "requests": 9,
+  "largest_result_chars": 3508,
+  "tools": {
+   "Read": 3,
+   "Bash": 6,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "redact",
+  "tool_calls": 11,
+  "tool_errors": 3,
+  "output_tokens": 7998,
+  "context_added": 18465,
+  "requests": 11,
+  "largest_result_chars": 5070,
+  "tools": {
+   "Read": 1,
+   "Bash": 9,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "merge",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 2992,
+  "context_added": 9761,
+  "requests": 7,
+  "largest_result_chars": 1268,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "hidden",
+  "tool_calls": 5,
+  "tool_errors": 0,
+  "output_tokens": 1399,
+  "context_added": 7675,
+  "requests": 5,
+  "largest_result_chars": 1217,
+  "tools": {
+   "Read": 1,
+   "Bash": 2,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "locate",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 2942,
+  "context_added": 15761,
+  "requests": 8,
+  "largest_result_chars": 11377,
+  "tools": {
+   "Read": 1,
+   "Bash": 6,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "quotes",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 4541,
+  "context_added": 15255,
+  "requests": 8,
+  "largest_result_chars": 5443,
+  "tools": {
+   "Read": 1,
+   "Bash": 6,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "corpus",
+  "tool_calls": 13,
+  "tool_errors": 1,
+  "output_tokens": 6235,
+  "context_added": 22875,
+  "requests": 12,
+  "largest_result_chars": 37352,
+  "tools": {
+   "Read": 3,
+   "Bash": 9,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "redact",
+  "tool_calls": 16,
+  "tool_errors": 1,
+  "output_tokens": 15162,
+  "context_added": 38904,
+  "requests": 15,
+  "largest_result_chars": 15505,
+  "tools": {
+   "Read": 1,
+   "Bash": 14,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "merge",
+  "tool_calls": 10,
+  "tool_errors": 0,
+  "output_tokens": 6660,
+  "context_added": 33497,
+  "requests": 9,
+  "largest_result_chars": 36093,
+  "tools": {
+   "Read": 3,
+   "Bash": 6,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "hidden",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 2179,
+  "context_added": 14423,
+  "requests": 7,
+  "largest_result_chars": 11377,
+  "tools": {
+   "Read": 1,
+   "Bash": 4,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "liteparse",
+  "task": "locate",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 2767,
+  "context_added": 11350,
+  "requests": 8,
+  "largest_result_chars": 3434,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "liteparse",
+  "task": "quotes",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 3673,
+  "context_added": 11906,
+  "requests": 8,
+  "largest_result_chars": 3026,
+  "tools": {
+   "Read": 1,
+   "Bash": 6,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "liteparse",
+  "task": "corpus",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 2750,
+  "context_added": 14751,
+  "requests": 8,
+  "largest_result_chars": 5691,
+  "tools": {
+   "Read": 1,
+   "Bash": 6,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "liteparse",
+  "task": "redact",
+  "tool_calls": 5,
+  "tool_errors": 0,
+  "output_tokens": 1752,
+  "context_added": 9947,
+  "requests": 5,
+  "largest_result_chars": 5551,
+  "tools": {
+   "Read": 1,
+   "Bash": 2,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "liteparse",
+  "task": "merge",
+  "tool_calls": 5,
+  "tool_errors": 0,
+  "output_tokens": 1353,
+  "context_added": 9653,
+  "requests": 5,
+  "largest_result_chars": 6162,
+  "tools": {
+   "Read": 1,
+   "Bash": 2,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "liteparse",
+  "task": "hidden",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 1987,
+  "context_added": 9348,
+  "requests": 7,
+  "largest_result_chars": 2895,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "locate",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 3191,
+  "context_added": 13535,
+  "requests": 8,
+  "largest_result_chars": 3818,
+  "tools": {
+   "Read": 1,
+   "Bash": 6,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "quotes",
+  "tool_calls": 11,
+  "tool_errors": 1,
+  "output_tokens": 4439,
+  "context_added": 24909,
+  "requests": 10,
+  "largest_result_chars": 14934,
+  "tools": {
+   "Read": 1,
+   "Bash": 7,
+   "Write": 1,
+   "mcp__claude-code-remote__list_triggers": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "corpus",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 3027,
+  "context_added": 15513,
+  "requests": 7,
+  "largest_result_chars": 4673,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "redact",
+  "tool_calls": 9,
+  "tool_errors": 0,
+  "output_tokens": 3566,
+  "context_added": 20833,
+  "requests": 8,
+  "largest_result_chars": 6590,
+  "tools": {
+   "Read": 1,
+   "Bash": 7,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "merge",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 2121,
+  "context_added": 13233,
+  "requests": 7,
+  "largest_result_chars": 3861,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "hidden",
+  "tool_calls": 5,
+  "tool_errors": 0,
+  "output_tokens": 1551,
+  "context_added": 11379,
+  "requests": 5,
+  "largest_result_chars": 5123,
+  "tools": {
+   "Read": 1,
+   "Bash": 2,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "redact2",
+  "tool_calls": 11,
+  "tool_errors": 1,
+  "output_tokens": 4731,
+  "context_added": 29901,
+  "requests": 11,
+  "largest_result_chars": 28388,
+  "tools": {
+   "Read": 1,
+   "Bash": 9,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "redact2",
+  "tool_calls": 12,
+  "tool_errors": 1,
+  "output_tokens": 16854,
+  "context_added": 31532,
+  "requests": 12,
+  "largest_result_chars": 9854,
+  "tools": {
+   "Read": 1,
+   "Bash": 9,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "redact2",
+  "tool_calls": 9,
+  "tool_errors": 0,
+  "output_tokens": 11017,
+  "context_added": 26370,
+  "requests": 9,
+  "largest_result_chars": 11135,
+  "tools": {
+   "Read": 1,
+   "Bash": 6,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "redact2",
+  "tool_calls": 21,
+  "tool_errors": 0,
+  "output_tokens": 23045,
+  "context_added": 54916,
+  "requests": 20,
+  "largest_result_chars": 15505,
+  "tools": {
+   "Read": 1,
+   "Bash": 18,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "damaged",
+  "tool_calls": 7,
+  "tool_errors": 1,
+  "output_tokens": 2920,
+  "context_added": 17772,
+  "requests": 7,
+  "largest_result_chars": 10183,
+  "tools": {
+   "Read": 1,
+   "Bash": 4,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "damaged",
+  "tool_calls": 9,
+  "tool_errors": 1,
+  "output_tokens": 7189,
+  "context_added": 14960,
+  "requests": 9,
+  "largest_result_chars": 1496,
+  "tools": {
+   "Read": 1,
+   "Bash": 7,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "damaged",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 3864,
+  "context_added": 11935,
+  "requests": 7,
+  "largest_result_chars": 2802,
+  "tools": {
+   "Read": 1,
+   "Bash": 4,
+   "Write": 2,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "damaged",
+  "tool_calls": 16,
+  "tool_errors": 3,
+  "output_tokens": 10004,
+  "context_added": 29245,
+  "requests": 16,
+  "largest_result_chars": 10736,
+  "tools": {
+   "Read": 1,
+   "Bash": 14,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "liteparse",
+  "task": "damaged",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 3893,
+  "context_added": 13180,
+  "requests": 8,
+  "largest_result_chars": 3481,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "native",
+  "task": "damaged",
+  "tool_calls": 16,
+  "tool_errors": 2,
+  "output_tokens": 4114,
+  "context_added": 11259,
+  "requests": 13,
+  "largest_result_chars": 2295,
+  "tools": {
+   "Read": 10,
+   "Bash": 1,
+   "Write": 4,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "nupdf",
+  "task": "longdoc",
+  "tool_calls": 10,
+  "tool_errors": 1,
+  "output_tokens": 3360,
+  "context_added": 19393,
+  "requests": 9,
+  "largest_result_chars": 6480,
+  "tools": {
+   "Read": 1,
+   "Bash": 8,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "python",
+  "task": "longdoc",
+  "tool_calls": 7,
+  "tool_errors": 0,
+  "output_tokens": 2631,
+  "context_added": 9734,
+  "requests": 6,
+  "largest_result_chars": 1460,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pymupdf4llm",
+  "task": "longdoc",
+  "tool_calls": 11,
+  "tool_errors": 1,
+  "output_tokens": 4176,
+  "context_added": 22708,
+  "requests": 11,
+  "largest_result_chars": 28167,
+  "tools": {
+   "Read": 2,
+   "Bash": 5,
+   "Monitor": 2,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "pdf_oxide",
+  "task": "longdoc",
+  "tool_calls": 8,
+  "tool_errors": 0,
+  "output_tokens": 2609,
+  "context_added": 15286,
+  "requests": 8,
+  "largest_result_chars": 11377,
+  "tools": {
+   "Read": 1,
+   "Bash": 5,
+   "Write": 1,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "liteparse",
+  "task": "longdoc",
+  "tool_calls": 10,
+  "tool_errors": 0,
+  "output_tokens": 3112,
+  "context_added": 13712,
+  "requests": 10,
+  "largest_result_chars": 7256,
+  "tools": {
+   "Read": 1,
+   "Bash": 8,
+   "SubagentHandback": 1
+  }
+ },
+ {
+  "arm": "native",
+  "task": "longdoc",
+  "tool_calls": 9,
+  "tool_errors": 0,
+  "output_tokens": 4981,
+  "context_added": 62292,
+  "requests": 9,
+  "largest_result_chars": 2258429,
+  "tools": {
+   "Read": 6,
+   "Bash": 2,
+   "SubagentHandback": 1
+  }
+ }
+]

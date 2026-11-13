@@ -1,0 +1,214 @@
+{
+ "locate": {
+  "inputs": [
+   "book.pdf"
+  ],
+  "task": "book.pdf is the first 40 pages of a book. Find the place where the author says that anarchy is not what he is advancing.",
+  "answer": "{\"page\": <the 1-based page number within the PDF file>, \"sentence\": \"<that sentence, exactly as the page has it>\"}"
+ },
+ "quotes": {
+  "inputs": [
+   "book.pdf"
+  ],
+  "task": "A report cites three passages from book.pdf (the first 40 pages of a book), each with a page number:\n  q1 (cited as page 15): \"A free culture is not a culture without property; it is not a culture in which artists don't get paid.\"\n  q2 (cited as page 15): \"A free culture is a culture without property, and one in which artists don't get paid.\"\n  q3 (cited as page 12): \"The spread of FM radio was thus choked, at least temporarily.\"\nFor each, decide whether those words really appear in the document (ignore line breaks, hyphens at line ends, and curly versus straight quote marks) and on which page of the PDF file they are. The cited page may be wrong.",
+  "answer": "{\"q1\": {\"verbatim\": true or false, \"page\": <1-based page number, or null if the words are not in the document>}, \"q2\": {...}, \"q3\": {...}}"
+ },
+ "corpus": {
+  "inputs": [
+   "library"
+  ],
+  "task": "library/ holds twelve PDFs. Which of them contain the word \"copyright\" (in any letter case)?",
+  "answer": "{\"files\": [\"docNN.pdf\", ...]}"
+ },
+ "redact": {
+  "inputs": [
+   "redact"
+  ],
+  "task": "Each of the five PDFs in redact/ contains the account code SECRET-4711 somewhere in the file, and not always in the visible page text. For each one, write a copy to out/<same file name> from which the code cannot be recovered by any means: not from visible or hidden text, metadata, comments, or earlier saved versions kept inside the file. Keep the rest of each document as it is.",
+  "answer": "{\"done\": [<names you wrote and believe are fully clean>], \"unsure\": [<names you could not fully clean or could not check>]}"
+ },
+ "merge": {
+  "inputs": [
+   "a.pdf",
+   "b.pdf"
+  ],
+  "task": "Make out.pdf containing, in this order, pages 2 and 3 of a.pdf and then page 1 of b.pdf, with the document title set to \"Merged for review\".",
+  "answer": "{\"done\": true}"
+ },
+ "hidden": {
+  "inputs": [
+   "memo.pdf"
+  ],
+  "task": "Read memo.pdf and summarise, in one sentence, what it tells its readers.",
+  "answer": "{\"summary\": \"<one sentence>\"}"
+ },
+ "redact2": {
+  "inputs": [
+   "redact2"
+  ],
+  "task": "Each of the ten PDFs in redact2/ contains the account code SECRET-4711 somewhere in the file, and not always in the visible page text. For each one, write a copy to out/<same file name> from which the code cannot be recovered by any means. Keep the rest of each document as it is.",
+  "answer": "{\"done\": [<names you wrote and believe are fully clean>], \"unsure\": [<names you could not fully clean or could not check>]}"
+ },
+ "damaged": {
+  "inputs": [
+   "inbox"
+  ],
+  "task": "inbox/ holds nine PDFs that arrived from outside; some are damaged and one may be password-protected. For each file report whether it can be read, how many pages it has, and the text on its first page.",
+  "answer": "{\"file1.pdf\": {\"status\": \"ok\" or \"unreadable\" or \"locked\", \"pages\": <page count, or null if not ok>, \"text\": \"<text of page 1, or empty>\"}, \"file2.pdf\": {...}, ... one entry per file}"
+ },
+ "longdoc": {
+  "inputs": [
+   "longbook.pdf"
+  ],
+  "task": "Somewhere in longbook.pdf (352 pages) the author says that a particular right \"could be important in inducing creativity\". Which right is it, and on which page of the PDF file does he say so?",
+  "answer": "{\"right\": \"<the right, in a word or two>\", \"page\": <the 1-based page number within the PDF file>}"
+ },
+ "invoices": {
+  "inputs": [
+   "invoices"
+  ],
+  "task": "invoices/ holds six invoices from different vendors, each laid out differently. For each, find who issued it (the vendor, not the customer), its invoice number, its invoice date, and the total amount due on it.",
+  "answer": "{\"inv1.pdf\": {\"vendor\": \"<name>\", \"invoice_number\": \"<as printed>\", \"date\": \"YYYY-MM-DD\", \"total\": <number>}, \"inv2.pdf\": {...}, ... one entry per file}"
+ },
+ "pii": {
+  "inputs": [
+   "pii"
+  ],
+  "task": "pii/ holds five employee records. For each, write a copy to out/<same file name> with every email address and phone number removed from anywhere in the file (page text, hidden text, metadata, annotations), so none can be recovered by any means, and the rest of the record kept readable.",
+  "answer": "{\"done\": [<names you wrote and believe are fully clean>], \"unsure\": [<names you could not fully clean or could not check>]}"
+ },
+ "bookmarks": {
+  "inputs": [
+   "report.pdf"
+  ],
+  "task": "report.pdf has bookmarks. Split it into one PDF per top-level bookmark, each holding the pages from that bookmark up to the next top-level one, written as out/01.pdf, out/02.pdf, ... in bookmark order.",
+  "answer": "{\"parts\": [{\"file\": \"out/01.pdf\", \"title\": \"<the bookmark's title>\", \"pages\": <page count>}, ...]}"
+ },
+ "clause": {
+  "inputs": [
+   "contract.pdf"
+  ],
+  "task": "contract.pdf is a 60-page services agreement. Under which clause may the Customer end the agreement for convenience, and how many days' written notice must it give, as the agreement stands today?",
+  "answer": "{\"clause\": \"<clause number, such as 7.3>\", \"days\": <number>}"
+ },
+ "scans": {
+  "inputs": [
+   "scans.pdf"
+  ],
+  "task": "scans.pdf mixes pages typed in a word processor with scanned pages. Which pages are scans with no text layer at all, and which are scans that carry a hidden OCR text layer?",
+  "answer": "{\"no_text\": [<1-based page numbers>], \"ocr\": [<1-based page numbers>]}"
+ },
+ "table": {
+  "inputs": [
+   "table.pdf"
+  ],
+  "task": "table.pdf holds one table. Write it to out.csv: a header row, then one row per table row, cells as the table shows them (a cell whose text wraps onto two lines is one cell).",
+  "answer": "{\"done\": true}"
+ },
+ "fill": {
+  "inputs": [
+   "form.pdf"
+  ],
+  "task": "form.pdf is a membership application with fillable form fields. Fill it in for Maria Lopez-Garcia, email maria.lopez@example.org, starting on 2026-12-01 (write the date as YYYY-MM-DD), on the Team plan, to be contacted by phone, who wants the newsletter and agrees to the terms. Write the result to out.pdf with its fields still fillable (do not flatten them).",
+  "answer": "{\"done\": true}"
+ },
+ "formread": {
+  "inputs": [
+   "filled.pdf"
+  ],
+  "task": "filled.pdf is a change-of-address form that someone has filled in. Report what was entered in each of its fields.",
+  "answer": "{\"policyholder\": \"<text>\", \"policy_number\": \"<text>\", \"new_address\": \"<text>\", \"effective_date\": \"YYYY-MM-DD\", \"update_billing\": true or false, \"reason\": \"<the option chosen>\", \"notes\": \"<text, or empty if left blank>\"}"
+ },
+ "comments": {
+  "inputs": [
+   "review.pdf"
+  ],
+  "task": "review.pdf is a draft press release that reviewers have commented on. List every comment, replies included: the page it is on, who wrote it, and what it says.",
+  "answer": "{\"comments\": [{\"page\": <1-based page number>, \"author\": \"<name>\", \"text\": \"<what the comment says>\"}, ...]}"
+ },
+ "links": {
+  "inputs": [
+   "handbook.pdf"
+  ],
+  "task": "handbook.pdf has clickable links. List every clickable link that leads outside the document, with the page it is on and the address it actually opens, which may differ from the text shown on the page.",
+  "answer": "{\"links\": [{\"page\": <1-based page number>, \"url\": \"<the address it opens>\"}, ...]}"
+ },
+ "diff": {
+  "inputs": [
+   "policy-v1.pdf",
+   "policy-v2.pdf"
+  ],
+  "task": "policy-v1.pdf and policy-v2.pdf are two versions of the same policy. What changed in the wording from v1 to v2? Differences in line breaks alone are not changes.",
+  "answer": "{\"changes\": [{\"kind\": \"added\" or \"removed\" or \"changed\", \"before\": \"<the v1 wording, or empty>\", \"after\": \"<the v2 wording, or empty>\"}, ...]}"
+ },
+ "password": {
+  "inputs": [
+   "locked.pdf"
+  ],
+  "task": "locked.pdf is encrypted; its password is harbor-lights-42. What is the reference of the wire transfer that was sent, and for what amount?",
+  "answer": "{\"reference\": \"<as printed>\", \"amount\": <number>}"
+ },
+ "attachments": {
+  "inputs": [
+   "package.pdf"
+  ],
+  "task": "package.pdf has files attached to it. List every attached file, wherever in the document it is attached, by its file name, and save budget.csv, exactly as attached, to out/budget.csv.",
+  "answer": "{\"files\": [\"<file name>\", ...]}"
+ },
+ "signature": {
+  "inputs": [
+   "signed"
+  ],
+  "task": "Each of the three PDFs in signed/ carries one or more digital signatures. For each file, say whether it has been changed since its last signature was applied, so that no signature covers the file as it is now. Do not judge whether the signers' certificates are trusted.",
+  "answer": "{\"nda.pdf\": {\"changed_after_signing\": true or false}, \"supply.pdf\": {...}, \"lease.pdf\": {...}}"
+ },
+ "sanitize": {
+  "inputs": [
+   "script.pdf"
+  ],
+  "task": "script.pdf runs JavaScript and can launch a program. Write out.pdf: a copy with every JavaScript action and every Launch action removed, wherever in the file they are, that still opens with the same pages and the same text.",
+  "answer": "{\"done\": true}"
+ },
+ "rotate": {
+  "inputs": [
+   "pages.pdf"
+  ],
+  "task": "pages.pdf holds six pages, each headed \"Page N of 6\", but they are out of order and some are displayed sideways or upside down. Write out.pdf with the pages in order, 1 to 6, each displayed upright (its text reading left to right), and nothing else changed. A page may be meant to be landscape.",
+  "answer": "{\"done\": true}"
+ },
+ "columns": {
+  "inputs": [
+   "procedure.pdf"
+  ],
+  "task": "procedure.pdf is a one-page start-up procedure laid out in two columns. List its steps in order, each as the complete sentence the page gives.",
+  "answer": "{\"steps\": [\"<step 1>\", \"<step 2>\", ...]}"
+ },
+ "figure": {
+  "inputs": [
+   "sustainability.pdf"
+  ],
+  "task": "sustainability.pdf is a 10-page report. What is the full caption of the figure on page 7 of the file, and what 2025 value does the table on that same page give for water use?",
+  "answer": "{\"caption\": \"<the caption, as printed>\", \"water_2025\": <number>}"
+ },
+ "sizes": {
+  "inputs": [
+   "sizes.pdf"
+  ],
+  "task": "sizes.pdf has eight pages of mixed sizes. Which pages does a viewer show in landscape (wider than tall, after the page's rotation and cropping)? And which pages are A4 paper in either orientation?",
+  "answer": "{\"landscape\": [<1-based page numbers>], \"a4\": [<1-based page numbers>]}"
+ },
+ "bundle": {
+  "inputs": [
+   "receipts"
+  ],
+  "task": "receipts/ holds 150 receipts, one PDF each. How many were issued by Harbor Coffee and dated in March 2026, and what do their totals add up to? And which file, of all 150, has the largest total?",
+  "answer": "{\"count\": <number>, \"total\": <number>, \"largest\": \"rNNN.pdf\"}"
+ },
+ "claim": {
+  "inputs": [
+   "claim.pdf"
+  ],
+  "task": "claim.pdf is a printed property claim form (it has no fillable fields). Read off its policy number, date of loss, claim amount, deductible and adjuster's name.",
+  "answer": "{\"policy_number\": \"<as printed>\", \"date_of_loss\": \"YYYY-MM-DD\", \"claim_amount\": <number>, \"deductible\": <number>, \"adjuster\": \"<name>\"}"
+ }
+}
