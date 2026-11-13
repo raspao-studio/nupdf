@@ -14,6 +14,7 @@ cargo xtask harness --tier standard     # same on fetched public corpora
 cargo xtask harness --update-baseline   # accept improved results
 cargo xtask bench --runs 5              # paired timing and memory against mutool
 cargo xtask bench --tier standard --sample 300 --runs 3   # evenly spaced sample of a big tier
+cargo xtask bench --tier standard --sample 200 --runs 3 --against pdf_oxide   # MuPDF, nupdf and pdf_oxide
 cargo xtask corpus list                 # what is fetched, sizes, licenses
 cargo xtask corpus fetch qpdf           # sparse clone of one source
 cargo xtask crashes --tier wild         # nupdf alone on every file: crashes, internal errors, timeouts
@@ -106,6 +107,7 @@ Parity is `match` divided by the files MuPDF handled. Reports go to `target/harn
 - Pairs run the same task with `mutool` and with `nupdf`, end to end as processes, because that is what an agent pays for. One warmup run, then N timed runs. The report gives median wall time, peak RSS (from `wait4`) and the geometric-mean speedup.
 - Runs are sequential, on the local bench machine. CI runners are too noisy to gate on.
 - From M5, context pairs add PyMuPDF, pypdf, pdfplumber, pdfminer.six, pdftotext and pdf_oxide, so the agent-facing comparison is concrete.
+- `--against pdf_oxide` (`xtask/src/against.rs`, `oracle/bench/oxide.py`) runs the operations pdf_oxide also has (`info`, `text`, `text-fast`, `render`, `tables`, `annots`, `forms`, `signatures`) on the same files with MuPDF, nupdf and pdf_oxide's Python bindings from `target/bench-venv`. pdf_oxide is timed as a process and in process (opening the document to its last byte of output, the interpreter and import left out); nupdf's in-process time is its process time less that of `nupdf --version`. A side that exits with an error, or for pdf_oxide raises on a page, has failed on the file. Where nupdf's and pdf_oxide's outputs must agree (page count, whether a file has text, how many pages have ink), a file on which they do not is counted apart. Ratios are over the files every side did and agreed on. Reports go to `target/bench/<tier>/against-pdf_oxide/`; numbers are in [BENCHMARKS](BENCHMARKS.md).
 - Scaling runs repeat each page-parallel command at 1, 2, 4, 8 and N threads.
 - Results that support public claims are committed under `bench/results/` with machine details.
 
