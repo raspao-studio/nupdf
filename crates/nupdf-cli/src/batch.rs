@@ -107,6 +107,12 @@ fn line_for(command: &[String], file: &Path, n: usize, width: usize) -> Vec<Stri
     line
 }
 
+/// Whether `batch` can run `sub` on each file: it takes one file first.
+pub fn can_run_on_each(sub: &clap::Command) -> bool {
+    let first = sub.get_positionals().next().map(|a| a.get_id().as_str());
+    !NOT_BATCHED.contains(&sub.get_name()) && first == Some("file")
+}
+
 /// Checks that `command` names a command that takes one file first.
 fn check_command(command: &[String]) -> Result<(), Failure> {
     let name = command
@@ -117,8 +123,7 @@ fn check_command(command: &[String]) -> Result<(), Failure> {
         .get_subcommands()
         .find(|c| c.get_name() == name)
         .ok_or_else(|| usage(format!("no command named {name}")))?;
-    let first = sub.get_positionals().next().map(|a| a.get_id().as_str());
-    if NOT_BATCHED.contains(&name.as_str()) || first != Some("file") {
+    if !can_run_on_each(sub) {
         return Err(usage(format!("{name} cannot be run on each file")));
     }
     Ok(())

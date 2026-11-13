@@ -28,6 +28,20 @@ PDF toolkit for agents. `nupdf <command> <file> [options]` prints one JSON repor
 ## Commands
 "#;
 
+/// What the MCP server tells a client at the start: the guide, read as
+/// tools. A model gets it without asking, so it need not call anything to
+/// learn how to start.
+pub fn mcp_instructions() -> String {
+    let mut out = String::from(
+        "Over MCP each command below is a tool with the same options by name, and \
+         `file` is a path on this machine. Give `file` a list of paths, directories or \
+         globs to run a tool on all of them in one call: one line per file, each \
+         with its report, then a summary.\n\n",
+    );
+    out.push_str(&guide());
+    out
+}
+
 /// The guide: what to know, then every command by name.
 pub fn guide() -> String {
     let mut out = INTRO.to_string();
