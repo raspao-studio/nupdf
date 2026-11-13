@@ -328,7 +328,14 @@ pub fn cli_units(op: &str, stdout: &[u8], dir: &Path) -> Option<u64> {
     let json = || serde_json::from_slice::<serde_json::Value>(stdout).ok();
     match op {
         "info" => json()?["pages"].as_u64(),
-        "text" => Some(non_whitespace(stdout)),
+        // Pages are separated by lines of `---`, which are not text.
+        "text" => Some(
+            String::from_utf8_lossy(stdout)
+                .lines()
+                .filter(|l| l.trim() != "---")
+                .map(|l| non_whitespace(l.as_bytes()))
+                .sum(),
+        ),
         "render-png" => dir_ink(dir),
         "forms" => Some(json()?.as_array()?.len() as u64),
         _ => None,
@@ -971,6 +978,9 @@ mod tests {
         let info = b"{\n  \"file\": \"a.pdf\",\n  \"pages\": 2,\n  \"version\": \"1.7\"\n}\n";
         assert_eq!(cli_units("info", info, dir), Some(2));
         assert_eq!(cli_units("text", b"Hello world!\n\n a", dir), Some(12));
+        // Its page separators are not text: two empty pages have none.
+        assert_eq!(cli_units("text", b"\n\n---\n\n", dir), Some(0));
+        assert_eq!(cli_units("text", b"a\n\n---\n\nb -- c\n", dir), Some(5));
         let forms = br#"[{"name":"Text1","page":1},{"name":"Text2","page":1}]"#;
         assert_eq!(cli_units("forms", forms, dir), Some(2));
         assert_eq!(cli_units("forms", b"[]", dir), Some(0));
