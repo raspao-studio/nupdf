@@ -1,7 +1,7 @@
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
-use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
+use crate::hayro_jbig2::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 
 /// The integer arithmetic decoder (A.2).
 pub(crate) struct IntegerDecoder {

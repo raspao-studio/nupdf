@@ -5,10 +5,10 @@
 //!
 //! "GBREG - The decoded region bitmap." (Table 3)
 
-use crate::decode::CombinationOperator;
-use crate::error::{OverflowError, Result, bail};
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::hayro_jbig2::decode::CombinationOperator;
+use crate::hayro_jbig2::error::{OverflowError, Result, bail};
+use std::vec;
+use std::vec::Vec;
 
 // To guard better against malicious files, we limit bitmap dimensions
 // to `u16::MAX`, which should be more than enough.

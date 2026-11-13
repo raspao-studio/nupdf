@@ -3,11 +3,11 @@
 //! This module handles parsing of standalone JBIG2 files in both sequential
 //! and random-access organization formats.
 
-use alloc::vec::Vec;
+use std::vec::Vec;
 
-use crate::error::{DecodeError, FormatError, ParseError, Result, bail};
-use crate::reader::Reader;
-use crate::segment::{
+use crate::hayro_jbig2::error::{DecodeError, FormatError, ParseError, Result, bail};
+use crate::hayro_jbig2::reader::Reader;
+use crate::hayro_jbig2::segment::{
     Segment, SegmentType, parse_segment, parse_segment_data, parse_segment_header,
 };
 

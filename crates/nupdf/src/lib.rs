@@ -43,6 +43,10 @@ mod garbage;
 pub mod geometry;
 pub mod glyphs;
 pub mod graft;
+/// The JBIG2 decoder: hayro-jbig2 0.4.0 (MIT OR Apache-2.0), carried in nupdf with
+/// guards against endless loops on damaged data (`hayro_jbig2/NUPDF.md`).
+#[doc(hidden)]
+pub mod hayro_jbig2;
 pub mod header;
 pub mod image;
 pub mod insert;

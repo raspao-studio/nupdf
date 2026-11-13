@@ -196,7 +196,7 @@ Pure Rust, widely used, permissive licenses compatible with AGPL (cargo-deny enf
 | LZW | own port of MuPDF's decoder (DECISIONS D16) |
 | Brotli | brotli-decompressor |
 | JPEG | own port of libjpeg (DECISIONS D17) |
-| JBIG2 | hayro-jbig2 |
+| JBIG2 | hayro-jbig2 0.4.0, carried in `crates/nupdf/src/hayro_jbig2` with guards against endless loops on damaged data (its NUPDF.md), since crates.io does not apply a workspace's patches |
 | CCITT | own port of MuPDF's decoder |
 | JPEG 2000 | hayro-jpeg2000 (M4) |
 | Fonts | skrifa / read-fonts (fontations), subsetter; Type1 from hayro-font or our own parser |

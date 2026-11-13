@@ -3,10 +3,10 @@
 //! This module handles parsing of individual segment headers and defines
 //! the segment types used in JBIG2.
 
-use alloc::vec::Vec;
+use std::vec::Vec;
 
-use crate::error::{ParseError, Result, SegmentError, bail, err};
-use crate::reader::Reader;
+use crate::hayro_jbig2::error::{ParseError, Result, SegmentError, bail, err};
+use crate::hayro_jbig2::reader::Reader;
 
 /// "The segment type is a number between 0 and 63, inclusive. Not all values
 /// are allowed." (7.3)
@@ -376,7 +376,7 @@ fn scan_for_immediate_generic_region_size(reader: &Reader<'_>) -> Result<usize> 
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
+    use std::vec;
 
     use super::*;
 

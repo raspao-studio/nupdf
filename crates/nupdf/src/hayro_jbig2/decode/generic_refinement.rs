@@ -1,17 +1,17 @@
 //! Generic refinement region segment parsing and decoding (7.4.7, 6.3).
 
-use alloc::vec::Vec;
+use std::vec::Vec;
 
 use super::{
     AdaptiveTemplatePixel, RefinementTemplate, RegionBitmap, RegionSegmentInfo,
     parse_refinement_at_pixels, parse_region_segment_info,
 };
-use crate::ScratchBuffers;
-use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
-use crate::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS, WORD_SHIFT, Word};
-use crate::decode::generic::ContextGatherer;
-use crate::error::{OverflowError, ParseError, RegionError, Result, bail};
-use crate::reader::Reader;
+use crate::hayro_jbig2::ScratchBuffers;
+use crate::hayro_jbig2::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
+use crate::hayro_jbig2::bitmap::{Bitmap, MAX_DIMENSION, WORD_BITS, WORD_SHIFT, Word};
+use crate::hayro_jbig2::decode::generic::ContextGatherer;
+use crate::hayro_jbig2::error::{OverflowError, ParseError, RegionError, Result, bail};
+use crate::hayro_jbig2::reader::Reader;
 
 /// Generic refinement region decoding procedure (6.3).
 pub(crate) fn decode(

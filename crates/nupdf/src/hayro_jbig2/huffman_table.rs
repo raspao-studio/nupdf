@@ -1,13 +1,13 @@
 //! Huffman table decoding, described in Annex B.
 
-use alloc::vec;
-use alloc::vec::Vec;
 use core::num::NonZeroU32;
+use std::vec;
+use std::vec::Vec;
 
-use crate::error::{HuffmanError, ParseError, Result, bail};
-use crate::lazy::Lazy;
-use crate::reader::Reader;
-use crate::sync::Arc;
+use crate::hayro_jbig2::error::{HuffmanError, ParseError, Result, bail};
+use crate::hayro_jbig2::lazy::Lazy;
+use crate::hayro_jbig2::reader::Reader;
+use crate::hayro_jbig2::sync::Arc;
 
 include!("huffman_tables_generated.rs");
 
@@ -118,7 +118,11 @@ impl HuffmanTable {
             node_index = match nodes[node_index as usize].get_child(!bit) {
                 Some(idx) => idx.get(),
                 None => {
-                    let new_idx = NonZeroU32::new(nodes.len() as u32).unwrap();
+                    // nupdf: a table too large to index fails rather than panics.
+                    let Some(new_idx) = u32::try_from(nodes.len()).ok().and_then(NonZeroU32::new)
+                    else {
+                        bail!(HuffmanError::InvalidCode);
+                    };
                     nodes.push(HuffmanNode::new_intermediate());
                     nodes[node_index as usize].set_child(!bit, new_idx)?;
                     new_idx.get()

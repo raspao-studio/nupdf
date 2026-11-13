@@ -1,8 +1,8 @@
 //! Page information segment parsing (7.4.8).
 
-use crate::decode::CombinationOperator;
-use crate::error::{ParseError, Result};
-use crate::reader::Reader;
+use crate::hayro_jbig2::decode::CombinationOperator;
+use crate::hayro_jbig2::error::{ParseError, Result};
+use crate::hayro_jbig2::reader::Reader;
 
 /// Parsed page information segment (7.4.8).
 #[derive(Debug, Clone, Default)]
