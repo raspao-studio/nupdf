@@ -59,6 +59,8 @@ pub struct Settings {
     pub threads: usize,
     /// Color management, as `mutool draw` has it on unless `-N`.
     pub icc: bool,
+    /// What of each page to draw: everything, as `mutool draw`, or the contents alone (`--no-annots`).
+    pub parts: nupdf::draw::Parts,
 }
 
 /// Each page in `spec` (all pages without one), written into `dir` as
@@ -95,6 +97,7 @@ pub fn render(
                     store,
                     bands,
                     settings.icc,
+                    settings.parts,
                 ),
                 Err(e) => (Err(e.clone()), store),
             };

@@ -4056,6 +4056,77 @@ fn run_page_imp(
     Ok(())
 }
 
+/// `pdf_run_annot_with_usage` from its run processor on: the appearance
+/// `ap` of an annotation on `page`, under `matrix` (`pdf_annot_transform`),
+/// drawn as `pdf_process_annot` draws it, `q`, `cm`, `Do` and `Q`, with the
+/// page's resources and default color spaces, unless the annotation's
+/// optional content `oc` is hidden for `usage`. The annotation's flags are
+/// the caller's to check.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_annot_appearance(
+    doc: &Document,
+    page: &Object,
+    dev: &mut dyn Device,
+    store: &mut Option<Store>,
+    usage: Option<&'static str>,
+    user: Matrix,
+    oc: Option<&Object>,
+    ap: &Object,
+    matrix: Matrix,
+) -> Result<(), String> {
+    let resources = doc
+        .inherited(page, b"Resources")
+        .map_err(|e| report::line(&e.0))?;
+    let defaults = Arc::new(page_defaults(doc, resources.as_ref()));
+    dev.set_default_colorspaces(&defaults);
+    let (_, ctm) = doc.page_transform(page).map_err(|e| report::line(&e.0))?;
+    let ctm = ctm.concat(user);
+    // pdf_dict_getl(page, StructParent): the page's own key, singular.
+    let struct_parent = match doc.dict_get(page, b"StructParent") {
+        v if v.is_number() => v.to_int(),
+        _ => -1,
+    };
+    let mut run = Run::new(
+        doc,
+        &mut *dev,
+        ctm,
+        struct_parent,
+        defaults,
+        store.take().unwrap_or_default(),
+    )?;
+    run.usage = usage;
+    if let Some(r) = &resources {
+        run.state.push_resources(r.clone());
+    }
+    // `pdf_is_ocg_hidden` with no resources to look names up in.
+    let hidden = oc.is_some_and(|oc| {
+        run.state
+            .store
+            .ocg(doc)
+            .is_hidden(doc, usage, oc, &|_: &[u8]| None)
+    });
+    let out = if hidden {
+        run.close()
+    } else {
+        let m = matrix;
+        run.op(Op::Save)
+            .and_then(|()| run.op(Op::Transform([m.a, m.b, m.c, m.d, m.e, m.f])))
+            .and_then(|()| {
+                run.op(Op::DrawForm {
+                    name: b"",
+                    form: ap,
+                })
+            })
+            .and_then(|()| run.op(Op::Restore))
+            .and_then(|()| run.close())
+    };
+    if resources.is_some() {
+        run.state.pop_resources();
+    }
+    *store = Some(run.into_store());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

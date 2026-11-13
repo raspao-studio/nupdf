@@ -456,6 +456,7 @@ fn render(doc: &Document, index: i32, dpi: f32) -> Result<nupdf::draw::paint::Pi
         None,
         Store::default(),
         true,
+        nupdf::draw::Parts::ALL,
     );
     r.map(|r| r.pix)
 }

@@ -1813,6 +1813,47 @@ fn render_writes_each_page_at_its_size() {
 }
 
 #[test]
+fn render_and_text_show_annotations_unless_asked_not_to() {
+    // A FreeText annotation whose appearance shows a secret, over a page
+    // whose contents do not.
+    let input = redaction("annotations.pdf");
+    let input = input.to_str().unwrap();
+    let mut images = Vec::new();
+    for extra in [None, Some("--no-annots")] {
+        let dir = scratch(&format!("render-annots-{}", extra.is_some()));
+        let mut args = vec![
+            "render",
+            input,
+            "-o",
+            dir.to_str().unwrap(),
+            "--format",
+            "ppm",
+        ];
+        args.extend(extra);
+        let run = nupdf(&args);
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        images.push(std::fs::read(dir.join("page-0001.ppm")).unwrap());
+    }
+    assert_ne!(images[0], images[1]);
+    // `mutool draw -F txt`: the appearance's text after the contents'.
+    let text = |extra: &[&str]| {
+        let mut args = vec!["extract", input, "--format", "text"];
+        args.extend_from_slice(extra);
+        String::from_utf8(nupdf(&args).stdout).unwrap()
+    };
+    assert_eq!(text(&[]), "Nothing to see here.\n\nSECRET-4711\n\n\u{c}\n");
+    assert_eq!(text(&["--no-annots"]), "Nothing to see here.\n\n\u{c}\n");
+    // JSON keeps to the contents, as `Page.toStructuredText`.
+    let json: Value =
+        serde_json::from_slice(&nupdf(&["extract", input, "--fields", "text"]).stdout).unwrap();
+    assert!(!json.to_string().contains("SECRET"));
+}
+
+#[test]
 fn render_threads_and_bands_do_not_change_the_pixels() {
     let input = smoke("stext.pdf");
     let mut images = Vec::new();

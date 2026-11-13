@@ -1923,13 +1923,31 @@ pub fn extract_page(
     opts: Options,
     store: Store,
 ) -> (Result<StextPage, String>, Store) {
+    extract_page_parts(doc, page, opts, store, crate::page_run::Parts::CONTENTS)
+}
+
+/// [`extract_page`] of the `parts` of the page asked for: with
+/// [`Parts::ALL`](crate::page_run::Parts::ALL), `fz_run_page` into the
+/// stext device, the text of annotations' and widgets' appearances after
+/// the contents'.
+pub fn extract_page_parts(
+    doc: &Document,
+    page: &Object,
+    opts: Options,
+    store: Store,
+    parts: crate::page_run::Parts,
+) -> (Result<StextPage, String>, Store) {
     let mediabox = match doc.page_transform(page) {
         Ok((rect, ctm)) => rect.transform(ctm),
         Err(e) => return (Err(crate::diag::report::line(&e.0)), store),
     };
     let mut dev = StextDevice::new(mediabox, opts).with_doc(doc);
     let usage = (opts.flags & flags::ALL_LAYERS == 0).then_some("View");
-    let run = crate::run::run_page_contents_for(doc, page, &mut dev, store, usage);
+    let run = if parts == crate::page_run::Parts::CONTENTS {
+        crate::run::run_page_contents_for(doc, page, &mut dev, store, usage)
+    } else {
+        crate::page_run::run_page_parts(doc, page, &mut dev, store, usage, Matrix::IDENTITY, parts)
+    };
     let page = match run.error {
         Some(e) => Err(e),
         None => Ok(dev.finish()),
