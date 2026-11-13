@@ -324,7 +324,7 @@ The M10 work that got here: `extract --format layout` (agents had rendered pages
 
 - [x] Wild tier: a sample of 100k+ files runs crash-free; publish the parity report. 100,000 Common Crawl files, 15 commands each: no signals and, after the fixes it found, no panics; parity on a 1,000-file sample 99.3% or better for every check but rendering (98.7% of pages within the pixel threshold, up from 94.0% after the triage there). docs/WILD-TIER.md
 - [ ] Continuous fuzzing (apply to OSS-Fuzz), SECURITY.md, a threat model
-- [ ] The public case: parity, safety, performance and agent-eval results against MuPDF and the alternatives
+- [x] The public case: parity, safety, performance and agent-eval results against MuPDF and the alternatives. [RESULTS](RESULTS.md), with what nupdf does not do yet
 - [ ] Publish to crates.io, make the repository public, ship a docs site
 
 ## Cross-cutting, every milestone
