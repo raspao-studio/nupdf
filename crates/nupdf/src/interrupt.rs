@@ -78,6 +78,19 @@ thread_local! {
     static CURRENT: RefCell<Option<Arc<Interrupt>>> = const { RefCell::new(None) };
     /// Checks since the clock was last read.
     static TICKS: Cell<u32> = const { Cell::new(0) };
+    /// Set by [`stop`]: the work on this thread has what it was after.
+    static STOPPED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Stops the work on this thread as an interrupt would, because it has
+/// found what it was run for; [`stopped`] says so and clears it.
+pub fn stop() {
+    STOPPED.with(|s| s.set(true));
+}
+
+/// Whether [`stop`] was called on this thread since the last call; clears it.
+pub fn stopped() -> bool {
+    STOPPED.with(|s| s.replace(false))
 }
 
 /// How many checks go by between readings of the clock.
@@ -98,6 +111,9 @@ pub fn within<R>(interrupt: Option<Arc<Interrupt>>, f: impl FnOnce() -> R) -> R 
 
 /// Whether the work on this thread should stop.
 pub fn interrupted() -> bool {
+    if STOPPED.with(Cell::get) {
+        return true;
+    }
     CURRENT.with(|c| {
         let c = c.borrow();
         let Some(interrupt) = c.as_ref() else {
@@ -124,6 +140,17 @@ mod tests {
     fn nothing_is_interrupted_outside_a_call() {
         assert!(!interrupted());
         assert!(current().is_none());
+    }
+
+    #[test]
+    fn a_stop_interrupts_this_thread_until_it_is_read() {
+        assert!(!stopped());
+        stop();
+        assert!(interrupted());
+        assert!(!std::thread::spawn(interrupted).join().unwrap());
+        assert!(stopped());
+        assert!(!interrupted());
+        assert!(!stopped());
     }
 
     #[test]
