@@ -3244,6 +3244,35 @@ fn scanned_pdf(name: &str) -> PathBuf {
 }
 
 #[test]
+fn info_tells_pages_with_text_from_scanned_ones() {
+    // Text and then a page's worth of image; the image alone; nothing.
+    let page = |contents: u32| {
+        format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents {contents} 0 R/Resources<</XObject<</Im0 6 0 R>>/Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>>>>>>>"
+        )
+    };
+    let text = "BT /F1 12 Tf 10 10 Td (Hello) Tj ET q 200 0 0 100 0 0 cm /Im0 Do Q";
+    let image = "q 200 0 0 100 0 0 cm /Im0 Do Q";
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R]/Count 3>>",
+        &page(7),
+        &page(8),
+        &page(9),
+        "<</Type/XObject/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceGray/BitsPerComponent 8/Length 4>>\nstream\n\u{80}\u{90}\u{a0}\u{b0}\nendstream",
+        &format!("<</Length {}>>\nstream\n{text}\nendstream", text.len()),
+        &format!("<</Length {}>>\nstream\n{image}\nendstream", image.len()),
+        "<</Length 0>>\nstream\n\nendstream",
+    ]);
+    let file = scratch("text-and-scanned.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let info = run_json(&["info", file.to_str().unwrap()]);
+    assert_eq!(info["text"]["checked"], true);
+    assert_eq!(info["text"]["pages_with_text"], 1);
+    assert_eq!(info["text"]["scanned_pages"], serde_json::json!([2]));
+}
+
+#[test]
 fn ocr_puts_what_tesseract_reads_on_scanned_pages() {
     let file = scanned_pdf("scanned.pdf");
     let info = run_json(&["info", file.to_str().unwrap()]);

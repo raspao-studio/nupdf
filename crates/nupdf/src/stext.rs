@@ -56,6 +56,10 @@ pub mod flags {
     /// nupdf's own: optional content runs whether shown or hidden, so
     /// text in hidden layers is gathered too.
     pub const ALL_LAYERS: u32 = 1 << 29;
+
+    /// nupdf's own: the page's run stops at its first character, for
+    /// whoever only asks whether a page has text.
+    pub const STOP_AT_TEXT: u32 = 1 << 28;
 }
 
 /// Vector block flags (`FZ_STEXT_VECTOR_IS_STROKED` and the rest).
@@ -1204,6 +1208,9 @@ impl<'a> StextDevice<'a> {
             size,
             font: font.clone(),
         });
+        if self.flags & flags::STOP_AT_TEXT != 0 {
+            crate::interrupt::stop();
+        }
     }
 
     fn text(&mut self, text: &Text, ctm: Matrix, color: u32, flags: i32) {
@@ -1929,11 +1936,23 @@ pub fn extract_page(
     };
     let mut dev = StextDevice::new(mediabox, opts).with_doc(doc);
     let usage = (opts.flags & flags::ALL_LAYERS == 0).then_some("View");
-    let run = crate::run::run_page_contents_for(doc, page, &mut dev, store, usage);
+    let mut run = crate::run::run_page_contents_for(doc, page, &mut dev, store, usage);
+    let stop_at_text = opts.flags & flags::STOP_AT_TEXT != 0;
+    if stop_at_text && crate::interrupt::stopped() {
+        // Broken off at the first character: the page so far, and no
+        // Type 3 font left marked as in use.
+        run.store.t3_loading.clear();
+        run.store.t3_running.clear();
+        return (Ok(dev.finish()), run.store);
+    }
     let page = match run.error {
         Some(e) => Err(e),
         None => Ok(dev.finish()),
     };
+    if stop_at_text {
+        // A character the end of the page added stops nothing after it.
+        let _ = crate::interrupt::stopped();
+    }
     (page, run.store)
 }
 
@@ -2190,6 +2209,46 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_run_stopping_at_text_ends_at_the_first_character() {
+        let mut content = b"BT /F1 12 Tf 10 10 Td (A) Tj ET ".to_vec();
+        for i in 0..1000 {
+            let (x, y) = (10 + i % 40 * 9, 30 + i / 40 * 14);
+            content.extend(format!("0 0 1 1 re f BT /F1 12 Tf {x} {y} Td (B) Tj ET ").bytes());
+        }
+        let d = doc(&content, "", "", &[]);
+        let page = d.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let chars = |flags: u32| {
+            let opts = Options {
+                flags,
+                ..Options::default()
+            };
+            let page = extract_page(&d, &page, opts, Store::default())
+                .0
+                .unwrap_or_else(|e| panic!("{e}"));
+            all_lines(&page.blocks)
+                .iter()
+                .map(|l| l.chars.len())
+                .sum::<usize>()
+        };
+        assert_eq!(chars(flags::STOP_AT_TEXT), 1);
+        // Nothing is left stopped for the next run.
+        assert_eq!(chars(0), 1001);
+        assert_eq!(chars(flags::STOP_AT_TEXT), 1);
+        // A page without text runs to its end.
+        let blank = doc(b"0 0 1 1 re f", "", "", &[]);
+        let page = blank.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let opts = Options {
+            flags: flags::STOP_AT_TEXT | flags::PRESERVE_IMAGES,
+            ..Options::default()
+        };
+        assert!(
+            extract_page(&blank, &page, opts, Store::default())
+                .0
+                .is_ok()
+        );
     }
 
     fn outline_of(doc: &Document, opts: &str) -> Vec<String> {
