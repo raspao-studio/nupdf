@@ -148,6 +148,33 @@ impl Session<'_> {
         obj.clone()
     }
 
+    /// The on states of a field's widgets, in order, each once.
+    fn on_states(&self, field: &Object) -> Vec<Vec<u8>> {
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let mut stack = vec![(field.clone(), 0usize)];
+        // Kids shared down a deep tree could be met exponentially often.
+        let mut budget = 1usize << 16;
+        while let Some((node, depth)) = stack.pop() {
+            budget = match budget.checked_sub(1) {
+                Some(b) => b,
+                None => break,
+            };
+            let kids = raw(self.doc, &node, b"Kids");
+            if matches!(kids, Object::Null) {
+                let st = on_state(self.doc, &node);
+                if !out.contains(&st) {
+                    out.push(st);
+                }
+            } else if depth < 256 {
+                let kids = self.doc.resolve(&kids);
+                for kid in kids.as_array().unwrap_or(&[]).iter().rev() {
+                    stack.push((kid.clone(), depth + 1));
+                }
+            }
+        }
+        out
+    }
+
     /// `pdf_field_mark_dirty`: the field and its kids, all the way down.
     fn mark_dirty(&mut self, field: &Object, depth: usize) {
         if depth > 256 {
@@ -217,7 +244,11 @@ impl Session<'_> {
         let value = value.split('\0').next().unwrap_or("");
         let set = match form::type_string(doc, widget) {
             "checkbox" | "radiobutton" => {
-                self.update_checkbox_selector(widget, value, 0);
+                // A field named on the command line is the one
+                // `pdf_lookup_field` finds: the head of the widget's group, so
+                // every widget of a radio group or check box group gets /AS.
+                let field = self.head_of_group(widget);
+                self.update_checkbox_selector(&field, value, 0);
                 self.update_field_value(widget, value)
             }
             _ => self.update_field_value(widget, value),
@@ -438,14 +469,18 @@ pub fn fill(doc: &Document, edits: &[Edit]) -> Result<Filled, FillError> {
                     notes
                         .push("the value is none of the options; MuPDF sets it anyway".to_string());
                 }
-                if matches!(kind, "checkbox" | "radiobutton")
-                    && value != "Off"
-                    && on_state(doc, &widget) != value.as_bytes()
-                {
-                    notes.push(format!(
-                        "'{value}' is not the widget's on state ('{}'): its /AS becomes Off",
-                        String::from_utf8_lossy(&on_state(doc, &widget))
-                    ));
+                if matches!(kind, "checkbox" | "radiobutton") && value != "Off" {
+                    let states = s.on_states(&s.head_of_group(&widget));
+                    if !states.iter().any(|st| st == value.as_bytes()) {
+                        let names: Vec<String> = states
+                            .iter()
+                            .map(|st| format!("'{}'", String::from_utf8_lossy(st)))
+                            .collect();
+                        notes.push(format!(
+                            "'{value}' is no widget's on state ({}): every /AS becomes Off",
+                            names.join(", ")
+                        ));
+                    }
                 }
                 let set = s.set(&widget, value);
                 ("set", set || old != form::value(doc, &widget))
@@ -589,6 +624,72 @@ mod tests {
         assert!(d.dict_get(&obj(7), b"AS").is_name(b"Yes"));
         let filled = fill(&d, &[Edit::Toggle { name: "ok".into() }]).unwrap();
         assert_eq!(filled.changes[0].new, "Off");
+    }
+
+    /// A radio group of three widgets, Email on, with on states Email,
+    /// Phone and Post.
+    fn radios() -> Document {
+        let widget = |state: &str, y: i32| {
+            format!(
+                "<< /Type /Annot /Subtype /Widget /Parent 4 0 R /Rect [10 {y} 30 {}] \
+                 /AS /{} /AP << /N << /{state} 8 0 R /Off 8 0 R >> >> >>",
+                y + 20,
+                if state == "Email" { "Email" } else { "Off" }
+            )
+        };
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] >> >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Annots [5 0 R 6 0 R 7 0 R] >>"
+                .to_string(),
+            "<< /T (contact_by) /FT /Btn /Ff 49152 /V /Email /Kids [5 0 R 6 0 R 7 0 R] >>"
+                .to_string(),
+            widget("Email", 10),
+            widget("Phone", 40),
+            widget("Post", 70),
+            "<< /Length 0 >>\nstream\n\nendstream".to_string(),
+        ];
+        let mut pdf = String::from("%PDF-1.7\n");
+        for (i, o) in objs.iter().enumerate() {
+            pdf.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+        }
+        pdf.push_str("trailer\n<< /Size 9 /Root 1 0 R >>\n");
+        Document::open(pdf.into_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_radio_group_set_by_name_turns_on_the_widget_with_that_state() {
+        // `pdf_lookup_field` finds the field, and `pdf_set_field_value` on it
+        // sets /AS on every kid: on for the one whose appearance has the state.
+        let d = radios();
+        let filled = fill(&d, &[set("contact_by", "Phone")]).unwrap();
+        assert_eq!(filled.changes[0].new, "Phone");
+        assert!(
+            filled.changes[0].notes.is_empty(),
+            "{:?}",
+            filled.changes[0].notes
+        );
+        let states: Vec<Object> = (5..8).map(|n| d.dict_get(&obj(n), b"AS")).collect();
+        assert_eq!(
+            states,
+            [
+                Object::name(b"Off"),
+                Object::name(b"Phone"),
+                Object::name(b"Off")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_state_no_radio_widget_has_turns_them_all_off_with_a_note() {
+        let d = radios();
+        let filled = fill(&d, &[set("contact_by", "Fax")]).unwrap();
+        assert!(
+            filled.changes[0].notes[0].contains("'Fax'"),
+            "{:?}",
+            filled.changes[0].notes
+        );
+        assert!((5..8).all(|n| d.dict_get(&obj(n), b"AS").is_name(b"Off")));
     }
 
     #[test]
