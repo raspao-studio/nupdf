@@ -2,18 +2,21 @@
 // Copyright (C) 2026 hum
 
 //! `cargo xtask bench --against pdf_oxide`: the bench pairs that pdf_oxide
-//! can also do, timed three ways on the same files: MuPDF, nupdf, and
-//! pdf_oxide through its Python bindings (`oracle/bench/oxide.py`, in
-//! `target/bench-venv`). pdf_oxide is timed as a process, as an agent pays
-//! for it, and in process, from opening the document to its last byte of
-//! output, with the interpreter and the import left out.
+//! can also do, timed on the same files with MuPDF, nupdf, pdf_oxide's
+//! native CLI (`pdf-oxide`, from the `pdf_oxide_cli` crate, in
+//! `target/oxide-cli/bin`) where it has a command for the operation, and
+//! pdf_oxide's Python bindings (`oracle/bench/oxide.py`, in
+//! `target/bench-venv`), the interface the agent eval used. The Python side
+//! is timed as a process, as an agent pays for it, and in process, from
+//! opening the document to its last byte of output, with the interpreter
+//! and the import left out.
 //!
 //! Each side's output is checked as well as timed: a side that exits with
-//! an error (or, for pdf_oxide, raises on a page) has failed on the file,
-//! and where nupdf's and pdf_oxide's outputs should agree (the page count,
+//! an error (or, in Python, raises on a page) has failed on the file, and
+//! where nupdf's and pdf_oxide's outputs should agree (the page count,
 //! whether there is text, which pages have ink) a file on which they do not
-//! is counted apart. Ratios are over the files every side did and agreed
-//! on, so a fast failure is not counted as a win.
+//! is counted apart. Each ratio is over the files both of its tools did and
+//! agreed on, so a fast failure is not counted as a win.
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -42,6 +45,18 @@ pub enum Check {
     Count,
 }
 
+impl Check {
+    /// Whether nupdf's units `a` and pdf_oxide's `b` agree.
+    pub fn agrees(self, a: Option<u64>, b: Option<u64>) -> bool {
+        match (self, a, b) {
+            (Check::Count, _, _) => true,
+            (Check::Equal, Some(a), Some(b)) => a == b,
+            (Check::NonEmpty, Some(a), Some(b)) => (a > 0) == (b > 0),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Against {
     pub name: &'static str,
@@ -55,6 +70,9 @@ pub struct Against {
     /// same as the bench pair of the same name, where there is one.
     pub oracle: &'static [&'static str],
     pub nupdf: &'static [&'static str],
+    /// The `pdf-oxide` CLI's arguments, expanded the same way; empty where
+    /// it has no command for the operation.
+    pub cli: &'static [&'static str],
 }
 
 const TEXT_MUTOOL: &[&str] = &["draw", "-q", "-F", "txt", "-o", "{out}", "{file}"];
@@ -64,43 +82,47 @@ pub const AGAINST: &[Against] = &[
     Against {
         name: "info",
         op: "info",
-        about: "open and count pages, as each tool's info command does it: `nupdf info` (version, page count, objects, permissions, metadata, and every page's text scanned for the pages that need OCR, up to 2,000 pages), MuPDF's `info.js` (the same without the text scan, JS overhead included), pdf_oxide `PdfDocument`, `version()` and `page_count`",
+        about: "open and count pages, as each tool's info command does it: `nupdf info` (version, page count, objects, permissions, metadata, and every page's text scanned for the pages that need OCR, up to 2,000 pages), MuPDF's `info.js` (the same without the text scan, JS overhead included), `pdf-oxide info --json` (version, page count, metadata), Python `PdfDocument`, `version()` and `page_count`",
         units: "pages",
         check: Check::Equal,
         oracle: &["run", "oracle/js/info.js", "{file}"],
         nupdf: &["info", "{file}"],
+        cli: &["info", "--json", "{file}"],
     },
     Against {
         name: "pages",
         op: "pages",
-        about: "open and walk the page tree: `nupdf pages` and `pages.js` (each page's object and inherited MediaBox, CropBox, Rotate and Resources, JS overhead included on the MuPDF side), pdf_oxide `page_media_box(i)`, `page_crop_box(i)` and `page_rotation(i)` for every page",
+        about: "open and walk the page tree: `nupdf pages` and `pages.js` (each page's object and inherited MediaBox, CropBox, Rotate and Resources, JS overhead included on the MuPDF side), Python `page_media_box(i)`, `page_crop_box(i)` and `page_rotation(i)` for every page; the CLI has no such command",
         units: "pages",
         check: Check::Equal,
         oracle: &["run", "oracle/js/pages.js", "{file}"],
         nupdf: &["pages", "{file}"],
+        cli: &[],
     },
     Against {
         name: "text",
         op: "text",
-        about: "every page's text as plain text to a file or stdout: `nupdf extract --format text`, `mutool draw -F txt`, pdf_oxide `extract_text(i)` with its defaults (which look for tables)",
+        about: "every page's text as plain text to a file or stdout: `nupdf extract --format text`, `mutool draw -F txt`, `pdf-oxide text`, Python `extract_text(i)` with its defaults (which look for tables)",
         units: "non-whitespace characters",
         check: Check::NonEmpty,
         oracle: TEXT_MUTOOL,
         nupdf: TEXT_NUPDF,
+        cli: &["text", "{file}"],
     },
     Against {
         name: "text-fast",
         op: "text-fast",
-        about: "as `text`, with pdf_oxide in its speed-first mode, `extract_text(i, extract_tables=False)`",
+        about: "as `text`, with Python in pdf_oxide's speed-first mode, `extract_text(i, extract_tables=False)`; the CLI has no such option",
         units: "non-whitespace characters",
         check: Check::NonEmpty,
         oracle: TEXT_MUTOOL,
         nupdf: TEXT_NUPDF,
+        cli: &[],
     },
     Against {
         name: "render",
         op: "render",
-        about: "every page at 72 dpi to an image file per page: `nupdf render --format ppm` (RGB, no annotations), `mutool draw -N` (RGB PPM, with annotations), pdf_oxide `render_pixmap(i, dpi=72)` (premultiplied RGBA, with annotations) written as PAM",
+        about: "every page at 72 dpi to an image file per page: `nupdf render --format ppm` (RGB, no annotations), `mutool draw -N` (RGB PPM, with annotations), Python `render_pixmap(i, dpi=72)` (premultiplied RGBA, with annotations) written as PAM; the CLI writes only PNG and JPEG (see `render-png`)",
         units: "pages with ink",
         check: Check::Equal,
         oracle: &[
@@ -114,42 +136,66 @@ pub const AGAINST: &[Against] = &[
             "{file}",
         ],
         nupdf: &["render", "{file}", "-o", "{dir}", "--format", "ppm"],
+        cli: &[],
+    },
+    Against {
+        name: "render-png",
+        op: "render-png",
+        about: "every page at 72 dpi to a PNG file per page: `nupdf render` (no annotations), `mutool draw -N`, `pdf-oxide render --dpi 72` and Python `render_page(i, dpi=72)` (with annotations)",
+        units: "pages with ink",
+        check: Check::Equal,
+        oracle: &[
+            "draw",
+            "-q",
+            "-N",
+            "-r",
+            "72",
+            "-o",
+            "{dir}/p%d.png",
+            "{file}",
+        ],
+        nupdf: &["render", "{file}", "-o", "{dir}"],
+        cli: &["render", "--dpi", "72", "-o", "{dir}", "{file}"],
     },
     Against {
         name: "tables",
         op: "tables",
-        about: "every page's tables as rows of cells: `nupdf tables`, MuPDF's table hunting (`tables.js`), pdf_oxide `extract_tables(i)` as JSON",
+        about: "every page's tables as rows of cells: `nupdf tables`, MuPDF's table hunting (`tables.js`), Python `extract_tables(i)` as JSON; the CLI has no tables command",
         units: "tables",
         check: Check::Count,
         oracle: &["run", "oracle/js/tables.js", "{file}"],
         nupdf: &["tables", "{file}"],
+        cli: &[],
     },
     Against {
         name: "annots",
         op: "annots",
-        about: "every page's annotations: `nupdf annots` and `annots.js` (widgets left out, as MuPDF does), pdf_oxide `get_annotations(i)` (widgets included) as JSON",
+        about: "every page's annotations: `nupdf annots` and `annots.js` (widgets and links left out, as MuPDF does), Python `get_annotations(i)` (widgets and links included) as JSON; the CLI has no annotations command",
         units: "annotations",
         check: Check::Count,
         oracle: &["run", "oracle/js/annots.js", "{file}"],
         nupdf: &["annots", "{file}"],
+        cli: &[],
     },
     Against {
         name: "forms",
         op: "forms",
-        about: "form fields: `nupdf forms` and `forms.js` (each page's widgets), pdf_oxide `get_form_fields()` (the AcroForm's fields) as JSON",
+        about: "form fields: `nupdf forms` and `forms.js` (each page's widgets), `pdf-oxide forms --json` and Python `get_form_fields()` (the AcroForm's fields) as JSON",
         units: "widgets or fields",
         check: Check::Count,
         oracle: &["run", "oracle/js/forms.js", "{file}"],
         nupdf: &["forms", "{file}"],
+        cli: &["forms", "--json", "{file}"],
     },
     Against {
         name: "signatures",
         op: "signatures",
-        about: "signatures checked: `nupdf signatures` and `signatures.js` (each page's signature widgets, byte ranges and digest), pdf_oxide `signatures()`, each with `verify_detached` (digest and signer attributes)",
+        about: "signatures checked: `nupdf signatures` and `signatures.js` (each page's signature widgets, byte ranges and digest), Python `signatures()`, each with `verify_detached` (digest and signer attributes); the CLI has no signatures command",
         units: "signatures",
         check: Check::Count,
         oracle: &["run", "oracle/js/signatures.js", "{file}"],
         nupdf: &["signatures", "{file}"],
+        cli: &[],
     },
 ];
 
@@ -197,8 +243,57 @@ pub fn ppm_has_ink(bytes: &[u8]) -> Option<bool> {
     Some(samples[..len].iter().any(|&b| b != 255))
 }
 
+/// Whether a PNG has any pixel that is not white, a transparent pixel
+/// counting as white; `None` if it does not decode.
+pub fn png_has_ink(bytes: &[u8]) -> Option<bool> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let data = &buf[..info.buffer_size()];
+    let (channels, alpha) = match info.color_type {
+        png::ColorType::Grayscale => (1, false),
+        png::ColorType::GrayscaleAlpha => (2, true),
+        png::ColorType::Rgb => (3, false),
+        png::ColorType::Rgba => (4, true),
+        png::ColorType::Indexed => return None,
+    };
+    Some(data.chunks_exact(channels).any(|px| {
+        let (color, a) = if alpha {
+            (&px[..channels - 1], px[channels - 1])
+        } else {
+            (px, 255)
+        };
+        a > 0 && color.iter().any(|&c| c != 255)
+    }))
+}
+
+/// The pages with ink among the PPM and PNG files in `dir`; `None` if one
+/// of them does not decode.
+pub fn dir_ink(dir: &Path) -> Option<u64> {
+    let mut inked = 0;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        let ink = match path.extension().and_then(|e| e.to_str()) {
+            Some("ppm") => ppm_has_ink(&std::fs::read(&path).ok()?)?,
+            Some("png") => png_has_ink(&std::fs::read(&path).ok()?)?,
+            _ => continue,
+        };
+        inked += u64::from(ink);
+    }
+    Some(inked)
+}
+
+fn non_whitespace(text: &[u8]) -> u64 {
+    String::from_utf8_lossy(text)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .count() as u64
+}
+
 /// The units of nupdf's output for `op`: from its report on stdout, or, for
-/// `render`, from the images it wrote into `dir`.
+/// rendering, from the images it wrote into `dir`.
 pub fn nupdf_units(op: &str, stdout: &[u8], dir: &Path) -> Option<u64> {
     let first_line = |s: &[u8]| -> Option<serde_json::Value> {
         let end = s.iter().position(|&b| b == b'\n').unwrap_or(s.len());
@@ -218,28 +313,24 @@ pub fn nupdf_units(op: &str, stdout: &[u8], dir: &Path) -> Option<u64> {
         "info" => first_line(stdout)?["page_count"].as_u64(),
         "pages" => Some(first_line(stdout)?["pages"].as_array()?.len() as u64),
         // The text is all of stdout; the report goes to stderr.
-        "text" | "text-fast" => Some(
-            String::from_utf8_lossy(stdout)
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .count() as u64,
-        ),
-        "render" => {
-            let mut inked = 0;
-            for entry in std::fs::read_dir(dir).ok()? {
-                let path = entry.ok()?.path();
-                if path.extension().is_some_and(|e| e == "ppm")
-                    && ppm_has_ink(&std::fs::read(&path).ok()?)?
-                {
-                    inked += 1;
-                }
-            }
-            Some(inked)
-        }
+        "text" | "text-fast" => Some(non_whitespace(stdout)),
+        "render" | "render-png" => dir_ink(dir),
         "tables" => per_page("tables"),
         "annots" => per_page("annots"),
         "forms" => per_page("widgets"),
         "signatures" => per_page("signatures"),
+        _ => None,
+    }
+}
+
+/// The units of the `pdf-oxide` CLI's output for `op`.
+pub fn cli_units(op: &str, stdout: &[u8], dir: &Path) -> Option<u64> {
+    let json = || serde_json::from_slice::<serde_json::Value>(stdout).ok();
+    match op {
+        "info" => json()?["pages"].as_u64(),
+        "text" => Some(non_whitespace(stdout)),
+        "render-png" => dir_ink(dir),
+        "forms" => Some(json()?.as_array()?.len() as u64),
         _ => None,
     }
 }
@@ -263,24 +354,30 @@ pub struct Row {
     /// Median process times in ms; `None` where that side failed.
     pub mupdf_ms: Option<f64>,
     pub nupdf_ms: Option<f64>,
+    /// pdf_oxide through Python.
     pub oxide_ms: Option<f64>,
     /// pdf_oxide's median time in process, without the interpreter and the
     /// import.
     pub oxide_work_ms: Option<f64>,
     pub oxide_import_ms: Option<f64>,
+    /// The `pdf-oxide` CLI, when it ran: `cli_tried` is false where it has
+    /// no command for the operation or is not installed.
+    pub cli_tried: bool,
+    pub cli_ms: Option<f64>,
     pub nupdf_units: Option<u64>,
     pub oxide_units: Option<u64>,
+    pub cli_units: Option<u64>,
 }
 
 impl Row {
-    /// Whether nupdf's and pdf_oxide's outputs agree as `check` asks.
+    /// Whether nupdf's and pdf_oxide's (Python) outputs agree.
     pub fn agrees(&self, check: Check) -> bool {
-        match (check, self.nupdf_units, self.oxide_units) {
-            (Check::Count, _, _) => true,
-            (Check::Equal, Some(a), Some(b)) => a == b,
-            (Check::NonEmpty, Some(a), Some(b)) => (a > 0) == (b > 0),
-            _ => false,
-        }
+        check.agrees(self.nupdf_units, self.oxide_units)
+    }
+
+    /// Whether nupdf's and the CLI's outputs agree.
+    pub fn cli_agrees(&self, check: Check) -> bool {
+        check.agrees(self.nupdf_units, self.cli_units)
     }
 }
 
@@ -290,24 +387,34 @@ pub struct Summary {
     pub failed_mupdf: usize,
     pub failed_nupdf: usize,
     pub failed_oxide: usize,
-    /// Files nupdf and pdf_oxide both did but on which they disagree.
+    /// Whether the CLI ran on this operation.
+    pub cli_tried: bool,
+    pub failed_cli: usize,
+    /// Files nupdf and pdf_oxide (Python, the CLI) both did but on which
+    /// they disagree.
     pub disagree: usize,
+    pub cli_disagree: usize,
     /// Files in MuPDF's ratio: MuPDF and nupdf did them.
     pub counted_mupdf: usize,
-    /// Files in pdf_oxide's ratios: nupdf and pdf_oxide did them and agreed.
+    /// Files in the Python ratios: nupdf and Python did them and agreed.
     pub counted: usize,
+    /// Files in the CLI's ratio: nupdf and the CLI did them and agreed.
+    pub counted_cli: usize,
     /// Geometric means of each side's process time over nupdf's, each over
     /// its own counted files: above 1, nupdf is faster.
     pub mupdf_ratio: f64,
     pub oxide_ratio: f64,
+    pub cli_ratio: f64,
+    /// The CLI's total over nupdf's, over the CLI's counted files.
+    pub cli_total_ratio: f64,
     /// The same in process: pdf_oxide's time in process over nupdf's
     /// process time less its startup (`nupdf_startup_ms`), that floored at
     /// [`FLOOR_MS`].
     pub work_ratio: f64,
     /// The ratio of the in-process totals, which small files sway less.
     pub work_total_ratio: f64,
-    /// Total ms: MuPDF's over its counted files, the others' over
-    /// pdf_oxide's.
+    /// Total ms: MuPDF's over its counted files, the others' over the
+    /// Python side's.
     pub nupdf_total: f64,
     pub mupdf_total: f64,
     pub oxide_total: f64,
@@ -319,9 +426,12 @@ pub struct Summary {
     /// Median of pdf_oxide's interpreter start and import, over every file
     /// it did: the cost an agent pays once per process.
     pub oxide_startup_ms: f64,
-    /// Output totals over the files both did.
+    /// Output totals over the files nupdf and Python both did, and over
+    /// those nupdf and the CLI both did.
     pub nupdf_units: u64,
     pub oxide_units: u64,
+    pub nupdf_cli_units: u64,
+    pub cli_units: u64,
 }
 
 /// The least nupdf's time in process is taken to be: below it, what is left
@@ -337,11 +447,16 @@ pub fn summarize(check: Check, rows: &[Row], nupdf_startup_ms: f64) -> Summary {
     };
     let mut counted = Vec::new();
     let mut with_mupdf = Vec::new();
+    let mut with_cli = Vec::new();
     let mut startup = Vec::new();
     for r in rows {
         s.failed_mupdf += usize::from(r.mupdf_ms.is_none());
         s.failed_nupdf += usize::from(r.nupdf_ms.is_none());
         s.failed_oxide += usize::from(r.oxide_ms.is_none());
+        if r.cli_tried {
+            s.cli_tried = true;
+            s.failed_cli += usize::from(r.cli_ms.is_none());
+        }
         if let (Some(total), Some(work)) = (r.oxide_ms, r.oxide_work_ms) {
             startup.push(total - work);
         }
@@ -354,6 +469,15 @@ pub fn summarize(check: Check, rows: &[Row], nupdf_startup_ms: f64) -> Summary {
         if let (Some(n), Some(m)) = (r.nupdf_ms, r.mupdf_ms) {
             with_mupdf.push((n, m));
         }
+        if let (Some(n), Some(c)) = (r.nupdf_ms, r.cli_ms) {
+            s.nupdf_cli_units += r.nupdf_units.unwrap_or(0);
+            s.cli_units += r.cli_units.unwrap_or(0);
+            if r.cli_agrees(check) {
+                with_cli.push((n, c));
+            } else {
+                s.cli_disagree += 1;
+            }
+        }
         let (Some(n), Some(o), Some(w)) = (r.nupdf_ms, r.oxide_ms, r.oxide_work_ms) else {
             continue;
         };
@@ -365,9 +489,19 @@ pub fn summarize(check: Check, rows: &[Row], nupdf_startup_ms: f64) -> Summary {
     }
     s.counted = counted.len();
     s.counted_mupdf = with_mupdf.len();
+    s.counted_cli = with_cli.len();
     let over = |t: f64, n: f64| t / n.max(f64::EPSILON);
     s.mupdf_ratio = geomean(with_mupdf.iter().map(|&(n, m)| over(m, n)));
     s.oxide_ratio = geomean(counted.iter().map(|&(n, o, _)| over(o, n)));
+    s.cli_ratio = geomean(with_cli.iter().map(|&(n, c)| over(c, n)));
+    s.cli_total_ratio = if with_cli.is_empty() {
+        f64::NAN
+    } else {
+        over(
+            with_cli.iter().map(|c| c.1).sum(),
+            with_cli.iter().map(|c| c.0).sum(),
+        )
+    };
     let in_process = |n: f64| (n - nupdf_startup_ms).max(FLOOR_MS);
     s.work_ratio = geomean(counted.iter().map(|&(n, _, w)| w / in_process(n)));
     s.mupdf_total = with_mupdf.iter().map(|c| c.1).sum();
@@ -400,29 +534,38 @@ pub fn render(a: &Against, tier: &str, runs: usize, rows: &[Row], nupdf_startup_
     let s = summarize(a.check, rows, nupdf_startup_ms);
     let mut out = format!(
         "# Bench `{}` against pdf_oxide on `{tier}` (median of {runs} runs)\n\n{}.\n\n\
-         Times in ms; `fail` where a side failed. pdf_oxide is timed as a process \
-         and in process (without the interpreter and its import). Units: {}.\n\n\
-         | File | MuPDF | nupdf | pdf_oxide | pdf_oxide in process | nupdf units | pdf_oxide units | |\n\
-         |---|---|---|---|---|---|---|---|\n",
+         Times in ms; `fail` where a side failed, `-` where the CLI has no command for it. \
+         Python is timed as a process and in process (without the interpreter and its import). \
+         Units: {}.\n\n\
+         | File | MuPDF | nupdf | pdf-oxide CLI | Python | Python in process | nupdf units | CLI units | Python units | |\n\
+         |---|---|---|---|---|---|---|---|---|---|\n",
         a.name, a.about, a.units
     );
     for r in rows {
-        let both = r.nupdf_ms.is_some() && r.oxide_ms.is_some();
-        let flag = if both && !r.agrees(a.check) {
-            "disagree"
+        let mut flags = Vec::new();
+        if r.nupdf_ms.is_some() && r.cli_ms.is_some() && !r.cli_agrees(a.check) {
+            flags.push("CLI disagrees");
+        }
+        if r.nupdf_ms.is_some() && r.oxide_ms.is_some() && !r.agrees(a.check) {
+            flags.push("Python disagrees");
+        }
+        let cli = if r.cli_tried {
+            ms(r.cli_ms)
         } else {
-            ""
+            "-".into()
         };
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} | {} | {} | {} | {flag} |",
+            "| {} | {} | {} | {cli} | {} | {} | {} | {} | {} | {} |",
             r.file,
             ms(r.mupdf_ms),
             ms(r.nupdf_ms),
             ms(r.oxide_ms),
             ms(r.oxide_work_ms),
             count(r.nupdf_units),
+            count(r.cli_units),
             count(r.oxide_units),
+            flags.join(", "),
         );
     }
     let _ = write!(out, "\n{}", summary_table(&[(a, s)]));
@@ -441,32 +584,44 @@ fn times(ratio: f64) -> String {
 /// what each side failed on.
 pub fn summary_table(results: &[(&Against, Summary)]) -> String {
     let mut out = String::from(
-        "| Operation | Files | MuPDF / nupdf | Files in it | pdf_oxide / nupdf | In process | Of totals | Files in them | \
-         Failed: MuPDF | nupdf | pdf_oxide | Disagree | Units: nupdf | pdf_oxide |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        "| Operation | Files | MuPDF / nupdf | Files in it | CLI / nupdf | Of totals | Files in it | \
+         Python / nupdf | In process | Of totals | Files in them | \
+         Failed: MuPDF | nupdf | CLI | Python | Disagree: CLI | Python | \
+         Units, nupdf / CLI | nupdf / Python |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     let mut startup = f64::NAN;
     for (a, s) in results {
         startup = s.nupdf_startup_ms;
+        let checked = |n: usize| {
+            if a.check == Check::Count {
+                "-".to_string()
+            } else {
+                n.to_string()
+            }
+        };
+        let cli = |v: String| if s.cli_tried { v } else { "-".into() };
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} / {} |",
             a.name,
             s.files,
             times(s.mupdf_ratio),
             s.counted_mupdf,
+            cli(times(s.cli_ratio)),
+            cli(times(s.cli_total_ratio)),
+            cli(s.counted_cli.to_string()),
             times(s.oxide_ratio),
             times(s.work_ratio),
             times(s.work_total_ratio),
             s.counted,
             s.failed_mupdf,
             s.failed_nupdf,
+            cli(s.failed_cli.to_string()),
             s.failed_oxide,
-            if a.check == Check::Count {
-                "-".to_string()
-            } else {
-                s.disagree.to_string()
-            },
+            cli(checked(s.cli_disagree)),
+            checked(s.disagree),
+            cli(format!("{} / {}", s.nupdf_cli_units, s.cli_units)),
             s.nupdf_units,
             s.oxide_units,
         );
@@ -474,13 +629,13 @@ pub fn summary_table(results: &[(&Against, Summary)]) -> String {
     let _ = writeln!(
         out,
         "\nRatios are each side's time over nupdf's, geometric means: above 1x, nupdf is faster. \
-         MuPDF's is over the files MuPDF and nupdf did (`mutool` exits with 1 when any page has \
-         an error, which counts as failing), pdf_oxide's over the files nupdf and pdf_oxide did \
-         and, where checked, agree on. In process, pdf_oxide's time runs from opening the document to its last \
-         byte of output, and nupdf's is its process time less {startup:.1} ms, the least it \
-         takes to start and exit with nothing to do (`nupdf --version`, fastest of 21 runs), and at least {FLOOR_MS} ms; \
-         \"of totals\" is the ratio of the summed in-process times. Units are totals over the \
-         files both nupdf and pdf_oxide did."
+         Each is over the files both of its tools did (`mutool` exits with 1 when any page has \
+         an error, which counts as failing) and, where checked, nupdf and pdf_oxide agree on. \
+         \"CLI\" is pdf_oxide's native `pdf-oxide`, \"Python\" its bindings. In process, Python's \
+         time runs from opening the document to its last byte of output, and nupdf's is its \
+         process time less {startup:.1} ms, the least it takes to start and exit with nothing to \
+         do (`nupdf --version`, fastest of 21 runs), and at least {FLOOR_MS} ms; \"of totals\" is \
+         the ratio of the summed times. Units are totals over the files both tools did."
     );
     out
 }
@@ -518,6 +673,22 @@ fn fresh(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
 }
 
+/// The `pdf-oxide` CLI: `NUPDF_PDF_OXIDE` or
+/// `target/oxide-cli/bin/pdf-oxide` (`cargo install --locked --root
+/// target/oxide-cli pdf_oxide_cli`), with its version.
+fn find_cli(root: &Path) -> Option<(PathBuf, String)> {
+    let path = std::env::var_os("NUPDF_PDF_OXIDE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target/oxide-cli/bin/pdf-oxide"));
+    let run = proc::run(&path, &["--version"], Duration::from_secs(10)).ok()?;
+    run.succeeded().then(|| {
+        (
+            path,
+            String::from_utf8_lossy(&run.stdout).trim().to_string(),
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     root: &Path,
@@ -544,6 +715,7 @@ pub fn run(
             "pdf_oxide is not installed in target/bench-venv (see oracle/bench/requirements.txt)"
         ),
     };
+    let cli = find_cli(root);
     let pairs: Vec<&Against> = AGAINST
         .iter()
         .filter(|a| only.is_none_or(|name| a.name == name))
@@ -596,8 +768,22 @@ pub fn run(
                 row.nupdf_ms = Some(wall_ms(&r));
             }
 
+            if let Some((program, _)) = cli.as_ref().filter(|_| !a.cli.is_empty()) {
+                row.cli_tried = true;
+                fresh(&dir);
+                let args = expand(root, a.cli, &file.path, &scratch, &dir);
+                if let Some(r) = runs_of(program, &args, runs)? {
+                    row.cli_units = cli_units(a.op, &r[0].stdout, &dir);
+                    row.cli_ms = Some(wall_ms(&r));
+                }
+            }
+
             fresh(&dir);
-            let out = if a.op == "render" { &dir } else { &scratch };
+            let out = if a.op.starts_with("render") {
+                &dir
+            } else {
+                &scratch
+            };
             let args: Vec<OsString> = vec![
                 script.clone().into_os_string(),
                 a.op.into(),
@@ -610,7 +796,12 @@ pub fn run(
                 if let Some(stats) = stats.filter(|s| s.iter().all(|s| s.failed_pages == 0)) {
                     let mut work: Vec<f64> = stats[1..].iter().map(|s| s.work_ms).collect();
                     let mut import: Vec<f64> = stats[1..].iter().map(|s| s.import_ms).collect();
-                    row.oxide_units = Some(stats[0].units);
+                    // PNGs are judged here, as nupdf's and the CLI's are.
+                    row.oxide_units = if a.op == "render-png" {
+                        dir_ink(&dir)
+                    } else {
+                        Some(stats[0].units)
+                    };
                     row.oxide_work_ms = Some(median(&mut work));
                     row.oxide_import_ms = Some(median(&mut import));
                     row.oxide_ms = Some(wall_ms(&r));
@@ -627,9 +818,16 @@ pub fn run(
         println!("{report}");
         results.push((a, summarize(a.check, &rows, startup)));
     }
+    let cli_version = cli.as_ref().map_or_else(
+        || {
+            "not installed, left out (cargo install --locked --root target/oxide-cli pdf_oxide_cli)"
+                .to_string()
+        },
+        |(_, v)| v.clone(),
+    );
     let mut summary = format!(
         "# nupdf, MuPDF and pdf_oxide on `{tier}` ({} files, median of {runs} runs)\n\n\
-         pdf_oxide and Python: {version}. MuPDF: {}.\n\n",
+         pdf_oxide CLI: {cli_version}. pdf_oxide and Python: {version}. MuPDF: {}.\n\n",
         files.len(),
         mupdf_version(mutool)
     );
@@ -674,9 +872,18 @@ mod tests {
         for a in AGAINST {
             assert!(names.insert(a.name), "{}", a.name);
             assert!(a.nupdf.contains(&"{file}") && a.oracle.contains(&"{file}"));
+            assert!(a.cli.is_empty() || a.cli.contains(&"{file}"), "{}", a.name);
             if let Some(p) = PAIRS.iter().find(|p| p.name == a.name) {
                 assert_eq!(p.oracle, a.oracle, "{}", a.name);
                 assert_eq!(p.nupdf, a.nupdf, "{}", a.name);
+            }
+            // Every CLI operation has its units read.
+            if !a.cli.is_empty() {
+                assert!(
+                    matches!(a.op, "info" | "text" | "render-png" | "forms"),
+                    "{}",
+                    a.op
+                );
             }
         }
         let script = include_str!("../../oracle/bench/oxide.py");
@@ -704,6 +911,41 @@ mod tests {
         assert_eq!(ppm_has_ink(b"P5\n1 1\n255\n\x00"), None, "not RGB");
     }
 
+    fn png(color: png::ColorType, pixels: &[u8]) -> Vec<u8> {
+        let channels = match color {
+            png::ColorType::Grayscale => 1,
+            png::ColorType::GrayscaleAlpha => 2,
+            png::ColorType::Rgb => 3,
+            _ => 4,
+        };
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, (pixels.len() / channels) as u32, 1);
+        enc.set_color(color);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .unwrap()
+            .write_image_data(pixels)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn png_ink() {
+        use png::ColorType::*;
+        assert_eq!(png_has_ink(&png(Rgb, &[255; 6])), Some(false));
+        assert_eq!(
+            png_has_ink(&png(Rgb, &[255, 255, 255, 0, 255, 255])),
+            Some(true)
+        );
+        assert_eq!(png_has_ink(&png(Grayscale, &[255, 254])), Some(true));
+        // Opaque white, then black that is fully transparent: no ink.
+        let clear = [255, 255, 255, 255, 0, 0, 0, 0];
+        assert_eq!(png_has_ink(&png(Rgba, &clear)), Some(false));
+        assert_eq!(png_has_ink(&png(Rgba, &[0, 0, 0, 255])), Some(true));
+        assert_eq!(png_has_ink(&png(GrayscaleAlpha, &[0, 1])), Some(true));
+        assert_eq!(png_has_ink(b"\x89PNG\r\n\x1a\nbroken"), None);
+    }
+
     #[test]
     fn nupdf_units_read_its_reports() {
         let dir = Path::new("/nonexistent");
@@ -724,13 +966,34 @@ mod tests {
     }
 
     #[test]
-    fn nupdf_units_count_rendered_pages_with_ink() {
+    fn cli_units_read_its_output() {
+        let dir = Path::new("/nonexistent");
+        let info = b"{\n  \"file\": \"a.pdf\",\n  \"pages\": 2,\n  \"version\": \"1.7\"\n}\n";
+        assert_eq!(cli_units("info", info, dir), Some(2));
+        assert_eq!(cli_units("text", b"Hello world!\n\n a", dir), Some(12));
+        let forms = br#"[{"name":"Text1","page":1},{"name":"Text2","page":1}]"#;
+        assert_eq!(cli_units("forms", forms, dir), Some(2));
+        assert_eq!(cli_units("forms", b"[]", dir), Some(0));
+        assert_eq!(cli_units("info", b"File: a.pdf\nPages: 2\n", dir), None);
+        assert_eq!(cli_units("tables", b"[]", dir), None);
+    }
+
+    #[test]
+    fn rendered_pages_with_ink_are_counted_from_ppm_and_png() {
         let dir = std::env::temp_dir().join(format!("nupdf-against-{}", std::process::id()));
         fresh(&dir);
         std::fs::write(dir.join("page-0001.ppm"), b"P6\n1 1\n255\n\x00\x00\x00").unwrap();
         std::fs::write(dir.join("page-0002.ppm"), b"P6\n1 1\n255\n\xff\xff\xff").unwrap();
         std::fs::write(dir.join("page-0003.ppm"), b"P6\n1 1\n255\n\x10\xff\xff").unwrap();
         assert_eq!(nupdf_units("render", b"{}", &dir), Some(2));
+        fresh(&dir);
+        std::fs::write(dir.join("a_1.png"), png(png::ColorType::Rgb, &[0, 0, 0])).unwrap();
+        std::fs::write(dir.join("a_2.png"), png(png::ColorType::Rgb, &[255; 3])).unwrap();
+        std::fs::write(dir.join("notes.txt"), b"not an image").unwrap();
+        assert_eq!(cli_units("render-png", b"", &dir), Some(1));
+        assert_eq!(nupdf_units("render-png", b"{}", &dir), Some(1));
+        std::fs::write(dir.join("a_3.png"), b"not a png").unwrap();
+        assert_eq!(dir_ink(&dir), None, "an image that does not decode");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -757,10 +1020,17 @@ mod tests {
             mupdf_ms: m,
             oxide_ms: o.map(|o| o.0),
             oxide_work_ms: o.map(|o| o.1),
-            oxide_import_ms: None,
             nupdf_units: n.map(|_| units.0),
             oxide_units: o.map(|_| units.1),
+            ..Row::default()
         }
+    }
+
+    fn with_cli(mut r: Row, cli: Option<(f64, u64)>) -> Row {
+        r.cli_tried = true;
+        r.cli_ms = cli.map(|c| c.0);
+        r.cli_units = cli.map(|c| c.1);
+        r
     }
 
     #[test]
@@ -792,6 +1062,8 @@ mod tests {
         assert_eq!((s.nupdf_units, s.oxide_units), (15, 10));
         // Startup: process less in process, the median of 30, 24, 20.9, 25.
         assert!((s.oxide_startup_ms - 24.5).abs() < 1e-9, "{s:?}");
+        // No CLI rows: nothing about it.
+        assert!(!s.cli_tried && s.cli_ratio.is_nan() && s.failed_cli == 0);
         // Counted, not checked: the disagreeing file is in the ratios.
         assert_eq!(summarize(Check::Count, &rows, 1.0).counted, 3);
         // Startup above the process time leaves the floor.
@@ -800,36 +1072,72 @@ mod tests {
     }
 
     #[test]
+    fn cli_ratios_are_over_the_files_nupdf_and_the_cli_did_and_agree_on() {
+        let base = |n| row(Some(n), Some(n), Some((40.0, 1.0)), (5, 5));
+        let rows = [
+            with_cli(base(2.0), Some((4.0, 5))),
+            with_cli(base(4.0), Some((16.0, 5))),
+            // The CLI failed.
+            with_cli(base(4.0), None),
+            // Fast and empty: a disagreement, out of the ratio.
+            with_cli(base(4.0), Some((0.1, 0))),
+            with_cli(row(None, Some(1.0), None, (0, 0)), Some((3.0, 2))),
+        ];
+        let s = summarize(Check::NonEmpty, &rows, 1.0);
+        assert!(s.cli_tried);
+        assert_eq!(
+            (s.failed_cli, s.counted_cli, s.cli_disagree),
+            (1, 2, 1),
+            "{s:?}"
+        );
+        // 4 / 2 and 16 / 4.
+        assert!((s.cli_ratio - 8f64.sqrt()).abs() < 1e-9, "{s:?}");
+        assert!((s.cli_total_ratio - 20.0 / 6.0).abs() < 1e-9, "{s:?}");
+        assert_eq!((s.nupdf_cli_units, s.cli_units), (15, 10));
+        // The Python side is untouched by the CLI's rows.
+        assert_eq!(s.counted, 4);
+    }
+
+    #[test]
     fn checks() {
         let r = |a, b| Row {
             nupdf_units: Some(a),
             oxide_units: Some(b),
+            cli_units: Some(b),
             ..Row::default()
         };
         assert!(r(3, 3).agrees(Check::Equal) && !r(3, 2).agrees(Check::Equal));
         assert!(r(3, 9).agrees(Check::NonEmpty) && !r(3, 0).agrees(Check::NonEmpty));
         assert!(r(0, 0).agrees(Check::NonEmpty) && r(0, 7).agrees(Check::Count));
+        assert!(r(3, 9).cli_agrees(Check::NonEmpty) && !r(3, 0).cli_agrees(Check::NonEmpty));
         assert!(!Row::default().agrees(Check::Equal));
+        assert!(!Row::default().cli_agrees(Check::Equal));
     }
 
     #[test]
     fn reports_flag_disagreements_and_failures() {
         let a = AGAINST.iter().find(|a| a.name == "info").unwrap();
         let rows = [
-            row(Some(2.0), Some(4.0), Some((40.0, 1.0)), (3, 2)),
+            with_cli(
+                row(Some(2.0), Some(4.0), Some((40.0, 1.0)), (3, 2)),
+                Some((3.0, 3)),
+            ),
             row(Some(2.0), None, Some((40.0, 1.0)), (3, 3)),
         ];
         let out = render(a, "smoke", 3, &rows, 1.0);
         assert!(
-            out.contains("| f | 4.0 | 2.0 | 40.0 | 1.0 | 3 | 2 | disagree |"),
+            out.contains("| f | 4.0 | 2.0 | 3.0 | 40.0 | 1.0 | 3 | 3 | 2 | Python disagrees |"),
             "{out}"
         );
-        assert!(out.contains("| f | fail | 2.0 |"), "{out}");
+        assert!(out.contains("| f | fail | 2.0 | - | 40.0 |"), "{out}");
         assert!(
             out.contains(
-                "| info | 2 | 2.00x | 1 | 20.00x | 1.00x | 1.00x | 1 | 1 | 0 | 0 | 1 | 6 | 5 |"
+                "| info | 2 | 2.00x | 1 | 1.50x | 1.50x | 1 | 20.00x | 1.00x | 1.00x | 1 | 1 | 0 | 0 | 0 | 0 | 1 | 3 / 3 | 6 / 5 |"
             ) && out.contains("less 1.0 ms"),
             "{out}"
         );
+        // Without the CLI, its columns are blank.
+        let out = render(a, "smoke", 3, &rows[1..], 1.0);
+        assert!(out.contains("| - | - | - |"), "{out}");
     }
 }

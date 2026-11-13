@@ -1224,6 +1224,7 @@ dependencies = [
  "md-5",
  "miniz_oxide 0.8.9",
  "nupdf",
+ "png",
  "serde",
  "serde_json",
  "sha2",
