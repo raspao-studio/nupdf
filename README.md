@@ -74,9 +74,6 @@ The [docs site](https://raspao-studio.github.io/nupdf/) has a getting-started gu
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | Layers, modules, data model, concurrency, safety |
 | [TESTING](docs/TESTING.md) | The reference build, corpora, checks, benchmarks, fuzzing, the agent eval |
 | [BENCHMARKS](docs/BENCHMARKS.md) | Speed against MuPDF and PDF Oxide, with the machine and versions |
-| [DECISIONS](docs/DECISIONS.md) | Why things are the way they are |
-| [PLAN](docs/PLAN.md) | Milestones, work items, exit criteria |
-| [PRIOR-ART](docs/PRIOR-ART.md) | What else exists, and what is new here |
 | [SECURITY](SECURITY.md) | Reporting a vulnerability; the [threat model](docs/THREAT-MODEL.md) |
 | [CHANGELOG](CHANGELOG.md) | What each release changed |
 

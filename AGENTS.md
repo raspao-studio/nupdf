@@ -2,7 +2,7 @@
 
 A PDF engine for AI agents, in Rust: the `nupdf` library (`crates/nupdf`), the `nupdf` command and MCP server (`crates/nupdf-cli`), and dev tooling run as `cargo xtask` (`xtask`). These are the instructions for anyone changing it, person or agent.
 
-MuPDF is the behavioural reference: by default nupdf does what a pinned MuPDF build does, checked file by file. Before changing a subsystem, read its entry in `docs/ARCHITECTURE.md` (which MuPDF file it follows) and the decisions it cites in `docs/DECISIONS.md`. Open work is in `docs/PLAN.md`.
+MuPDF is the behavioural reference: by default nupdf does what a pinned MuPDF build does, checked file by file. Before changing a subsystem, read its entry in `docs/ARCHITECTURE.md` (which MuPDF file it follows) and the decisions it cites in `docs/DECISIONS.md`. Open work is in the GitHub issues.
 
 ## Commands
 
@@ -33,5 +33,5 @@ MuPDF is the behavioural reference: by default nupdf does what a pinned MuPDF bu
 ## Changes
 
 - Everything reaches `main` through a pull request; `main` is protected and needs the `check`, `deny` and `smoke` jobs to pass on a branch that is up to date with it.
-- Small commits whose messages say why. Tick the matching box in `docs/PLAN.md` in the commit that finishes the work.
+- Small commits whose messages say why.
 - Releases follow [RELEASING](docs/RELEASING.md); publishing is done by hand.

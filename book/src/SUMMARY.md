@@ -31,5 +31,3 @@
 - [Architecture](docs/ARCHITECTURE.md)
 - [Testing](docs/TESTING.md)
 - [Decisions](docs/DECISIONS.md)
-- [Plan](docs/PLAN.md)
-- [Prior art](docs/PRIOR-ART.md)
