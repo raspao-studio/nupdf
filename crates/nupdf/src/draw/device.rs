@@ -267,11 +267,15 @@ impl<'d> DrawDevice<'d> {
         let ri = self.ri(ri);
         let mut out = [0u8; MAX_COLORS + 1];
         let comps = match n {
-            0 => [0.0; 3],
-            1 => [self.cc.gray(self.doc, cs, color, ri), 0.0, 0.0],
-            _ => self.cc.rgb(self.doc, cs, color, ri),
+            0 => [0.0; 4],
+            1 => [self.cc.gray(self.doc, cs, color, ri), 0.0, 0.0, 0.0],
+            4 => self.cc.cmyk(self.doc, cs, color),
+            _ => {
+                let [r, g, b] = self.cc.rgb(self.doc, cs, color, ri);
+                [r, g, b, 0.0]
+            }
         };
-        let n = n.min(3);
+        let n = n.min(4);
         for (o, v) in out.iter_mut().zip(&comps[..n]) {
             *o = (v * 255.0) as u8;
         }
@@ -853,11 +857,23 @@ impl Device for DrawDevice<'_> {
                 .as_ref()
                 .is_some_and(|c| matches!(c, ColorSpace::Separation { .. }));
         let is_rgb = plain(crate::colorspace::Family::Rgb);
-        // Images with more components than RGB convert before scaling,
-        // the rest after; gray paints as it is.
-        let before = !is_gray && cs.as_ref().map_or(0, ColorSpace::n) > 3;
+        // Into a CMYK group, CMYK images paint as they are and the rest
+        // convert to CMYK.
+        let model = self.dest_n();
+        let (is_gray, is_rgb, is_cmyk) = if model == 4 {
+            let cmyk = family == Some(crate::colorspace::Family::Cmyk)
+                && !src
+                    .as_ref()
+                    .is_some_and(|c| matches!(c, ColorSpace::Separation { .. }));
+            (false, false, cmyk || cs.is_none())
+        } else {
+            (is_gray, is_rgb, false)
+        };
+        // Images with more components than the pixmap convert before
+        // scaling, the rest after; gray paints into RGB as it is.
+        let before = !is_gray && !is_cmyk && cs.as_ref().map_or(0, ColorSpace::n) > model.max(3);
         if before {
-            pix = self.to_rgb(&pix, cs.as_ref());
+            pix = self.to_model(&pix, cs.as_ref(), model);
         }
         if dw < pix.w && dh < pix.h {
             let fit = alpha == 1.0;
@@ -875,8 +891,8 @@ impl Device for DrawDevice<'_> {
                 pix = s;
             }
         }
-        if !before && !is_gray && !is_rgb {
-            pix = self.to_rgb(&pix, cs.as_ref());
+        if !before && !is_gray && !is_rgb && !is_cmyk {
+            pix = self.to_model(&pix, cs.as_ref(), model);
         }
         let ko = alpha != 1.0 && self.knockout_begin();
         let scissor = self.scissor();
@@ -1164,7 +1180,7 @@ impl Device for DrawDevice<'_> {
     fn begin_group(
         &mut self,
         area: Rect,
-        _cs: Option<&ColorSpace>,
+        cs: Option<&ColorSpace>,
         isolated: bool,
         knockout: bool,
         blendmode: u8,
@@ -1178,7 +1194,16 @@ impl Device for DrawDevice<'_> {
             self.knockout_begin();
         }
         let bbox = IRect::from_rect(area).intersect(self.scissor());
-        let n = self.dest_n();
+        let parent_n = self.dest_n();
+        // The group blends in its own colorspace (gray, RGB or CMYK), as
+        // MuPDF's group pixmaps are; with color management on nupdf keeps
+        // the one below, having no ICC conversion of whole pixmaps.
+        let n = match cs.map(|c| self.cc.default_of(c).family()) {
+            Some(Some(crate::colorspace::Family::Gray)) if !self.cc.icc => 1,
+            Some(Some(crate::colorspace::Family::Rgb)) if !self.cc.icc => 3,
+            Some(Some(crate::colorspace::Family::Cmyk)) if !self.cc.icc => 4,
+            _ => parent_n,
+        };
         let di = self.dest_index();
         let parent_alpha = self
             .stack
@@ -1198,7 +1223,13 @@ impl Device for DrawDevice<'_> {
                 dest.as_mut(),
                 self.stack.get(di).and_then(|s| s.dest.as_ref()),
             ) {
-                d.copy_rect(parent, bbox);
+                if n == parent_n {
+                    d.copy_rect(parent, bbox);
+                } else if let Ok(mut part) = Pix::new(bbox, parent.n, parent.alpha) {
+                    // fz_copy_pixmap_rect converting the backdrop.
+                    part.copy_rect(parent, bbox);
+                    d.copy_rect(&super::paint::convert_device(&part, n), bbox);
+                }
             }
             Pix::new(bbox, 1, true).map_or(Ga::Off, Ga::Own)
         };
@@ -1232,7 +1263,14 @@ impl Device for DrawDevice<'_> {
         let mut parent_ga = self.take_ga();
         let mode = blendmode & 15;
         let di = self.dest_index();
-        let mut src = src;
+        // A group in another colorspace than the one below converts to it
+        // before it is blended (fz_convert_pixmap).
+        let parent_n = self.dest_n();
+        let mut src = if src.n - usize::from(src.alpha) == parent_n {
+            src
+        } else {
+            super::paint::convert_device(&src, parent_n)
+        };
         if let Some(dest) = self.stack.get_mut(di).and_then(|s| s.dest.as_mut()) {
             match &own {
                 // The same group alpha above and below: a plain paint.
@@ -1777,6 +1815,75 @@ impl DrawDevice<'_> {
             cs = None;
         }
         Some((pix, cs, used.unwrap_or(whole)))
+    }
+
+    /// `convert_pixmap_for_painting`: into CMYK for a CMYK group, else RGB.
+    fn to_model(&self, pix: &Pix, cs: Option<&ColorSpace>, model: usize) -> Pix {
+        if model == 4 {
+            self.to_cmyk(pix, cs)
+        } else {
+            self.to_rgb(pix, cs)
+        }
+    }
+
+    /// `fz_convert_pixmap` to CMYK without color management: device gray
+    /// and RGB (and spaces of their families) by MuPDF's fast formulas, the
+    /// rest color by color through the converter.
+    fn to_cmyk(&self, pix: &Pix, cs: Option<&ColorSpace>) -> Pix {
+        use crate::colorspace::Family;
+        let Some(cs) = cs else {
+            return pix.clone();
+        };
+        let cs = self.cc.default_of(cs);
+        let device = !matches!(
+            cs,
+            ColorSpace::Separation { .. } | ColorSpace::Indexed { .. }
+        );
+        match cs.family() {
+            Some(Family::Gray | Family::Rgb | Family::Cmyk) if device => {
+                return super::paint::convert_device(pix, 4);
+            }
+            _ => {}
+        }
+        let sa = usize::from(pix.alpha);
+        let sn = pix.n - sa;
+        let mut out = Pix {
+            n: 4 + sa,
+            samples: Vec::with_capacity(pix.w as usize * pix.h as usize * (4 + sa)),
+            ..*pix
+        };
+        let mut cache: std::collections::HashMap<Vec<u8>, [u8; 4]> =
+            std::collections::HashMap::new();
+        for p in pix.samples.chunks(pix.n.max(1)) {
+            let a = if sa == 1 { i32::from(p[sn]) } else { 255 };
+            let key: Vec<u8> = p[..sn]
+                .iter()
+                .map(|&v| {
+                    if sa == 1 {
+                        super::paint::div255(i32::from(v), a) as u8
+                    } else {
+                        v
+                    }
+                })
+                .collect();
+            let c = *cache.entry(key).or_insert_with_key(|k| {
+                let f: Vec<f32> = k.iter().map(|&v| f32::from(v) / 255.0).collect();
+                self.cc
+                    .cmyk(self.doc, cs, &f)
+                    .map(|v| (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8)
+            });
+            for v in c {
+                out.samples.push(if sa == 1 {
+                    mul255(i32::from(v), a) as u8
+                } else {
+                    v
+                });
+            }
+            if sa == 1 {
+                out.samples.push(a as u8);
+            }
+        }
+        out
     }
 
     /// `fz_convert_pixmap` to RGB: through the color converter, MuPDF's
@@ -2532,5 +2639,87 @@ mod tests {
             true,
             "e4a7d6ab178c2b97e00847800352e2da",
         );
+    }
+
+    /// A page whose transparency group is `page_group` (none when empty),
+    /// drawing `content` with `resources`; objects from 5 on are `extra`.
+    fn group_page(page_group: &str, resources: &str, content: &str, extra: &[&str]) -> Vec<u8> {
+        let page = format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 128 128]{page_group}/Resources<<{resources}>>/Contents 4 0 R>>"
+        );
+        let contents = stream("", content);
+        let mut objs = vec![
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            page.as_str(),
+            contents.as_str(),
+        ];
+        objs.extend_from_slice(extra);
+        kit::pdf_of(&objs)
+    }
+
+    #[test]
+    fn groups_blend_in_their_own_colorspace() {
+        // Without color management MuPDF draws a group into a pixmap of
+        // the group's colorspace and converts it when the group ends: in a
+        // CMYK group translucent colors mix as inks (and blend modes work
+        // on their complements), images and shadings convert to CMYK, and
+        // a gray group draws in gray. nupdf drew every group in RGB.
+        let image = kit::hex_stream(
+            "/Type/XObject/Subtype/Image/Width 4/Height 4/ColorSpace/DeviceRGB/BitsPerComponent 8",
+            &(0..48u32).map(|i| (i * 37 % 256) as u8).collect::<Vec<_>>(),
+        );
+        let gray_image = kit::hex_stream(
+            "/Type/XObject/Subtype/Image/Width 4/Height 4/ColorSpace/DeviceGray/BitsPerComponent 8",
+            &(0..16u32).map(|i| (i * 53 % 256) as u8).collect::<Vec<_>>(),
+        );
+        let multiply = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 128 128]/Group<</S/Transparency>>/Resources<</ExtGState<</M<</BM/Multiply/ca 0.8>>>>>>",
+            "0 0.6 0.9 0 k 70 70 40 40 re f /M gs 0.9 0.1 0 0.1 k 85 85 40 30 re f 0.9 0.2 0.1 rg 75 60 20 60 re f",
+        );
+        let gray_group = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 128 128]/Group<</S/Transparency/CS/DeviceGray/I true>>",
+            "1 0 0 rg 4 100 30 20 re f 0 0 1 rg 20 104 30 20 re f",
+        );
+        let mask = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 128 128]/Group<</S/Transparency/CS/DeviceCMYK>>",
+            "0 0 0 0.3 k 0 0 64 128 re f 0.5 0.2 0.1 0.2 k 64 0 64 128 re f",
+        );
+        let res = "/XObject<</Im 5 0 R/Gi 6 0 R/Fm 7 0 R/Gg 8 0 R>>/ExtGState<</A<</ca 0.5>>/S<</ca 0.6/BM/Screen>>/SM<</SMask<</S/Luminosity/G 9 0 R>>>>>>/Shading<</Sh<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 128 0]/Function<</FunctionType 2/Domain[0 1]/C0[1 0.8 0]/C1[0 0.4 1]/N 1>>>>>>";
+        let content = "0 0 0 0.1 k 0 0 128 128 re f
+            q /A gs 1 0.5 0 0 k 4 4 50 40 re f 0 0.3 1 0 k 24 20 50 40 re f 0.2 0.7 0.3 rg 44 8 30 30 re f Q
+            q /S gs 0.1 0.9 0.4 0 k 4 50 40 20 re f Q
+            q /A gs 40 0 0 40 80 4 cm /Im Do Q q 20 0 0 20 100 46 cm /Gi Do Q
+            q 4 70 60 26 re W n /Sh sh Q
+            /Fm Do /Gg Do
+            q /SM gs 0.2 0.4 0.9 0 k 60 44 20 20 re f Q";
+        let extra = [
+            image.as_str(),
+            gray_image.as_str(),
+            multiply.as_str(),
+            gray_group.as_str(),
+            mask.as_str(),
+        ];
+        let cmyk = group_page(
+            "/Group<</S/Transparency/CS/DeviceCMYK>>",
+            res,
+            content,
+            &extra,
+        );
+        check(
+            "group-cmyk",
+            &cmyk,
+            false,
+            "05d33c7eb65c0c48a9f0aeb516d66951",
+        );
+        // The same in an RGB page group: only the gray group and the
+        // CMYK soft mask take their own spaces.
+        let rgb = group_page(
+            "/Group<</S/Transparency/CS/DeviceRGB>>",
+            res,
+            content,
+            &extra,
+        );
+        check("group-rgb", &rgb, false, "8dfd06dac5a793172f1755ddc8f825c5");
     }
 }
