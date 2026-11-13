@@ -578,3 +578,12 @@ MuPDF has no command for this; `sanitize` is nupdf's own.
 - **Only scanned pages, unless asked**: a page with no text and images over at least half of it. `--pages` and `--all` choose otherwise; `--min-confidence` leaves out words Tesseract is unsure of.
 - **`info` says which pages look scanned** (`text.scanned_pages`, and `text.next` names the command), from a copy of the document of its own so that drawing the pages adds nothing to what `info` reports. Documents of more than 2,000 pages are not looked at page by page.
 - **Tesseract is not bundled.** Without it, `ocr` fails with `ocr.unavailable` and how to install it; `--tesseract PATH` names another program, which is how the tests run it.
+
+## D51. `extract --format layout` puts each row of a page on one line
+
+*2026-11-13*
+
+- **Why**: in MuPDF's text order a label and its value are often far apart. Generated forms and invoices draw values in their own blocks, sometimes before the labels, so `Total` and `393.25` come out lines apart or reversed. In the agent eval, agents that met that text rendered the pages and read the images, which cost several times the tokens of the text (eval/REPORT.md, token follow-up).
+- **What it does**: horizontal lines whose baselines are within half a line of each other share a row; rows go down the page, lines across it, each at the column its left edge gives (one column per the page's median character width, counted from the page's leftmost text), at least a space apart. A gap between rows of more than two lines' height becomes one empty line. Lines that are not horizontal follow, a line each. Rows are cut off at column 400, so text placed far off the page cannot make a row of millions of spaces. A form feed ends each page, as in `text`.
+- **Its own format, not MuPDF's**: MuPDF has no such output, so `text` stays `fz_print_stext_page_as_text` (D5) and `layout` is opt-in. `--options` apply as for the other formats.
+- **Budgets count whole pages**: rows cross blocks, so `--max-chars` and `--max-items` stop before a page, and `next_cursor` names a page.

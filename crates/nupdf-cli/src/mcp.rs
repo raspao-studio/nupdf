@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(props["file"]["type"], json!(["string", "array"]));
         assert_eq!(
             props["format"]["enum"],
-            json!(["json", "jsonl", "text", "markdown"])
+            json!(["json", "jsonl", "text", "markdown", "layout"])
         );
         assert_eq!(props["pretty"], Value::Null);
         assert!(props["password"].is_object() && props["timeout"].is_object());

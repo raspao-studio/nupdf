@@ -1358,6 +1358,55 @@ fn extract_budgets_truncate_at_blocks_and_resume_by_cursor() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// A one-page invoice whose values are drawn before their labels, at the
+/// right of the page, as many generated forms draw them.
+fn invoice_pdf(name: &str) -> PathBuf {
+    let content = "BT /F1 12 Tf 400 600 Td (393.25) Tj ET BT /F1 12 Tf 72 600 Td (Total) Tj ET \
+                   BT /F1 12 Tf 400 640 Td (2026-02-11) Tj ET BT /F1 12 Tf 72 640 Td (Date) Tj ET";
+    let pdf = format!(
+        "%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+         2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+         3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<<\
+         /F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>>>>>>>endobj\n\
+         4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n\
+         trailer<</Root 1 0 R/Size 5>>\n",
+        content.len()
+    );
+    let path = scratch(name);
+    std::fs::write(&path, pdf).unwrap();
+    path
+}
+
+#[test]
+fn extract_layout_keeps_labels_and_values_on_one_row() {
+    let path = invoice_pdf("layout-invoice.pdf");
+    let file = path.to_str().unwrap();
+    // Plain text keeps MuPDF's order: the value comes before its label.
+    let plain = String::from_utf8(nupdf(&["extract", file, "--format", "text"]).stdout).unwrap();
+    assert!(
+        !plain
+            .lines()
+            .any(|l| l.starts_with("Total") && l.contains("393.25"))
+    );
+    let out = nupdf(&["extract", file, "--format", "layout"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let rows: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(rows.len(), 2, "{text:?}");
+    assert!(
+        rows[0].starts_with("Date ") && rows[0].ends_with("2026-02-11"),
+        "{text:?}"
+    );
+    assert!(
+        rows[1].starts_with("Total ") && rows[1].ends_with("393.25"),
+        "{text:?}"
+    );
+    assert!(text.ends_with("393.25\n\u{c}\n"), "{text:?}");
+    let report: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(report["schema"], "nupdf.extract/v1");
+    assert_eq!(report["truncated"], false);
+}
+
 #[test]
 fn extract_writes_text_jsonl_and_markdown() {
     let path = smoke("stext.pdf");

@@ -258,7 +258,9 @@ enum Command {
     /// Extract the pages' text with content ids (p3, p3.b2, p3.b2.l4,
     /// p3.b2.l4.s1): as JSON with blocks, lines and spans and their boxes
     /// and fonts, as JSON lines (a page per line), as plain text (as
-    /// `mutool draw -F txt` writes it) or as Markdown.
+    /// `mutool draw -F txt` writes it), as Markdown, or laid out as on the
+    /// page (`layout`: a label and its value on one row, cheaper to read
+    /// than a rendered page).
     Extract {
         file: PathBuf,
         #[arg(long, value_enum, default_value = "json")]
