@@ -1,0 +1,242 @@
+[
+  {
+    "file": "long/long-001.pdf",
+    "oracle_ms": 4.4055420000000005,
+    "nupdf_ms": 2.665375,
+    "speedup": 1.6528788631993623,
+    "oracle_rss_mb": 6.25,
+    "nupdf_rss_mb": 8.234375
+  },
+  {
+    "file": "long/long-002.pdf",
+    "oracle_ms": 4.218334,
+    "nupdf_ms": 2.1243339999999997,
+    "speedup": 1.9857207011703433,
+    "oracle_rss_mb": 6.1875,
+    "nupdf_rss_mb": 6.28125
+  },
+  {
+    "file": "long/long-003.pdf",
+    "oracle_ms": 4.271125,
+    "nupdf_ms": 2.102667,
+    "speedup": 2.0312893101951,
+    "oracle_rss_mb": 6.203125,
+    "nupdf_rss_mb": 6.09375
+  },
+  {
+    "file": "long/long-004.pdf",
+    "oracle_ms": 4.434583,
+    "nupdf_ms": 2.022583,
+    "speedup": 2.1925344967301714,
+    "oracle_rss_mb": 6.140625,
+    "nupdf_rss_mb": 5.875
+  },
+  {
+    "file": "long/long-005.pdf",
+    "oracle_ms": 4.633125,
+    "nupdf_ms": 8.265125,
+    "speedup": 0.5605632098728089,
+    "oracle_rss_mb": 6.375,
+    "nupdf_rss_mb": 28.046875
+  },
+  {
+    "file": "long/long-006.pdf",
+    "oracle_ms": 5.367334,
+    "nupdf_ms": 3.4345830000000004,
+    "speedup": 1.562732360813525,
+    "oracle_rss_mb": 6.234375,
+    "nupdf_rss_mb": 9.140625
+  },
+  {
+    "file": "long/long-007.pdf",
+    "oracle_ms": 4.8594170000000005,
+    "nupdf_ms": 3.4810000000000003,
+    "speedup": 1.3959830508474576,
+    "oracle_rss_mb": 6.421875,
+    "nupdf_rss_mb": 10.84375
+  },
+  {
+    "file": "long/long-008.pdf",
+    "oracle_ms": 85.769125,
+    "nupdf_ms": 39.335334,
+    "speedup": 2.180460066768468,
+    "oracle_rss_mb": 37.625,
+    "nupdf_rss_mb": 74.5625
+  },
+  {
+    "file": "long/long-009.pdf",
+    "oracle_ms": 5.1896249999999995,
+    "nupdf_ms": 3.9304170000000003,
+    "speedup": 1.320375166299148,
+    "oracle_rss_mb": 6.46875,
+    "nupdf_rss_mb": 12.125
+  },
+  {
+    "file": "long/long-010.pdf",
+    "oracle_ms": 7.01875,
+    "nupdf_ms": 4.57925,
+    "speedup": 1.532729158705028,
+    "oracle_rss_mb": 7.28125,
+    "nupdf_rss_mb": 12.1875
+  },
+  {
+    "file": "long/long-011.pdf",
+    "oracle_ms": 5.777333,
+    "nupdf_ms": 5.303292,
+    "speedup": 1.0893861774912639,
+    "oracle_rss_mb": 6.6875,
+    "nupdf_rss_mb": 17.359375
+  },
+  {
+    "file": "long/long-012.pdf",
+    "oracle_ms": 4.849666,
+    "nupdf_ms": 8.586458,
+    "speedup": 0.5648040204703733,
+    "oracle_rss_mb": 6.40625,
+    "nupdf_rss_mb": 28.734375
+  },
+  {
+    "file": "long/long-013.pdf",
+    "oracle_ms": 5.1975,
+    "nupdf_ms": 3.9536249999999997,
+    "speedup": 1.3146163331120175,
+    "oracle_rss_mb": 6.546875,
+    "nupdf_rss_mb": 12.1875
+  },
+  {
+    "file": "long/long-014.pdf",
+    "oracle_ms": 5.373374999999999,
+    "nupdf_ms": 8.567207999999999,
+    "speedup": 0.6272025845526337,
+    "oracle_rss_mb": 6.609375,
+    "nupdf_rss_mb": 28.328125
+  },
+  {
+    "file": "long/long-015.pdf",
+    "oracle_ms": 5.36875,
+    "nupdf_ms": 8.644458,
+    "speedup": 0.6210626507757919,
+    "oracle_rss_mb": 6.484375,
+    "nupdf_rss_mb": 29.140625
+  },
+  {
+    "file": "long/long-016.pdf",
+    "oracle_ms": 5.330583,
+    "nupdf_ms": 2.684291,
+    "speedup": 1.9858439342083254,
+    "oracle_rss_mb": 6.453125,
+    "nupdf_rss_mb": 7.6875
+  },
+  {
+    "file": "long/long-017.pdf",
+    "oracle_ms": 5.6195,
+    "nupdf_ms": 19.518458,
+    "speedup": 0.2879069647817466,
+    "oracle_rss_mb": 6.578125,
+    "nupdf_rss_mb": 67.546875
+  },
+  {
+    "file": "long/long-018.pdf",
+    "oracle_ms": 6.5338330000000004,
+    "nupdf_ms": 4.073791,
+    "speedup": 1.6038704489258286,
+    "oracle_rss_mb": 6.953125,
+    "nupdf_rss_mb": 12.46875
+  },
+  {
+    "file": "long/long-019.pdf",
+    "oracle_ms": 5.346375,
+    "nupdf_ms": 3.414334,
+    "speedup": 1.5658617463903648,
+    "oracle_rss_mb": 6.5625,
+    "nupdf_rss_mb": 10.046875
+  },
+  {
+    "file": "long/long-020.pdf",
+    "oracle_ms": 4.257791,
+    "nupdf_ms": 2.106916,
+    "speedup": 2.020864144560106,
+    "oracle_rss_mb": 6.140625,
+    "nupdf_rss_mb": 5.671875
+  },
+  {
+    "file": "long/long-021.pdf",
+    "oracle_ms": 4.593375,
+    "nupdf_ms": 2.2160420000000003,
+    "speedup": 2.0727833678242558,
+    "oracle_rss_mb": 6.234375,
+    "nupdf_rss_mb": 6.296875
+  },
+  {
+    "file": "long/long-022.pdf",
+    "oracle_ms": 4.338542,
+    "nupdf_ms": 2.052417,
+    "speedup": 2.113869647347493,
+    "oracle_rss_mb": 6.203125,
+    "nupdf_rss_mb": 5.796875
+  },
+  {
+    "file": "long/long-023.pdf",
+    "oracle_ms": 4.345625,
+    "nupdf_ms": 2.853375,
+    "speedup": 1.522977176151049,
+    "oracle_rss_mb": 6.328125,
+    "nupdf_rss_mb": 6.625
+  },
+  {
+    "file": "long/long-024.pdf",
+    "oracle_ms": 4.3870000000000005,
+    "nupdf_ms": 2.129958,
+    "speedup": 2.059665026258734,
+    "oracle_rss_mb": 6.140625,
+    "nupdf_rss_mb": 5.84375
+  },
+  {
+    "file": "long/long-025.pdf",
+    "oracle_ms": 4.3721250000000005,
+    "nupdf_ms": 2.080917,
+    "speedup": 2.101056889823093,
+    "oracle_rss_mb": 6.1875,
+    "nupdf_rss_mb": 6.015625
+  },
+  {
+    "file": "long/long-026.pdf",
+    "oracle_ms": 4.192583,
+    "nupdf_ms": 1.9592500000000002,
+    "speedup": 2.1398917953298455,
+    "oracle_rss_mb": 6.140625,
+    "nupdf_rss_mb": 5.71875
+  },
+  {
+    "file": "long/long-027.pdf",
+    "oracle_ms": 4.2710420000000004,
+    "nupdf_ms": 2.004084,
+    "speedup": 2.1311691525904104,
+    "oracle_rss_mb": 6.140625,
+    "nupdf_rss_mb": 5.6875
+  },
+  {
+    "file": "long/long-028.pdf",
+    "oracle_ms": 4.305375,
+    "nupdf_ms": 2.4992080000000003,
+    "speedup": 1.722695750013604,
+    "oracle_rss_mb": 6.15625,
+    "nupdf_rss_mb": 5.703125
+  },
+  {
+    "file": "long/long-029.pdf",
+    "oracle_ms": 4.450666,
+    "nupdf_ms": 2.049375,
+    "speedup": 2.1717186947240013,
+    "oracle_rss_mb": 6.171875,
+    "nupdf_rss_mb": 5.875
+  },
+  {
+    "file": "long/long-030.pdf",
+    "oracle_ms": 4.707707999999999,
+    "nupdf_ms": 2.178625,
+    "speedup": 2.1608620115898787,
+    "oracle_rss_mb": 6.296875,
+    "nupdf_rss_mb": 6.09375
+  }
+]
