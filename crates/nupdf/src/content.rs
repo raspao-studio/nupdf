@@ -364,6 +364,10 @@ pub struct Store {
     /// By object number; a function-based shading is sampled 66,049
     /// times.
     shades: HashMap<i32, Result<Arc<Shade>, String>>,
+    /// Color spaces loaded, by object number (`pdf_find_item`): an ICC
+    /// profile is read and inflated once, not at every `cs`. Failures are
+    /// not kept, as MuPDF keeps none.
+    pub colorspaces: HashMap<i32, ColorSpace>,
     pub images: HashMap<i32, Result<Arc<Image>, String>>,
     pub patterns: HashMap<i32, Arc<crate::run::Pattern>>,
     /// The structure tree's repaired parents, by element number, once it
@@ -1138,7 +1142,18 @@ impl<'d, 'p> Csi<'d, 'p> {
                 {
                     return self.emit(pattern(b"Pattern"));
                 }
-                colorspace::load(self.doc, &obj)?
+                match obj.as_ref().map(|r| r.num) {
+                    Some(num) => {
+                        if let Some(cs) = self.proc.state().store.colorspaces.get(&num) {
+                            cs.clone()
+                        } else {
+                            let cs = colorspace::load(self.doc, &obj)?;
+                            self.proc.state().store.colorspaces.insert(num, cs.clone());
+                            cs
+                        }
+                    }
+                    None => colorspace::load(self.doc, &obj)?,
+                }
             }
         };
         self.emit(Op::ColorSpace {
@@ -1656,5 +1671,587 @@ mod tests {
         let (ops, diags) = run(b"BI /W 1 /H 1 ID x");
         assert!(ops.is_empty());
         assert_eq!(diags[0], "syntax error: syntax error after inline image");
+    }
+
+    /// Each operator in a line of its own, names and strings as text.
+    #[derive(Default)]
+    struct Ops {
+        lines: Vec<String>,
+        state: ProcState,
+        usage: Option<&'static str>,
+        soft_mask: bool,
+    }
+
+    fn text(b: &[u8]) -> String {
+        String::from_utf8_lossy(b).into_owned()
+    }
+
+    impl Processor for Ops {
+        fn state(&mut self) -> &mut ProcState {
+            &mut self.state
+        }
+
+        fn usage(&self) -> Option<&'static str> {
+            self.usage
+        }
+
+        fn wants_soft_mask(&self) -> bool {
+            self.soft_mask
+        }
+
+        fn op(&mut self, op: Op<'_>) -> Result<(), String> {
+            let line = match op {
+                Op::Intent(n) => format!("ri {}", text(n)),
+                Op::GsBegin { name, .. } => format!("gs {}", text(name)),
+                Op::GsBlendMode(n) => format!("BM {}", text(n)),
+                Op::GsSoftMask(m) => format!("SMask {}", m.is_some()),
+                Op::GsBlackPointCompensation(n) => format!("BPC {}", text(n)),
+                Op::Font { name, font, size } => {
+                    format!("Tf {} {size} {}", text(name), font.is_some())
+                }
+                Op::Show { text: t, .. } => format!("Tj {}", text(t)),
+                Op::NextLineShow { text: t, .. } => format!("' {}", text(t)),
+                Op::NextLineShowSpaced {
+                    word_spacing,
+                    char_spacing,
+                    text: t,
+                    ..
+                } => format!("\" {word_spacing} {char_spacing} {}", text(t)),
+                Op::ColorSpace {
+                    stroke,
+                    name,
+                    colorspace,
+                } => format!(
+                    "CS {stroke} {} {:?}",
+                    text(name),
+                    colorspace.map(|c| c.type_name())
+                ),
+                Op::ColorPattern {
+                    stroke,
+                    name,
+                    color,
+                    ..
+                } => format!("SCN pattern {stroke} {} {color:?}", text(name)),
+                Op::ColorShade { stroke, name, .. } => {
+                    format!("SCN shade {stroke} {}", text(name))
+                }
+                Op::Shade { name, .. } => format!("sh {}", text(name)),
+                Op::DrawImage { name, .. } => format!("Do image {}", text(name)),
+                Op::DrawForm { name, .. } => format!("Do form {}", text(name)),
+                Op::MarkedPoint(t) => format!("MP {}", text(t)),
+                Op::MarkedPointProperties { tag, raw, cooked } => {
+                    format!(
+                        "DP {} {} {}",
+                        text(tag),
+                        raw.map(|o| crate::print::to_string(o, Default::default()))
+                            .unwrap_or_default(),
+                        cooked.is_some()
+                    )
+                }
+                Op::BeginMarked(t) => format!("BMC {}", text(t)),
+                Op::BeginMarkedProperties { tag, cooked, .. } => format!(
+                    "BDC {} {} hidden={}",
+                    text(tag),
+                    cooked.is_some(),
+                    self.state.hidden
+                ),
+                Op::EndMarked => format!("EMC hidden={}", self.state.hidden),
+                Op::InlineImage {
+                    image,
+                    colorspace_name,
+                } => format!(
+                    "BI {}x{} n={} cs={:?} {:?}",
+                    image.width,
+                    image.height,
+                    image.n,
+                    colorspace_name.map(text),
+                    image.data
+                ),
+                Op::EndOfData | Op::End => return Ok(()),
+                other => format!("{other:?}"),
+            };
+            self.lines.push(line);
+            Ok(())
+        }
+    }
+
+    /// `content` run with `resources` (object 3), objects from 4 on, as
+    /// `proc` sees it: its lines, the warnings, and the error that ended
+    /// it.
+    fn run_in(
+        resources: &str,
+        objects: &[&[u8]],
+        content: &[u8],
+        mut proc: Ops,
+    ) -> (Vec<String>, Vec<String>, Option<String>) {
+        let mut objs = vec![
+            b"<</Type/Catalog>>".to_vec(),
+            crate::testutil::stream("", content),
+            format!("<<{resources}>>").into_bytes(),
+        ];
+        objs.extend(objects.iter().map(|o| o.to_vec()));
+        let doc = crate::testutil::doc_bytes(&objs);
+        let before = doc.diagnostics().snapshot().len();
+        let contents = Object::Ref(crate::ObjRef::new(2, 0));
+        let res = Object::Ref(crate::ObjRef::new(3, 0));
+        let err = process_contents(&doc, Some(&res), Some(&contents), &mut proc).err();
+        let diags = doc.diagnostics().snapshot()[before..]
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        (proc.lines, diags, err)
+    }
+
+    /// Found by the wild-tier sweep: a page that set an ICC color space
+    /// at every few operators read and inflated its profile each time, for
+    /// minutes. The space is loaded once, as MuPDF's store keeps it.
+    #[test]
+    fn a_color_space_used_again_is_loaded_once() {
+        let icc = crate::testutil::stream("/N 3", crate::cms::RGB_ICC);
+        let objs = vec![
+            b"<</Type/Catalog>>".to_vec(),
+            crate::testutil::stream("", b"/C0 cs 1 0 0 sc /C0 CS /C0 cs /C0 cs"),
+            b"<</ColorSpace<</C0 4 0 R>>>>".to_vec(),
+            b"[/ICCBased 5 0 R]".to_vec(),
+            icc,
+        ];
+        let doc = crate::testutil::doc_bytes(&objs);
+        let mut proc = Ops::default();
+        let contents = Object::Ref(crate::ObjRef::new(2, 0));
+        let res = Object::Ref(crate::ObjRef::new(3, 0));
+        assert_eq!(
+            process_contents(&doc, Some(&res), Some(&contents), &mut proc),
+            Ok(())
+        );
+        assert_eq!(proc.state.store.colorspaces.len(), 1);
+        assert!(doc.diagnostics().snapshot().is_empty());
+    }
+
+    fn ops_of(resources: &str, objects: &[&[u8]], content: &[u8]) -> (Vec<String>, Vec<String>) {
+        let (lines, diags, err) = run_in(resources, objects, content, Ops::default());
+        assert_eq!(err, None);
+        (lines, diags)
+    }
+
+    #[test]
+    fn every_path_and_text_operator_reaches_the_processor() {
+        let (ops, diags) = ops_of(
+            "",
+            &[],
+            b"4 M [3 1] 0 d /Perceptual ri 1 i 3 J -1 j \
+              1 2 3 4 5 6 c 1 2 3 4 v 1 2 3 4 y h 0 0 1 1 re S s F f f* B B* b b* n W W* \
+              BT 1 Tc 2 Tw 90 Tz 14 TL 3 Tr 2 Ts 1 2 Td 3 4 TD 1 0 0 1 5 6 Tm T* \
+              (a) ' 1 2 (b) \" ET 5 0 d0 1 0 0 0 1 1 d1 \
+              0.5 G 0.5 g 1 0 0 RG 0 1 0 rg 0 0 0 1 K 1 0 0 0 k 0.2 SC 0.3 0.4 sc \
+              /Tag MP /Tag <</A 1>> DP /Tag BMC EMC",
+        );
+        assert_eq!(
+            ops,
+            [
+                "MiterLimit(4.0)",
+                "Dash { array: Some(Array([Int(3), Int(1)])), phase: 0.0 }",
+                "ri Perceptual",
+                "Flatness(1.0)",
+                "LineCap(2)",
+                "LineJoin(0)",
+                "CurveTo([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])",
+                "CurveToV([1.0, 2.0, 3.0, 4.0])",
+                "CurveToY([1.0, 2.0, 3.0, 4.0])",
+                "ClosePath",
+                "Rect([0.0, 0.0, 1.0, 1.0])",
+                "Stroke",
+                "CloseStroke",
+                "FillCompat",
+                "Fill",
+                "FillEvenOdd",
+                "FillStroke",
+                "FillStrokeEvenOdd",
+                "CloseFillStroke",
+                "CloseFillStrokeEvenOdd",
+                "EndPath",
+                "Clip",
+                "ClipEvenOdd",
+                "BeginText",
+                "CharSpacing(1.0)",
+                "WordSpacing(2.0)",
+                "HorizontalScaling(90.0)",
+                "Leading(14.0)",
+                "RenderMode(3)",
+                "Rise(2.0)",
+                "TextMove(1.0, 2.0)",
+                "TextMoveSetLeading(3.0, 4.0)",
+                "TextMatrix([1.0, 0.0, 0.0, 1.0, 5.0, 6.0])",
+                "NextLine",
+                "' a",
+                "\" 1 2 b",
+                "EndText",
+                "Type3Width(5.0, 0.0)",
+                "Type3Bbox([1.0, 0.0, 0.0, 0.0, 1.0, 1.0])",
+                "Gray { stroke: true, gray: 0.5 }",
+                "Gray { stroke: false, gray: 0.5 }",
+                "Rgb { stroke: true, rgb: [1.0, 0.0, 0.0] }",
+                "Rgb { stroke: false, rgb: [0.0, 1.0, 0.0] }",
+                "Cmyk { stroke: true, cmyk: [0.0, 0.0, 0.0, 1.0] }",
+                "Cmyk { stroke: false, cmyk: [1.0, 0.0, 0.0, 0.0] }",
+                "Color { stroke: true, color: [0.2] }",
+                "Color { stroke: false, color: [0.3, 0.4] }",
+                "MP Tag",
+                "DP Tag <</A 1>> true",
+                "BMC Tag",
+                "EMC hidden=0",
+            ]
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn an_extgstate_sends_each_entry_it_sets() {
+        let res = "/ExtGState<</G<</LW 2/LC 5/LJ -1/ML 3/D[[2 1]4]/RI/Saturation/FL 0.5\
+                   /Font[4 0 R 9]/OP true/op false/OPM 1/UseBlackPtComp/ON\
+                   /TR/Custom/CA 0.25/ca 0.75/BM[/Multiply/Normal]/SMask/None>>\
+                   /H<</TR2/Custom/TR/Other/SMask<</S/Luminosity>>/BM/Screen>>>>";
+        let font: &[u8] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+        let proc = Ops {
+            soft_mask: true,
+            ..Ops::default()
+        };
+        let (ops, diags, err) = run_in(res, &[font], b"/G gs /H gs", proc);
+        assert_eq!(err, None);
+        assert_eq!(
+            ops,
+            [
+                "gs G",
+                "LineWidth(2.0)",
+                "LineCap(2)",
+                "LineJoin(0)",
+                "MiterLimit(3.0)",
+                "Dash { array: Some(Array([Int(2), Int(1)])), phase: 4.0 }",
+                "ri Saturation",
+                "Flatness(0.5)",
+                "Tf ExtGState 9 true",
+                "GsOverprintStroke(true)",
+                "GsOverprintFill(false)",
+                "GsOverprintMode(1)",
+                "BPC ON",
+                "GsStrokeAlpha(0.25)",
+                "GsFillAlpha(0.75)",
+                "BM Multiply",
+                "SMask false",
+                "GsEnd",
+                "gs H",
+                "BM Screen",
+                "SMask true",
+                "GsEnd",
+            ]
+        );
+        // /TR counts once without /TR2; with it, /TR2 alone.
+        assert_eq!(
+            diags,
+            ["ignoring transfer function", "ignoring transfer function"]
+        );
+        // A processor that takes no soft masks is not sent them.
+        let (ops, _, _) = run_in(res, &[font], b"/G gs", Ops::default());
+        assert!(!ops.iter().any(|l| l.starts_with("SMask")), "{ops:?}");
+    }
+
+    #[test]
+    fn colors_patterns_shadings_and_xobjects_are_looked_up() {
+        let res = "/ColorSpace<</CS0[/Pattern]/CS1[/Indexed/DeviceRGB 1<000000FFFFFF>]>>\
+                   /Pattern<</P1 4 0 R/P2 5 0 R/P3<</PatternType 7>>>>\
+                   /Shading<</Sh 6 0 R>>\
+                   /XObject<</Im 7 0 R/Fm 8 0 R/PS<</Subtype/PS>>/Odd<</Subtype/Foo>>/None<<>>\
+                   /F2<</Subtype/Form/Subtype2/PS>>>>";
+        let shading = "<</ShadingType 2/ColorSpace/DeviceGray/Coords[0 0 1 0]/Function<</FunctionType 2/Domain[0 1]/N 1>>>>";
+        let objs: Vec<Vec<u8>> = vec![
+            crate::testutil::stream(
+                "/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 1 1]/XStep 1/YStep 1",
+                b"0 0 1 1 re f",
+            ),
+            format!("<</PatternType 2/Shading {shading}>>").into_bytes(),
+            shading.as_bytes().to_vec(),
+            crate::testutil::stream(
+                "/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8",
+                b"\x00",
+            ),
+            crate::testutil::stream("/Subtype/Form/BBox[0 0 1 1]", b""),
+        ];
+        let refs: Vec<&[u8]> = objs.iter().map(|o| &o[..]).collect();
+        let (ops, diags) = ops_of(
+            res,
+            &refs,
+            b"/CS0 CS /CS1 cs /DeviceGray cs /DeviceCMYK CS /Pattern cs \
+              0.5 /P1 scn /P2 SCN /P3 scn /Nope scn /Sh sh /Gone sh \
+              /Im Do /Fm Do /PS Do /Odd Do /None Do /F2 Do",
+        );
+        assert_eq!(
+            ops,
+            [
+                "CS true Pattern None",
+                "CS false CS1 Some(\"Indexed\")",
+                "CS false DeviceGray Some(\"Gray\")",
+                "CS true DeviceCMYK Some(\"CMYK\")",
+                "CS false Pattern None",
+                "SCN pattern false P1 [0.5]",
+                "SCN shade true P2",
+                "sh Sh",
+                "Do image Im",
+                "Do form Fm",
+            ]
+        );
+        assert_eq!(
+            diags,
+            [
+                "syntax error: unknown pattern type: 7",
+                "syntax error: cannot find Pattern resource 'Nope'",
+                "syntax error: cannot find Shading resource 'Gone'",
+                "ignoring XObject with subtype PS",
+                "ignoring XObject with unknown subtype: 'Foo'",
+                "syntax error: no XObject subtype specified",
+                "ignoring XObject with subtype PS",
+                "encountered syntax errors; page may not be correct",
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_optional_content_counts_its_depth_and_drops_its_xobjects() {
+        let objs = vec![
+            b"<</Type/Catalog/OCProperties<</OCGs[4 0 R]/D<</OFF[4 0 R]>>>>>>".to_vec(),
+            crate::testutil::stream(
+                "",
+                b"/OC /oc BDC /X BMC /Span <<>> BDC EMC EMC /X Do EMC /OC /oc BDC EMC /Y Do",
+            ),
+            b"<</Properties<</oc 4 0 R>>/XObject<</X 5 0 R/Y 6 0 R>>>>".to_vec(),
+            b"<</Type/OCG/Name(Off)>>".to_vec(),
+            crate::testutil::stream("/Subtype/Form/BBox[0 0 1 1]/OC 4 0 R", b""),
+            crate::testutil::stream("/Subtype/Form/BBox[0 0 1 1]", b""),
+        ];
+        let doc = crate::testutil::doc_bytes(&objs);
+        let mut proc = Ops {
+            usage: Some("View"),
+            ..Ops::default()
+        };
+        let res = Object::Ref(crate::ObjRef::new(3, 0));
+        let contents = Object::Ref(crate::ObjRef::new(2, 0));
+        process_contents(&doc, Some(&res), Some(&contents), &mut proc)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            proc.lines,
+            [
+                "BDC OC true hidden=0",
+                "BMC X",
+                "BDC Span true hidden=2",
+                "EMC hidden=3",
+                "EMC hidden=2",
+                "EMC hidden=1",
+                "BDC OC true hidden=0",
+                "EMC hidden=1",
+                "Do form Y",
+            ]
+        );
+    }
+
+    #[test]
+    fn text_arrays_and_operand_limits_are_syntax_errors() {
+        let many = "1 ".repeat(33);
+        let long = "x".repeat(300);
+        let content = format!(
+            "BT [(a) Tw] TJ [(b) /N] TJ ET {many}w ({long}) Tj ({long}) ' 1 2 ({long}) \" \
+             /A /B MP <</K 1>> 3 w BT [(c) 2"
+        );
+        let (ops, diags) = ops_of("", &[], content.as_bytes());
+        // As in MuPDF: after the error the `]` is one too, and the `TJ`
+        // runs with no array. After the overflow the stack is empty.
+        assert_eq!(
+            ops,
+            [
+                "BeginText".to_string(),
+                "ShowArray(None)".to_string(),
+                "ShowArray(None)".to_string(),
+                "EndText".to_string(),
+                "LineWidth(0.0)".to_string(),
+                format!("Tj {long}"),
+                format!("' {long}"),
+                format!("\" 1 2 {long}"),
+                "MP A".to_string(),
+                "LineWidth(3.0)".to_string(),
+                "BeginText".to_string(),
+            ]
+        );
+        assert_eq!(
+            diags,
+            [
+                "syntax error: syntax error in array",
+                "syntax error: syntax error in content stream",
+                "syntax error: syntax error in array",
+                "syntax error: syntax error in content stream",
+                "syntax error: stack overflow",
+                "encountered syntax errors; page may not be correct",
+            ]
+        );
+    }
+
+    #[test]
+    fn too_many_syntax_errors_end_the_page() {
+        let content = "foo ".repeat(MAX_SYNTAX_ERRORS + 5) + "1 w";
+        let (ops, diags) = ops_of("", &[], content.as_bytes());
+        assert!(ops.is_empty());
+        assert_eq!(diags.len(), MAX_SYNTAX_ERRORS + 2);
+        assert_eq!(
+            diags[MAX_SYNTAX_ERRORS..],
+            [
+                "too many syntax errors; ignoring rest of page",
+                "encountered syntax errors; page may not be correct",
+            ]
+        );
+    }
+
+    #[test]
+    fn bad_dictionaries_and_arrays_are_syntax_errors() {
+        // MuPDF's `mutool trace` strokes this at widths 0 and 2.
+        let (ops, diags) = ops_of("", &[], b"[1 2 <</A>> 1 w <</A 1 /B>> d 2 w");
+        assert_eq!(ops, ["LineWidth(0.0)", "LineWidth(2.0)"]);
+        assert_eq!(
+            diags,
+            [
+                "syntax error: invalid key in dict",
+                "syntax error: invalid key in dict",
+                "encountered syntax errors; page may not be correct",
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_images_check_their_dictionary() {
+        let cases: [(&[u8], &str); 7] = [
+            (
+                b"BI /W 1 /H 1 /Filter /JPXDecode ID x EI",
+                "syntax error: inline JPXDecode image",
+            ),
+            (
+                b"BI /W 1 /H 1 /Filter [/AHx /JPXDecode] ID x EI",
+                "syntax error: inline JPXDecode image",
+            ),
+            (
+                b"BI /W 0 /H 1 ID x EI",
+                "syntax error: image width is zero (or less)",
+            ),
+            (
+                b"BI /W 1 /H 0 ID x EI",
+                "syntax error: image height is zero (or less)",
+            ),
+            (
+                b"BI /W 1 /H 1 /BPC -2 ID x EI",
+                "syntax error: image depth is zero (or less)",
+            ),
+            (
+                b"BI /W 1 /H 1 /BPC 32 ID x EI",
+                "syntax error: image depth is too large: 32",
+            ),
+            (
+                b"BI /W 2000000000 /H 2 /BPC 16 /CS /RGB ID x EI",
+                "syntax error: integer overflow in inline image size",
+            ),
+        ];
+        for (content, want) in cases {
+            let (ops, diags) = ops_of("", &[], content);
+            assert!(ops.is_empty(), "{ops:?}");
+            assert_eq!(diags[0], want);
+        }
+        // A named colorspace from the resources, a soft mask that is
+        // ignored, and colour keys with bad entries.
+        let (ops, diags) = ops_of(
+            "/ColorSpace<</C0/DeviceRGB>>",
+            &[],
+            b"BI /W 1 /H 1 /CS /C0 /SMask <<>> ID abc EI BI /IM true /W 8 /H 1 /Mask [0 /x] ID \x80 EI \
+              BI /W 1 /H 1 /CS /G /Mask [0 1.5] ID \x00 EI",
+        );
+        assert_eq!(
+            ops,
+            [
+                "BI 1x1 n=3 cs=Some(\"C0\") [97, 98, 99]",
+                "BI 8x1 n=1 cs=None [128]",
+                "BI 1x1 n=1 cs=Some(\"G\") [0]",
+            ]
+        );
+        assert_eq!(
+            diags,
+            [
+                "Ignoring invalid inline image soft mask",
+                "invalid value in color key mask",
+                "invalid value in color key mask",
+            ]
+        );
+    }
+
+    #[test]
+    fn contents_arrays_join_their_parts_and_skip_what_does_not_open() {
+        let objs = vec![
+            b"<</Type/Catalog>>".to_vec(),
+            b"[3 0 R 5 0 R 4 0 R]".to_vec(),
+            crate::testutil::stream("", b"1 w"),
+            crate::testutil::stream("", b"2 w"),
+            b"<<>>".to_vec(),
+            b"(not a stream)".to_vec(),
+        ];
+        let doc = crate::testutil::doc_bytes(&objs);
+        let run = |num: i32| {
+            let before = doc.diagnostics().snapshot().len();
+            let mut log = Log::default();
+            let c = Object::Ref(crate::ObjRef::new(num, 0));
+            process_raw_contents(&doc, &c, &mut log).unwrap_or_else(|e| panic!("{e}"));
+            let diags: Vec<String> = doc.diagnostics().snapshot()[before..]
+                .iter()
+                .map(|d| d.message.clone())
+                .collect();
+            (log.0, diags)
+        };
+        let (ops, diags) = run(2);
+        assert_eq!(ops, ["LineWidth(1.0)", "LineWidth(2.0)"]);
+        assert_eq!(
+            diags,
+            [
+                "format error: object is not a stream",
+                "cannot load content stream part 2/3",
+            ]
+        );
+        let (ops, diags) = run(6);
+        assert!(ops.is_empty());
+        assert_eq!(diags, ["content stream is not a stream (6 0 R)"]);
+        // No contents at all is nothing to do.
+        let mut log = Log::default();
+        assert_eq!(process_contents(&doc, None, None, &mut log), Ok(()));
+        assert!(log.0.is_empty());
+    }
+
+    #[test]
+    fn a_glyph_procedure_runs_with_the_fonts_resources() {
+        let doc = crate::testutil::doc_of(&["<</Type/Catalog>>", "<</ExtGState<</G<</LW 7>>>>>>"]);
+        let res = Object::Ref(crate::ObjRef::new(2, 0));
+        let mut log = Log::default();
+        process_glyph(&doc, Some(&res), b"/G gs 0 0 d0", &mut log)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(log.0.len(), 4, "{:?}", log.0);
+        assert_eq!(log.0[1], "LineWidth(7.0)");
+        assert_eq!(log.0[3], "Type3Width(0.0, 0.0)");
+        // The resources are gone again afterwards.
+        assert!(log.1.resources().is_none());
+    }
+
+    #[test]
+    fn shadings_load_once_per_object() {
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog>>",
+            "<</ShadingType 2/ColorSpace/DeviceGray/Coords[0 0 1 0]/Function<</FunctionType 2/Domain[0 1]/N 1>>>>",
+        ]);
+        let mut store = Store::default();
+        let r = Object::Ref(crate::ObjRef::new(2, 0));
+        let a = store.shade(&doc, &r).unwrap_or_else(|e| panic!("{e}"));
+        let b = store.shade(&doc, &r).unwrap_or_else(|e| panic!("{e}"));
+        assert!(Arc::ptr_eq(&a, &b));
+        // A direct shading is loaded each time.
+        let direct = doc.resolve(&r);
+        let c = store.shade(&doc, &direct).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!Arc::ptr_eq(&a, &c));
     }
 }

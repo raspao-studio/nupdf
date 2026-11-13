@@ -2953,7 +2953,7 @@ fn xobject_colorspace(doc: &Document, xobj: &Object) -> Option<ColorSpace> {
                     "run.blend_colorspace",
                     format!(
                         "Ignoring invalid XObject blending colorspace: {}.",
-                        cs.type_name()
+                        colorspace_name(&cs)
                     ),
                 );
                 None
@@ -2967,6 +2967,21 @@ fn xobject_colorspace(doc: &Document, xobj: &Object) -> Option<ColorSpace> {
             );
             None
         }
+    }
+}
+
+/// `fz_colorspace_name`, as far as the colorspace keeps what MuPDF names
+/// it by: Separation and DeviceN colorants and ICC profile descriptions
+/// are not kept, so those give their type's name.
+fn colorspace_name(cs: &ColorSpace) -> String {
+    match cs {
+        ColorSpace::Gray => "DeviceGray".into(),
+        ColorSpace::Rgb => "DeviceRGB".into(),
+        ColorSpace::Cmyk => "DeviceCMYK".into(),
+        ColorSpace::Indexed { base, high, .. } => {
+            format!("Indexed({high},{})", colorspace_name(base))
+        }
+        other => other.type_name().into(),
     }
 }
 
@@ -3112,7 +3127,7 @@ fn output_intent(doc: &Document) -> Option<ColorSpace> {
                 }
                 return Some(ColorSpace::Icc(
                     family,
-                    colorspace::IccData(Some(Arc::from(data))),
+                    colorspace::IccData::new(Arc::from(data)),
                 ));
             }
         }
@@ -3159,7 +3174,10 @@ fn page_defaults(doc: &Document, resources: Option<&Object>) -> DefaultColorSpac
             }
             _ => doc.diagnostics().warn(
                 "colorspace.output_intent",
-                format!("Ignoring incompatible output intent: {}.", oi.type_name()),
+                format!(
+                    "Ignoring incompatible output intent: {}.",
+                    colorspace_name(&oi)
+                ),
             ),
         }
     }
@@ -3979,7 +3997,7 @@ fn run_page_imp(
                             "run.blend_colorspace",
                             format!(
                                 "Ignoring invalid Page blending colorspace: {}.",
-                                cs.type_name()
+                                colorspace_name(&cs)
                             ),
                         );
                         None
@@ -4138,7 +4156,115 @@ mod tests {
         fn end_metatext(&mut self) {
             self.0.push("end meta".into());
         }
+        fn clip_stroke_path(&mut self, _: &Path, s: &StrokeState, _: Matrix, _: Rect) {
+            self.0.push(format!("clip stroke w={}", s.linewidth));
+        }
+        fn fill_text(
+            &mut self,
+            t: &Text,
+            _: Matrix,
+            cs: &ColorSpace,
+            color: &[f32],
+            alpha: f32,
+            _: ColorParams,
+        ) {
+            self.0.push(format!(
+                "text fill {} {color:?} {alpha} {}",
+                cs.type_name(),
+                chars(t)
+            ));
+        }
+        fn stroke_text(
+            &mut self,
+            t: &Text,
+            _: &StrokeState,
+            _: Matrix,
+            cs: &ColorSpace,
+            color: &[f32],
+            _: f32,
+            _: ColorParams,
+        ) {
+            self.0.push(format!(
+                "text stroke {} {color:?} {}",
+                cs.type_name(),
+                chars(t)
+            ));
+        }
+        fn clip_text(&mut self, t: &Text, _: Matrix, _: Rect) {
+            self.0.push(format!("text clip {}", chars(t)));
+        }
+        fn clip_stroke_text(&mut self, t: &Text, _: &StrokeState, _: Matrix, _: Rect) {
+            self.0.push(format!("text clip stroke {}", chars(t)));
+        }
+        fn ignore_text(&mut self, t: &Text, _: Matrix) {
+            self.0.push(format!("text ignore {}", chars(t)));
+        }
+        fn fill_image(&mut self, i: &Image, ctm: Matrix, alpha: f32, _: ColorParams) {
+            self.0.push(format!(
+                "image {}x{} {alpha} mask={} [{} {} {} {} {} {}]",
+                i.width,
+                i.height,
+                i.mask.is_some(),
+                ctm.a,
+                ctm.b,
+                ctm.c,
+                ctm.d,
+                ctm.e,
+                ctm.f
+            ));
+        }
+        fn fill_image_mask(
+            &mut self,
+            i: &Image,
+            _: Matrix,
+            cs: &ColorSpace,
+            color: &[f32],
+            _: f32,
+            _: ColorParams,
+        ) {
+            self.0.push(format!(
+                "image mask {}x{} {} {color:?}",
+                i.width,
+                i.height,
+                cs.type_name()
+            ));
+        }
+        fn clip_image_mask(&mut self, i: &Image, _: Matrix, _: Rect) {
+            self.0
+                .push(format!("clip image mask {}x{}", i.width, i.height));
+        }
+        fn begin_tile(
+            &mut self,
+            _: Rect,
+            _: Rect,
+            xstep: f32,
+            ystep: f32,
+            _: Matrix,
+            _: i32,
+        ) -> bool {
+            self.0.push(format!("tile {xstep} {ystep}"));
+            false
+        }
+        fn end_tile(&mut self) {
+            self.0.push("end tile".into());
+        }
     }
+
+    /// The Unicode text of `t`'s glyphs.
+    fn chars(t: &Text) -> String {
+        t.spans
+            .iter()
+            .flat_map(|s| s.items.iter())
+            .filter_map(|i| char::from_u32(i.ucs as u32))
+            .collect()
+    }
+
+    /// The device calls and warnings of a page drawing `content`.
+    fn calls(resources: &str, content: &str, objects: &[&str]) -> (Vec<String>, Vec<String>) {
+        run("", resources, content, objects)
+    }
+
+    const HELV: &str = "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
 
     /// A one-page document: `catalog` and `resources` are spliced into the
     /// catalog and page, `objects` numbered from 5.
@@ -4148,21 +4274,28 @@ mod tests {
         content: &str,
         objects: &[&str],
     ) -> (Vec<String>, Vec<String>) {
-        let mut pdf = format!(
-            "%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R{catalog}>>endobj\n\
-             2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
-             3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<<{resources}>>/Contents 4 0 R/StructParents 0>>endobj\n\
-             4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n",
-            content.len()
-        );
-        for (i, o) in objects.iter().enumerate() {
-            pdf.push_str(&format!("{} 0 obj{o}endobj\n", i + 5));
-        }
-        pdf.push_str(&format!(
-            "trailer<</Root 1 0 R/Size {}>>\n",
-            objects.len() + 5
-        ));
-        let doc = Document::open(pdf.into_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
+        run_page(catalog, "/StructParents 0", resources, content, objects)
+    }
+
+    /// [`run`], with `page` spliced into the page dictionary.
+    fn run_page(
+        catalog: &str,
+        page: &str,
+        resources: &str,
+        content: &str,
+        objects: &[&str],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut objs = vec![
+            format!("<</Type/Catalog/Pages 2 0 R{catalog}>>").into_bytes(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<<{resources}>>/Contents 4 0 R{page}>>"
+            )
+            .into_bytes(),
+            crate::testutil::stream("", content.as_bytes()),
+        ];
+        objs.extend(objects.iter().map(|o| o.as_bytes().to_vec()));
+        let doc = crate::testutil::doc_bytes(&objs);
         let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
         let mut log = Log::default();
         let out = run_page_contents(&doc, &page, &mut log, Store::default());
@@ -4314,5 +4447,995 @@ mod tests {
         );
         assert_eq!(calls[0], "fill RGB [1.0, 0.0, 0.5] 1 e=0");
         assert!(warnings.contains(&"syntax error: unknown keyword: 'foo'".to_string()));
+    }
+
+    #[test]
+    fn each_render_mode_fills_strokes_hides_or_clips_text() {
+        // As `mutool trace` shows it: the clipping modes gather their
+        // glyphs until ET.
+        let (calls, warnings) = calls(
+            "/Font<</F1 5 0 R>>",
+            "BT /F1 10 Tf 1 0 0 rg 0 0 1 RG (A) Tj 1 Tr (B) Tj 2 Tr (C) Tj 3 Tr (D) Tj \
+             4 Tr (E) Tj 5 Tr (F) Tj 6 Tr (G) Tj 7 Tr (H) Tj ET 0 0 1 1 re f",
+            &[HELV],
+        );
+        assert_eq!(
+            calls,
+            [
+                "text fill RGB [1.0, 0.0, 0.0] 1 A",
+                "text stroke RGB [0.0, 0.0, 1.0] B",
+                "text fill RGB [1.0, 0.0, 0.0] 1 C",
+                "text stroke RGB [0.0, 0.0, 1.0] C",
+                "text ignore D",
+                "text fill RGB [1.0, 0.0, 0.0] 1 E",
+                "text stroke RGB [0.0, 0.0, 1.0] F",
+                "text fill RGB [1.0, 0.0, 0.0] 1 G",
+                "text stroke RGB [0.0, 0.0, 1.0] G",
+                "text clip EFGH",
+                "fill RGB [1.0, 0.0, 0.0] 1 e=0",
+                "pop",
+            ]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn text_drawn_with_patterns_and_shadings_clips_to_its_glyphs() {
+        let tiling = "<</PatternType 1/PaintType 1/TilingType 1/BBox[0 0 4 4]/XStep 4/YStep 4/Length 21>>stream\n0 1 0 rg 0 0 2 2 re f\nendstream ";
+        let shading = "<</PatternType 2/Shading<</ShadingType 2/ColorSpace/DeviceGray/Coords[0 0 1 0]/Function<</FunctionType 2/Domain[0 1]/N 1>>>>>>";
+        let (calls, warnings) = calls(
+            "/Font<</F1 5 0 R>>/Pattern<</P 6 0 R/S 7 0 R>>/ExtGState<</H<</CA 0.5>>>>",
+            "BT /F1 10 Tf /Pattern cs /P scn /Pattern CS /S SCN (A) Tj 1 Tr (B) Tj \
+             /H gs 2 Tr 0 g 1 G (C) Tj /S scn 0 Tr (D) Tj ET BT 0 g (E) Tj ET",
+            &[HELV, tiling, shading],
+        );
+        // As `mutool trace` shows it; a fill and a stroke with a
+        // translucent stroke go in a knockout group.
+        assert_eq!(
+            calls,
+            [
+                "text clip A",
+                "tile 4 4",
+                "fill RGB [0.0, 1.0, 0.0] 1 e=0",
+                "end tile",
+                "pop",
+                "text clip stroke B",
+                "shade",
+                "pop",
+                "group i=false k=true bm=0 a=1",
+                "text fill Gray [0.0] 1 C",
+                "text stroke Gray [1.0] C",
+                "end group",
+                "text clip D",
+                "shade",
+                "pop",
+                "text fill Gray [0.0] 1 E",
+            ]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A Type 3 font: `a` a mask, `b` coloured with the colour it is
+    /// shown with, `c` coloured with its own and drawing a shading, a
+    /// stroke and an image mask, `d` nothing.
+    fn type3() -> Vec<String> {
+        vec![
+            "<</Type/Font/Subtype/Type3/FontBBox[0 0 1000 1000]/FontMatrix[0.001 0 0 0.001 0 0]\
+             /CharProcs<</a 6 0 R/b 7 0 R/c 8 0 R/d 9 0 R>>/Encoding<</Differences[97/a/b/c/d]>>\
+             /FirstChar 97/LastChar 100/Widths[1000 1000 1000 1000]/Resources<</Shading<</Sh 10 0 R>>>>>>"
+                .into(),
+            st("", "1000 0 0 0 750 750 d1 0 0 750 750 re f"),
+            st("", "1000 0 d0 0 0 500 500 re f"),
+            st(
+                "",
+                "1000 0 d0 0 0 1 rg q 0 0 500 500 re W n /Sh sh Q 2 w 0 0 1 1 re S \
+                 q 100 0 0 100 0 0 cm BI /W 1 /H 1 /IM true ID x EI Q",
+            ),
+            st("", "0 0 d0"),
+            SHADING.into(),
+        ]
+    }
+
+    const SHADING: &str = "<</ShadingType 2/ColorSpace/DeviceGray/Coords[0 0 1 0]/Function<</FunctionType 2/Domain[0 1]/N 1>>>>";
+
+    /// A stream object with `dict` and `data`.
+    fn st(dict: &str, data: &str) -> String {
+        format!("<<{dict}/Length {}>>stream\n{data}\nendstream", data.len())
+    }
+
+    fn strs(v: &[String]) -> Vec<&str> {
+        v.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn type3_glyphs_are_cached_masks_or_drawn_directly() {
+        // As `mutool trace` shows it: glyphs whose colour or stroke the
+        // procedure leaves undefined are drawn through the gstate, and
+        // shown invisibly for extraction; the clipping modes do not clip
+        // with Type 3 glyphs.
+        let (calls, warnings) = calls(
+            "/Font<</T3 5 0 R>>",
+            "BT /T3 10 Tf 1 0 0 rg 10 10 Td (abcd) Tj 3 Tr (a) Tj 1 Tr (a) Tj 4 Tr (b) Tj ET",
+            &strs(&type3()),
+        );
+        assert_eq!(
+            calls,
+            [
+                "text fill RGB [1.0, 0.0, 0.0] 1 a",
+                "fill RGB [1.0, 0.0, 0.0] 1 e=20",
+                "text ignore b",
+                "clip eo=false",
+                "shade",
+                "pop",
+                "stroke Gray [0.0] w=2",
+                "image mask 1x1 RGB [0.0, 0.0, 1.0]",
+                "text ignore c",
+                "text fill RGB [1.0, 0.0, 0.0] 1 d",
+                "text ignore a",
+                "text fill RGB [1.0, 0.0, 0.0] 1 a",
+                "fill RGB [1.0, 0.0, 0.0] 1 e=70",
+                "text ignore b",
+            ]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// Records fills and strokes with their whole state, and groups.
+    #[derive(Default)]
+    struct Detail(Vec<String>);
+
+    fn params(p: ColorParams) -> String {
+        format!("ri={} bp={} op={} opm={}", p.ri, p.bp, p.op, p.opm)
+    }
+
+    impl Device for Detail {
+        fn fill_path(
+            &mut self,
+            _: &Path,
+            _: bool,
+            _: Matrix,
+            _: &ColorSpace,
+            _: &[f32],
+            alpha: f32,
+            p: ColorParams,
+        ) {
+            self.0.push(format!("fill a={alpha} {}", params(p)));
+        }
+        fn stroke_path(
+            &mut self,
+            _: &Path,
+            s: &StrokeState,
+            _: Matrix,
+            _: &ColorSpace,
+            _: &[f32],
+            alpha: f32,
+            p: ColorParams,
+        ) {
+            self.0.push(format!(
+                "stroke w={} ml={} cap={},{},{} join={} dash={:?}@{} a={alpha} {}",
+                s.linewidth,
+                s.miterlimit,
+                s.start_cap,
+                s.dash_cap,
+                s.end_cap,
+                s.linejoin,
+                s.dash,
+                s.dash_phase,
+                params(p)
+            ));
+        }
+        fn begin_group(
+            &mut self,
+            _: Rect,
+            _: Option<&ColorSpace>,
+            i: bool,
+            k: bool,
+            bm: u8,
+            a: f32,
+        ) {
+            self.0.push(format!("group i={i} k={k} bm={bm} a={a}"));
+        }
+        fn end_group(&mut self) {
+            self.0.push("end group".into());
+        }
+    }
+
+    #[test]
+    fn graphics_state_operators_reach_the_stroke_state_and_color_params() {
+        // As `mutool trace` shows it: a blend mode puts each mark in a
+        // group of its own, and the page in one too.
+        let objs = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</ExtGState<</G<</OP true/OPM 1/UseBlackPtComp/ON/CA 0.5/ca 2/BM/Multiply>>/F<</op true>>>>>>/Contents 4 0 R>>".to_vec(),
+            crate::testutil::stream(
+                "",
+                b"3 w 2 j 1 J 4 M [2 1] 0.5 d /Saturation ri 0 0 m 10 10 l S /G gs \
+                  1 1 m 5 5 20 20 30 30 c 40 40 50 50 v 60 60 70 70 y h S 0 0 5 5 re f \
+                  /F gs 0 0 5 5 re f h 9 9 m h f",
+            ),
+        ];
+        let doc = crate::testutil::doc_bytes(&objs);
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dev = Detail::default();
+        let out = run_page_contents(&doc, &page, &mut dev, Store::default());
+        assert_eq!(out.error, None);
+        let stroke = "w=3 ml=4 cap=1,1,1 join=2 dash=[2.0, 1.0]@0.5";
+        assert_eq!(
+            dev.0,
+            [
+                "group i=true k=false bm=0 a=1".to_string(),
+                format!("stroke {stroke} a=1 ri=2 bp=true op=false opm=false"),
+                "group i=false k=false bm=1 a=1".to_string(),
+                format!("stroke {stroke} a=0.5 ri=2 bp=true op=true opm=true"),
+                "end group".to_string(),
+                "group i=false k=false bm=1 a=1".to_string(),
+                "fill a=1 ri=2 bp=true op=true opm=true".to_string(),
+                "end group".to_string(),
+                "group i=false k=false bm=1 a=1".to_string(),
+                "fill a=1 ri=2 bp=true op=true opm=true".to_string(),
+                "end group".to_string(),
+                "group i=false k=false bm=1 a=1".to_string(),
+                "fill a=1 ri=2 bp=true op=true opm=true".to_string(),
+                "end group".to_string(),
+                "end group".to_string(),
+            ]
+        );
+        let warnings: Vec<String> = doc
+            .diagnostics()
+            .snapshot()
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(warnings, ["closepath with no current point"]);
+    }
+
+    const TILING: &str = "<</PatternType 1/PaintType 1/TilingType 1/BBox[0 0 4 4]/XStep 4/YStep 4/Length 21>>stream\n0 1 0 rg 0 0 2 2 re f\nendstream";
+
+    #[test]
+    fn images_masks_and_patterns_paint_through_clips_and_groups() {
+        let shading = format!("<</PatternType 2/Shading{SHADING}>>");
+        let objects = [
+            st(
+                "/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8/Intent/Saturation",
+                "x",
+            ),
+            st(
+                "/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceRGB/BitsPerComponent 8/Mask 7 0 R",
+                "abc",
+            ),
+            st("/Subtype/Image/Width 1/Height 1/ImageMask true", "x"),
+            st("/Subtype/Image/Width 1/Height 1/ImageMask true", "x"),
+            TILING.into(),
+            shading,
+            st(
+                "/PatternType 1/PaintType 2/TilingType 1/BBox[0 0 100 100]/XStep 100/YStep 100",
+                "0 0 5 5 re f",
+            ),
+            st(
+                "/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 4 4]/XStep 0/YStep 0",
+                "0 0 1 1 re f",
+            ),
+        ];
+        let (calls, warnings) = calls(
+            "/XObject<</Im 5 0 R/Mk 6 0 R/IM1 8 0 R>>/Pattern<</P 9 0 R/S 10 0 R/U 11 0 R/Z 12 0 R>>\
+             /ColorSpace<</CSP[/Pattern/DeviceRGB]>>/ExtGState<</A<</ca 0.5/CA 0.5>>/M<</BM/Multiply>>>>",
+            "q 10 0 0 10 0 0 cm /Im Do /Mk Do /M gs /Mk Do Q \
+             q 20 0 0 20 0 0 cm /Pattern cs /P scn /IM1 Do /S scn /IM1 Do Q \
+             /CSP cs 1 0 0 /U scn 0 0 50 50 re f /A gs /P scn 0 0 50 50 re f \
+             /Pattern CS /P SCN 0 0 3 3 re S /S SCN 0 0 3 3 re S /Z scn 0 0 1 1 re f",
+            &strs(&objects),
+        );
+        // As `mutool trace` shows it.
+        let image = "1x1 1 mask=false [10 0 -0 10 0 90]";
+        let masked = "1x1 1 mask=true [10 0 -0 10 0 90]";
+        let cell = "fill RGB [0.0, 1.0, 0.0] 1";
+        assert_eq!(
+            calls,
+            [
+                "group i=true k=false bm=0 a=1".to_string(),
+                format!("image {image}"),
+                "clip image mask 1x1".into(),
+                format!("image {masked}"),
+                "pop".into(),
+                "group i=false k=false bm=1 a=1".into(),
+                "clip image mask 1x1".into(),
+                format!("image {masked}"),
+                "pop".into(),
+                "end group".into(),
+                "clip image mask 1x1".into(),
+                "tile 4 4".into(),
+                format!("{cell} e=0"),
+                "end tile".into(),
+                "pop".into(),
+                "clip image mask 1x1".into(),
+                "shade".into(),
+                "pop".into(),
+                "clip eo=false".into(),
+                "fill RGB [1.0, 0.0, 0.0] 1 e=0".into(),
+                "pop".into(),
+                "group i=false k=false bm=0 a=0.5".into(),
+                "clip eo=false".into(),
+                "tile 4 4".into(),
+                format!("{cell} e=0"),
+                "end tile".into(),
+                "pop".into(),
+                "end group".into(),
+                "group i=false k=false bm=0 a=0.5".into(),
+                "clip stroke w=1".into(),
+                format!("{cell} e=-4"),
+                format!("{cell} e=0"),
+                format!("{cell} e=-4"),
+                format!("{cell} e=0"),
+                "pop".into(),
+                "end group".into(),
+                "clip stroke w=1".into(),
+                "shade".into(),
+                "pop".into(),
+                "group i=false k=false bm=0 a=0.5".into(),
+                "clip eo=false".into(),
+                "fill RGB [0.0, 0.0, 0.0] 1 e=0".into(),
+                "pop".into(),
+                "end group".into(),
+                "end group".into(),
+            ]
+        );
+        assert_eq!(
+            warnings,
+            [
+                "tiling pattern must have non-zero xstep",
+                "tiling pattern must have non-zero ystep",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_broken_structure_tree_is_repaired_once_and_followed() {
+        let objects = [
+            HELV,
+            "<</Type/StructTreeRoot/K[7 0 R 11 0 R 12 0 R 13 0 R]/RoleMap<</MyPara/P>>/ParentTree<</Kids[14 0 R]>>>>",
+            "<</Type/StructElem/S/Document/P 6 0 R/K[8 0 R 9 0 R]>>",
+            "<</Type/StructElem/S/MyPara/P 7 0 R/K 0/Alt(alt)/E(abbr)/T(title)>>",
+            "<</Type/StructElem/S/Span/P 7 0 R/K[1 <</Type/MCR/MCID 2>>]>>",
+            // No parent: the parent tree's check makes it the root's child.
+            "<</Type/StructElem/S/Figure/K 3>>",
+            "<</Type/Foo>>",
+            "<</Type/StructElem/K 5>>",
+            "<</Type/StructElem/S/P/P 7 0 R>>",
+            "<</Limits[0 0]/Nums[0[8 0 R 9 0 R 9 0 R 10 0 R]]>>",
+        ];
+        let (calls, warnings) = run(
+            "/StructTreeRoot 6 0 R",
+            "/Font<</F1 5 0 R>>",
+            "/P <</MCID 0>> BDC 0 0 1 1 re f EMC /Span <</MCID 1>> BDC 0 0 2 2 re f EMC \
+             /X <</MCID 3>> BDC 0 0 3 3 re f EMC /Layer <</Title (L1)>> BDC 0 0 4 4 re f EMC \
+             /Span <</Lang (de-DE)/ActualText (Hi)>> BDC BT /F1 10 Tf (Hi) Tj ET EMC \
+             /Tag MP /Tag <</MCID 2>> DP 0 0 5 5 re f",
+            &objects,
+        );
+        // As `mutool trace` shows it.
+        let fill = "fill Gray [0.0] 1 e=0";
+        assert_eq!(
+            calls,
+            [
+                "struct Document Document 0",
+                "struct P MyPara 0",
+                "Alt alt",
+                "Abbreviation abbr",
+                "Title title",
+                fill,
+                "end meta",
+                "end meta",
+                "end meta",
+                "end struct",
+                "struct Span Span 1",
+                fill,
+                "end struct",
+                "end struct",
+                "struct Figure Figure -1",
+                fill,
+                "layer L1",
+                fill,
+                "end layer",
+                "ActualText Hi",
+                "text fill Gray [0.0] 1 Hi",
+                "end meta",
+                "end struct",
+                "struct Document Document 0",
+                "struct Span Span 1",
+                fill,
+                "end struct",
+                "end struct",
+            ]
+        );
+        assert_eq!(
+            warnings,
+            [
+                "Type should be StructElem",
+                "Missing structure type (S)",
+                "Bad parent (P)",
+                "Repairing missing parent (P) in parent tree nodes",
+            ]
+        );
+    }
+
+    #[test]
+    fn forms_groups_soft_masks_and_layers_nest_inside_the_page_group_and_crop() {
+        let objects = [
+            st(
+                "/Subtype/Form/BBox[0 0 10 10]/Group<</S/Transparency/I true/K true/CS/DeviceCMYK>>/OC 10 0 R",
+                "0 0 1 1 re f",
+            ),
+            // It draws itself: the second time is skipped.
+            st(
+                "/Subtype/Form/BBox[0 0 10 10]/Resources<</XObject<</Me 6 0 R>>>>",
+                "/Me Do 0 0 2 2 re f",
+            ),
+            st(
+                "/Subtype/Form/BBox[0 0 10 10]/Group<</S/Transparency/CS/DeviceGray>>",
+                "0 0 3 3 re f",
+            ),
+            "<</FunctionType 2/Domain[0 1]/N 1>>".into(),
+            st(
+                "/Subtype/Form/BBox[0 0 10 10]/Group<</S/Transparency/CS/Lab>>",
+                "0 0 4 4 re f",
+            ),
+            "<</Type/OCG/Name(Lay)>>".into(),
+        ];
+        let (calls, warnings) = run_page(
+            "/OCProperties<</OCGs[10 0 R]/D<<>>>>",
+            "/CropBox[10 10 90 90]/Group<</S/Transparency/CS/DeviceGray>>",
+            "/XObject<</F1 5 0 R/F2 6 0 R/F3 9 0 R>>\
+             /ExtGState<</M<</SMask<</S/Alpha/G 7 0 R/TR 8 0 R/BC[0.5]>>>>/N<</SMask/None>>>>",
+            "/F1 Do /F2 Do /M gs 0 0 5 5 re f /N gs /F3 Do 0 0 6 6 re f",
+            &strs(&objects),
+        );
+        // As `mutool trace` shows it.
+        let fill = "fill Gray [0.0] 1 e=-10";
+        assert_eq!(
+            calls,
+            [
+                "group i=true k=false bm=0 a=1",
+                "clip eo=true",
+                "group i=true k=true bm=0 a=1",
+                "layer Lay",
+                "clip eo=false",
+                fill,
+                "pop",
+                "end group",
+                "end layer",
+                "clip eo=false",
+                fill,
+                "pop",
+                "mask lum=false [0.5]",
+                "group i=true k=false bm=0 a=1",
+                "clip eo=false",
+                fill,
+                "pop",
+                "end group",
+                "end mask",
+                fill,
+                "pop",
+                "group i=false k=false bm=0 a=1",
+                "clip eo=false",
+                fill,
+                "pop",
+                "end group",
+                fill,
+                "pop",
+                "end group",
+            ]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn group_colorspaces_that_cannot_blend_are_ignored() {
+        let objects = [
+            st(
+                "/Subtype/Form/BBox[0 0 10 10]/Group<</S/Transparency/I true/CS[/Indexed/DeviceRGB 0<000000>]>>",
+                "0 0 4 4 re f",
+            ),
+            st(
+                "/Subtype/Form/BBox[0 0 10 10]/Group<</S/Transparency/I true/CS/Nope>>",
+                "0 0 4 4 re f",
+            ),
+        ];
+        let (calls, warnings) = run_page(
+            "",
+            "/Group<</S/Transparency/CS[/Lab<</WhitePoint[1 1 1]>>]>>",
+            "/XObject<</F4 5 0 R/F5 6 0 R>>",
+            "/F4 Do /F5 Do",
+            &strs(&objects),
+        );
+        assert_eq!(calls.len(), 12, "{calls:?}");
+        // MuPDF's messages.
+        assert_eq!(
+            warnings,
+            [
+                "Ignoring invalid Page blending colorspace: Lab.",
+                "Ignoring invalid XObject blending colorspace: Indexed(0,DeviceRGB).",
+                "syntax error: unknown colorspace: Nope",
+                "Ignoring XObject blending colorspace.",
+            ]
+        );
+        let (_, warnings) = run_page("", "/Group<</S/Transparency/CS/Nope>>", "", "", &[]);
+        assert_eq!(
+            warnings,
+            [
+                "syntax error: unknown colorspace: Nope",
+                "Ignoring Page blending colorspace.",
+            ]
+        );
+    }
+
+    /// Records the default colorspaces each time they are set, and the
+    /// colorspace of each group.
+    #[derive(Default)]
+    struct Defaults(Vec<String>);
+
+    fn cs_name(cs: Option<&ColorSpace>) -> &'static str {
+        cs.map_or("-", ColorSpace::type_name)
+    }
+
+    impl Device for Defaults {
+        fn set_default_colorspaces(&mut self, d: &DefaultColorSpaces) {
+            self.0.push(format!(
+                "defaults gray={} rgb={} cmyk={} oi={}",
+                cs_name(d.gray.as_ref()),
+                cs_name(d.rgb.as_ref()),
+                cs_name(d.cmyk.as_ref()),
+                cs_name(d.output_intent.as_ref())
+            ));
+        }
+        fn begin_group(
+            &mut self,
+            _: Rect,
+            cs: Option<&ColorSpace>,
+            _: bool,
+            _: bool,
+            _: u8,
+            _: f32,
+        ) {
+            self.0.push(format!("group {}", cs_name(cs)));
+        }
+    }
+
+    /// A page with an output intent whose profile is `profile` (an object)
+    /// and transparency, page resources `resources` and a form (object 6)
+    /// with `form_resources`: the defaults and groups it gives, and the
+    /// warnings.
+    fn defaults_of(
+        profile: Vec<u8>,
+        resources: &str,
+        form_resources: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let objs = vec![
+            b"<</Type/Catalog/Pages 2 0 R/OutputIntents[<</DestOutputProfile 5 0 R>>]>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</XObject<</F 6 0 R>>/ExtGState<</B<</BM/Multiply>>>>{resources}>>/Contents 4 0 R>>"
+            )
+            .into_bytes(),
+            crate::testutil::stream("", b"/F Do"),
+            profile,
+            crate::testutil::stream(
+                &format!("/Subtype/Form/BBox[0 0 1 1]/Resources<<{form_resources}>>"),
+                b"0 0 1 1 re f",
+            ),
+        ];
+        let doc = crate::testutil::doc_bytes(&objs);
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dev = Defaults::default();
+        let out = run_page_contents(&doc, &page, &mut dev, Store::default());
+        assert_eq!(out.error, None);
+        let warnings = doc
+            .diagnostics()
+            .snapshot()
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        (dev.0, warnings)
+    }
+
+    fn srgb() -> Vec<u8> {
+        moxcms::ColorProfile::new_srgb()
+            .encode()
+            .unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    #[test]
+    fn an_output_intent_sets_the_default_of_its_family_and_the_page_group() {
+        // As `mutool trace` shows it: the sRGB intent is the default RGB
+        // space, and the group of a page that blends and has no /Group.
+        let profile = crate::testutil::stream("/N 3", &srgb());
+        let (calls, warnings) = defaults_of(profile, "", "");
+        assert_eq!(
+            calls,
+            ["defaults gray=- rgb=RGB cmyk=- oi=RGB", "group RGB"]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // The page's own defaults win; those of the wrong family, or that
+        // do not load, are ignored. A form's are set while it runs.
+        let profile = crate::testutil::stream("/N 4", &srgb());
+        let (calls, warnings) = defaults_of(
+            profile,
+            "/ColorSpace<</DefaultRGB[/CalRGB<<>>]/DefaultGray/DeviceRGB/DefaultCMYK/Nope>>",
+            "/ColorSpace<</DefaultGray[/CalGray<<>>]>>",
+        );
+        assert_eq!(
+            calls,
+            [
+                "defaults gray=- rgb=RGB cmyk=- oi=RGB",
+                "group RGB",
+                "defaults gray=Gray rgb=RGB cmyk=- oi=RGB",
+                "defaults gray=- rgb=RGB cmyk=- oi=RGB",
+            ]
+        );
+        assert_eq!(
+            warnings,
+            [
+                "syntax error: unknown colorspace: Nope",
+                "ICC colorspace N=4 does not match profile N=3 (using profile)",
+            ]
+        );
+    }
+
+    #[test]
+    fn output_intents_that_do_not_load_fall_back_to_their_n() {
+        // MuPDF's messages for each.
+        let (calls, warnings) = defaults_of(crate::testutil::stream("/N 1", &srgb()), "", "");
+        assert_eq!(calls[0], "defaults gray=Gray rgb=- cmyk=- oi=Gray");
+        assert_eq!(
+            warnings,
+            ["ICC colorspace N=1 does not match profile N=3 (ignoring profile)"]
+        );
+        let (calls, warnings) = defaults_of(crate::testutil::stream("/N 4", b"garbage"), "", "");
+        assert_eq!(calls[0], "defaults gray=- rgb=- cmyk=CMYK oi=CMYK");
+        assert_eq!(
+            warnings[1..],
+            [
+                "format error: cmsOpenProfileFromMem failed",
+                "ignoring broken ICC profile",
+            ]
+        );
+        let (calls, warnings) = defaults_of(crate::testutil::stream("/N 5", b"garbage"), "", "");
+        assert_eq!(calls[0], "defaults gray=- rgb=- cmyk=- oi=-");
+        assert_eq!(
+            warnings[3..],
+            [
+                "syntax error: invalid ICC colorspace",
+                "Attempt to read Output Intent failed",
+            ]
+        );
+        let (_, warnings) = defaults_of(b"<</N 3>>".to_vec(), "", "");
+        assert_eq!(
+            warnings,
+            [
+                "format error: object is not a stream",
+                "ignoring broken ICC profile"
+            ]
+        );
+    }
+
+    /// Records the area of each tile.
+    #[derive(Default)]
+    struct Tiles(Vec<String>);
+
+    impl Device for Tiles {
+        fn begin_tile(&mut self, area: Rect, _: Rect, _: f32, _: f32, _: Matrix, _: i32) -> bool {
+            let r = |v: f32| (v * 100.0).round() / 100.0;
+            self.0.push(format!(
+                "{} {} {} {}",
+                r(area.x0),
+                r(area.y0),
+                r(area.x1),
+                r(area.y1)
+            ));
+            false
+        }
+    }
+
+    #[test]
+    fn type3_glyph_boxes_are_measured_from_what_they_draw() {
+        // A font with an empty box takes each glyph's from what the glyph
+        // draws, as MuPDF's bbox device measures it: a text filled with a
+        // pattern is tiled over that box. The areas are `mutool trace`'s.
+        let state = "10 w 0 j 0 J 10 M [] 0 d";
+        let d1 = "1000 0 0 0 1000 1000 d1";
+        let objects = [
+            "<</Type/Font/Subtype/Type3/FontBBox[0 0 0 0]/FontMatrix[0.001 0 0 0.001 0 0]\
+             /CharProcs<</a 6 0 R/b 7 0 R/c 8 0 R/d 9 0 R/e 10 0 R/f 11 0 R/g 12 0 R/h 13 0 R/i 14 0 R>>\
+             /Encoding<</Differences[97/a/b/c/d/e/f/g/h/i]>>/FirstChar 97/LastChar 105\
+             /Widths[1000 1000 1000 1000 1000 1000 1000 1000 1000]/Resources 15 0 R>>"
+                .to_string(),
+            st("", &format!("{d1} q 0 0 500 500 re W n 0 0 1000 1000 re f Q")),
+            st("", &format!("{d1} {state} 0 0 m 500 500 l S")),
+            st(
+                "",
+                &format!("{d1} q 500 0 0 500 0 0 cm /Sh sh BI /W 1 /H 1 /IM true ID x EI /Im Do Q"),
+            ),
+            st(
+                "",
+                &format!(
+                    "{d1} {state} BT /F1 1000 Tf (x) Tj 1 Tr (x) Tj 3 Tr (x) Tj 7 Tr (x) Tj ET"
+                ),
+            ),
+            st("", &format!("{d1} /GS gs 0 0 100 100 re f /Fm Do")),
+            st("", "1000 0 d0 /Pattern cs /P scn 0 0 300 300 re f"),
+            st("", &format!("{d1} /OC /oc BDC 0 0 1 1 re f EMC")),
+            st("", &format!("{d1} 0 0 0 0 re W n 0 0 10 10 re f")),
+            st(
+                "",
+                &format!("1000 0 d0 /Pattern CS /P SCN {state} 0 0 m 100 100 l S"),
+            ),
+            format!(
+                "<</Font<</F1 17 0 R>>/Shading<</Sh{SHADING}>>/XObject<</Im 19 0 R/Fm 20 0 R>>\
+                 /ExtGState<</GS<</SMask<</S/Luminosity/G 20 0 R>>>>>>/Pattern<</P 16 0 R>>\
+                 /Properties<</oc 18 0 R>>>>"
+            ),
+            TILING.into(),
+            HELV.into(),
+            "<</Type/OCG/Name(L)>>".into(),
+            st(
+                "/Subtype/Image/Width 1/Height 1/ColorSpace/DeviceGray/BitsPerComponent 8",
+                "x",
+            ),
+            st(
+                "/Subtype/Form/BBox[0 0 100 100]/Group<</S/Transparency>>",
+                "0 0 50 50 re f",
+            ),
+        ];
+        let objs: Vec<Vec<u8>> = [
+            "<</Type/Catalog/Pages 2 0 R/OCProperties<</OCGs[18 0 R]/D<<>>>>>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".into(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</Font<</T3 5 0 R>>/Pattern<</P 16 0 R>>>>/Contents 4 0 R>>".into(),
+            "<<>>".into(),
+        ]
+        .into_iter()
+        .chain(objects)
+        .map(String::into_bytes)
+        .collect();
+        let doc = crate::testutil::doc_bytes(&objs);
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let huge = Rect::INFINITE;
+        let r = |v: f32| (v * 100.0).round() / 100.0;
+        let infinite = format!(
+            "{} {} {} {}",
+            r(huge.x0),
+            r(huge.y0),
+            r(huge.x1),
+            r(huge.y1)
+        );
+        let want: [(&str, &[&str]); 9] = [
+            ("a", &["9 49 16 56"]),
+            ("b", &["8 48 17 57"]),
+            // An unbounded shading.
+            ("c", &[infinite.as_str()]),
+            ("d", &["-0.83 38 31.73 67.24"]),
+            // What is inside a soft mask or a layer marks nothing.
+            ("e", &[]),
+            // Coloured glyphs draw their pattern themselves.
+            ("f", &["0 0 300 300"]),
+            ("g", &[]),
+            // A clip to nothing hides what follows.
+            ("h", &["9 49 21 61"]),
+            ("i", &["-100 -100 200 200"]),
+        ];
+        let mut store = Store::default();
+        for (ch, tiles) in want {
+            let mut dev = Tiles::default();
+            let mut run = Run::new(
+                &doc,
+                &mut dev,
+                Matrix::IDENTITY,
+                -1,
+                Arc::new(DefaultColorSpaces::default()),
+                std::mem::take(&mut store),
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+            let res = doc.dict_get(&page, b"Resources");
+            let data = format!("BT /T3 10 Tf 10 50 Td /Pattern cs /P scn ({ch}) Tj ET");
+            content::process_glyph(&doc, Some(&res), data.as_bytes(), &mut run)
+                .and_then(|()| run.close())
+                .unwrap_or_else(|e| panic!("{e}"));
+            store = run.into_store();
+            assert_eq!(dev.0, tiles, "glyph {ch}");
+        }
+    }
+
+    /// Records where each glyph goes, and each fill's colour.
+    #[derive(Default)]
+    struct Glyphs(Vec<String>);
+
+    impl Device for Glyphs {
+        fn fill_text(
+            &mut self,
+            t: &Text,
+            _: Matrix,
+            _: &ColorSpace,
+            _: &[f32],
+            _: f32,
+            _: ColorParams,
+        ) {
+            let r = |v: f32| (v * 100.0).round() / 100.0;
+            for i in t.spans.iter().flat_map(|s| s.items.iter()) {
+                let c = char::from_u32(i.ucs as u32).unwrap_or('?');
+                self.0.push(format!("{c} {} {}", r(i.x), r(i.y)));
+            }
+        }
+        fn fill_path(
+            &mut self,
+            _: &Path,
+            _: bool,
+            _: Matrix,
+            cs: &ColorSpace,
+            color: &[f32],
+            _: f32,
+            _: ColorParams,
+        ) {
+            self.0.push(format!("fill {} {color:?}", cs.type_name()));
+        }
+        fn stroke_path(
+            &mut self,
+            _: &Path,
+            _: &StrokeState,
+            _: Matrix,
+            _: &ColorSpace,
+            _: &[f32],
+            _: f32,
+            _: ColorParams,
+        ) {
+            self.0.push("stroke".into());
+        }
+        fn fill_shade(&mut self, _: &Shade, _: Matrix, _: f32, _: ColorParams) {
+            self.0.push("shade".into());
+        }
+    }
+
+    #[test]
+    fn text_state_operators_place_glyphs_and_colors_clamp_to_their_space() {
+        let shading = SHADING;
+        let objs = vec![
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".into(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</Font<</F1 5 0 R/Bad 6 0 R/NotDict 7 0 R>>\
+                 /ColorSpace<</Sep[/Separation/Spot/DeviceRGB<</FunctionType 2/Domain[0 1]/N 1/C0[0 0 0]/C1[1 0 0]>>]\
+                 /Ix[/Indexed/DeviceRGB 1<000000FF0000>]/L[/Lab<</WhitePoint[1 1 1]>>]>>\
+                 /Pattern<</S<</PatternType 2/Shading{shading}>>>>>>/Contents 4 0 R>>"
+            ),
+            st(
+                "",
+                "(x) Tj [(y)] TJ BT /F1 10 Tf 2 Tc 3 Tw 50 Tz 12 TL 1 Ts 10 80 TD (a b) Tj T* (c) TJ \
+                 [(d) -500 (e)] TJ (f) ' 1 0 (g) \" ET /Sep cs 0.5 sc 0 0 1 1 re f /Ix cs 5 sc 0 0 1 1 re f \
+                 /L cs 200 -200 50 sc 0 0 1 1 re f 0 0 0 1 k 0 0 1 1 re f /Pattern cs /S scn 0.5 sc \
+                 0 0 1 1 re f 0 G 0 0 m 1 1 l h s Q Q BT /Bad 10 Tf (h) Tj /NotDict 10 Tf (i) Tj ET",
+            ),
+            HELV.into(),
+            "<</Type/Font/Subtype/TrueType/BaseFont/Broken/FontDescriptor<</FontFile2 8 0 R>>>>"
+                .into(),
+            "(not a dict)".into(),
+            st("", "garbage"),
+        ];
+        let objs: Vec<Vec<u8>> = objs.into_iter().map(String::into_bytes).collect();
+        let doc = crate::testutil::doc_bytes(&objs);
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut dev = Glyphs::default();
+        let out = run_page_contents(&doc, &page, &mut dev, Store::default());
+        assert_eq!(out.error, None);
+        // Positions and colours as `mutool trace` gives them: a string
+        // operand of TJ shows nothing, and colours are clamped to their
+        // space.
+        assert_eq!(
+            dev.0,
+            [
+                "a 10 81",
+                "  13.78 81",
+                "b 17.67 81",
+                "d 10 161",
+                "e 16.28 161",
+                "f 10 241",
+                "g 10 321",
+                "fill Separation [0.5]",
+                "fill Indexed [0.003921569]",
+                "fill Lab [100.0, -128.0, 50.0]",
+                "fill CMYK [0.0, 0.0, 0.0, 1.0]",
+                "shade",
+                "stroke",
+                "h 0 0",
+                "i 5.56 0",
+            ]
+        );
+        let warnings: Vec<String> = doc
+            .diagnostics()
+            .snapshot()
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(
+            warnings[..4],
+            [
+                "cannot draw text since font and size not set",
+                "cannot draw text since font and size not set",
+                "color incompatible with material",
+                "gstate underflow in content stream",
+            ]
+        );
+    }
+
+    #[test]
+    fn layers_and_clips_unwind_in_the_order_they_nest() {
+        let (calls, warnings) = run(
+            "/OCProperties<</OCGs[5 0 R 6 0 R]/D<<>>>>",
+            "/Properties<</a 5 0 R/b 6 0 R/m 7 0 R/s<</Name/Named>>>>",
+            "/OC /a BDC q 0 0 9 9 re W n /OC /b BDC 0 0 1 1 re f Q EMC EMC EMC \
+             /OC /m BDC 0 0 2 2 re f EMC /OC /s BDC 0 0 3 3 re f EMC \
+             q 0 0 9 9 re W n /OC /a BDC 0 0 4 4 re f Q 0 0 5 5 re f EMC",
+            &[
+                "<</Type/OCG/Name(A)>>",
+                "<</Type/OCG/Name(B)>>",
+                "<</Type/OCMD/OCGs[5 0 R 6 0 R]>>",
+            ],
+        );
+        // As `mutool trace` shows it: a clip popped inside a layer ends
+        // the layer with it; a membership dictionary opens each of its
+        // groups.
+        let fill = "fill Gray [0.0] 1 e=0";
+        assert_eq!(
+            calls,
+            [
+                "layer A",
+                "clip eo=false",
+                "layer B",
+                fill,
+                "end layer",
+                "pop",
+                "end layer",
+                "layer A",
+                "layer B",
+                fill,
+                "end layer",
+                "end layer",
+                "layer Named",
+                fill,
+                "end layer",
+                "clip eo=false",
+                "layer A",
+                fill,
+                "end layer",
+                "pop",
+                fill,
+            ]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn nesting_limits_end_the_page() {
+        let (out, _) = calls("", &"q ".repeat(MAX_GSTATES + 1), &[]);
+        assert_eq!(
+            out.last().map(String::as_str),
+            Some("error limit error: too many nested graphics states")
+        );
+        let (out, _) = calls("", &"0 0 1 1 re W n ".repeat(MAX_NEST + 1), &[]);
+        assert_eq!(
+            out.last().map(String::as_str),
+            Some("error limit error: layer/clip nesting too deep")
+        );
+        // A CTM change while text clips gather ends it too.
+        let (out, warnings) = calls(
+            "/Font<</F1 5 0 R>>",
+            "BT /F1 10 Tf 7 Tr (a) Tj 1 0 0 1 5 5 cm ET",
+            &[HELV],
+        );
+        assert_eq!(
+            out.last().map(String::as_str),
+            Some("error generic error: CTM CHANGE IN CLIP TEXT!!!")
+        );
+        assert_eq!(
+            warnings,
+            ["ignoring CTM change for accumulated glyph clip paths"]
+        );
     }
 }

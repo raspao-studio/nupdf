@@ -1445,9 +1445,14 @@ impl Document {
             return v;
         }
         let Some(_guard) = LoadGuard::enter(st, num) else {
-            return Loaded::Failed(report::format(&format!(
-                "recursive object lookup ({num} 0 R)"
-            )));
+            // MuPDF marks a member whose object stream is being read, and
+            // a lookup of it meanwhile finds no usable entry.
+            let message = if st.entries.get(num).kind == Kind::InStream {
+                format!("cannot find object in xref ({num} 0 R)")
+            } else {
+                format!("recursive object lookup ({num} 0 R)")
+            };
+            return Loaded::Failed(report::format(&message));
         };
         let loaded = match (self.load_slot(st, num, allow_repair), self.crypt()) {
             // pdf_cache_object decrypts what it parsed from the file. If AES
@@ -1537,13 +1542,11 @@ impl Document {
                 if let Some(e) = &objstm.error {
                     return Loaded::Failed(e.clone());
                 }
-                if can_repair {
-                    Loaded::NeedsRepair(String::new())
-                } else {
-                    Loaded::Failed(report::format(&format!(
-                        "object ({num} 0 R) was not found in its object stream"
-                    )))
-                }
+                // pdf_load_obj_stm found no such member: MuPDF throws, with
+                // no repair, at every lookup.
+                Loaded::Failed(report::format(&format!(
+                    "cannot load object stream containing object ({num} 0 R)"
+                )))
             }
         }
     }
@@ -1553,20 +1556,33 @@ impl Document {
         if let Some(found) = st.objstms.lock().ok().and_then(|m| m.get(&stm).cloned()) {
             // After a failure MuPDF marks the stream's entry free, so later
             // lookups give up before reading it, with a shorter message.
+            // The members parsed before the failure stay cached in their
+            // entries.
             if found.error.is_some() {
                 return Arc::new(ObjStm {
-                    objects: Vec::new(),
+                    objects: found.objects.clone(),
                     error: Some(report::format(&format!("corrupt object stream {stm}"))),
                 });
             }
             return found;
         }
         let computed = Arc::new(self.load_objstm(st, stm));
-        if computed.error.is_some()
-            && let Ok(mut demoted) = st.demoted.lock()
-        {
-            demoted.insert(stm);
-            st.any_demoted.store(true, Ordering::Release);
+        if let Some(error) = &computed.error {
+            if let Ok(mut demoted) = st.demoted.lock() {
+                demoted.insert(stm);
+                st.any_demoted.store(true, Ordering::Release);
+            }
+            // The lookup that read the stream fails, even for a member
+            // parsed before the error (pdf_load_obj_stm throws); the
+            // members it parsed are kept for the lookups after it.
+            let failed = Arc::new(ObjStm {
+                objects: Vec::new(),
+                error: Some(error.clone()),
+            });
+            if let Ok(mut map) = st.objstms.lock() {
+                map.entry(stm).or_insert(computed);
+            }
+            return failed;
         }
         if let Ok(mut map) = st.objstms.lock() {
             return Arc::clone(map.entry(stm).or_insert(computed));
@@ -1591,7 +1607,7 @@ impl Document {
         }
         let stream = match self.load_in(st, stm, true) {
             Loaded::Obj(Object::Stream(s)) => s,
-            Loaded::Obj(_) => return fail(format!("object is not a stream ({stm} 0 R)")),
+            Loaded::Obj(_) => return fail("object is not a stream".into()),
             _ => return fail(format!("corrupt object stream {stm}")),
         };
         let count = self
@@ -1810,10 +1826,9 @@ impl Document {
                 .and_then(|d| d.get(b"Type"))
                 .is_some_and(|t| self.resolve_in(&first, t).is_name(b"ObjStm"));
             if is_objstm
-                && self
-                    .repair_objstm(&first, i, &obj, &mut entries, &mut changed)
-                    .is_err()
+                && let Err(e) = self.repair_objstm(&first, i, &obj, &mut entries, &mut changed)
             {
+                self.report(&e);
                 self.diag.warn(
                     "repair.broken_objstm",
                     format!("ignoring broken object stream ({i} 0 R)"),
@@ -1894,7 +1909,8 @@ impl Document {
                     }
                 }
                 Loaded::Missing => {}
-                Loaded::Failed(_) | Loaded::NeedsRepair(_) => {
+                Loaded::Failed(cause) | Loaded::NeedsRepair(cause) => {
+                    self.report(&cause);
                     self.diag.warn(
                         "repair.broken_object",
                         format!("ignoring broken object ({i} 0 R)"),
@@ -1926,19 +1942,19 @@ impl Document {
         changed: &mut HashSet<i32>,
     ) -> Result<(), String> {
         let Object::Stream(stream) = obj else {
-            return Err("object is not a stream".into());
+            return Err(report::format("object is not a stream"));
         };
         let count = self
             .resolve_in(st, stream.dict.get(b"N").unwrap_or(&Object::Null))
             .to_int();
-        let data = self
-            .stream_bytes_in(st, stream)
-            .map_err(|e| e.to_string())?;
+        let data = self.stream_bytes_in(st, stream).map_err(|e| e.report())?;
         let mut lx = Lexer::small(&data, 0, &self.diag);
         let mut i = 0;
         while i < count {
             let Token::Int(n) = lx.next_token() else {
-                return Err(format!("corrupt object stream ({stm} 0 R)"));
+                return Err(report::format(&format!(
+                    "corrupt object stream ({stm} 0 R)"
+                )));
             };
             let n = n as i32;
             if !(0..MAX_OBJECT_NUMBER).contains(&n) {
@@ -1971,7 +1987,9 @@ impl Document {
                 changed.insert(n);
             }
             let Token::Int(_) = lx.next_token() else {
-                return Err(format!("corrupt object stream ({stm} 0 R)"));
+                return Err(report::format(&format!(
+                    "corrupt object stream ({stm} 0 R)"
+                )));
             };
             i += 1;
         }
@@ -2408,5 +2426,587 @@ mod kept_state {
         assert!(state.upgrade().is_some());
         drop(doc);
         assert!(state.upgrade().is_none());
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod object_streams {
+    use super::*;
+
+    fn doc(bytes: &[u8]) -> Document {
+        Document::open(bytes.to_vec()).unwrap()
+    }
+
+    /// A file indexed by an xref stream: `objects` (number, body) in the
+    /// file, in order, and `packed` (number, object stream, index) in
+    /// object streams. The xref stream comes last, numbered after the
+    /// others, with object 1 as /Root.
+    pub(crate) fn xref_stream_file(
+        objects: &[(i32, Vec<u8>)],
+        packed: &[(i32, i32, i32)],
+    ) -> Vec<u8> {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = HashMap::new();
+        for (n, body) in objects {
+            offsets.insert(*n, out.len());
+            out.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let max = objects
+            .iter()
+            .map(|o| o.0)
+            .chain(packed.iter().map(|p| p.0))
+            .max()
+            .unwrap_or(0);
+        let xnum = max + 1;
+        let xref = out.len();
+        offsets.insert(xnum, xref);
+        let mut data = Vec::new();
+        for i in 0..=xnum {
+            let (kind, a, b): (u8, u32, u16) = if i == 0 {
+                (0, 0, 0xffff)
+            } else if let Some(&o) = offsets.get(&i) {
+                (1, o as u32, 0)
+            } else if let Some(&(_, stm, idx)) = packed.iter().find(|p| p.0 == i) {
+                (2, stm as u32, idx as u16)
+            } else {
+                (0, 0, 0)
+            };
+            data.push(kind);
+            data.extend_from_slice(&a.to_be_bytes());
+            data.extend_from_slice(&b.to_be_bytes());
+        }
+        let dict = format!("/Type/XRef/Size {}/W[1 4 2]/Root 1 0 R", xnum + 1);
+        out.extend_from_slice(format!("{xnum} 0 obj\n").as_bytes());
+        out.extend_from_slice(&crate::testutil::stream(&dict, &data));
+        out.extend_from_slice(format!("\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+        out
+    }
+
+    /// An object stream's body holding `members` (number, object text).
+    pub(crate) fn objstm(members: &[(i32, &str)]) -> Vec<u8> {
+        let mut header = String::new();
+        let mut body = String::new();
+        for (n, text) in members {
+            header.push_str(&format!("{n} {} ", body.len()));
+            body.push_str(text);
+            body.push(' ');
+        }
+        let dict = format!("/Type/ObjStm/N {}/First {}", members.len(), header.len());
+        crate::testutil::stream(&dict, format!("{header}{body}").as_bytes())
+    }
+
+    fn messages(doc: &Document) -> Vec<String> {
+        doc.diagnostics()
+            .snapshot()
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    /// One good object stream and one broken in each way MuPDF tells
+    /// apart; with `bad_refs`, members said to be in streams that are
+    /// free or past the end of the xref too.
+    fn broken_objstms(bad_refs: bool) -> Vec<u8> {
+        let s = crate::testutil::stream;
+        let mut packed = vec![
+            (2, 10, 0),
+            (3, 11, 0),
+            (4, 12, 0),
+            (5, 13, 0),
+            (6, 14, 1),
+            (7, 15, 0),
+            (8, 15, 1),
+            (9, 16, 0),
+            (17, 1, 0),
+            (21, 22, 0),
+        ];
+        if bad_refs {
+            packed.extend([(18, 19, 0), (20, 999, 0)]);
+        }
+        xref_stream_file(
+            &[
+                (1, b"<</Type/Catalog/Pages 2 0 R>>".to_vec()),
+                (10, objstm(&[(2, "<</Type/Pages/Kids[]/Count 0>>")])),
+                (11, s("/Type/ObjStm/N -1/First 0", b"")),
+                (12, s("/Type/ObjStm/N 1/First 4", b"x y (a)")),
+                (13, s("/Type/ObjStm/N 1/First 4", b"5 x (a)")),
+                (14, s("/Type/ObjStm/N 2/First 9", b"99 0 6 0 (six)")),
+                (15, s("/Type/ObjStm/N 2/First 8", b"7 3 8 0 (e)(s)")),
+                (16, s("/Type/ObjStm/N 1/First 4", b"9 0 )")),
+                (
+                    22,
+                    s("/Type/ObjStm/N 1/First 4/Filter/FlateDecode", b"junk"),
+                ),
+            ],
+            &packed,
+        )
+    }
+
+    /// Each object looked up in turn, with what the lookup reported.
+    fn lookups(d: &Document, nums: &[i32]) -> Vec<(i32, Option<Object>, Vec<String>)> {
+        nums.iter()
+            .map(|&n| {
+                let before = messages(d).len();
+                let obj = d.object(n);
+                (n, obj, messages(d)[before..].to_vec())
+            })
+            .collect()
+    }
+
+    fn string(s: &str) -> Option<Object> {
+        Some(Object::String(Arc::from(s.as_bytes())))
+    }
+
+    fn said(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn broken_object_streams_fail_as_mupdf_reports_them() {
+        // What `mutool show -b FILE 2 3 3 4 5 6 7 7 8 9 17 21` prints, a
+        // value and the errors and warnings before it, for each lookup.
+        let d = doc(&broken_objstms(false));
+        assert_eq!(d.page_count(), Ok(0));
+        let cannot = |n: i32| format!("cannot load object ({n} 0 R) into cache");
+        let expected = vec![
+            (
+                3,
+                None,
+                said(&[
+                    "format error: number of objects in object stream out of range",
+                    &cannot(3),
+                ]),
+            ),
+            (
+                3,
+                None,
+                said(&["format error: corrupt object stream 11", &cannot(3)]),
+            ),
+            (
+                4,
+                None,
+                said(&["format error: corrupt object stream (12 0 R)", &cannot(4)]),
+            ),
+            (
+                5,
+                None,
+                said(&["format error: corrupt object stream (13 0 R)", &cannot(5)]),
+            ),
+            (
+                6,
+                string("six"),
+                said(&["object stream object out of range, skipping"]),
+            ),
+            (
+                7,
+                None,
+                said(&[
+                    "cannot seek backwards",
+                    "syntax error: unknown token in object stream",
+                    &cannot(7),
+                ]),
+            ),
+            // Parsed before the error, and kept.
+            (7, string("s"), vec![]),
+            (
+                8,
+                None,
+                said(&["format error: corrupt object stream 15", &cannot(8)]),
+            ),
+            (
+                9,
+                None,
+                said(&["syntax error: unknown token in object stream", &cannot(9)]),
+            ),
+            (
+                17,
+                None,
+                said(&["format error: object is not a stream", &cannot(17)]),
+            ),
+            (
+                21,
+                None,
+                said(&[
+                    "library error: zlib error: incorrect header check",
+                    "read error; treating as end of file",
+                    "format error: corrupt object stream (22 0 R)",
+                    &cannot(21),
+                ]),
+            ),
+        ];
+        let nums: Vec<i32> = expected.iter().map(|e| e.0).collect();
+        assert_eq!(lookups(&d, &nums), expected);
+        assert!(matches!(d.object(2), Some(Object::Dict(_))));
+        assert!(!d.repair_attempted());
+    }
+
+    #[test]
+    fn repair_reads_object_streams_and_reports_what_it_skips() {
+        // A member said to be in a free object (19) makes MuPDF repair the
+        // file as it opens. Its warnings, in order, from `mutool show`.
+        let d = doc(&broken_objstms(true));
+        assert!(d.repair_attempted());
+        assert_eq!(
+            messages(&d),
+            said(&[
+                "format error: invalid reference to an objstm that does not exist: 19 (18 0 R)",
+                "trying to repair broken xref",
+                "repairing PDF document",
+                "format error: corrupt object stream (12 0 R)",
+                "ignoring broken object stream (12 0 R)",
+                "format error: corrupt object stream (13 0 R)",
+                "ignoring broken object stream (13 0 R)",
+                "library error: zlib error: incorrect header check",
+                "read error; treating as end of file",
+                "format error: corrupt object stream (22 0 R)",
+                "ignoring broken object stream (22 0 R)",
+                "syntax error: unknown token in object stream",
+                "ignoring broken object (99 0 R)",
+                "syntax error: unknown token in object stream",
+                "ignoring broken object (9 0 R)",
+                "cannot seek backwards",
+                "syntax error: unknown token in object stream",
+                "ignoring broken object (8 0 R)",
+                "format error: corrupt object stream 14",
+                "ignoring broken object (6 0 R)",
+                "format error: corrupt object stream (13 0 R)",
+                "ignoring broken object (5 0 R)",
+            ])
+        );
+        let values: Vec<Option<Object>> = [2, 3, 4, 7, 17, 18, 20, 21]
+            .iter()
+            .map(|&n| d.object(n))
+            .collect();
+        assert!(matches!(values[0], Some(Object::Dict(_))));
+        assert_eq!(
+            values[1..].to_vec(),
+            [
+                Some(Object::Null),
+                Some(Object::Null),
+                string("s"),
+                Some(Object::Null),
+                Some(Object::Null),
+                Some(Object::Null),
+                Some(Object::Null)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_object_stream_past_the_limit_is_refused() {
+        let file = xref_stream_file(
+            &[
+                (1, b"<</Type/Catalog/Pages 2 0 R>>".to_vec()),
+                (
+                    3,
+                    objstm(&[(2, "<</Type/Pages/Kids[]/Count 0>>"), (4, "1")]),
+                ),
+            ],
+            &[(2, 3, 0), (4, 3, 1)],
+        );
+        let limits = Limits {
+            max_objstm_objects: 1,
+            ..Limits::default()
+        };
+        let d = Document::open_with(file, limits).unwrap();
+        assert_eq!(d.object(4), None);
+        assert!(d.diagnostics().has("limit.objstm_objects"));
+        assert!(
+            messages(&d)
+                .contains(&"format error: object stream 3 exceeds the object limit".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod lookups_and_edits {
+    use super::object_streams::{objstm, xref_stream_file};
+    use super::*;
+
+    fn doc(bytes: &[u8]) -> Document {
+        Document::open(bytes.to_vec()).unwrap()
+    }
+
+    fn messages(doc: &Document) -> Vec<String> {
+        doc.diagnostics()
+            .snapshot()
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    fn packed() -> Document {
+        doc(&xref_stream_file(
+            &[
+                (1, b"<</Type/Catalog/Pages 2 0 R>>".to_vec()),
+                (
+                    3,
+                    objstm(&[(5, "5"), (2, "<</Type/Pages/Kids[]/Count 0>>")]),
+                ),
+                (4, crate::testutil::stream("", b"data")),
+                (6, b"42".to_vec()),
+            ],
+            &[(5, 3, 0), (2, 3, 1)],
+        ))
+    }
+
+    fn pages_count(d: &Document) -> Object {
+        let root = d.trailer().get(b"Root").cloned().unwrap();
+        d.dict_get(&d.dict_get(&root, b"Pages"), b"Count")
+    }
+
+    #[test]
+    fn a_failed_open_says_why() {
+        let e = Document::open(b"not a pdf".to_vec()).err().unwrap();
+        assert_eq!(e.to_string(), "no objects found");
+        assert_eq!(e.code, "input.unrepairable");
+    }
+
+    #[test]
+    fn members_of_object_streams_changed_in_place_get_generation_0() {
+        let d = packed();
+        assert_eq!(d.xref_entry(2).kind, Kind::InStream);
+        assert_eq!(d.xref_entry(2).generation, 1);
+        d.alter_object(2, Object::Int(7));
+        assert_eq!(d.xref_entry(2).generation, 0);
+        d.replace_stream(5, Dict::new(), b"x".to_vec());
+        assert_eq!(d.xref_entry(5).generation, 0);
+        assert!(matches!(d.object(5), Some(Object::Stream(_))));
+    }
+
+    #[test]
+    fn objects_out_of_range_are_not_deleted() {
+        let d = packed();
+        d.delete_object(0);
+        d.delete_object(99);
+        assert_eq!(
+            messages(&d),
+            [
+                "object out of range (0 0 R); xref size 8",
+                "object out of range (99 0 R); xref size 8"
+            ]
+        );
+        assert!(!d.is_edited());
+    }
+
+    #[test]
+    fn update_stream_needs_a_dictionary_to_hold_the_data() {
+        let d = packed();
+        d.update_stream(99, b"nothing".to_vec());
+        d.update_stream(6, b"not a dict".to_vec());
+        assert!(!d.is_edited());
+        d.update_stream(4, b"longer data".to_vec());
+        let Some(Object::Stream(s)) = d.object(4) else {
+            panic!("not a stream");
+        };
+        assert_eq!(s.dict.get(b"Length"), Some(&Object::Int(11)));
+        assert_eq!(d.stream_data(&s).unwrap(), b"longer data");
+    }
+
+    #[test]
+    fn edited_streams_are_read_through_their_filters() {
+        let d = packed();
+        let mut dict = Dict::new();
+        dict.put(b"Filter", Object::name(b"ASCIIHexDecode"));
+        d.replace_stream(4, dict, b"414243>".to_vec());
+        let Some(Object::Stream(s)) = d.object(4) else {
+            panic!("not a stream");
+        };
+        assert_eq!(d.stream_bytes(&s).unwrap(), b"ABC");
+        assert_eq!(d.content_stream_data(&s).unwrap(), (b"ABC".to_vec(), false));
+        assert_eq!(d.image_samples(&s, 2).unwrap(), b"AB");
+    }
+
+    #[test]
+    fn a_count_too_high_is_written_into_the_tree_at_the_first_edit() {
+        let d = doc(include_bytes!(
+            "../../../corpus/smoke/pages-count-too-high.pdf"
+        ));
+        assert!(d.page(0).is_ok());
+        // Loading the page tree found one page; nupdf keeps it to itself.
+        assert_eq!(d.page_count(), Ok(1));
+        assert_eq!(pages_count(&d), Object::Int(3));
+        d.add_object(Object::Null);
+        assert_eq!(pages_count(&d), Object::Int(1));
+        assert_eq!(d.page_count(), Ok(1));
+    }
+
+    #[test]
+    fn settling_the_page_count_rewrites_it_unedited() {
+        let d = doc(include_bytes!(
+            "../../../corpus/smoke/pages-count-too-high.pdf"
+        ));
+        d.settle_page_count();
+        assert!(!d.is_edited());
+        assert!(d.page(0).is_ok());
+        d.settle_page_count();
+        assert!(d.is_edited());
+        assert_eq!(pages_count(&d), Object::Int(1));
+    }
+
+    #[test]
+    fn permissions_follow_p_unless_the_owner_opened_it() {
+        let d = doc(include_bytes!(
+            "../../../corpus/smoke/encrypted-restricted.pdf"
+        ));
+        let allowed = |d: &Document| {
+            [
+                "print",
+                "edit",
+                "copy",
+                "annotate",
+                "form",
+                "accessibility",
+                "assemble",
+                "print-hq",
+                "something-else",
+            ]
+            .map(|p| d.has_permission(p))
+        };
+        assert_eq!(
+            allowed(&d),
+            [true, false, false, false, false, true, false, false, true]
+        );
+        assert_eq!(d.authenticate("owner"), Ok(4));
+        assert_eq!(allowed(&d), [true; 9]);
+        // The password carries over to the file opened again.
+        let again = d.reopen().unwrap();
+        assert_eq!(allowed(&again), [true; 9]);
+        assert_eq!(again.encryption(), d.encryption());
+    }
+
+    #[test]
+    fn documents_made_in_memory_cannot_be_reopened() {
+        let d = Document::create().unwrap();
+        assert!(d.reopen().is_none());
+        let e = packed();
+        assert!(e.reopen().is_some());
+        e.add_object(Object::Null);
+        assert!(e.reopen().is_none());
+    }
+
+    #[test]
+    fn unencrypted_loads_are_only_for_objects_in_the_file() {
+        let d = packed();
+        assert_eq!(d.load_unencrypted(6), Some(Object::Int(42)));
+        assert_eq!(d.load_unencrypted(2), None);
+        assert_eq!(d.load_unencrypted(0), None);
+        assert_eq!(d.load_unencrypted(99), None);
+        assert_eq!(d.load_object(99), Ok(None));
+    }
+
+    #[test]
+    fn an_object_stream_whose_count_is_inside_itself_is_recursive() {
+        // /N is object 2, which is in the stream itself.
+        let d = doc(&xref_stream_file(
+            &[
+                (1, b"<</Type/Catalog/Pages 4 0 R>>".to_vec()),
+                (
+                    3,
+                    crate::testutil::stream("/Type/ObjStm/N 2 0 R/First 4", b"2 0 1"),
+                ),
+                (4, b"<</Type/Pages/Kids[]/Count 0>>".to_vec()),
+            ],
+            &[(2, 3, 0)],
+        ));
+
+        // As `mutool show FILE 2` reports it: the member is marked while
+        // its stream is read, so the lookup of /N finds nothing.
+        assert_eq!(d.object(2), None);
+        assert_eq!(
+            messages(&d),
+            [
+                "format error: cannot find object in xref (2 0 R)",
+                "cannot load object (2 0 R) into cache",
+                "format error: cannot load object stream containing object (2 0 R)",
+                "cannot load object (2 0 R) into cache"
+            ]
+        );
+        assert!(!d.repair_attempted());
+    }
+
+    #[test]
+    fn jbig2_globals_that_need_themselves_are_a_cycle() {
+        let d = crate::testutil::doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[]/Count 0>>".to_vec(),
+            crate::testutil::stream(
+                "/Filter/JBIG2Decode/DecodeParms<</JBIG2Globals 3 0 R>>",
+                b"\0\0\0\0",
+            ),
+            crate::testutil::stream(
+                "/Filter/JBIG2Decode/DecodeParms<</JBIG2Globals 5 0 R>>",
+                b"\0\0\0\0",
+            ),
+            b"<</NotAStream true>>".to_vec(),
+        ]);
+        let Some(Object::Stream(s)) = d.object(3) else {
+            panic!("not a stream");
+        };
+        assert_eq!(
+            d.stream_data(&s).err().map(|e| e.report()),
+            Some("format error: cyclic reference when loading JBIG2 globals".to_string())
+        );
+        let Some(Object::Stream(s)) = d.object(4) else {
+            panic!("not a stream");
+        };
+        let _ = d.stream_data(&s);
+    }
+
+    #[test]
+    fn an_unset_entry_cannot_be_found() {
+        // Subsections for 0-1 and 3-3: 2 is inside the table but unset.
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let one = out.len();
+        out.extend_from_slice(b"1 0 obj<</Type/Catalog/Pages 3 0 R>>endobj\n");
+        let three = out.len();
+        out.extend_from_slice(b"3 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n");
+        let xref = out.len();
+        out.extend_from_slice(
+            format!(
+                "xref\n0 2\n0000000000 65535 f \n{one:010} 00000 n \n3 1\n{three:010} 00000 n \n\
+                 trailer<</Size 4/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n"
+            )
+            .as_bytes(),
+        );
+        let d = doc(&out);
+        assert_eq!(d.page_count(), Ok(0));
+        let before = messages(&d).len();
+        assert_eq!(d.object(2), None);
+        assert_eq!(
+            messages(&d)[before..],
+            [
+                "format error: cannot find object in xref (2 0 R)",
+                "cannot load object (2 0 R) into cache"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_member_missing_from_its_stream_fails_at_each_lookup() {
+        // The xref puts 7 in object stream 3, which holds only 5 and 2.
+        // As `mutool show FILE 7 5 7` reports it.
+        let d = doc(&xref_stream_file(
+            &[
+                (1, b"<</Type/Catalog/Pages 2 0 R>>".to_vec()),
+                (
+                    3,
+                    objstm(&[(5, "5"), (2, "<</Type/Pages/Kids[]/Count 0>>")]),
+                ),
+            ],
+            &[(5, 3, 0), (2, 3, 1), (7, 3, 2)],
+        ));
+        let failure = [
+            "format error: cannot load object stream containing object (7 0 R)",
+            "cannot load object (7 0 R) into cache",
+        ];
+        assert_eq!(d.object(7), None);
+        assert_eq!(messages(&d), failure);
+        assert_eq!(d.object(5), Some(Object::Int(5)));
+        assert_eq!(d.object(7), None);
+        assert_eq!(messages(&d), [failure, failure].concat());
+        assert!(!d.repair_attempted());
     }
 }

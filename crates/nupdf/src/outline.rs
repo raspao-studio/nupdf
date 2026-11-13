@@ -559,4 +559,177 @@ mod tests {
             "<</Parent 4 0 R/Title(b)/A<</S/URI/URI(https://example.com)>>/Prev 3 0 R/Count -1/First 6 0 R/Last 6 0 R>>"
         );
     }
+
+    /// An outline whose back pointers are wrong: the root's /Last, the
+    /// second item's /Parent and /Prev, the child's missing /Parent.
+    fn broken() -> Document {
+        crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R/Outlines 3 0 R>>",
+            "<</Type/Pages/Kids[7 0 R]/Count 1>>",
+            "<</Type/Outlines/First 4 0 R/Last 4 0 R/Count 2>>",
+            "<</Title(a)/Parent 3 0 R/Next 5 0 R/Dest[7 0 R/Fit]>>",
+            "<</Title(b)/Parent 9 0 R/Prev 7 0 R/First 6 0 R/Last 6 0 R/Count 1>>",
+            "<</Title(b1)/A<</S/URI/URI(http://b1)>>>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]>>",
+        ])
+    }
+
+    #[test]
+    fn the_iterator_repairs_moves_and_inserts_as_mupdf_does() {
+        // oracle: the same moves through Document.outlineIterator.
+        let doc = broken();
+        let mut it = OutlineIter::new(&doc).unwrap();
+        assert!(doc.diagnostics().has("outline.repaired"));
+        let title = |it: &OutlineIter| it.item().unwrap().map(|i| (i.title, i.uri, i.is_open));
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(title(&it), Some((s("a"), s("#page=1&view=Fit"), false)));
+        assert_eq!(it.prev_sibling(), -1);
+        assert_eq!(it.next_sibling(), 0);
+        let item = |t: Option<&str>, uri: &str, open| OutlineItem {
+            title: t.map(String::from),
+            uri: Some(uri.into()),
+            is_open: open,
+        };
+        assert_eq!(it.insert(&item(Some("x"), "#page=1", false)), Ok(0));
+        assert_eq!(title(&it), Some((s("b"), None, true)));
+        assert_eq!(it.down(), 0);
+        assert_eq!(it.next_sibling(), 1);
+        assert_eq!(title(&it), None);
+        assert_eq!(
+            it.insert(&item(Some("y"), "file:z.pdf#page=2", true)),
+            Ok(1)
+        );
+        assert_eq!(it.prev_sibling(), 0);
+        assert_eq!(it.down(), 1);
+        assert_eq!(it.down(), -1);
+        assert_eq!(it.prev_sibling(), -1);
+        assert_eq!(it.next_sibling(), -1);
+        assert_eq!(it.insert(&item(None, "http://w", true)), Ok(1));
+        assert_eq!([it.up(), it.up(), it.up(), it.up()], [0, 0, -1, -1]);
+        let print = |num| {
+            crate::print::to_string(&doc.object(num).unwrap_or(Object::Null), Default::default())
+        };
+        let expected = [
+            "<</Type/Outlines/First 4 0 R/Last 5 0 R/Count 5>>",
+            "<</Title(a)/Parent 3 0 R/Next 8 0 R/Dest[7 0 R/Fit]>>",
+            "<</Title(b)/Parent 3 0 R/Prev 8 0 R/First 6 0 R/Last 9 0 R/Count 3>>",
+            "<</Title(b1)/A<</S/URI/URI(http://b1)>>/Parent 5 0 R/Next 9 0 R>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]>>",
+            "<</Parent 3 0 R/Title(x)/Dest[7 0 R/XYZ null null null]/Prev 4 0 R/Next 5 0 R>>",
+            "<</Parent 5 0 R/Title(y)/Dest[1/XYZ null null null]/Prev 6 0 R/Count -1/First 10 0 R/Last 10 0 R>>",
+            "<</Parent 9 0 R/A<</S/URI/URI(http://w)>>>>",
+        ];
+        for (i, want) in expected.iter().enumerate() {
+            assert_eq!(print(i as i32 + 3), *want, "object {}", i + 3);
+        }
+        // An item leading to a page the document lacks fails the read.
+        assert_eq!(
+            load_outline(&doc).err().as_deref(),
+            Some("cannot find page 2 in page tree")
+        );
+        // The repaired tree, read whole, with each item's page.
+        let all = load_outline(&broken()).unwrap();
+        let pages: Vec<(Option<String>, i32, usize)> = all
+            .iter()
+            .map(|o| (o.item.title.clone(), o.page, o.down.len()))
+            .collect();
+        assert_eq!(pages, [(s("a"), 0, 0), (s("b"), -1, 1)]);
+    }
+
+    #[test]
+    fn outlines_that_cannot_be_repaired_fail() {
+        let doc = |items: &[&str]| {
+            let mut objs = vec![
+                "<</Type/Catalog/Pages 2 0 R/Outlines 3 0 R>>",
+                "<</Type/Pages/Kids[]/Count 0>>",
+            ];
+            objs.extend_from_slice(items);
+            crate::testutil::doc_of(&objs)
+        };
+        let err = |d: &Document| OutlineIter::new(d).err();
+        let direct = doc(&["<</First 4 0 R>>", "<</Title(a)/Next<</Title(b)>>>>"]);
+        assert_eq!(
+            err(&direct).as_deref(),
+            Some("Non-indirect outline entry discovered")
+        );
+        let cycle = doc(&[
+            "<</First 4 0 R/Last 5 0 R>>",
+            "<</Parent 3 0 R/Next 5 0 R>>",
+            "<</Parent 3 0 R/Prev 4 0 R/Next 4 0 R>>",
+        ]);
+        assert_eq!(err(&cycle).as_deref(), Some("Cycle detected in outlines"));
+        // A repair that has to change an item that is not a dictionary.
+        let stuck = doc(&[
+            "<</First 4 0 R/Last 4 0 R>>",
+            "<</Parent 3 0 R/Prev 5 0 R>>",
+            "7",
+        ]);
+        assert!(OutlineIter::new(&stuck).is_ok());
+        let none = doc(&[]);
+        let mut it = OutlineIter::new(&none).unwrap();
+        assert_eq!(it.item(), Ok(None));
+        assert_eq!(
+            [it.next_sibling(), it.prev_sibling(), it.up(), it.down()],
+            [-1, -1, -1, -1]
+        );
+    }
+
+    #[test]
+    fn a_first_item_makes_the_outlines_dictionary() {
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[]/Count 0>>",
+        ]);
+        let mut it = OutlineIter::new(&doc).unwrap();
+        let item = OutlineItem {
+            title: Some("only".into()),
+            uri: None,
+            is_open: false,
+        };
+        assert_eq!(it.insert(&item), Ok(1));
+        let print = |num| {
+            crate::print::to_string(&doc.object(num).unwrap_or(Object::Null), Default::default())
+        };
+        assert_eq!(print(1), "<</Type/Catalog/Pages 2 0 R/Outlines 4 0 R>>");
+        // A node with no /Count yet is taken as closed (0 - 1).
+        assert_eq!(
+            print(4),
+            "<</Type/Outlines/Count -1/First 3 0 R/Last 3 0 R>>"
+        );
+        assert_eq!(print(3), "<</Parent 4 0 R/Title(only)>>");
+    }
+
+    #[test]
+    fn counts_stop_at_a_parent_chain_that_loops() {
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[]/Count 0>>",
+            "<</Parent 4 0 R/Count 1>>",
+            "<</Parent 3 0 R/Count 1>>",
+            "<<>>",
+        ]);
+        let obj = Object::Ref(ObjRef::new(5, 0));
+        put(&doc, &obj, b"Parent", Some(Object::Ref(ObjRef::new(3, 0)))).unwrap();
+        let item = OutlineItem {
+            title: None,
+            uri: None,
+            is_open: true,
+        };
+        assert_eq!(
+            update(&doc, &obj, &item, true),
+            Err("cycle in parent chain".into())
+        );
+        assert_eq!(
+            put(&doc, &Object::Int(1), b"X", None),
+            Err("outline item is not an indirect object".into())
+        );
+        assert_eq!(
+            put(&doc, &Object::Ref(ObjRef::new(2, 0)), b"X", None),
+            Ok(())
+        );
+        assert_eq!(
+            put(&doc, &Object::Ref(ObjRef::new(9, 0)), b"X", None),
+            Err("not a dict (null)".into())
+        );
+    }
 }

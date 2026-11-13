@@ -1526,6 +1526,992 @@ mod tests {
         );
     }
 
+    /// Decodes as MuPDF's DCTDecode filter does (`dct::open`), returning
+    /// the output's length and SHA-256, and the warnings.
+    fn mupdf_decode(data: &[u8], color_transform: i32) -> (usize, String, Vec<String>) {
+        use sha2::Digest;
+        let diag = Diagnostics::new();
+        let mut s = crate::dct::open(Stream::memory(data, &diag), color_transform);
+        let out = s.read_best(data.len(), 0, usize::MAX).unwrap_or_default();
+        let hash = sha2::Sha256::digest(&out)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let warnings = diag.snapshot().into_iter().map(|d| d.message).collect();
+        (out.len(), hash, warnings)
+    }
+
+    macro_rules! fixture {
+        ($name:literal) => {
+            include_bytes!(concat!("../../tests/data/jpeg/", $name, ".jpg")).as_slice()
+        };
+    }
+
+    /// The fixtures' 37x29 picture at quality 75 with 2x2 chroma, as MuPDF
+    /// decodes it. Every lossless re-encoding of it (progressive,
+    /// arithmetic, restart intervals, optimized tables, separate scans)
+    /// must give these same samples.
+    const Q75_420: &str = "2bca641120d3dfc7f3ea2964674e0b649986e0697044bcfad098ad3cb1239dac";
+
+    #[test]
+    fn every_entropy_coding_of_one_picture_decodes_as_in_mupdf() {
+        let cases = [
+            ("base420", fixture!("base420")),
+            ("opt", fixture!("opt")),
+            ("restart", fixture!("restart")),
+            ("multiscan", fixture!("multiscan")),
+            ("prog", fixture!("prog")),
+            ("prog_restart", fixture!("prog_restart")),
+            ("arith", fixture!("arith")),
+            ("arith_restart", fixture!("arith_restart")),
+            ("arith_prog", fixture!("arith_prog")),
+            ("arith_prog_restart", fixture!("arith_prog_restart")),
+        ];
+        for (name, data) in cases {
+            let (len, hash, warnings) = mupdf_decode(data, -1);
+            assert_eq!((len, hash.as_str()), (37 * 29 * 3, Q75_420), "{name}");
+            assert!(warnings.is_empty(), "{name}: {warnings:?}");
+        }
+    }
+
+    #[test]
+    fn sampling_factors_and_color_spaces_decode_as_in_mupdf() {
+        let cases = [
+            (
+                "base422",
+                fixture!("base422"),
+                3219,
+                "78a35d715eaf4ff2e3d62205c7e083eb01a00ca7de5e425addf6fadd24689991",
+            ),
+            (
+                "base440",
+                fixture!("base440"),
+                3219,
+                "ab1286e5040107d67f0009f867419094b6af46028cdfcad5317b270b266211eb",
+            ),
+            (
+                "base444",
+                fixture!("base444"),
+                3219,
+                "7e7036df9b5c69d83c593633eab95de496b2070b8198db42cf6336031730bc79",
+            ),
+            (
+                "base411",
+                fixture!("base411"),
+                3219,
+                "5e5dfdff742191a73ece8aa2f6b65bff07cec5b18e3b606072b6aae8ebabb842",
+            ),
+            (
+                "base32",
+                fixture!("base32"),
+                3219,
+                "af1e39069ce498e873655b5b153e799f918bf7f7ed0820e8dccc7bee46d9d079",
+            ),
+            (
+                "mixed",
+                fixture!("mixed"),
+                3219,
+                "99050daf8ff503d1e2ff86fde32802c9ae79b16c516570f925ef4c6ce6ad04b2",
+            ),
+            (
+                "gray",
+                fixture!("gray"),
+                1073,
+                "eec2c8e7d7122de348f0b341e53ea61ae6805bf529eeebc7f030f0f4e96c963d",
+            ),
+            (
+                "prog_gray",
+                fixture!("prog_gray"),
+                1073,
+                "eec2c8e7d7122de348f0b341e53ea61ae6805bf529eeebc7f030f0f4e96c963d",
+            ),
+            (
+                "rgb",
+                fixture!("rgb"),
+                3219,
+                "307b559681e5fb99215764106ace5be82010d52d66a21aea0c40806c67dd5243",
+            ),
+            (
+                "cmyk",
+                fixture!("cmyk"),
+                4292,
+                "ad444b520a4750c01a3c67fad461936dc10ca5f6a46ae911db143a053a24b062",
+            ),
+        ];
+        for (name, data, want_len, want) in cases {
+            let (len, hash, warnings) = mupdf_decode(data, -1);
+            assert_eq!((len, hash.as_str()), (want_len, want), "{name}");
+            assert!(warnings.is_empty(), "{name}: {warnings:?}");
+        }
+    }
+
+    /// The marker segments before the first SOS (the SOS included): each
+    /// one's marker, offset and total length.
+    fn segments(j: &[u8]) -> Vec<(u8, usize, usize)> {
+        let mut out: Vec<(u8, usize, usize)> = Vec::new();
+        let mut i = 2;
+        while i + 4 <= j.len() && j[i] == 0xff && out.last().is_none_or(|s| s.0 != 0xda) {
+            let n = usize::from(j[i + 2]) << 8 | usize::from(j[i + 3]);
+            out.push((j[i + 1], i, n + 2));
+            i += n + 2;
+        }
+        out
+    }
+
+    /// Offset and total length of the first `marker` segment.
+    fn segment(j: &[u8], marker: u8) -> (usize, usize) {
+        let s = segments(j).into_iter().find(|s| s.0 == marker);
+        s.map(|s| (s.1, s.2))
+            .unwrap_or_else(|| panic!("no 0x{marker:02x} segment"))
+    }
+
+    fn at(j: &[u8], marker: u8) -> usize {
+        segment(j, marker).0
+    }
+
+    /// `j` with `remove` bytes at `at` replaced by `insert`.
+    fn splice(j: &[u8], at: usize, remove: usize, insert: &[u8]) -> Vec<u8> {
+        let mut v = j[..at].to_vec();
+        v.extend_from_slice(insert);
+        v.extend_from_slice(&j[at + remove..]);
+        v
+    }
+
+    fn set(j: &[u8], at: usize, bytes: &[u8]) -> Vec<u8> {
+        splice(j, at, bytes.len(), bytes)
+    }
+
+    fn without(j: &[u8], marker: u8) -> Vec<u8> {
+        let (at, len) = segment(j, marker);
+        splice(j, at, len, &[])
+    }
+
+    /// `j` with its frame and first scan's component IDs replaced.
+    fn with_ids(j: &[u8], ids: &[u8]) -> Vec<u8> {
+        let mut v = j.to_vec();
+        let sof = segments(j)
+            .into_iter()
+            .find(|s| (0xc0..=0xcf).contains(&s.0) && ![0xc4, 0xc8, 0xcc].contains(&s.0))
+            .map_or(0, |s| s.1);
+        let sos = at(j, 0xda);
+        for (i, &id) in ids.iter().enumerate() {
+            v[sof + 10 + 3 * i] = id;
+            if i < usize::from(j[sos + 4]) {
+                v[sos + 5 + 2 * i] = id;
+            }
+        }
+        v
+    }
+
+    /// Offset of the `k`th restart marker in the entropy-coded data.
+    fn rst(j: &[u8], k: usize) -> usize {
+        let from = at(j, 0xda);
+        (from..j.len() - 1)
+            .filter(|&i| j[i] == 0xff && (0xd0..=0xd7).contains(&j[i + 1]))
+            .nth(k)
+            .unwrap_or(0)
+    }
+
+    /// The `subtract green` LSE marker libjpeg's encoder writes, for the
+    /// components with these IDs (G, R, B order).
+    fn lse(ids: [u8; 3]) -> Vec<u8> {
+        let mut m = vec![0xff, 0xf8, 0, 24, 0x0d, 0, 255, 3, ids[0], ids[1], ids[2]];
+        m.extend([0x80, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0]);
+        m
+    }
+
+    /// Malformed, truncated and re-labelled variants of the fixtures, with
+    /// the /ColorTransform each is decoded with.
+    fn variants() -> Vec<(&'static str, Vec<u8>, i32)> {
+        let base = fixture!("base420");
+        let sof = at(base, 0xc0);
+        let sos = at(base, 0xda);
+        let dht = at(base, 0xc4);
+        let dqt = at(base, 0xdb);
+        let arith = fixture!("arith");
+        let dac = at(arith, 0xcc);
+        let rgb = fixture!("rgb");
+        let rgb_sof = segment(rgb, 0xc0);
+        let gray = fixture!("gray");
+        let gray_sof = segment(gray, 0xc0);
+        let cmyk = fixture!("cmyk");
+        let prog = fixture!("prog");
+        let r1b = fixture!("restart1b");
+        let entropy = sos + segment(base, 0xda).1;
+        // The chroma quantization table, with its first `count` entries.
+        let chroma = |count: usize, wide: bool| {
+            let q = &base[dqt + 69 + 5..dqt + 69 + 5 + count];
+            let len = 3 + count * if wide { 2 } else { 1 };
+            let mut seg = vec![0xff, 0xdb, (len >> 8) as u8, len as u8];
+            seg.push(if wide { 0x11 } else { 0x01 });
+            for &b in q {
+                if wide {
+                    seg.push(0);
+                }
+                seg.push(b);
+            }
+            splice(base, dqt + 69, 69, &seg)
+        };
+        let mut wide_dqt = vec![0xff, 0xdb, 0, 131, 0x10];
+        for &b in &base[dqt + 5..dqt + 69] {
+            wide_dqt.extend([0, b]);
+        }
+        let mut many = vec![0xff, 0xd8, 0xff, 0xc0, 0, 41, 8, 0, 8, 0, 8, 11];
+        for id in 1..=11 {
+            many.extend([id, 0x11, 0]);
+        }
+        many.extend([0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0, 0xff, 0xd9]);
+        let mut lossy_tail = base[..entropy + 40].to_vec();
+        lossy_tail.extend([0xaa; 30]);
+        lossy_tail.extend_from_slice(&base[entropy + 70..]);
+        let noise_base = fixture!("noise_base");
+        let noise_prog = fixture!("noise_prog");
+        let noise_arith = fixture!("noise_arith_prog");
+        let stripes = fixture!("stripes_prog");
+        let stripes_arith = fixture!("stripes_arith_prog");
+        let mut arith_noise = arith[..at(arith, 0xda) + 14 + 30].to_vec();
+        arith_noise.extend([0x5a; 40]);
+        arith_noise.extend_from_slice(&arith[at(arith, 0xda) + 14 + 70..]);
+        let second_scan = splice(base, base.len() - 2, 0, &base[sos..base.len() - 2]);
+        vec![
+            // Marker segments.
+            ("two_soi", splice(base, 2, 0, &[0xff, 0xd8]), -1),
+            ("two_sof", splice(base, dht, 0, &base[sof..sof + 19]), -1),
+            ("empty_image", set(base, sof + 5, &[0, 0]), -1),
+            ("sof_length", set(base, sof + 3, &[0x12]), -1),
+            ("sof_duplicate_id", set(base, sof + 13, &[1]), -1),
+            ("sof_extended", set(base, sof + 1, &[0xc1]), -1),
+            ("sof_lossless", set(base, sof + 1, &[0xc3]), -1),
+            ("sos_before_sof", without(base, 0xc0), -1),
+            ("sos_bad_id", set(base, sos + 5, &[9]), -1),
+            ("sos_duplicate_id", set(base, sos + 7, &[1]), -1),
+            ("sos_length", set(base, sos + 3, &[0x0d]), -1),
+            ("sos_no_components", set(base, sos + 2, &[0, 6, 0]), -1),
+            ("dac_index", set(arith, dac + 4, &[40]), -1),
+            ("dac_value", set(arith, dac + 5, &[0x05]), -1),
+            ("dac_length", set(arith, dac + 3, &[0x09]), -1),
+            ("dht_count", set(base, dht + 5, &[0xff]), -1),
+            ("dht_index", set(base, dht + 4, &[0x05]), -1),
+            ("dht_length", set(base, dht + 3, &[0x20]), -1),
+            ("dht_oversubscribed", set(base, dht + 5, &[3, 0]), -1),
+            (
+                "dht_missing",
+                {
+                    let mut j = base.to_vec();
+                    for _ in 0..4 {
+                        j = without(&j, 0xc4);
+                    }
+                    j
+                },
+                -1,
+            ),
+            ("dht_undefined_slot", set(base, sos + 6, &[0x22]), -1),
+            ("dqt_index", set(base, dqt + 4, &[0x05]), -1),
+            ("dqt_length", set(base, dqt + 3, &[0x44]), -1),
+            ("dqt_16bit", splice(base, dqt, 69, &wide_dqt), -1),
+            ("dqt_4", chroma(4, false), -1),
+            ("dqt_9", chroma(9, false), -1),
+            ("dqt_16", chroma(16, false), -1),
+            ("dqt_25", chroma(25, false), -1),
+            ("dqt_36", chroma(36, false), -1),
+            ("dqt_49", chroma(49, false), -1),
+            ("dqt_16bit_9", chroma(9, true), -1),
+            (
+                "dri_length",
+                splice(base, sos, 0, &[0xff, 0xdd, 0, 5, 0, 1, 0]),
+                -1,
+            ),
+            (
+                "unknown_marker",
+                splice(base, dqt, 0, &[0xff, 0xf0, 0, 2]),
+                -1,
+            ),
+            (
+                "ignored_markers",
+                splice(
+                    base,
+                    dqt,
+                    0,
+                    &[
+                        0xff, 0xd0, 0xff, 0x01, 0xff, 0xe1, 0, 6, b'E', b'x', b'i', b'f', 0xff,
+                        0xfe, 0, 4, b'h', b'i', 0xff, 0xdc, 0, 4, 0, 29, 0xff, 0xe0, 0, 4, 0, 0,
+                    ],
+                ),
+                -1,
+            ),
+            (
+                "garbage_between_markers",
+                splice(base, dqt, 0, b"ab\xff\x00cd\xff\xff"),
+                -1,
+            ),
+            ("no_image", vec![0xff, 0xd8, 0xff, 0xd9], -1),
+            (
+                "missing_sos",
+                splice(base, dht, base.len() - dht, &[0xff, 0xd9]),
+                -1,
+            ),
+            ("too_wide", set(base, sof + 7, &[0xff, 0xdd]), -1),
+            ("too_many_components", many, -1),
+            ("bogus_sampling", set(base, sof + 11, &[0x51]), -1),
+            (
+                "interleave_too_large",
+                set(set(base, sof + 14, &[0x22]).as_slice(), sof + 17, &[0x22]),
+                -1,
+            ),
+            (
+                "fractional_sampling",
+                set(set(base, sof + 11, &[0x31]).as_slice(), sof + 14, &[0x21]),
+                -1,
+            ),
+            (
+                "bad_spectral_end",
+                set(set(base, sof + 1, &[0xc1]).as_slice(), sos + 12, &[40]),
+                -1,
+            ),
+            ("baseline_short_spectrum", set(base, sos + 12, &[48]), -1),
+            ("prog_bad_params", set(prog, at(prog, 0xda) + 12, &[5]), -1),
+            (
+                "prog_bad_approx",
+                set(prog, at(prog, 0xda) + 13, &[0x31]),
+                -1,
+            ),
+            ("second_scan", second_scan, -1),
+            // LSE (JPEG-LS color transform) markers.
+            ("lse_before_sof", splice(base, 2, 0, &lse([2, 1, 3])), -1),
+            (
+                "lse_gray",
+                splice(gray, gray_sof.0 + gray_sof.1, 0, &lse([1, 1, 1])),
+                -1,
+            ),
+            (
+                "lse_rgb",
+                splice(rgb, rgb_sof.0 + rgb_sof.1, 0, &lse(*b"GRB")),
+                -1,
+            ),
+            ("lse_ycc", splice(base, sof + 19, 0, &lse([2, 1, 3])), -1),
+            (
+                "lse_length",
+                splice(rgb, rgb_sof.0 + rgb_sof.1, 0, &set(&lse(*b"GRB"), 3, &[25])),
+                -1,
+            ),
+            (
+                "lse_id",
+                splice(
+                    rgb,
+                    rgb_sof.0 + rgb_sof.1,
+                    0,
+                    &set(&lse(*b"GRB"), 4, &[0x0e]),
+                ),
+                -1,
+            ),
+            (
+                "lse_maxtrans",
+                splice(
+                    rgb,
+                    rgb_sof.0 + rgb_sof.1,
+                    0,
+                    &set(&lse(*b"GRB"), 6, &[127]),
+                ),
+                -1,
+            ),
+            (
+                "lse_count",
+                splice(rgb, rgb_sof.0 + rgb_sof.1, 0, &set(&lse(*b"GRB"), 7, &[2])),
+                -1,
+            ),
+            (
+                "lse_order",
+                splice(rgb, rgb_sof.0 + rgb_sof.1, 0, &lse(*b"RGB")),
+                -1,
+            ),
+            (
+                "lse_params",
+                splice(rgb, rgb_sof.0 + rgb_sof.1, 0, &set(&lse(*b"GRB"), 12, &[1])),
+                -1,
+            ),
+            // Component IDs, JFIF and Adobe markers, and /ColorTransform.
+            ("ct0", base.to_vec(), 0),
+            ("ct1_rgb_ids", with_ids(&without(rgb, 0xee), b"RGB"), 1),
+            ("ids_bg_ycc", with_ids(base, &[1, 0x22, 0x23]), -1),
+            ("ids_bg_rgb", with_ids(base, b"rgb"), -1),
+            ("ids_rgb_jfif", with_ids(base, b"RGB"), -1),
+            ("ids_other_jfif", with_ids(base, &[4, 5, 6]), -1),
+            ("ids_other_adobe0", with_ids(rgb, &[4, 5, 6]), -1),
+            (
+                "ids_other_plain",
+                with_ids(&without(base, 0xe0), &[4, 5, 6]),
+                -1,
+            ),
+            (
+                "ycck_ids",
+                with_ids(&set(cmyk, 17, &[2]), &[1, 2, 3, 4]),
+                -1,
+            ),
+            (
+                "ycck_adobe2",
+                with_ids(&set(cmyk, 17, &[2]), &[5, 6, 7, 8]),
+                -1,
+            ),
+            ("cmyk_adobe1_ct", set(cmyk, 17, &[1]), -1),
+            (
+                "cmyk_plain_ids",
+                with_ids(&without(cmyk, 0xee), &[5, 6, 7, 8]),
+                1,
+            ),
+            (
+                "cmyk_plain_ycck_ids",
+                with_ids(&without(cmyk, 0xee), &[1, 2, 3, 4]),
+                1,
+            ),
+            (
+                "two_components",
+                {
+                    let j = set(base, sof + 3, &[14]);
+                    let j = set(&j, sof + 9, &[2]);
+                    let j = splice(&j, sof + 16, 3, &[]);
+                    let s = at(&j, 0xda);
+                    let j = set(&j, s + 3, &[10]);
+                    let j = set(&j, s + 4, &[2]);
+                    splice(&j, s + 9, 2, &[])
+                },
+                -1,
+            ),
+            // Truncated and damaged entropy-coded data.
+            ("base_truncated", base[..entropy + 150].to_vec(), -1),
+            ("base_noise", lossy_tail, -1),
+            (
+                "base_early_eoi",
+                splice(base, entropy + 60, 0, &[0xff, 0xd9]),
+                -1,
+            ),
+            ("arith_truncated", arith[..arith.len() * 2 / 3].to_vec(), -1),
+            ("arith_noise", arith_noise, -1),
+            (
+                "prog_after_dc",
+                prog[..at(prog, 0xda) + 14 + 26].to_vec(),
+                -1,
+            ),
+            ("prog_half", prog[..prog.len() / 2].to_vec(), -1),
+            ("prog_most", prog[..prog.len() * 4 / 5].to_vec(), -1),
+            ("prog_gray_half", fixture!("prog_gray")[..300].to_vec(), -1),
+            (
+                "arith_prog_half",
+                fixture!("arith_prog")[..400].to_vec(),
+                -1,
+            ),
+            (
+                "arith_prog_most",
+                fixture!("arith_prog")[..600].to_vec(),
+                -1,
+            ),
+            ("restart1b", r1b.to_vec(), -1),
+            ("rst_skipped_ahead", set(r1b, rst(r1b, 2) + 1, &[0xd4]), -1),
+            ("rst_one_ahead", set(r1b, rst(r1b, 2) + 1, &[0xd3]), -1),
+            ("rst_behind", set(r1b, rst(r1b, 2) + 1, &[0xd0]), -1),
+            ("rst_far", set(r1b, rst(r1b, 2) + 1, &[0xd6]), -1),
+            ("rst_removed", splice(r1b, rst(r1b, 2), 2, &[]), -1),
+            ("rst_low_marker", set(r1b, rst(r1b, 2) + 1, &[0x01]), -1),
+            ("rst_other_marker", set(r1b, rst(r1b, 2) + 1, &[0xc4]), -1),
+            (
+                "arith_rst_removed",
+                {
+                    let a = fixture!("arith_restart");
+                    splice(a, rst(a, 1), 2, &[])
+                },
+                -1,
+            ),
+            (
+                "arith_rst_wrong",
+                {
+                    let a = fixture!("arith_restart");
+                    set(a, rst(a, 1) + 1, &[0xd5])
+                },
+                -1,
+            ),
+            (
+                "prog_rst_removed",
+                {
+                    let p = fixture!("prog_restart");
+                    splice(p, rst(p, 3), 2, &[])
+                },
+                -1,
+            ),
+            ("dht_table_5", set(base, sos + 6, &[0x55]), -1),
+            ("dht_overfull", set(base, dht + 5, &[1, 0]), -1),
+            ("dht_dc_symbol_16", set(base, dht + 21, &[16]), -1),
+            (
+                "huff_fill_bytes",
+                splice(base, stuffed(base), 0, &[0xff]),
+                -1,
+            ),
+            ("huff_bad_codes", noise(base, 40, &[0xff, 0x00], 12), -1),
+            (
+                "arith_fill_bytes",
+                splice(arith, stuffed(arith), 0, &[0xff]),
+                -1,
+            ),
+            ("arith_zeros", noise(arith, 30, &[0x00], 40), -1),
+            ("arith_ones", noise(arith, 30, &[0xff, 0x00], 40), -1),
+            ("arith_random", noise(arith, 30, &RANDOM, 1), -1),
+            ("arith_conditioning", set(arith, dac + 5, &[0xff]), -1),
+            ("arith_ac_conditioning", set(arith, dac + 7, &[0x01]), -1),
+            ("prog_in_dc_scan", prog[..254].to_vec(), -1),
+            ("prog_in_ac_first", prog[..319].to_vec(), -1),
+            ("prog_in_ac_refine", prog[..841].to_vec(), -1),
+            ("noise_base", noise_base.to_vec(), -1),
+            ("noise_prog", noise_prog.to_vec(), -1),
+            ("noise_arith_prog", noise_arith.to_vec(), -1),
+            ("noise_prog_random", noise(noise_prog, 200, &RANDOM, 1), -1),
+            (
+                "noise_arith_random",
+                noise(noise_arith, 150, &RANDOM, 1),
+                -1,
+            ),
+            (
+                "noise_arith_ones",
+                noise(noise_arith, 150, &[0xff, 0x00], 30),
+                -1,
+            ),
+            (
+                "noise_arith_zeros",
+                noise(noise_arith, 150, &[0x00], 60),
+                -1,
+            ),
+            // Damage found by search to reach each of the arithmetic
+            // decoder's bad-code exits: a DC magnitude past 2^15, an AC one,
+            // an AC run past the band, and a refinement run past it.
+            (
+                "arith_dc_overflow",
+                noise(arith, 6, &[0xef, 0x17, 0xb2, 0xda, 0x6d, 0x11], 1),
+                -1,
+            ),
+            (
+                "arith_ac_overflow",
+                noise(arith, 24, &[0xc2, 0x53, 0x96, 0x6f, 0x19, 0x1a], 1),
+                -1,
+            ),
+            (
+                "arith_band_overrun",
+                noise(arith, 129, &[0x25, 0x31, 0xa6, 0x3e, 0x24, 0xcc], 1),
+                -1,
+            ),
+            (
+                "arith_refine_overrun",
+                noise(
+                    fixture!("arith_prog"),
+                    336,
+                    &[0x5f, 0x76, 0x85, 0x9f, 0x0e, 0x67],
+                    1,
+                ),
+                -1,
+            ),
+            ("stripes_prog", stripes.to_vec(), -1),
+            ("stripes_arith_prog", stripes_arith.to_vec(), -1),
+            ("stripes_prog_random", noise(stripes, 20, &RANDOM, 1), -1),
+            (
+                "stripes_arith_random",
+                noise(stripes_arith, 15, &RANDOM, 1),
+                -1,
+            ),
+            ("prog_in_ac_refine_early", prog[..801].to_vec(), -1),
+            ("precision_7", set(base, sof + 4, &[7]), -1),
+            (
+                "dqt_length_1",
+                splice(base, dqt, 0, &[0xff, 0xdb, 0, 1]),
+                -1,
+            ),
+            (
+                "prog_empty_scan_in_headers",
+                splice(prog, at(prog, 0xda), 0, &[0xff, 0xda, 0, 6, 0, 0, 63, 0]),
+                -1,
+            ),
+            (
+                "prog_empty_scan_later",
+                splice(prog, 270, 0, &[0xff, 0xda, 0, 6, 0, 0, 0, 0]),
+                -1,
+            ),
+            (
+                "prog_zero_quantizer",
+                set(prog, dqt + 6, &[0])[..450].to_vec(),
+                -1,
+            ),
+            ("sampling_1x3", fixture!("base13").to_vec(), -1),
+            (
+                "sampling_4x4_separate_scans",
+                fixture!("sep44").to_vec(),
+                -1,
+            ),
+            ("prog_separate_dc", fixture!("prog_sepdc").to_vec(), -1),
+            (
+                "prog_only_luma_dc",
+                fixture!("prog_sepdc")[..228].to_vec(),
+                -1,
+            ),
+            (
+                "prog_no_chroma_ac",
+                fixture!("prog_sepdc")[..568].to_vec(),
+                -1,
+            ),
+            ("prog_in_ac_refine_late", prog[..881].to_vec(), -1),
+            (
+                "noise_prog_cut",
+                noise_prog[..noise_prog.len() - 60].to_vec(),
+                -1,
+            ),
+            (
+                "stripes_prog_cut",
+                stripes[..stripes.len() - 30].to_vec(),
+                -1,
+            ),
+        ]
+    }
+
+    /// Deterministic bytes for damaging entropy-coded data.
+    const RANDOM: [u8; 48] = [
+        0x3a, 0x91, 0x0c, 0xe7, 0x55, 0x2b, 0xd8, 0x46, 0x7f, 0x13, 0xa2, 0x69, 0xc4, 0x08, 0xbd,
+        0x5e, 0x97, 0x21, 0xf3, 0x6c, 0x0a, 0x84, 0x3d, 0xe9, 0x52, 0xb7, 0x1f, 0xc8, 0x64, 0x2e,
+        0x99, 0x07, 0xd3, 0x4a, 0x76, 0xa5, 0x1c, 0xef, 0x38, 0x8b, 0x60, 0xd1, 0x05, 0x9e, 0x47,
+        0xba, 0x2d, 0x73,
+    ];
+
+    /// `j` with `pattern`, `times` over, written over the entropy-coded
+    /// data `skip` bytes into the first scan.
+    fn noise(j: &[u8], skip: usize, pattern: &[u8], times: usize) -> Vec<u8> {
+        let (sos, len) = segment(j, 0xda);
+        let at = sos + len + skip;
+        let mut bytes = pattern.repeat(times);
+        bytes.truncate(j.len() - 2 - at);
+        set(j, at, &bytes)
+    }
+
+    /// Offset of the first stuffed 0xff (0xff 0x00) in the entropy-coded
+    /// data.
+    fn stuffed(j: &[u8]) -> usize {
+        let from = at(j, 0xda);
+        (from..j.len() - 1)
+            .find(|&i| j[i] == 0xff && j[i + 1] == 0)
+            .unwrap_or(0)
+    }
+
+    /// MuPDF 1.28.6's DCTDecode output for each variant: length, the first
+    /// 16 hex digits of its SHA-256, and its distinct warnings.
+    #[rustfmt::skip]
+    const MUPDF_VARIANTS: &[(&str, usize, &str, &[&str])] = &[
+            ("arith_ac_conditioning", 3219, "47c89455dcc29b6f", &[]),
+            ("arith_ac_overflow", 3219, "6d51df4d77fa640e", &[]),
+            ("arith_band_overrun", 3219, "10a401e3519370ff", &[]),
+            ("arith_conditioning", 3219, "3abf0ed9106766d3", &[]),
+            ("arith_dc_overflow", 3219, "989a1ca7b393df80", &[]),
+            ("arith_fill_bytes", 3219, "2bca641120d3dfc7", &[]),
+            ("arith_noise", 3219, "7ed57574c7e686c2", &[]),
+            ("arith_ones", 3219, "11acc98c77bed87b", &[]),
+            ("arith_prog_half", 0, "e3b0c44298fc1c14", &["premature end of file in jpeg", "library error: jpeg error: Invalid component ID 255 in SOS", "read error; treating as end of file"]),
+            ("arith_prog_most", 3219, "6660dcb78975668e", &["premature end of file in jpeg"]),
+            ("arith_random", 3219, "b8c83578f737324e", &[]),
+            ("arith_refine_overrun", 3219, "f8ab933eae9275c0", &[]),
+            ("arith_rst_removed", 3219, "1533e36ed944023f", &[]),
+            ("arith_rst_wrong", 3219, "2bca641120d3dfc7", &[]),
+            ("arith_truncated", 3219, "3e54ab2b52ac1a9f", &["premature end of file in jpeg"]),
+            ("arith_zeros", 3219, "e7e191dc1740ed2a", &[]),
+            ("bad_spectral_end", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid progressive parameters Ss=0 Se=40 Ah=0 Al=0", "read error; treating as end of file"]),
+            ("base_early_eoi", 3219, "24430017cb0f80c0", &[]),
+            ("base_noise", 3219, "4d666cb911b9be05", &[]),
+            ("base_truncated", 3219, "b8bfe0a6e6222856", &["premature end of file in jpeg"]),
+            ("baseline_short_spectrum", 3219, "2bca641120d3dfc7", &[]),
+            ("bogus_sampling", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus sampling factors", "read error; treating as end of file"]),
+            ("cmyk_adobe1_ct", 4292, "ad444b520a4750c0", &[]),
+            ("dac_index", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus DAC index 40", "read error; treating as end of file"]),
+            ("dac_length", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus marker length", "read error; treating as end of file"]),
+            ("dac_value", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus DAC value 0x5", "read error; treating as end of file"]),
+            ("dht_count", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus Huffman table definition", "read error; treating as end of file"]),
+            ("dht_dc_symbol_16", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus Huffman table definition", "read error; treating as end of file"]),
+            ("dht_index", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus DHT index 5", "read error; treating as end of file"]),
+            ("dht_length", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus marker length", "read error; treating as end of file"]),
+            ("dht_missing", 3219, "2bca641120d3dfc7", &[]),
+            ("dht_overfull", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus Huffman table definition", "read error; treating as end of file"]),
+            ("dht_oversubscribed", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus Huffman table definition", "read error; treating as end of file"]),
+            ("dht_table_5", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Huffman table 0x05 was not defined", "read error; treating as end of file"]),
+            ("dht_undefined_slot", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Huffman table 0x02 was not defined", "read error; treating as end of file"]),
+            ("dqt_16", 3219, "b4f8deb24b19495c", &[]),
+            ("dqt_16bit", 3219, "2bca641120d3dfc7", &[]),
+            ("dqt_16bit_9", 3219, "4e2d78309e3dddb6", &[]),
+            ("dqt_25", 3219, "99b02cfa03aa241e", &[]),
+            ("dqt_36", 3219, "44d5e1d68ec6c2de", &[]),
+            ("dqt_4", 3219, "30ff28204d02368a", &[]),
+            ("dqt_49", 3219, "b88a8c0610d100bc", &[]),
+            ("dqt_9", 3219, "4e2d78309e3dddb6", &[]),
+            ("dqt_index", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus DQT index 5", "read error; treating as end of file"]),
+            ("dqt_length", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus DQT index 15", "read error; treating as end of file"]),
+            ("dqt_length_1", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus marker length", "read error; treating as end of file"]),
+            ("dri_length", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus marker length", "read error; treating as end of file"]),
+            ("empty_image", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Empty JPEG image (DNL not supported)", "read error; treating as end of file"]),
+            ("fractional_sampling", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Fractional sampling not implemented yet", "read error; treating as end of file"]),
+            ("garbage_between_markers", 3219, "2bca641120d3dfc7", &[]),
+            ("huff_bad_codes", 3219, "a67111c87266f5c6", &[]),
+            ("huff_fill_bytes", 3219, "2bca641120d3dfc7", &[]),
+            ("ids_bg_rgb", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported color conversion request", "read error; treating as end of file"]),
+            ("ids_bg_ycc", 3219, "a45da09de27c6742", &[]),
+            ("ids_other_adobe0", 3219, "307b559681e5fb99", &[]),
+            ("ids_other_jfif", 3219, "2bca641120d3dfc7", &[]),
+            ("ids_other_plain", 3219, "2bca641120d3dfc7", &[]),
+            ("ids_rgb_jfif", 3219, "ee04f1749097b5d7", &[]),
+            ("ignored_markers", 3219, "2bca641120d3dfc7", &[]),
+            ("interleave_too_large", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Sampling factors too large for interleaved scan", "read error; treating as end of file"]),
+            ("lse_before_sof", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid JPEG file structure: LSE before SOF", "read error; treating as end of file"]),
+            ("lse_count", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported color conversion request", "read error; treating as end of file"]),
+            ("lse_gray", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported color conversion request", "read error; treating as end of file"]),
+            ("lse_id", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported marker type 0xf8", "read error; treating as end of file"]),
+            ("lse_length", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus marker length", "read error; treating as end of file"]),
+            ("lse_maxtrans", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported color conversion request", "read error; treating as end of file"]),
+            ("lse_order", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported color conversion request", "read error; treating as end of file"]),
+            ("lse_params", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported color conversion request", "read error; treating as end of file"]),
+            ("lse_rgb", 3219, "d17ffe949fab0469", &[]),
+            ("lse_ycc", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported color conversion request", "read error; treating as end of file"]),
+            ("missing_sos", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid JPEG file structure: missing SOS marker", "read error; treating as end of file"]),
+            ("no_image", 0, "e3b0c44298fc1c14", &["library error: jpeg error: JPEG datastream contains no image", "read error; treating as end of file"]),
+            ("noise_arith_ones", 384, "a4fcace339d1dc40", &[]),
+            ("noise_arith_prog", 384, "9282aae9dbaa7a81", &[]),
+            ("noise_arith_random", 384, "4ee70735654cbf7c", &[]),
+            ("noise_arith_zeros", 384, "1835977e66015051", &[]),
+            ("noise_base", 384, "9282aae9dbaa7a81", &[]),
+            ("noise_prog", 384, "9282aae9dbaa7a81", &[]),
+            ("noise_prog_cut", 0, "e3b0c44298fc1c14", &["premature end of file in jpeg", "library error: jpeg error: Invalid progressive parameters Ss=1 Se=63 Ah=15 Al=15", "read error; treating as end of file"]),
+            ("noise_prog_random", 384, "33011cfea747eccc", &[]),
+            ("precision_7", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported JPEG data precision 7", "read error; treating as end of file"]),
+            ("prog_after_dc", 3219, "db76884731ebe319", &["premature end of file in jpeg"]),
+            ("prog_bad_approx", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid progressive parameters Ss=0 Se=0 Ah=3 Al=1", "read error; treating as end of file"]),
+            ("prog_bad_params", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid progressive parameters Ss=0 Se=5 Ah=0 Al=1", "read error; treating as end of file"]),
+            ("prog_empty_scan_in_headers", 3219, "2bca641120d3dfc7", &[]),
+            ("prog_empty_scan_later", 3219, "2bca641120d3dfc7", &[]),
+            ("prog_gray_half", 1073, "299df05da530d9f8", &["premature end of file in jpeg"]),
+            ("prog_half", 3219, "c6e8b747b93804a7", &["premature end of file in jpeg"]),
+            ("prog_in_ac_first", 3219, "3f4c037bda932a53", &["premature end of file in jpeg"]),
+            ("prog_in_ac_refine", 3219, "636c42d0b38d4433", &["premature end of file in jpeg"]),
+            ("prog_in_ac_refine_early", 3219, "36646418538b21d5", &["premature end of file in jpeg"]),
+            ("prog_in_ac_refine_late", 3219, "711bcf80c0f80b71", &["premature end of file in jpeg"]),
+            ("prog_in_dc_scan", 3219, "091127d34b1ca89e", &["premature end of file in jpeg"]),
+            ("prog_most", 3219, "8f615851cda3aaf3", &["premature end of file in jpeg"]),
+            ("prog_no_chroma_ac", 3219, "254a23502a29319c", &["premature end of file in jpeg"]),
+            ("prog_only_luma_dc", 3219, "d8abbc9103917d10", &["premature end of file in jpeg"]),
+            ("prog_rst_removed", 3219, "58a2444e1762b029", &[]),
+            ("prog_separate_dc", 3219, "2bca641120d3dfc7", &[]),
+            ("prog_zero_quantizer", 3219, "854eb4acfec2cbaf", &["premature end of file in jpeg"]),
+            ("restart1b", 3219, "2a5690246073ad80", &[]),
+            ("rst_behind", 3219, "702569ea9aa8e2ce", &[]),
+            ("rst_far", 3219, "2a5690246073ad80", &[]),
+            ("rst_low_marker", 3219, "702569ea9aa8e2ce", &[]),
+            ("rst_one_ahead", 3219, "11ed9ee19ed0759f", &[]),
+            ("rst_other_marker", 3219, "471e7c2453abeea0", &[]),
+            ("rst_removed", 3219, "702569ea9aa8e2ce", &[]),
+            ("rst_skipped_ahead", 3219, "38087aa0b3d0f7bf", &[]),
+            ("sampling_1x3", 3219, "dcbc9620d3d8db84", &[]),
+            ("sampling_4x4_separate_scans", 3219, "d8cfdabe4491eea6", &[]),
+            ("second_scan", 3219, "2bca641120d3dfc7", &[]),
+            ("sof_duplicate_id", 3219, "2bca641120d3dfc7", &[]),
+            ("sof_extended", 3219, "2bca641120d3dfc7", &[]),
+            ("sof_length", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus marker length", "read error; treating as end of file"]),
+            ("sof_lossless", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported JPEG process: SOF type 0xc3", "read error; treating as end of file"]),
+            ("sos_bad_id", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid component ID 9 in SOS", "read error; treating as end of file"]),
+            ("sos_before_sof", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid JPEG file structure: SOS before SOF", "read error; treating as end of file"]),
+            ("sos_duplicate_id", 3219, "2bca641120d3dfc7", &[]),
+            ("sos_length", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus marker length", "read error; treating as end of file"]),
+            ("sos_no_components", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus marker length", "read error; treating as end of file"]),
+            ("stripes_arith_prog", 256, "4f749d7a3fb61862", &[]),
+            ("stripes_arith_random", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid progressive parameters Ss=1 Se=58 Ah=9 Al=1", "read error; treating as end of file"]),
+            ("stripes_prog", 256, "4f749d7a3fb61862", &[]),
+            ("stripes_prog_cut", 0, "e3b0c44298fc1c14", &["premature end of file in jpeg", "library error: jpeg error: Bogus Huffman table definition", "read error; treating as end of file"]),
+            ("stripes_prog_random", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Bogus Huffman table definition", "read error; treating as end of file"]),
+            ("too_many_components", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Too many color components: 11, max 10", "read error; treating as end of file"]),
+            ("too_wide", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Maximum supported image dimension is 65500 pixels", "read error; treating as end of file"]),
+            ("two_components", 2146, "090d827cad5d0411", &[]),
+            ("two_sof", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid JPEG file structure: two SOF markers", "read error; treating as end of file"]),
+            ("two_soi", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Invalid JPEG file structure: two SOI markers", "read error; treating as end of file"]),
+            ("unknown_marker", 0, "e3b0c44298fc1c14", &["library error: jpeg error: Unsupported marker type 0xf0", "read error; treating as end of file"]),
+            ("ycck_adobe2", 4292, "38dfe3d6cf8a1d5a", &[]),
+            ("ycck_ids", 4292, "38dfe3d6cf8a1d5a", &[]),
+            ("ct0", 3219, "ee04f1749097b5d7", &[]),
+            ("cmyk_plain_ids", 4292, "ad444b520a4750c0", &[]),
+            ("cmyk_plain_ycck_ids", 4292, "38dfe3d6cf8a1d5a", &[]),
+            ("ct1_rgb_ids", 3219, "307b559681e5fb99", &[]),
+    ];
+
+    #[test]
+    fn damaged_and_relabelled_variants_decode_as_in_mupdf() {
+        // NUPDF_DUMP_JPEG_VARIANTS=<dir> writes the variants out, to be
+        // checked against MuPDF with tests/data/oracle.py (see the README).
+        let dump = std::env::var_os("NUPDF_DUMP_JPEG_VARIANTS");
+        let mut wrong = Vec::new();
+        for (name, data, ct) in variants() {
+            if let Some(dir) = &dump {
+                let path = std::path::Path::new(dir).join(format!("{name}.ct{ct}.jpg"));
+                std::fs::write(path, &data).unwrap_or_else(|e| panic!("{e}"));
+            }
+            let Some(&(_, len, hash, warnings)) = MUPDF_VARIANTS.iter().find(|v| v.0 == name)
+            else {
+                wrong.push(format!("{name}: no MuPDF result"));
+                continue;
+            };
+            let (got_len, got_hash, mut got_warnings) = mupdf_decode(&data, ct);
+            got_warnings.dedup();
+            let mut distinct: Vec<String> = Vec::new();
+            for w in got_warnings {
+                if !distinct.contains(&w) {
+                    distinct.push(w);
+                }
+            }
+            if (got_len, &got_hash[..16]) != (len, hash) || distinct != warnings {
+                wrong.push(format!(
+                    "{name}: got {got_len} {} {distinct:?}, MuPDF {len} {hash} {warnings:?}",
+                    &got_hash[..16]
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn smartscale_block_sizes_are_unsupported() {
+        // An extended-sequential scan ending at Se=48 asks for 7x7 blocks.
+        // libjpeg 10 (so MuPDF) decodes these; this port reports them, as
+        // the module documentation says.
+        let base = fixture!("base420");
+        let j = set(base, at(base, 0xc0) + 1, &[0xc1]);
+        let j = set(&j, at(base, 0xda) + 12, &[48]);
+        let (len, _, warnings) = mupdf_decode(&j, -1);
+        assert_eq!(len, 0);
+        assert_eq!(
+            warnings,
+            [
+                "unsupported error: jpeg block size 7 (SmartScale)",
+                "read error; treating as end of file",
+            ]
+        );
+        // A progressive file's component-less SOS before its first scan
+        // sets the block size too: Se=0 asks for 1x1 blocks. MuPDF accepts
+        // that and then fails at the first AC scan ("Invalid progressive
+        // parameters Ss=1 Se=5 Ah=0 Al=2"); both decode nothing.
+        let prog = fixture!("prog");
+        let j = splice(prog, at(prog, 0xda), 0, &[0xff, 0xda, 0, 6, 0, 0, 0, 0]);
+        let (len, _, warnings) = mupdf_decode(&j, -1);
+        assert_eq!(len, 0);
+        assert_eq!(
+            warnings,
+            [
+                "unsupported error: jpeg block size 1 (SmartScale)",
+                "read error; treating as end of file",
+            ]
+        );
+    }
+
+    /// A source handing out `chunk` bytes at a time, as a filter upstream
+    /// of DCTDecode does.
+    struct Chunks<'a>(&'a [u8], usize);
+
+    impl crate::stream::Source for Chunks<'_> {
+        fn next(
+            &mut self,
+            _: usize,
+            out: &mut Vec<u8>,
+            _: &Diagnostics,
+        ) -> Result<crate::stream::Next, String> {
+            let n = self.1.min(self.0.len());
+            out.extend_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(if n == 0 {
+                crate::stream::Next::Eof
+            } else {
+                crate::stream::Next::Data
+            })
+        }
+    }
+
+    #[test]
+    fn long_segments_are_skipped_across_reads() {
+        // A 3000-byte APP1 segment read 100 bytes at a time decodes as
+        // the file without it.
+        let base = fixture!("base420");
+        let mut app1 = vec![0xff, 0xe1, 0x0b, 0xba];
+        app1.resize(3004, 0x55);
+        let j = splice(base, at(base, 0xdb), 0, &app1);
+        let diag = Diagnostics::new();
+        let chain = Stream::new(Chunks(&j, 100), &diag);
+        let mut s = crate::dct::open(chain, -1);
+        let out = s.read_best(j.len(), 0, usize::MAX).unwrap_or_default();
+        let whole = mupdf_decode(base, -1);
+        let hash: String = {
+            use sha2::Digest;
+            sha2::Sha256::digest(&out)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let msgs: Vec<String> = diag.snapshot().into_iter().map(|d| d.message).collect();
+        assert_eq!((out.len(), hash, msgs), (whole.0, whole.1, vec![]));
+    }
+
+    #[test]
+    fn the_decoder_api_reports_what_it_read() {
+        let diag = Diagnostics::new();
+        let base = fixture!("base420");
+        let mut d = Decoder::new(Stream::memory(base, &diag));
+        assert_eq!(d.read_header(), Ok(()));
+        assert_eq!(d.jpeg_color_space(), ColorSpace::YCbCr);
+        assert_eq!(d.adobe_transform(), None);
+        assert_eq!(d.start(), Ok(()));
+        assert_eq!(
+            format!("{d:?}"),
+            "Decoder { width: 37, height: 29, components: 3, scanline: 0 }"
+        );
+        let mut row = [0u8; 37 * 3];
+        for _ in 0..29 {
+            assert_eq!(d.read_scanline(&mut row), Ok(()));
+        }
+        // Reading past the last scanline leaves the buffer alone.
+        row.fill(7);
+        assert_eq!(d.read_scanline(&mut row), Ok(()));
+        assert_eq!(d.output_scanline(), 29);
+        assert!(row.iter().all(|&v| v == 7));
+
+        // A stream without an image says so every time it is asked.
+        let mut d = Decoder::new(Stream::memory(&[0xff, 0xd8, 0xff, 0xd9], &diag));
+        let none = Err(Error::jpeg("JPEG datastream contains no image"));
+        assert_eq!(d.read_header(), none);
+        assert_eq!(d.read_header(), none);
+    }
+
+    #[test]
+    fn coefficient_limits_reach_dct_as_limit_errors() {
+        let mut j = vec![0xff, 0xd8, 0xff, 0xc2, 0, 20, 8, 0xff, 0xdc, 0xff, 0xdc, 4];
+        for id in 1..=4 {
+            j.extend([id, 0x11, 0]);
+        }
+        j.extend([0xff, 0xdb, 0, 67, 0]);
+        j.extend([1u8; 64]);
+        j.extend([0xff, 0xda, 0, 8, 1, 1, 0, 0, 0, 0]);
+        let (len, _, warnings) = mupdf_decode(&j, -1);
+        assert_eq!(len, 0);
+        assert_eq!(
+            warnings,
+            [
+                "limit error: jpeg coefficient buffer too large (34326192128 bytes)",
+                "read error; treating as end of file",
+            ]
+        );
+    }
+
+    #[test]
+    fn twelve_bit_data_is_unsupported_as_in_mupdf() {
+        let (len, _, warnings) = mupdf_decode(fixture!("p12"), -1);
+        assert_eq!(len, 0);
+        assert_eq!(
+            warnings,
+            [
+                "library error: jpeg error: Unsupported JPEG data precision 12",
+                "read error; treating as end of file",
+            ]
+        );
+    }
+
     #[test]
     fn huge_progressive_images_hit_the_limit() {
         // A progressive 65500x65500 four-component header.

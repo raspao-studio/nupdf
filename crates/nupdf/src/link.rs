@@ -753,7 +753,10 @@ pub fn load_links(doc: &Document, page: &Object, pagenum: i32, ctm: Matrix) -> V
         match load_link(doc, &annot, pagenum, ctm) {
             Ok(Some(link)) => out.push(link),
             Ok(None) => {}
-            Err(e) => doc.diagnostics().warn("link.unloadable", e),
+            // MuPDF reports the error, with its kind, and goes on.
+            Err(e) => doc
+                .diagnostics()
+                .warn("link.unloadable", crate::diag::report::line(&e)),
         }
     }
     out
@@ -776,10 +779,11 @@ fn load_link(
     let uri = match get(doc, annot, b"Dest") {
         Some(dest) => parse_link_dest(doc, Some(&dest))?,
         None => {
-            // The additional actions' mouse up, then down, otherwise.
+            // The additional actions otherwise, as `pdf_dict_geta(AA, U,
+            // D)` takes them: the abbreviated key, mouse down, first.
             let action = get(doc, annot, b"A").or_else(|| {
                 let aa = get(doc, annot, b"AA").unwrap_or(Object::Null);
-                get(doc, &aa, b"U").or_else(|| get(doc, &aa, b"D"))
+                get(doc, &aa, b"D").or_else(|| get(doc, &aa, b"U"))
             });
             parse_link_action(doc, action.as_ref(), pagenum)?
         }
@@ -1250,5 +1254,301 @@ mod tests {
         assert_eq!(named_dest_of("x#nameddest=a%20b&page=2"), "a b");
         assert_eq!(named_dest_of("#chapter%201"), "chapter 1");
         assert_eq!(file_uri_path("file://tmp/a%20b.pdf#page=2"), "/tmp/a b.pdf");
+    }
+
+    /// Three pages, the second turned 90 degrees; page 1 has a link for
+    /// each kind of destination and action, the catalog a /Dests
+    /// dictionary (with `dests_dict`) or a /Dests name tree.
+    fn every_link(dests_dict: bool) -> Vec<u8> {
+        let links = [
+            "/Dest[4 0 R/XYZ 10 20 2]",
+            "/Dest[4 0 R/XYZ null null 0]",
+            "/Dest[4 0 R/FitH]",
+            "/Dest[4 0 R/FitBH 100]",
+            "/Dest[4 0 R/FitV 50]",
+            "/Dest[4 0 R/FitBV]",
+            "/Dest[4 0 R/FitR 10 20 110 220]",
+            "/Dest[4 0 R/FitB]",
+            "/Dest[1/Fit]",
+            "/Dest[9 /Fit]",
+            "/Dest/Chapter",
+            "/Dest(Section)",
+            "/Dest 5",
+            "/A<</S/URI/URI(rel/x.html)>>",
+            "/A<</S/Launch/F(a.pdf)>>",
+            "/A<</S/Launch/F<</F(b.pdf)/UF(dir/c d.pdf)>>>>",
+            "/A<</S/Launch/F<</DOS(dos.pdf)/EF<</F 1 0 R>>>>>>",
+            "/A<</S/Launch/F 5>>",
+            "/A<</S/GoToR/F<</FS/URL/F(http://u/doc.pdf)>>/D[0/Fit]>>",
+            "/A<</S/GoToR/F<</FS/URL/F(http://u/doc.pdf#x)>>/D/nm>>",
+            "/A<</S/GoToR/F<</FS/URL/F(http://u/doc.pdf)>>/D(str)>>",
+            "/A<</S/GoToR/F<</FS/URL/F(http://u/doc.pdf)>>/D 5>>",
+            "/A<</S/GoToR/F(/abs/e.pdf)/D[2/FitH 30]>>",
+            "/A<</S/GoToR/F(e.pdf)/D/nm>>",
+            "/A<</S/GoToR/F(e.pdf)/D(str)>>",
+            "/A<</S/GoToR/F(e.pdf)>>",
+            "/A<</S/Named/N/FirstPage>>",
+            "/A<</S/Named/N/LastPage>>",
+            "/A<</S/Named/N/PrevPage>>",
+            "/A<</S/Named/N/NextPage>>",
+            "/A<</S/Named/N/Other>>",
+            "/AA<</U<</S/URI/URI(http://up)>>/D<</S/URI/URI(http://down)>>>>",
+            "/AA<</D<</S/URI/URI(http://down)>>>>",
+            "/A<</S/JavaScript/JS(1)>>",
+        ];
+        let annots: Vec<String> = links
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let x = i as f32 * 10.0;
+                format!("<</Subtype/Link/Rect[{x} 10 {} 20]{l}>>", x + 5.0)
+            })
+            .collect();
+        let names = if dests_dict {
+            "/Dests<</Chapter[4 0 R/Fit]/Section<</D[5 0 R/FitH 700]>>>>"
+        } else {
+            "/Names<</Dests 7 0 R>>"
+        };
+        let catalog = format!("<</Type/Catalog/Pages 2 0 R/URI<</Base(http://b/)>>{names}>>");
+        let page1 = format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]/Annots[{} <</Subtype/Link>>]>>",
+            annots.join("")
+        );
+        crate::testutil::pdf_of(&[
+            &catalog,
+            "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R]/Count 3>>",
+            &page1,
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]/Rotate 90>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]>>",
+            "<</Type/Page/MediaBox[0 0 1 1]>>",
+            // The name tree: an inner node over two leaves, the second
+            // out of order, and a direct kid MuPDF warns about.
+            "<</Kids[8 0 R 10 0 R <</Names[(zz)[3 0 R/Fit]]>>]>>",
+            "<</Limits[(Chapter)(Chapter)]/Names[(Chapter)[4 0 R/Fit]]>>",
+            "<</Type/Page/MediaBox[0 0 1 1]>>",
+            "<</Limits[(Section)(nm)]/Names[(nm)[3 0 R/Fit](Section)<</D[5 0 R/FitH 700]>>]>>",
+        ])
+    }
+
+    #[test]
+    fn every_kind_of_link_reads_as_mupdf_reads_it() {
+        // What oracle/js/navigation.js `links` gives for page 1: each
+        // link's URI and the page it resolves to (-1 for none). The two
+        // documents differ only in where named destinations are found.
+        let shared = |nm: i32| {
+            vec![
+                ("#page=2&zoom=200,20,10", 1),
+                ("#page=2", 1),
+                ("#page=2&view=FitH", 1),
+                ("#page=2&view=FitBH,0", 1),
+                ("#page=2&view=FitV,0", 1),
+                ("#page=2&view=FitBV", 1),
+                ("#page=2&viewrect=20,10,200,100", 1),
+                ("#page=2&view=FitB", 1),
+                ("#page=2&view=Fit", 1),
+                ("#nameddest=Chapter", 1),
+                ("#nameddest=Section", 2),
+                ("http://b/rel/x.html", -1),
+                ("file:a.pdf#page=1", 0),
+                ("file:dir/c%20d.pdf#page=1", 0),
+                ("http://u/doc.pdf#page=1&view=Fit", 0),
+                ("http://u/doc.pdf#x&nameddest=nm", nm),
+                ("http://u/doc.pdf#nameddest=str", -1),
+                ("file:///abs/e.pdf#page=3&view=FitH,30", 2),
+                ("file:e.pdf#nameddest=nm", nm),
+                ("file:e.pdf#nameddest=str", -1),
+                ("file:e.pdf#page=1", 0),
+                ("#page=1", 0),
+                ("#page=3", 2),
+                ("#page=1", 0),
+                ("#page=2", 1),
+                // Mouse down before mouse up.
+                ("http://down", -1),
+                ("http://down", -1),
+            ]
+        };
+        let warned = [
+            "format error: cannot find page 10 in page tree",
+            "invalid link destination",
+            "cannot parse file specification",
+        ];
+        for (dict, nm) in [(true, -1), (false, 0)] {
+            let doc = Document::open(every_link(dict)).unwrap();
+            let page = doc.page(0).unwrap();
+            let links = load_links(&doc, &page, 0, Matrix::IDENTITY);
+            let got: Vec<(String, i32)> = links
+                .iter()
+                .map(|l| (l.uri.clone(), resolve_link_page(&doc, &l.uri).unwrap()))
+                .collect();
+            let expected: Vec<(String, i32)> = shared(nm)
+                .into_iter()
+                .map(|(u, p)| (u.to_string(), p))
+                .collect();
+            assert_eq!(got, expected);
+            let mut messages: Vec<String> = doc
+                .diagnostics()
+                .snapshot()
+                .into_iter()
+                .map(|d| d.message)
+                .collect();
+            messages.dedup();
+            let mut want: Vec<&str> = warned.to_vec();
+            want.push("invalid link destination");
+            if !dict {
+                want.push("non-indirect internal node found in name tree");
+            }
+            let mut distinct: Vec<String> = messages.clone();
+            distinct.sort();
+            distinct.dedup();
+            want.sort();
+            want.dedup();
+            assert_eq!(distinct, want);
+        }
+    }
+
+    #[test]
+    fn named_actions_need_a_page_to_move_from() {
+        let doc = Document::open(every_link(true)).unwrap();
+        let named = |n: &str, page: i32| {
+            let action = Object::Dict(Arc::new({
+                let mut d = Dict::new();
+                d.put(b"S", Object::name(b"Named"));
+                d.put(b"N", Object::name(n.as_bytes()));
+                d
+            }));
+            parse_link_action(&doc, Some(&action), page).unwrap()
+        };
+        assert_eq!(named("PrevPage", 0).as_deref(), Some("#page=1"));
+        assert_eq!(named("NextPage", 2).as_deref(), Some("#page=3"));
+        assert_eq!(named("PrevPage", -1).as_deref(), None);
+        assert_eq!(named("NextPage", -1).as_deref(), None);
+        assert_eq!(parse_link_action(&doc, None, 0), Ok(None));
+    }
+
+    #[test]
+    fn page_numbers_are_counted_through_the_tree_without_a_page_map() {
+        // A root /Count past the xref: the page count is invalid, so MuPDF
+        // has no page map and counts the pages before each ancestor.
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 5 0 R 8 0 R 4 0 R]/Count 1000>>",
+            "<</Type/Pages/Parent 2 0 R/Kids[6 0 R 7 0 R]/Count 2>>",
+            "<</Type/Page/Parent 2 0 R>>",
+            "<</Type/Page/Parent 2 0 R>>",
+            "<</Type/Page/Parent 3 0 R>>",
+            "<</Type/Page/Parent 3 0 R>>",
+            "<</Type/Pages/Parent 2 0 R/Kids[]/Count(x)>>",
+            "<</Type/Page/Parent 3 0 R>>",
+            "<</Type/Page/Parent 11 0 R>>",
+            "<</Type/Pages/Parent 12 0 R/Kids[10 0 R]/Count 1>>",
+            "<</Type/Pages/Parent 11 0 R/Kids[11 0 R]/Count 1>>",
+            "<</Type/Font>>",
+        ]);
+        assert!(!doc.has_page_map());
+        let r = |n: i32| Object::Ref(ObjRef::new(n, 0));
+        let numbers: Vec<Result<i32, String>> = [5, 6, 7, 4, 9, 10, 13]
+            .iter()
+            .map(|&n| lookup_page_number(&doc, &r(n)))
+            .collect();
+        assert_eq!(
+            numbers,
+            [
+                Ok(2),
+                Ok(0),
+                Ok(1),
+                // A node before it has no usable /Count.
+                Err("illegal or missing count in pages tree".into()),
+                // Not among its parent's kids.
+                Ok(-1),
+                Err("cycle in page tree (parents)".into()),
+                Ok(-1),
+            ]
+        );
+        assert!(doc.diagnostics().has("page.invalid"));
+    }
+
+    #[test]
+    fn created_links_hold_what_mupdf_writes() {
+        // Page.createLink in `mutool run` on the same three pages (the
+        // second turned 90 degrees, the third 45, which counts as 0).
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R]/Count 3>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]/Rotate 90>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]/Rotate 45>>",
+        ]);
+        let uris = [
+            "#page=2&zoom=150,10,20",
+            "#page=2&zoom=150,nan,20",
+            "#page=2&zoom=0,10,nan",
+            "#page=3&zoom=150,10,20",
+            "#page=2&view=FitH,30",
+            "#page=2&view=FitBV,40",
+            "#page=2&viewrect=10,20,30,40",
+            "#page=1&view=Fit",
+            "#page=1&view=FitB",
+            "#nameddest=x%20y",
+            "file:dir/o%C3%BC.pdf#page=2&view=FitH",
+            "http://x",
+            "bogus",
+        ];
+        let page = Object::Ref(ObjRef::new(3, 0));
+        for (i, uri) in uris.iter().enumerate() {
+            let x = i as f32 * 10.0;
+            let made = create_link(&doc, &page, Rect::new(x, 10.0, x + 5.0, 20.0), uri);
+            assert_eq!(made.is_err(), *uri == "bogus", "{uri}");
+        }
+        assert_eq!(
+            create_link(
+                &doc,
+                &doc.dict_get(&page, b"Parent"),
+                Rect::EMPTY,
+                "#page=1"
+            ),
+            Err("cannot add a link to a page that is not an object".into())
+        );
+        let text = |n: i32| {
+            crate::print::to_string(
+                &doc.resolve(&Object::Ref(ObjRef::new(n, 0))),
+                crate::print::Options::default(),
+            )
+        };
+        let link = |rect: &str, action: &str| {
+            format!(
+                "<</Type/Annot/Subtype/Link/Rect[{rect}]/BS<</Type/Border/S/S/W 0>>/A<<{action}>>>>"
+            )
+        };
+        let expected = [
+            (6, link("0 780 5 790", "/S/GoTo/D[4 0 R/XYZ 20 10 1.5]")),
+            (7, link("10 780 15 790", "/S/GoTo/D[4 0 R/XYZ 20 null 1.5]")),
+            (8, link("20 780 25 790", "/S/GoTo/D[4 0 R/XYZ null 10 1]")),
+            (9, link("30 780 35 790", "/S/GoTo/D[5 0 R/XYZ 20 10 1.5]")),
+            (10, link("40 780 45 790", "/S/GoTo/D[4 0 R/FitH 0]")),
+            (11, link("50 780 55 790", "/S/GoTo/D[4 0 R/FitBV 0]")),
+            (
+                12,
+                link("60 780 65 790", "/S/GoTo/D[4 0 R/FitR 20 10 60 40]"),
+            ),
+            (13, link("70 780 75 790", "/S/GoTo/D[3 0 R/Fit]")),
+            (14, link("80 780 85 790", "/S/GoTo/D[3 0 R/Fit]")),
+            (15, link("90 780 95 790", "/S/GoTo/D(x y)")),
+            (
+                16,
+                "<</Type/Filespec/F(dir/o_.pdf)/UF<FEFF006400690072002F006F00FC002E007000640066>>>"
+                    .to_string(),
+            ),
+            (
+                17,
+                link("100 780 105 790", "/S/GoToR/D[1/FitH null]/F 16 0 R"),
+            ),
+            (18, link("110 780 115 790", "/S/URI/URI(http://x)")),
+        ];
+        for (n, want) in expected {
+            assert_eq!(text(n), want, "object {n}");
+        }
+        assert!(text(3).ends_with(
+            "/Annots[6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 17 0 R 18 0 R]>>"
+        ));
     }
 }

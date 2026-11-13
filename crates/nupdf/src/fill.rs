@@ -596,6 +596,155 @@ mod tests {
         let d = doc();
         let e = fill(&d, &[set("name", "x"), set("nobody", "y")]).unwrap_err();
         assert_eq!(e, FillError::UnknownField("nobody".into()));
+        assert_eq!(e.to_string(), "no field named 'nobody'");
         assert!(!d.is_edited());
+    }
+
+    #[test]
+    fn the_first_text_field_is_set_and_the_first_check_box_toggled() {
+        let d = doc();
+        let filled = fill_first(&d, "nupdf").unwrap();
+        let ops: Vec<(&str, &str, &str)> = filled
+            .changes
+            .iter()
+            .map(|c| (c.name.as_str(), c.op, c.new.as_str()))
+            .collect();
+        assert_eq!(ops, [("name", "set", "nupdf"), ("ok", "toggle", "Yes")]);
+    }
+
+    /// Check boxes in a group, a radio button that may not be turned off,
+    /// a text field whose value is a stream, a combo box, a read-only
+    /// field and a plain text field.
+    fn form() -> Document {
+        let s = |t: &str| t.as_bytes().to_vec();
+        crate::testutil::doc_bytes(&[
+            s(
+                "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R 8 0 R 10 0 R 12 0 R 13 0 R 14 0 R]/DA(/Helv 0 Tf 0 g)>>>>",
+            ),
+            s("<</Type/Pages/Kids[3 0 R]/Count 1>>"),
+            s(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Annots[5 0 R 6 0 R 9 0 R 11 0 R 12 0 R 13 0 R 14 0 R]>>",
+            ),
+            s("<</T(grp)/FT/Btn/Kids[5 0 R 6 0 R]>>"),
+            s(
+                "<</Type/Annot/Subtype/Widget/Parent 4 0 R/Rect[0 0 10 10]/AS/Off/AP<</N<</On 7 0 R/Off 7 0 R>>>>>>",
+            ),
+            s(
+                "<</Type/Annot/Subtype/Widget/Parent 4 0 R/Rect[20 0 30 10]/AS/Off/AP<</N<</Two 7 0 R>>>>>>",
+            ),
+            crate::testutil::stream("/Type/XObject/Subtype/Form/BBox[0 0 10 10]", b""),
+            s("<</T(r)/FT/Btn/Ff 49152/V/On/Kids[9 0 R]>>"),
+            s(
+                "<</Type/Annot/Subtype/Widget/Parent 8 0 R/Rect[40 0 50 10]/AS/On/AP<</N<</On 7 0 R>>>>>>",
+            ),
+            s("<</T(memo)/FT/Tx/V 15 0 R/Kids[11 0 R]>>"),
+            s("<</Type/Annot/Subtype/Widget/Parent 10 0 R/Rect[0 20 100 40]>>"),
+            s(
+                "<</Type/Annot/Subtype/Widget/T(pick)/FT/Ch/Ff 131072/Opt[(a)(b)]/Rect[0 50 100 70]>>",
+            ),
+            s("<</Type/Annot/Subtype/Widget/T(ro)/FT/Tx/Ff 1/Rect[0 80 100 100]>>"),
+            s("<</Type/Annot/Subtype/Widget/T(plain)/FT/Tx/Rect[0 110 100 130]>>"),
+            crate::testutil::stream("", b"streamed value"),
+        ])
+    }
+
+    #[test]
+    fn each_kind_of_field_fills_as_mupdf_fills_it() {
+        let d = form();
+        let toggle = |n: &str| Edit::Toggle { name: n.into() };
+        let filled = fill(
+            &d,
+            &[
+                set("grp", "On"),
+                toggle("r"),
+                set("memo", "new"),
+                set("pick", "zzz"),
+                set("ro", "x"),
+                toggle("plain"),
+            ],
+        )
+        .unwrap();
+        let notes: Vec<(&str, bool, &[String])> = filled
+            .changes
+            .iter()
+            .map(|c| (c.name.as_str(), c.changed, c.notes.as_slice()))
+            .collect();
+        let say = |n: &str| vec![n.to_string()];
+        assert_eq!(
+            notes,
+            [
+                ("grp", true, &[][..]),
+                (
+                    "r",
+                    false,
+                    &say("a radio button that may not be turned off stays on")[..]
+                ),
+                ("memo", true, &[][..]),
+                (
+                    "pick",
+                    true,
+                    &say("the value is none of the options; MuPDF sets it anyway")[..]
+                ),
+                (
+                    "ro",
+                    true,
+                    &say("the field is read-only; MuPDF changes it anyway")[..]
+                ),
+                (
+                    "plain",
+                    false,
+                    &say("a text does not toggle; MuPDF does nothing")[..]
+                ),
+            ]
+        );
+        let made: Vec<(i32, Option<String>)> = filled
+            .made
+            .iter()
+            .map(|m| (m.object, m.error.clone()))
+            .collect();
+        assert_eq!(
+            made,
+            [(5, None), (6, None), (11, None), (12, None), (13, None)]
+        );
+        // The objects as oracle/js/clean.js leaves them with the same fill
+        // and toggle edits. The stream value moves onto the widget, where
+        // it hides the new value.
+        let expected = [
+            (4, "<</T(grp)/FT/Btn/Kids[5 0 R 6 0 R]/V(On)>>"),
+            (
+                5,
+                "<</Type/Annot/Subtype/Widget/Parent 4 0 R/Rect[0 0 10 10]/AS/On/AP<</N<</Off 16 0 R/On 18 0 R>>>>>>",
+            ),
+            (
+                6,
+                "<</Type/Annot/Subtype/Widget/Parent 4 0 R/Rect[20 0 30 10]/AS/Off/AP<</N<</Off 19 0 R/Two 20 0 R>>>>>>",
+            ),
+            (8, "<</T(r)/FT/Btn/Ff 49152/V/On/Kids[9 0 R]>>"),
+            (
+                9,
+                "<</Type/Annot/Subtype/Widget/Parent 8 0 R/Rect[40 0 50 10]/AS/On/AP<</N<</On 7 0 R>>>>>>",
+            ),
+            (10, "<</T(memo)/FT/Tx/V(new)/Kids[11 0 R]>>"),
+            (
+                11,
+                "<</Type/Annot/Subtype/Widget/Parent 10 0 R/Rect[0 20 100 40]/V(streamed value)/AP<</N 22 0 R>>>>",
+            ),
+            (
+                12,
+                "<</Type/Annot/Subtype/Widget/T(pick)/FT/Ch/Ff 131072/Opt[(a)(b)]/Rect[0 50 100 70]/V(zzz)/AP<</N 23 0 R>>>>",
+            ),
+            (
+                13,
+                "<</Type/Annot/Subtype/Widget/T(ro)/FT/Tx/Ff 1/Rect[0 80 100 100]/V(x)/AP<</N 24 0 R>>>>",
+            ),
+            (
+                14,
+                "<</Type/Annot/Subtype/Widget/T(plain)/FT/Tx/Rect[0 110 100 130]>>",
+            ),
+        ];
+        for (n, want) in expected {
+            let got = crate::print::to_string(&d.resolve(&obj(n)), Default::default());
+            assert_eq!(got, want, "object {n}");
+        }
     }
 }

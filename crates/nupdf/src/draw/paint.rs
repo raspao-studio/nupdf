@@ -210,6 +210,47 @@ impl Pix {
         }
     }
 
+    /// A glyph's coverage row at `alpha` into a one-component plane (a
+    /// group alpha or shape), as `draw_glyph` paints one with no
+    /// colorspace: an RLE glyph by `fz_paint_glyph_mask(_alpha)`, any
+    /// other by `paint_span_0_da_sa(_alpha)`.
+    pub fn glyph_alpha_row(&mut self, x: i32, y: i32, cov: &[u8], alpha: u8, rle: bool) {
+        if alpha == 255 {
+            if rle {
+                self.glyph_mask_row(x, y, cov);
+            } else {
+                self.span_mask(x, y, cov);
+            }
+            return;
+        }
+        let b = self.bbox();
+        if y < b.y0 || y >= b.y1 || self.n != 1 {
+            return;
+        }
+        let x0 = x.max(b.x0);
+        let x1 = (x + cov.len() as i32).min(b.x1);
+        if x0 >= x1 {
+            return;
+        }
+        let start = self.at(x0, y);
+        let row = &mut self.samples[start..start + (x1 - x0) as usize];
+        let al = i32::from(alpha);
+        for (d, &a) in row.iter_mut().zip(&cov[(x0 - x) as usize..]) {
+            let (a, v) = (i32::from(a), i32::from(*d));
+            *d = if rle {
+                match a {
+                    0 => v,
+                    255 => al,
+                    _ if v == 0 => mul255(a, al),
+                    _ => blend(al, v, expand(a)),
+                }
+            } else {
+                let masa = combine(a, expand(al));
+                masa + combine(v, expand(255 - masa))
+            } as u8;
+        }
+    }
+
     /// `fz_paint_pixmap`: `src` (premultiplied) over `self` at `alpha`;
     /// both have the same colors.
     pub fn paint_pixmap(&mut self, src: &Pix, alpha: i32) {
@@ -812,5 +853,48 @@ mod tests {
         // 255 - 255 * 129 / 256, as MuPDF rounds it.
         assert_eq!(p.samples[3], 126);
         assert_eq!(&p.samples[6..9], &[255, 255, 255]);
+    }
+
+    #[test]
+    fn spans_outside_a_pixmap_leave_it_be() {
+        let mut rgb =
+            Pix::new(IRect::new(10, 10, 14, 12), 3, false).unwrap_or_else(|e| panic!("{e}"));
+        let mut mask =
+            Pix::new(IRect::new(10, 10, 14, 12), 1, true).unwrap_or_else(|e| panic!("{e}"));
+        let before = (rgb.clone(), mask.clone());
+        let cov = [255u8; 4];
+        // Rows above and below, and runs wholly to either side.
+        for (x, y) in [(10, 9), (10, 12), (2, 10), (14, 11)] {
+            rgb.span_with_color(x, y, &cov, &[1, 2, 3, 255]);
+            mask.span_mask(x, y, &cov);
+            mask.glyph_mask_row(x, y, &cov);
+            mask.glyph_alpha_row(x, y, &cov, 128, true);
+        }
+        // A glyph row into a pixmap with colors does nothing.
+        rgb.glyph_mask_row(10, 10, &cov);
+        assert_eq!((rgb, mask), before);
+        // Pixmaps past MuPDF's size limit are refused.
+        assert!(Pix::new(IRect::new(0, 0, 1 << 16, 1 << 14), 3, false).is_err());
+    }
+
+    #[test]
+    fn glyph_rows_paint_planes_as_mupdfs_mask_painters_do() {
+        // Into an alpha plane holding 100: a solid run, an edge, and
+        // nothing, at full alpha and at 128, as RLE glyphs and as small
+        // ones (span painters).
+        let row = |alpha: u8, rle: bool| {
+            let mut p = Pix::new(IRect::new(0, 0, 4, 1), 1, true).unwrap_or_else(|e| panic!("{e}"));
+            p.samples = vec![100, 100, 0, 100];
+            p.glyph_alpha_row(0, 0, &[255, 128, 128, 0], alpha, rle);
+            p.samples
+        };
+        // fz_paint_glyph_mask: solid is 255; an edge over 0 is the edge.
+        assert_eq!(row(255, true), [255, 178, 128, 100]);
+        // paint_span_0_da_sa: the coverage over what is there.
+        assert_eq!(row(255, false), [255, 177, 128, 100]);
+        // fz_paint_glyph_mask_alpha: solid is the alpha, replacing.
+        assert_eq!(row(128, true), [128, 114, 64, 100]);
+        // paint_span_0_da_sa_alpha.
+        assert_eq!(row(128, false), [177, 139, 64, 100]);
     }
 }

@@ -612,4 +612,169 @@ mod tests {
         set_bits(&mut row, 3, 13);
         assert_eq!(row, [0b0001_1111, 0b1111_1000]);
     }
+
+    macro_rules! fixture {
+        ($name:literal) => {
+            include_bytes!(concat!("../tests/data/fax/", $name, ".fax")).as_slice()
+        };
+    }
+
+    fn fax_cases() -> Vec<crate::filter::StreamCase> {
+        let g3 = fixture!("g3_1d");
+        let g4 = fixture!("g4");
+        let ccf = |p: &str| format!("/Filter /CCITTFaxDecode /DecodeParms << /Columns 45 {p} >>");
+        let mut corrupt = g4.to_vec();
+        corrupt[20] ^= 0xff;
+        let mut corrupt_1d = g3.to_vec();
+        corrupt_1d[10] = 0;
+        corrupt_1d[11] = 0;
+        vec![
+            (
+                "g3_1d",
+                ccf("/K 0 /EndOfLine true /Rows 12"),
+                g3.to_vec(),
+                None,
+            ),
+            ("g3_1d_no_eol_flag", ccf("/K 0"), g3.to_vec(), None),
+            (
+                "g3_1d_black_is_1",
+                ccf("/K 0 /BlackIs1 true"),
+                g3.to_vec(),
+                None,
+            ),
+            (
+                "g3_1d_rows_5",
+                ccf("/K 0 /EndOfLine true /Rows 5 /EndOfBlock false"),
+                g3.to_vec(),
+                None,
+            ),
+            (
+                "g3_1d_corrupt",
+                ccf("/K 0 /EndOfLine true"),
+                corrupt_1d,
+                None,
+            ),
+            (
+                "g3_1d_late_eol",
+                ccf("/K 0 /EndOfLine true"),
+                [&[0xaa, 0x55][..], g3].concat(),
+                None,
+            ),
+            (
+                "g3_1d_no_eol",
+                ccf("/K 0 /EndOfLine true"),
+                vec![0xff; 40],
+                None,
+            ),
+            (
+                "g3_1d_aligned",
+                ccf("/K 0 /EndOfLine true /EncodedByteAlign true"),
+                fixture!("g3_1d_aligned").to_vec(),
+                None,
+            ),
+            (
+                "g3_2d",
+                ccf("/K 1 /EndOfLine true"),
+                fixture!("g3_2d").to_vec(),
+                None,
+            ),
+            (
+                "g3_2d_aligned",
+                ccf("/K 1 /EndOfLine true /EncodedByteAlign true"),
+                fixture!("g3_2d_aligned").to_vec(),
+                None,
+            ),
+            ("g3_2d_k_4", ccf("/K 4"), fixture!("g3_2d").to_vec(), None),
+            ("g4", ccf("/K -1 /Rows 12"), g4.to_vec(), None),
+            (
+                "g4_no_eob",
+                ccf("/K -1 /EndOfBlock false /Rows 12"),
+                g4.to_vec(),
+                None,
+            ),
+            (
+                "g4_rows_3",
+                ccf("/K -1 /Rows 3 /EndOfBlock false"),
+                g4.to_vec(),
+                None,
+            ),
+            (
+                "g4_aligned",
+                ccf("/K -1 /EncodedByteAlign true"),
+                g4.to_vec(),
+                None,
+            ),
+            ("g4_corrupt", ccf("/K -1"), corrupt, None),
+            ("g4_truncated", ccf("/K -1"), g4[..30].to_vec(), None),
+            ("g4_wrong_width", s_ccf(40), g4.to_vec(), None),
+            // The extension code for uncompressed mode, in 2-D and 1-D.
+            (
+                "g4_uncompressed",
+                ccf("/K -1"),
+                vec![0x03, 0xc0, 0, 0],
+                None,
+            ),
+            (
+                "g3_uncompressed",
+                ccf("/K 0"),
+                vec![0x00, 0x0f, 0x00, 0, 0],
+                None,
+            ),
+            (
+                "g4_invalid",
+                ccf("/K -1"),
+                vec![0x00, 0x01, 0xff, 0xff],
+                None,
+            ),
+            (
+                "columns_overflow",
+                "/Filter /CCITTFaxDecode /DecodeParms << /Columns 2147483647 >>".to_string(),
+                g4.to_vec(),
+                None,
+            ),
+            (
+                "default_columns",
+                "/Filter /CCF".to_string(),
+                g4.to_vec(),
+                None,
+            ),
+        ]
+    }
+
+    fn s_ccf(columns: i32) -> String {
+        format!("/Filter /CCITTFaxDecode /DecodeParms << /K -1 /Columns {columns} >>")
+    }
+
+    /// MuPDF 1.28.6's result for each case, from tests/data/oracle.py.
+    #[rustfmt::skip]
+    const MUPDF_FAX: &[(&str, usize, &str, &[&str])] = &[
+        ("columns_overflow", 0, "e3b0c44298fc1c14", &["error too many columns integer overflow (2147483647)"]),
+        ("default_columns", 216, "9ce31e87e7f0949e", &["format error: overflow in 1d faxd"]),
+        ("g3_1d", 72, "9585bd5380175186", &[]),
+        ("g3_1d_aligned", 72, "9585bd5380175186", &["faxd stream doesn't start with EOL"]),
+        ("g3_1d_black_is_1", 72, "18c51331fafb5992", &[]),
+        ("g3_1d_corrupt", 12, "c5c273927cdfa4a8", &["format error: overflow in 1d faxd"]),
+        ("g3_1d_late_eol", 72, "9585bd5380175186", &["faxd stream doesn't start with EOL"]),
+        ("g3_1d_no_eol", 0, "e3b0c44298fc1c14", &["faxd stream doesn't start with EOL", "format error: initial EOL not found", "read error; treating as end of file"]),
+        ("g3_1d_no_eol_flag", 72, "9585bd5380175186", &[]),
+        ("g3_1d_rows_5", 30, "f582aef27f051f82", &[]),
+        ("g3_2d", 72, "9585bd5380175186", &[]),
+        ("g3_2d_aligned", 72, "9585bd5380175186", &["faxd stream doesn't start with EOL"]),
+        ("g3_2d_k_4", 72, "9585bd5380175186", &[]),
+        ("g3_uncompressed", 6, "ce8bee525d6736e9", &[]),
+        ("g4", 72, "9585bd5380175186", &[]),
+        ("g4_aligned", 24, "707fad5bc6295f3b", &["format error: overflow in 2d faxd"]),
+        ("g4_corrupt", 18, "05de5a409cb4564e", &["format error: overflow in 2d faxd"]),
+        ("g4_invalid", 96, "ce65609cc564ce3d", &[]),
+        ("g4_no_eob", 72, "9585bd5380175186", &[]),
+        ("g4_rows_3", 18, "bbac9f0e8005b6ad", &[]),
+        ("g4_truncated", 24, "a2e69f985aea1000", &[]),
+        ("g4_uncompressed", 6, "ce8bee525d6736e9", &["format error: uncompressed data in faxd"]),
+        ("g4_wrong_width", 15, "2ca0ebcbda972e1d", &["format error: overflow in 2d faxd"]),
+    ];
+
+    #[test]
+    fn fax_streams_decode_as_in_mupdf() {
+        crate::filter::check_against_mupdf("NUPDF_DUMP_FAX_CASES", &fax_cases(), MUPDF_FAX);
+    }
 }

@@ -292,10 +292,21 @@ impl Gel {
             fy1 += 1.0;
         }
         let c = self.clip;
-        fx0 = fx0.clamp(c.x0 as f32, c.x1 as f32);
-        fx1 = fx1.clamp(c.x0 as f32, c.x1 as f32);
-        fy0 = fy0.clamp(c.y0 as f32, c.y1 as f32);
-        fy1 = fy1.clamp(c.y0 as f32, c.y1 as f32);
+        // `fz_clamp`: an empty clip (min above max) gives min, as C's
+        // comparisons do; `f32::clamp` would panic.
+        let fz_clamp = |v: f32, lo: f32, hi: f32| {
+            if v < lo {
+                lo
+            } else if v > hi {
+                hi
+            } else {
+                v
+            }
+        };
+        fx0 = fz_clamp(fx0, c.x0 as f32, c.x1 as f32);
+        fx1 = fz_clamp(fx1, c.x0 as f32, c.x1 as f32);
+        fy0 = fz_clamp(fy0, c.y0 as f32, c.y1 as f32);
+        fy1 = fz_clamp(fy1, c.y0 as f32, c.y1 as f32);
         let clampf = |v: f32, lo: i32, hi: i32| v.clamp(lo as f32, hi as f32) as i32;
         let x0 = clampf(fx0, BBOX_MIN * HSCALE, BBOX_MAX * HSCALE);
         let y0 = clampf(fy0, BBOX_MIN * VSCALE, BBOX_MAX * VSCALE);
@@ -596,6 +607,17 @@ impl Gel {
 
 #[cfg(test)]
 mod tests {
+    /// Found by the wild-tier crash sweep: a stroke under a clip that is
+    /// empty (its x0 past its x1) made `f32::clamp` panic, where MuPDF's
+    /// `fz_clamp` gives the lower bound.
+    #[test]
+    fn an_empty_clip_takes_a_rectangle_without_panicking() {
+        let mut gel = Gel::new();
+        gel.reset(IRect::new(3162, 0, 0, 10));
+        gel.insert_rect(10.0, 2.0, 20.0, 8.0);
+        gel.insert(10.0, 2.0, 20.0, 8.0);
+    }
+
     use super::*;
 
     fn coverage(gel: &mut Gel, eofill: bool, w: i32, h: i32) -> Vec<u8> {

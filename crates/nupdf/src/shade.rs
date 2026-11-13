@@ -411,6 +411,178 @@ mod tests {
         );
     }
 
+    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    /// Object 2's shading and the warnings loading it gave.
+    fn load_with(objects: &[&str]) -> (Result<Shade, String>, Vec<String>) {
+        let doc = doc_with(objects);
+        let before = doc.diagnostics().snapshot().len();
+        let shade = load(&doc, &obj(2));
+        let w = doc.diagnostics().snapshot()[before..]
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        (shade, w)
+    }
+
+    #[test]
+    fn function_shadings_sample_a_grid_over_their_domain() {
+        // One 2-in, 3-out function: (x, y, 0.5).
+        let (shade, _) = load_with(&[
+            "<</ShadingType 1/ColorSpace/DeviceRGB/Domain[0 2 0 4]/Matrix[2 0 0 2 10 20]/Function 3 0 R>>",
+            "<</FunctionType 4/Domain[0 2 0 4]/Range[0 2 0 4 0 1]/Length 13>>stream\n{ 0.5 }\nendstream",
+        ]);
+        let shade = shade.unwrap_or_else(|e| panic!("{e}"));
+        let ShadeData::Function {
+            matrix,
+            domain,
+            divs,
+            values,
+        } = &shade.data
+        else {
+            panic!("{:?}", shade.data);
+        };
+        assert_eq!((*divs, domain), (256, &[[0.0, 0.0], [2.0, 4.0]]));
+        assert_eq!(
+            *matrix,
+            Matrix::scale(2.0, 2.0).concat(Matrix::translate(10.0, 20.0))
+        );
+        assert_eq!(values.len(), 257 * 257 * 3);
+        assert_eq!(&values[..3], [0.0, 0.0, 0.5]);
+        // The last point of the first row, and the grid's far corner.
+        assert_eq!(&values[256 * 3..257 * 3], [2.0, 0.0, 0.5]);
+        assert_eq!(&values[values.len() - 3..], [2.0, 4.0, 0.5]);
+        // Bounded by the domain through the matrix, within the BBox.
+        assert_eq!(shade.bound(Matrix::IDENTITY), rect(10.0, 20.0, 14.0, 28.0));
+
+        // n 2-in, 1-out functions (x + y, x, x + y); the default domain is
+        // the unit square.
+        let (shade, _) = load_with(&[
+            "<</ShadingType 1/ColorSpace/DeviceRGB/BBox[0 0 0.5 0.5]/Function[3 0 R 4 0 R 3 0 R]>>",
+            "<</FunctionType 4/Domain[0 1 0 1]/Range[0 2]/Length 9>>stream\n{ add }\nendstream",
+            "<</FunctionType 4/Domain[0 1 0 1]/Range[0 1]/Length 9>>stream\n{ pop }\nendstream",
+        ]);
+        let shade = shade.unwrap_or_else(|e| panic!("{e}"));
+        let ShadeData::Function { values, .. } = &shade.data else {
+            panic!("{:?}", shade.data);
+        };
+        assert_eq!(&values[..3], [0.0, 0.0, 0.0]);
+        assert_eq!(&values[values.len() - 3..], [2.0, 1.0, 2.0]);
+        assert_eq!(shade.bound(Matrix::IDENTITY), rect(0.0, 0.0, 0.5, 0.5));
+        // Two functions for three colors is wrong.
+        let (shade, _) = load_with(&[
+            "<</ShadingType 1/ColorSpace/DeviceRGB/Function[3 0 R 3 0 R]>>",
+            "<</FunctionType 4/Domain[0 1 0 1]/Range[0 2]/Length 9>>stream\n{ add }\nendstream",
+        ]);
+        assert_eq!(
+            shade.err().as_deref(),
+            Some("syntax error: incorrect number of shading functions")
+        );
+    }
+
+    #[test]
+    fn radial_shadings_with_function_arrays_and_patterns() {
+        // A shading pattern: its matrix applies, and alpha in its
+        // ExtGState is reported unsupported.
+        let (shade, w) = load_with(&[
+            "<</PatternType 2/Matrix[1 0 0 1 5 5]/ExtGState<</ca 0.5>>/Shading 3 0 R>>",
+            "<</ShadingType 3/ColorSpace/DeviceRGB/Background[0.1 0.2]/BBox[0 0 10 10]\
+              /Coords[0 0 1 5 5 4]/Domain[2 4]/Extend[false true]\
+              /Function[4 0 R 4 0 R 4 0 R]>>",
+            "<</FunctionType 2/Domain[0 10]/C0[0]/C1[1]/N 1>>",
+        ]);
+        let shade = shade.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(w, ["shading with alpha not supported"]);
+        assert_eq!(shade.kind, 3);
+        assert_eq!(shade.background, Some(vec![0.1, 0.2, 0.0]));
+        assert_eq!(shade.matrix, Matrix::translate(5.0, 5.0));
+        assert_eq!(
+            shade.data,
+            ShadeData::Axial {
+                coords: [[0.0, 0.0, 1.0], [5.0, 5.0, 4.0]],
+                extend: [false, true]
+            }
+        );
+        // Each function sampled over the domain, then a 1.
+        assert_eq!(shade.function_stride, 4);
+        assert_eq!(&shade.function[..4], [2.0, 2.0, 2.0, 1.0]);
+        assert_eq!(&shade.function[255 * 4..], [4.0, 4.0, 4.0, 1.0]);
+        // Axial shadings are bounded by their BBox alone.
+        assert_eq!(
+            shade.bound(Matrix::scale(2.0, 2.0)),
+            rect(10.0, 10.0, 30.0, 30.0)
+        );
+        // A pattern's ExtGState without alpha says nothing.
+        let (shade, w) = load_with(&[
+            "<</PatternType 2/ExtGState<</LW 1>>/Shading<</ShadingType 2/ColorSpace/DeviceGray/Function<</FunctionType 2/Domain[0 1]/N 1>>>>>>",
+        ]);
+        assert!(shade.is_ok() && w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn mesh_shadings_keep_their_stream_and_check_their_parameters() {
+        let (shade, w) = load_with(&[
+            "<</ShadingType 4/ColorSpace/DeviceRGB/BitsPerFlag 8/BitsPerCoordinate 16/BitsPerComponent 8\
+              /Decode[0 100 0 50 0 1 0 1 0 1]/BBox[10 10 200 200]/Length 3>>stream\nabcendstream",
+        ]);
+        let shade = shade.unwrap_or_else(|e| panic!("{e}"));
+        assert!(w.is_empty(), "{w:?}");
+        let ShadeData::Mesh(mesh) = &shade.data else {
+            panic!("{:?}", shade.data);
+        };
+        assert_eq!((mesh.x, mesh.y), ([0.0, 100.0], [0.0, 50.0]));
+        assert_eq!(&mesh.c1[..3], [1.0, 1.0, 1.0]);
+        assert_eq!(mesh.data, b"abc");
+        assert!(shade.function.is_empty());
+        // The decode range, clipped to the BBox.
+        assert_eq!(shade.bound(Matrix::IDENTITY), rect(10.0, 10.0, 100.0, 50.0));
+
+        // A lattice with a function: the parametric value's range is
+        // sampled; bad depths fall back to 8 with a warning each.
+        let (shade, w) = load_with(&[
+            "<</ShadingType 5/ColorSpace/DeviceGray/VerticesPerRow 1/BitsPerFlag 3\
+              /BitsPerCoordinate 5/BitsPerComponent 3/Decode[0 1 0 1 0.5 1]\
+              /Function<</FunctionType 2/Domain[0 1]/N 1>>/Length 1>>stream\nx\nendstream",
+        ]);
+        let shade = shade.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            w,
+            [
+                "Too few vertices per row (1)",
+                "Invalid number of bits per coordinate (5)",
+                "Invalid number of bits per component (3)",
+            ]
+        );
+        let ShadeData::Mesh(mesh) = &shade.data else {
+            panic!("{:?}", shade.data);
+        };
+        assert_eq!(
+            (
+                mesh.vertices_per_row,
+                mesh.bits_per_flag,
+                mesh.bits_per_coordinate,
+                mesh.bits_per_component
+            ),
+            (2, 3, 8, 8)
+        );
+        assert_eq!(&shade.function[..2], [0.5, 1.0]);
+        assert_eq!(&shade.function[510..], [1.0, 1.0]);
+        // A coons patch mesh with a bad flag depth, and a short Decode
+        // (ignored: the unit defaults stay).
+        let (shade, w) = load_with(&[
+            "<</ShadingType 6/ColorSpace/DeviceGray/BitsPerFlag 1/BitsPerCoordinate 8\
+              /BitsPerComponent 8/Decode[0 5]/Length 1>>stream\nx\nendstream",
+        ]);
+        assert_eq!(w, ["Invalid number of bits per flag (1)"]);
+        let shade = shade.unwrap_or_else(|e| panic!("{e}"));
+        let ShadeData::Mesh(mesh) = &shade.data else {
+            panic!("{:?}", shade.data);
+        };
+        assert_eq!((mesh.bits_per_flag, mesh.x), (8, [0.0, 1.0]));
+    }
+
     #[test]
     fn shading_failures_are_mupdfs() {
         let err = |objects: &[&str]| load(&doc_with(objects), &obj(2)).err();

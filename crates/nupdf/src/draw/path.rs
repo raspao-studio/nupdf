@@ -1083,6 +1083,66 @@ mod tests {
         assert_eq!(&c[0..8], &[0; 8]);
     }
 
+    /// The ink of a 10-wide stroke of a sharp corner with `join` and
+    /// `cap` at miter limit 1.2, which its right angle passes.
+    fn ink(join: i32, cap: i32) -> u32 {
+        let mut p = Path::new();
+        p.move_to(10.0, 50.0);
+        p.line_to(50.0, 10.0);
+        p.line_to(90.0, 50.0);
+        let stroke = StrokeState {
+            linewidth: 10.0,
+            linejoin: join,
+            start_cap: cap,
+            end_cap: cap,
+            miterlimit: 1.2,
+            ..StrokeState::default()
+        };
+        let mut gel = Gel::new();
+        let r = IRect::new(0, 0, 100, 64);
+        let bbox = flatten_stroke(&mut gel, &p, &stroke, Matrix::IDENTITY, 0.3, 10.0, r)
+            .unwrap_or(IRect::EMPTY);
+        raster(&mut gel, bbox, 100, 64)
+            .iter()
+            .map(|&v| u32::from(v))
+            .sum()
+    }
+
+    #[test]
+    fn xps_miters_and_triangle_caps_fall_between_their_neighbours() {
+        // PDF clamps joins and caps to 0..2; XPS's miter (3) cuts a
+        // too-long miter off at the limit rather than bevelling it, and
+        // its triangle cap reaches out half as far as a square one.
+        let (bevel, xps) = (ink(LINEJOIN_BEVEL, 0), ink(LINEJOIN_MITER_XPS, 0));
+        let miter = {
+            // The full miter, with no limit to fall back at.
+            let mut p = Path::new();
+            p.move_to(10.0, 50.0);
+            p.line_to(50.0, 10.0);
+            p.line_to(90.0, 50.0);
+            let stroke = StrokeState {
+                linewidth: 10.0,
+                miterlimit: 10.0,
+                ..StrokeState::default()
+            };
+            let mut gel = Gel::new();
+            let r = IRect::new(0, 0, 100, 64);
+            let bbox = flatten_stroke(&mut gel, &p, &stroke, Matrix::IDENTITY, 0.3, 10.0, r)
+                .unwrap_or(IRect::EMPTY);
+            raster(&mut gel, bbox, 100, 64)
+                .iter()
+                .map(|&v| u32::from(v))
+                .sum::<u32>()
+        };
+        assert!(bevel < xps && xps < miter, "{bevel} {xps} {miter}");
+        let (butt, tri, square) = (
+            ink(LINEJOIN_BEVEL, LINECAP_BUTT),
+            ink(LINEJOIN_BEVEL, LINECAP_TRIANGLE),
+            ink(LINEJOIN_BEVEL, LINECAP_SQUARE),
+        );
+        assert!(butt < tri && tri < square, "{butt} {tri} {square}");
+    }
+
     #[test]
     fn dashes_leave_gaps() {
         let mut p = Path::new();
@@ -1106,5 +1166,135 @@ mod tests {
         .unwrap_or(IRect::EMPTY);
         let c = raster(&mut gel, bbox, 8, 4);
         assert_eq!(&c[8..16], &[255, 255, 0, 0, 255, 255, 0, 0]);
+    }
+
+    use crate::draw::testkit::{check, page, px};
+
+    fn draw(name: &str, content: &str, want: &str) -> crate::draw::Pix {
+        check(name, &page(128, 128, "", content, &[]), true, want)
+    }
+
+    #[test]
+    fn joins_and_caps_as_mupdf_strokes_them() {
+        // Miter, round and bevel joins with butt, round and square caps;
+        // a miter past its limit, which bevels; a sharp one within it.
+        let pix = draw(
+            "path-joins-caps",
+            "8 w 0 J 0 j 10 10 m 40 40 l 70 10 l S
+             1 J 1 j 10 50 m 40 80 l 70 50 l S
+             2 J 2 j 10 90 m 40 120 l 70 90 l S
+             0 J 0 j 2 M 80 10 m 100 40 l 120 10 l S
+             10 M 80 50 m 90 80 l 100 50 l S
+             1 j 120 70 m 100 70 l 100 70 l 100 90 l S",
+            "075d1181b2a242714981221baef38f43",
+        );
+        // The round cap reaches past the line's end; the butt one does not.
+        assert_eq!(px(&pix, 7, 128 - 51), [0, 0, 0]);
+        assert_eq!(px(&pix, 5, 128 - 8), [255, 255, 255]);
+    }
+
+    #[test]
+    fn zero_length_subpaths_draw_their_caps() {
+        // A round cap is a dot, a square one a square, a butt one nothing;
+        // closed and moved-to subpaths with no length do the same.
+        draw(
+            "path-zero-length",
+            "10 w 1 J 20 20 m 20 20 l S 2 J 50 20 m 50 20 l S 0 J 80 20 m 80 20 l S
+             1 J 20 60 m h S 2 J 50 60 m 50 60 l h S 1 J 80 60 m S
+             1 J 20 100 m 20 100 20 100 20 100 c S 2 J 50 100 m 50 100 l 50 100 l S",
+            "a4fafeb77424b450bb892d3f29b755f0",
+        );
+    }
+
+    #[test]
+    fn curves_fill_and_stroke_flattened() {
+        draw(
+            "path-curves",
+            "0 0 1 rg 10 10 m 50 120 80 -20 120 60 c 100 100 v 20 120 y h f
+             1 0 0 RG 3 w 1 j 10 60 m 40 0 90 128 120 60 c 60 110 v S
+             0 1 0 rg 0 0 0 RG 1 w 30 30 m 98 30 l 64 98 l h 30 80 m 98 80 l 64 12 l h B*",
+            "c62c4486101a117f8c12c23ffc510639",
+        );
+    }
+
+    #[test]
+    fn dashes_follow_lines_curves_and_closes() {
+        draw(
+            "path-dashes",
+            "4 w [6 3] 0 d 10 10 m 118 10 l S
+             [6 3 1 3] 2 d 10 25 m 118 40 l S
+             1 J [0 6] 0 d 10 55 m 118 55 l S
+             0 J [10 4] 25 d 10 70 m 60 128 90 40 118 100 c S
+             2 J 1 j [8 5] 3 d 20 80 80 30 re S
+             0 j [12 0 4] 1 d 30 90 m 100 120 l 30 120 l h S",
+            "7f600c68edb9defa16bb732280d5b49b",
+        );
+    }
+
+    #[test]
+    fn strokes_and_rects_under_rotation_and_skew() {
+        draw(
+            "path-transforms",
+            "q 0.7 0.7 -0.7 0.7 64 0 cm 6 w 20 20 40 30 re S 0 0 1 rg 30 60 20 20 re f Q
+             q 0 1 -1 0 128 0 cm 4 w 10 10 30 20 re S 1 0 0 rg 50 10 20 30 re f Q
+             q 1 0 0.5 1 0 0 cm 0 w 10 100 m 60 120 l S 0.1 w 10 110 m 60 126 l S Q
+             q 1 0 0 -1 0 128 cm 3 w 2 J 70 70 m 120 70 l S 80 80 30 2 re S Q",
+            "55da1b66578c32e88b5df75b8a7b6c65",
+        );
+    }
+
+    #[test]
+    fn clamped_joins_and_caps_and_reversals() {
+        // `3 j` and `3 J` clamp to bevel and square, as MuPDF reads them;
+        // lines that turn back on themselves join flat.
+        draw(
+            "path-clamped-joins",
+            "6 w 3 j 4 M 10 10 m 40 40 l 70 10 l S 70 30 m 40 60 l 10 30 l S
+             1.2 M 10 70 m 40 100 l 70 70 l S 70 90 m 40 120 l 10 90 l S
+             3 J 0 j 80 20 m 120 20 l S 100 45 m 100 45 l S
+             1 J 1 j 80 70 m 120 70 l 90 70 l S 0 j 80 90 m 120 90 l 90 90 l S
+             2 J 3 j 80 110 m 120 110 l 120 110 l 90 125 l S",
+            "f2ff5993e47b7eb0a472af437965eca6",
+        );
+    }
+
+    #[test]
+    fn dashes_clip_to_the_page_and_skip_whole_cycles() {
+        // Dashed lines from far off the page each way, entirely off it,
+        // and a long one through many cycles of an odd-length array.
+        draw(
+            "path-dashes-offpage",
+            "3 w [5 3] 1 d -2000 10 m 2000 20 l S 2000 30 m -2000 40 l S
+             10 -2000 m 20 2000 l S 30 2000 m 40 -2000 l S
+             -500 -500 m 600 700 l S -10 200 m -10 300 l S
+             [3] 0 d 50 50 m 120 120 l S [7 2 1] 40 d 60 20 m 120 20 l 120 60 l S",
+            "231c30468760662bad5bf105e5b9ddc0",
+        );
+    }
+
+    #[test]
+    fn degenerate_dashes_are_solid_or_nothing() {
+        // A dash pattern too short to see strokes solid; one of nothing
+        // strokes nothing; neither does any dash through a flat matrix.
+        draw(
+            "path-dashes-degenerate",
+            "4 w [0.001 0.001] 0 d 10 10 m 118 10 l S [0 0] 0 d 10 30 m 118 30 l S
+             q 1 0 0 0 0 64 cm [4 4] 0 d 10 0 m 118 0 l S Q
+             [4 4] 0 d 10 80 m 10 80.00001 l 118 90 l S",
+            "ae9842ef2f4737728e90adb66e70b6a6",
+        );
+    }
+
+    #[test]
+    fn open_subpaths_fill_as_if_closed() {
+        // Subpaths left open close before the next moveto and at the end;
+        // a fill inside an empty clip paints nothing.
+        draw(
+            "path-open-fills",
+            "10 10 m 60 10 l 35 60 l 70 10 m 120 10 l 95 60 l f
+             q 0 0 0 0 re W n 0 0 128 128 re f Q
+             10 70 m 120 70 l 120 120 l f*",
+            "f14947d2d212418a7dda9cca775e772f",
+        );
     }
 }

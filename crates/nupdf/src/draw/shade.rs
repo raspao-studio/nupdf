@@ -197,6 +197,8 @@ fn paint_triangle(pix: &mut Pix, v: [&Vert; 3], n: usize, bbox: IRect) {
 struct Painter<'a> {
     doc: Option<&'a Document>,
     cc: &'a Converter,
+    /// The rendering intent colors convert with.
+    ri: u8,
     shade: &'a Shade,
     dest: &'a mut Pix,
     bbox: IRect,
@@ -222,7 +224,7 @@ impl Painter<'_> {
                 v[2] = f * 255.0;
             }
             Some(n) => {
-                let out = convert(self.doc, self.cc, &self.shade.colorspace, input, n);
+                let out = convert(self.doc, self.cc, self.ri, &self.shade.colorspace, input, n);
                 for k in 0..n {
                     v[2 + k] = out[k] * 255.0;
                 }
@@ -251,14 +253,15 @@ impl Painter<'_> {
 fn convert(
     doc: Option<&Document>,
     cc: &Converter,
+    ri: u8,
     cs: &ColorSpace,
     input: &[f32],
     n: usize,
 ) -> [f32; 3] {
     match n {
         0 => [0.0; 3],
-        1 => [cc.gray(doc, cs, input, 1), 0.0, 0.0],
-        _ => cc.rgb(doc, cs, input, 1),
+        1 => [cc.gray(doc, cs, input, ri), 0.0, 0.0],
+        _ => cc.rgb(doc, cs, input, ri),
     }
 }
 
@@ -812,6 +815,7 @@ fn type67(pt: &mut Painter<'_>, ctm: Matrix, kind: i32) {
 pub fn paint_shade(
     doc: Option<&Document>,
     cc: &Converter,
+    ri: u8,
     shade: &Shade,
     ctm: Matrix,
     dest: &mut Pix,
@@ -848,6 +852,7 @@ pub fn paint_shade(
         let mut pt = Painter {
             doc,
             cc,
+            ri,
             shade,
             dest: target,
             bbox,
@@ -876,7 +881,7 @@ pub fn paint_shade(
             .function
             .get(i * stride..(i + 1) * stride)
             .unwrap_or(&[]);
-        let col = convert(doc, cc, &shade.colorspace, f, dest_colors.min(3));
+        let col = convert(doc, cc, ri, &shade.colorspace, f, dest_colors.min(3));
         for k in 0..dest_colors.min(3) {
             row[k] = (col[k] * 255.0) as u8;
         }
@@ -918,5 +923,273 @@ mod tests {
         // Row 0 runs from 0 to nearly 255 across.
         assert_eq!(pix.samples[0], 0);
         assert!(pix.samples[8] > 180, "{:?}", &pix.samples[..10]);
+    }
+
+    use crate::draw::testkit::{bits, check, hex_stream, page, px, stream};
+
+    /// A 64-point page painting shading 5 with `sh`.
+    fn sh_page(shading: &str, extra: &[&str]) -> Vec<u8> {
+        let mut objs = vec![shading];
+        objs.extend_from_slice(extra);
+        page(64, 64, "/Shading<</S 5 0 R>>", "/S sh", &objs)
+    }
+
+    const RED_TO_BLUE: &str = "<</FunctionType 2/Domain[0 1]/C0[1 0 0]/C1[0 0 1]/N 1>>";
+
+    #[test]
+    fn function_shadings_sample_a_grid() {
+        // x y -> x, y, (x + y) / 2, over a domain scaled to the page.
+        let f = stream(
+            "/FunctionType 4/Domain[0 1 0 1]/Range[0 1 0 1 0 1]",
+            "{2 copy add 2 div}",
+        );
+        let pdf = sh_page(
+            "<</ShadingType 1/ColorSpace/DeviceRGB/Domain[0 1 0 1]/Matrix[64 0 0 64 0 0]/Function 6 0 R>>",
+            &[&f],
+        );
+        let pix = check(
+            "shade-type1",
+            &pdf,
+            true,
+            "afe82cbdb13d29006ff1dfe72379473b",
+        );
+        // Bottom left of the page is the domain's origin: black.
+        assert!(
+            px(&pix, 1, 62).iter().all(|&v| v < 16),
+            "{:?}",
+            px(&pix, 1, 62)
+        );
+    }
+
+    #[test]
+    fn axial_shadings_extend_past_their_ends() {
+        for (name, extend, want) in [
+            (
+                "shade-axial",
+                "[false false]",
+                "e1ed185de29095ba26f4bd2252a271a2",
+            ),
+            (
+                "shade-axial-extend",
+                "[true true]",
+                "bd37f597aa9eac5f2aaac6fd701bf10a",
+            ),
+        ] {
+            let pdf = sh_page(
+                &format!(
+                    "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[16 0 48 0]/Extend{extend}/Function {RED_TO_BLUE}>>"
+                ),
+                &[],
+            );
+            let pix = check(name, &pdf, true, want);
+            let left = px(&pix, 4, 32);
+            if extend.starts_with("[true") {
+                assert_eq!(left, [255, 0, 0], "{name}");
+            } else {
+                assert_eq!(left, [255, 255, 255], "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_shading_pattern_fills_within_its_path_with_its_background() {
+        // A pattern fill passes the path's box as the scissor, which bounds
+        // the axial quad; the background paints where the shading does not.
+        // Without ICC: lcms turns MuPDF's gray ramp into RGB a level off
+        // neutral here and there, moxcms does not.
+        let pdf = page(
+            64,
+            64,
+            "/Pattern<</P 5 0 R>>",
+            "/Pattern cs /P scn 8 8 48 48 re f",
+            &[
+                "<</PatternType 2/Shading<</ShadingType 2/ColorSpace/DeviceGray/Background[0.5]/Coords[24 0 40 0]/Function<</FunctionType 2/Domain[0 1]/C0[0]/C1[1]/N 1>>>>>>",
+            ],
+        );
+        check(
+            "shade-pattern-background",
+            &pdf,
+            false,
+            "cfbee938e5f09e1012096ce83c8491fc",
+        );
+    }
+
+    #[test]
+    fn radial_shadings_extend_both_ways() {
+        for (name, coords, want) in [
+            (
+                "shade-radial-grow",
+                "[32 32 4 32 32 28]",
+                "7b09d1bfd698308be7416c8f491cc0c7",
+            ),
+            (
+                "shade-radial-shrink",
+                "[20 20 28 40 40 6]",
+                "36fd6139d8cbca113463b42ffbd19460",
+            ),
+        ] {
+            let pdf = sh_page(
+                &format!(
+                    "<</ShadingType 3/ColorSpace/DeviceRGB/Coords{coords}/Extend[true true]/Function {RED_TO_BLUE}>>"
+                ),
+                &[],
+            );
+            check(name, &pdf, true, want);
+        }
+    }
+
+    #[test]
+    fn free_form_meshes_share_edges_by_flag() {
+        // Flag, x, y (16 bits), then RGB; flags of 2 bits leave the
+        // vertices off byte boundaries.
+        let mut f = Vec::new();
+        let verts: [(u32, u32, u32, [u32; 3]); 5] = [
+            (0, 4, 4, [255, 0, 0]),
+            (0, 60, 4, [0, 255, 0]),
+            (0, 4, 60, [0, 0, 255]),
+            (1, 60, 60, [255, 255, 0]),
+            (2, 32, 30, [0, 255, 255]),
+        ];
+        for (flag, x, y, c) in verts {
+            f.extend([(flag, 2), (x * 1000, 16), (y * 1000, 16)]);
+            f.extend(c.map(|v| (v, 8)));
+        }
+        let s = hex_stream(
+            "/ShadingType 4/ColorSpace/DeviceRGB/BitsPerCoordinate 16/BitsPerComponent 8/BitsPerFlag 2/Decode[0 65.535 0 65.535 0 1 0 1 0 1]",
+            &bits(&f),
+        );
+        check(
+            "shade-type4",
+            &sh_page(&s, &[]),
+            true,
+            "b3da78e81808d6d0d15d74e373ec2ca8",
+        );
+    }
+
+    #[test]
+    fn meshes_with_a_function_look_their_colors_up() {
+        // One parameter a vertex, 4 bits, through a red-to-blue function.
+        let mut f = Vec::new();
+        for (flag, x, y, t) in [(0, 2, 2, 0), (0, 62, 2, 15), (0, 2, 62, 8), (1, 62, 62, 4)] {
+            f.extend([(flag, 8), (x, 8), (y, 8), (t, 4)]);
+        }
+        let s = hex_stream(
+            &format!(
+                "/ShadingType 4/ColorSpace/DeviceRGB/BitsPerCoordinate 8/BitsPerComponent 4/BitsPerFlag 8/Decode[0 255 0 255 0 1]/Function {RED_TO_BLUE}"
+            ),
+            &bits(&f),
+        );
+        check(
+            "shade-type4-function",
+            &sh_page(&s, &[]),
+            true,
+            "b6ac80793d7971c4cf928de926605d71",
+        );
+    }
+
+    #[test]
+    fn lattice_meshes_join_rows() {
+        let mut f = Vec::new();
+        for row in 0..3u32 {
+            for col in 0..3u32 {
+                f.extend([(col * 30 + 2, 8), (row * 30 + 2, 8)]);
+                f.extend([(row * 120, 8), (col * 120, 8), (255 - row * 60, 8)]);
+            }
+        }
+        let s = hex_stream(
+            "/ShadingType 5/ColorSpace/DeviceRGB/BitsPerCoordinate 8/BitsPerComponent 8/VerticesPerRow 3/Decode[0 255 0 255 0 1 0 1 0 1]",
+            &bits(&f),
+        );
+        check(
+            "shade-type5",
+            &sh_page(&s, &[]),
+            true,
+            "39a9b8ae1bc7a3eb3da7985c8094013f",
+        );
+    }
+
+    /// A patch mesh: a first patch, then one sharing each of its edges
+    /// in turn (flags 1, 2 and 3), coordinates and colors 8 bits each.
+    fn patches(tensor: bool) -> Vec<u8> {
+        let mut f = vec![(0, 8)];
+        let first = [
+            (16, 16),
+            (16, 24),
+            (16, 40),
+            (16, 48),
+            (24, 50),
+            (40, 46),
+            (48, 48),
+            (50, 40),
+            (46, 24),
+            (48, 16),
+            (40, 14),
+            (24, 18),
+        ];
+        for (x, y) in first {
+            f.extend([(x, 8), (y, 8)]);
+        }
+        if tensor {
+            for (x, y) in [(24, 24), (24, 40), (40, 40), (40, 24)] {
+                f.extend([(x, 8), (y, 8)]);
+            }
+        }
+        for c in [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]] {
+            f.extend(c.map(|v| (v, 8)));
+        }
+        let extra = if tensor { 12 } else { 8 };
+        for (flag, dx, dy) in [(1u32, 0i32, 12i32), (2, 12, 0), (3, 0, -12)] {
+            f.push((flag, 8));
+            for k in 0..extra {
+                let x = (32 + dx + (k % 4) * 3 - 6).clamp(0, 63) as u32;
+                let y = (32 + dy + (k / 4) * 3 - 6).clamp(0, 63) as u32;
+                f.extend([(x, 8), (y, 8)]);
+            }
+            for c in [[0, 255, 255], [255, 0, 255]] {
+                f.extend(c.map(|v| (v, 8)));
+            }
+        }
+        bits(&f)
+    }
+
+    #[test]
+    fn coons_and_tensor_patches_continue_from_their_neighbours() {
+        for (name, kind, tensor, want) in [
+            ("shade-type6", 6, false, "b3bb355bd4913d271a8c47efc82efa38"),
+            ("shade-type7", 7, true, "2616e82bea9045baf2856eaf2b41d94a"),
+        ] {
+            let s = hex_stream(
+                &format!(
+                    "/ShadingType {kind}/ColorSpace/DeviceRGB/BitsPerCoordinate 8/BitsPerComponent 8/BitsPerFlag 8/Decode[0 64 0 64 0 1 0 1 0 1]"
+                ),
+                &patches(tensor),
+            );
+            check(name, &sh_page(&s, &[]), true, want);
+        }
+    }
+
+    #[test]
+    fn a_luminosity_mask_shades_in_gray() {
+        // The soft mask's group draws a shading into a gray pixmap.
+        let group = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 64 64]/Group<</S/Transparency/CS/DeviceGray>>/Resources<</Shading<</S 7 0 R>>>>",
+            "/S sh",
+        );
+        let shading = format!(
+            "<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 64 0]/Function {RED_TO_BLUE}>>"
+        );
+        let pdf = page(
+            64,
+            64,
+            "/ExtGState<</G 5 0 R>>",
+            "/G gs 1 0 0 rg 0 0 64 64 re f",
+            &["<</SMask<</S/Luminosity/G 6 0 R>>>>", &group, &shading],
+        );
+        check(
+            "shade-luminosity-mask",
+            &pdf,
+            false,
+            "27011420bf53041160d43b4ecc0320fe",
+        );
     }
 }

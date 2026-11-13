@@ -269,4 +269,56 @@ mod tests {
         assert_eq!(qf, 0);
         assert_eq!(m.f, 8.0);
     }
+
+    use crate::draw::testkit::{check, page};
+
+    #[test]
+    fn glyphs_at_every_size_and_angle_draw_as_mupdf_draws_them() {
+        // Sizes on each side of the subpixel steps (4, 8, 24 and 48
+        // pixels), rotated and skewed text, and an unknown font MuPDF
+        // substitutes Helvetica for,
+        // stretched to its widths.
+        let pdf = page(
+            200,
+            200,
+            "/Font<</H 5 0 R/A 6 0 R>>",
+            "BT /H 3 Tf 2 190 Td (tiny 3) Tj /H 6 Tf 0 -8 Td (small 6) Tj
+             /H 12 Tf 0 -14 Td (twelve) Tj /H 30 Tf 0 -30 Td (Big) Tj
+             /H 50 Tf 0 -46 Td (Lg) Tj ET
+             BT /H 14 Tf 0 1 -1 0 190 10 Tm (turned) Tj 0.9 0.4 -0.4 0.9 120 60 Tm (tilted) Tj
+             1 0 0.4 1 120 90 Tm (skew) Tj ET
+             BT /A 16 Tf 2 10 Td (Widths) Tj ET",
+            &[
+                "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+                "<</Type/Font/Subtype/TrueType/BaseFont/Frobnitz/FirstChar 32/LastChar 122/Widths[278 278 355 556 556 889 667 191 333 333 389 584 278 333 278 278 556 556 556 556 556 556 556 556 556 556 278 278 584 584 584 556 1015 667 667 722 722 667 611 778 722 278 500 667 556 833 722 778 667 778 722 667 611 722 667 944 667 667 611 278 278 278 469 556 333 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900 900]/FontDescriptor<</Type/FontDescriptor/FontName/Frobnitz/Flags 32/FontBBox[-665 -325 2000 1006]/ItalicAngle 0/Ascent 905/Descent -212/CapHeight 716/StemV 80>>>>",
+            ],
+        );
+        check(
+            "glyph-sizes",
+            &pdf,
+            true,
+            "df53793a35c0946a0bb9c0c0b162fedc",
+        );
+    }
+
+    #[test]
+    fn glyphs_too_big_to_cache_fill_as_paths() {
+        // A 300-pixel O is past the glyph cache's size, so its outline
+        // fills as a path. MuPDF's FreeType hints the outline it takes
+        // at 1024 pixels; nupdf's is unhinted, a level or so off on the
+        // edges, so pixels are sampled away from them.
+        let pdf = page(
+            200,
+            200,
+            "/Font<</H 5 0 R>>",
+            "BT /H 300 Tf 0 0 1 rg 60 -40 Td (O) Tj ET",
+            &["<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"],
+        );
+        let pix = crate::draw::testkit::render("glyph-path", &pdf, 1.0, true);
+        let px = |x, y| crate::draw::testkit::px(&pix, x, y);
+        // The ring of the O, its counter and the page beside it.
+        assert_eq!(px(80, 100), [0, 0, 255]);
+        assert_eq!(px(150, 100), [255, 255, 255]);
+        assert_eq!(px(10, 100), [255, 255, 255]);
+    }
 }

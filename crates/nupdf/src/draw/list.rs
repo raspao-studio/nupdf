@@ -366,3 +366,90 @@ impl Device for DisplayList {
         self.cmds.push(Cmd::EndMetatext);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::Store;
+    use crate::document::Document;
+    use crate::draw::testkit::{render, sink_with};
+    use crate::draw::{DrawDevice, Pix};
+    use crate::geometry::IRect;
+
+    fn listed(pdf: &[u8]) -> (Document, DisplayList) {
+        let doc = Document::open(pdf.to_vec()).unwrap_or_else(|e| panic!("{e:?}"));
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut list = DisplayList::default();
+        let run = crate::run::run_page_contents_with(
+            &doc,
+            &page,
+            &mut list,
+            Store::default(),
+            Some("View"),
+            Matrix::IDENTITY,
+        );
+        assert_eq!(run.error, None);
+        (doc, list)
+    }
+
+    #[test]
+    fn a_replayed_list_draws_what_the_page_does() {
+        // Helvetica stroked, and clipped to its strokes, as well.
+        let pdf = sink_with(
+            "BT /F1 14 Tf 1 Tr 4 112 Td (Ab) Tj ET q /Pattern CS /Sh SCN BT /F1 16 Tf 1 Tr 100 30 Td (W) Tj ET Q",
+        );
+        let (doc, list) = listed(&pdf);
+        // Every kind of call was kept.
+        let kinds: std::collections::HashSet<_> = list
+            .cmds
+            .iter()
+            .map(|c| {
+                format!("{c:?}")
+                    .split(['(', ' '])
+                    .next()
+                    .map(str::to_string)
+            })
+            .collect();
+        for k in [
+            "FillPath",
+            "StrokePath",
+            "ClipPath",
+            "ClipStrokePath",
+            "FillShade",
+            "FillImage",
+            "FillImageMask",
+            "ClipImageMask",
+            "FillText",
+            "StrokeText",
+            "ClipText",
+            "ClipStrokeText",
+            "IgnoreText",
+            "PopClip",
+            "BeginMask",
+            "EndMask",
+            "BeginGroup",
+            "EndGroup",
+            "BeginTile",
+            "EndTile",
+            "BeginLayer",
+            "EndLayer",
+            "BeginMetatext",
+            "EndMetatext",
+        ] {
+            assert!(kinds.contains(&Some(k.to_string())), "no {k}: {kinds:?}");
+        }
+        // Played into a pixmap, the list paints what the page run does.
+        let mut pix =
+            Pix::new(IRect::new(0, 0, 128, 128), 3, false).unwrap_or_else(|e| panic!("{e}"));
+        pix.clear_with(255);
+        let mut dev = DrawDevice::new(Some(&doc), pix);
+        dev.cc.icc = true;
+        list.replay(&mut dev);
+        let direct = render("list-sink", &pdf, 1.0, true);
+        assert!(dev.into_pix() == direct, "the replay differs");
+        // Played into another list, it is kept call for call.
+        let mut again = DisplayList::default();
+        list.replay(&mut again);
+        assert_eq!(format!("{:?}", again.cmds), format!("{:?}", list.cmds));
+    }
+}

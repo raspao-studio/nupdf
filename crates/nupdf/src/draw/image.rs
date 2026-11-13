@@ -19,63 +19,48 @@ use super::paint::{Pix, blend, combine, expand, mul255};
 const MY_EPSILON: f32 = 0.001;
 
 /// `fz_gridfit_matrix`, not as tiled: an axis-aligned image's edges moved
-/// out onto pixel boundaries.
+/// out onto pixel boundaries, upright or turned a quarter.
 pub fn gridfit(mut m: Matrix) -> Matrix {
-    if m.b.abs() >= f32::EPSILON || m.c.abs() >= f32::EPSILON {
-        return m;
-    }
-    let trunc = |v: f32| v as i32 as f32;
-    if m.a > 0.0 {
-        let mut f = trunc(m.e);
-        if f - m.e > MY_EPSILON {
-            f -= 1.0;
-        }
-        m.a += m.e - f;
-        m.e = f;
-        let mut f = trunc(m.a);
-        if m.a - f > MY_EPSILON {
-            f += 1.0;
-        }
-        m.a = f;
-    } else if m.a < 0.0 {
-        let mut f = trunc(m.e);
-        if m.e - f > MY_EPSILON {
-            f += 1.0;
-        }
-        m.a += m.e - f;
-        m.e = f;
-        let mut f = trunc(m.a);
-        if f - m.a > MY_EPSILON {
-            f -= 1.0;
-        }
-        m.a = f;
-    }
-    if m.d > 0.0 {
-        let mut f = trunc(m.f);
-        if f - m.f > MY_EPSILON {
-            f -= 1.0;
-        }
-        m.d += m.f - f;
-        m.f = f;
-        let mut f = trunc(m.d);
-        if m.d - f > MY_EPSILON {
-            f += 1.0;
-        }
-        m.d = f;
-    } else if m.d < 0.0 {
-        let mut f = trunc(m.f);
-        if m.f - f > MY_EPSILON {
-            f += 1.0;
-        }
-        m.d += m.f - f;
-        m.f = f;
-        let mut f = trunc(m.d);
-        if f - m.d > MY_EPSILON {
-            f -= 1.0;
-        }
-        m.d = f;
+    if m.b.abs() < f32::EPSILON && m.c.abs() < f32::EPSILON {
+        fit_edge(&mut m.a, &mut m.e);
+        fit_edge(&mut m.d, &mut m.f);
+    } else if m.a.abs() < f32::EPSILON && m.d.abs() < f32::EPSILON {
+        // As MuPDF pairs them: b's edge is f, and c's is e.
+        fit_edge(&mut m.b, &mut m.f);
+        fit_edge(&mut m.c, &mut m.e);
     }
     m
+}
+
+/// One axis of `fz_gridfit_matrix`: the edge at `origin` and the one at
+/// `origin + size` moved out to whole pixels.
+fn fit_edge(size: &mut f32, origin: &mut f32) {
+    let trunc = |v: f32| v as i32 as f32;
+    if *size > 0.0 {
+        let mut f = trunc(*origin);
+        if f - *origin > MY_EPSILON {
+            f -= 1.0;
+        }
+        *size += *origin - f;
+        *origin = f;
+        let mut f = trunc(*size);
+        if *size - f > MY_EPSILON {
+            f += 1.0;
+        }
+        *size = f;
+    } else if *size < 0.0 {
+        let mut f = trunc(*origin);
+        if *origin - f > MY_EPSILON {
+            f += 1.0;
+        }
+        *size += *origin - f;
+        *origin = f;
+        let mut f = trunc(*size);
+        if f - *size > MY_EPSILON {
+            f -= 1.0;
+        }
+        *size = f;
+    }
 }
 
 /// The size an image shows at under `ctm`, as `fz_get_pixmap_from_image`
@@ -182,7 +167,7 @@ fn pixblock_bresenham(s2buf: &mut [u8], w: i32, h: i32, n: i32, factor: u32, sub
 
 /// `fz_subsample_pixblock`: whole squares, then the partial ones at the
 /// right and bottom edges averaged by their size.
-fn pixblock(buf: &mut [u8], w: i32, h: i32, n: i32, factor: u32) {
+pub(crate) fn pixblock(buf: &mut [u8], w: i32, h: i32, n: i32, factor: u32) {
     let f = 1i32 << factor;
     let stride = i64::from(w * n);
     let fwd = stride;
@@ -1051,6 +1036,29 @@ mod tests {
         });
         assert_eq!((m.e, m.f), (1.0, 2.0));
         assert_eq!((m.a, m.d), (11.0, 6.0));
+        // Turned a quarter, and flipped: b pairs with f, c with e, and
+        // the negative sizes move their edges the other way. nupdf left
+        // turned images off the grid.
+        let m = gridfit(Matrix {
+            a: 0.0,
+            b: -30.0,
+            c: -22.0,
+            d: 0.0,
+            e: 26.3,
+            f: 64.5,
+        });
+        assert_eq!((m.e, m.f), (27.0, 65.0));
+        assert_eq!((m.b, m.c), (-31.0, -23.0));
+        // Neither upright nor turned a quarter: as it was.
+        let skew = Matrix {
+            a: 1.0,
+            b: 0.5,
+            c: 0.0,
+            d: 1.0,
+            e: 0.3,
+            f: 0.3,
+        };
+        assert_eq!(gridfit(skew), skew);
     }
 
     #[test]
@@ -1123,5 +1131,473 @@ mod tests {
             None,
         );
         assert_eq!(dst.samples, img.samples);
+    }
+
+    use crate::draw::testkit::{check, hex_stream, page};
+
+    /// `w` by `h` RGB bytes: red across, green down, blue checkered.
+    fn rgb(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                out.push((x * 255 / (w - 1).max(1)) as u8);
+                out.push((y * 255 / (h - 1).max(1)) as u8);
+                out.push(if (x / 2 + y / 2) % 2 == 0 { 200 } else { 30 });
+            }
+        }
+        out
+    }
+
+    fn image(dict: &str, w: u32, h: u32, data: &[u8]) -> String {
+        hex_stream(
+            &format!("/Type/XObject/Subtype/Image/Width {w}/Height {h}{dict}"),
+            data,
+        )
+    }
+
+    /// A 128-point page drawing `content` with images /I0 to /I(n-1),
+    /// which are objects 5 onwards, and `more` objects after them.
+    fn image_page(
+        name: &str,
+        content: &str,
+        images: &[String],
+        more: &[&str],
+        icc: bool,
+        want: &str,
+    ) {
+        let mut res = String::from("/XObject<<");
+        for i in 0..images.len() {
+            res.push_str(&format!("/I{i} {} 0 R", i + 5));
+        }
+        res.push_str(">>/Pattern<</P<</PatternType 2/Shading<</ShadingType 2/ColorSpace/DeviceRGB/Coords[0 0 128 0]/Function<</FunctionType 2/Domain[0 1]/C0[1 0 0]/C1[0 0 1]/N 1>>>>>>>>/ExtGState<</H<</ca 0.5>>>>");
+        let mut objs: Vec<&str> = images.iter().map(String::as_str).collect();
+        objs.extend_from_slice(more);
+        check(name, &page(128, 128, &res, content, &objs), icc, want);
+    }
+
+    #[test]
+    fn images_scale_flip_and_rotate_onto_the_grid() {
+        let small = image(
+            "/ColorSpace/DeviceRGB/BitsPerComponent 8",
+            16,
+            16,
+            &rgb(16, 16),
+        );
+        let odd = image(
+            "/ColorSpace/DeviceRGB/BitsPerComponent 8",
+            50,
+            37,
+            &rgb(50, 37),
+        );
+        let smooth = image(
+            "/ColorSpace/DeviceRGB/BitsPerComponent 8/Interpolate true",
+            16,
+            16,
+            &rgb(16, 16),
+        );
+        image_page(
+            "image-transforms",
+            "q 16 0 0 16 4 4 cm /I0 Do Q q -24 0 0 24 52 4.4 cm /I0 Do Q
+             q 24 0 0 -24 56.6 52 cm /I0 Do Q q 0 20 -20 0 104 4 cm /I0 Do Q
+             q 10 6 -6 10 112 30 cm /I0 Do Q q 0 -20 20 0 2 50 cm /I2 Do Q
+             q 9 0 0 7 4 60 cm /I1 Do Q q 30 0 0 22 16 60 cm /I1 Do Q
+             q 0 30 -22 0 72 60 cm /I1 Do Q q 20 3 -3 20 80 60 cm /I1 Do Q
+             q 3 0 0 3 108 60 cm /I1 Do Q
+             q 40 0 0 40 100 100 cm /I0 Do Q q 36 0 0 36 4 90 cm /I2 Do Q
+             q /H gs 40 0 0 40 44 86 cm /I1 Do Q",
+            &[small, odd, smooth],
+            &[],
+            true,
+            "77a6ce0fbe68855997d1e4dee557af7d",
+        );
+    }
+
+    #[test]
+    fn images_decode_every_kind_of_sample() {
+        let checker: Vec<u8> = (0..8)
+            .map(|y| if y % 2 == 0 { 0xAA } else { 0x55 })
+            .collect();
+        let cmyk: Vec<u8> = (0..16u32)
+            .flat_map(|i| [(i * 16) as u8, 255 - (i * 16) as u8, (i % 4 * 80) as u8, 20])
+            .collect();
+        // Indexed, 2 bits: 6 a row, padded to bytes.
+        let indexed: Vec<u8> = (0..6u32)
+            .flat_map(|y| {
+                let v: Vec<u32> = (0..6).map(|x| (x + y) % 4).collect();
+                [
+                    (v[0] << 6 | v[1] << 4 | v[2] << 2 | v[3]) as u8,
+                    (v[4] << 6 | v[5] << 4) as u8,
+                ]
+            })
+            .collect();
+        let wide: Vec<u8> = rgb(4, 4).iter().flat_map(|&v| [v, 0x80]).collect();
+        let alpha: Vec<u8> = (0..256u32).map(|i| (i % 16 * 17) as u8).collect();
+        let images = [
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 1/Decode[1 0]",
+                8,
+                8,
+                &checker,
+            ),
+            image("/ColorSpace/DeviceCMYK/BitsPerComponent 8", 4, 4, &cmyk),
+            image(
+                "/ColorSpace[/Indexed/DeviceRGB 3<ff0000 00ff00 0000ff ffff00>]/BitsPerComponent 2",
+                6,
+                6,
+                &indexed,
+            ),
+            image("/ColorSpace/DeviceRGB/BitsPerComponent 16", 4, 4, &wide),
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8/SMask 14 0 R",
+                16,
+                16,
+                &rgb(16, 16),
+            ),
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8/Decode[1 0 1 0 1 0]",
+                16,
+                16,
+                &rgb(16, 16),
+            ),
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8/Mask[0 120 0 120 0 255]",
+                16,
+                16,
+                &rgb(16, 16),
+            ),
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8/Mask 15 0 R",
+                16,
+                16,
+                &rgb(16, 16),
+            ),
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 4",
+                4,
+                2,
+                &[0x01, 0x23, 0x45, 0x67],
+            ),
+        ];
+        let smask = image("/ColorSpace/DeviceGray/BitsPerComponent 8", 16, 16, &alpha);
+        let stencil = image("/ImageMask true/BitsPerComponent 1", 8, 8, &checker);
+        let mut content = String::new();
+        for i in 0..images.len() {
+            let (x, y) = (4 + (i % 4) * 30, 4 + (i / 4) * 30);
+            content.push_str(&format!("q 26 0 0 26 {x} {y} cm /I{i} Do Q\n"));
+        }
+        // Without ICC: lcms turns the CMYK image into RGB a level or two
+        // off moxcms here and there.
+        image_page(
+            "image-kinds",
+            &content,
+            &images,
+            &[&smask, &stencil],
+            false,
+            "4f7cd069493752cbed7465bcc3554431",
+        );
+    }
+
+    #[test]
+    fn stencil_masks_paint_in_the_fill_color_or_a_pattern() {
+        let checker: Vec<u8> = (0..8)
+            .map(|y| if y % 2 == 0 { 0xCC } else { 0x33 })
+            .collect();
+        let stencils = [
+            image("/ImageMask true/BitsPerComponent 1", 8, 8, &checker),
+            image(
+                "/ImageMask true/BitsPerComponent 1/Decode[1 0]/Interpolate true",
+                8,
+                8,
+                &checker,
+            ),
+        ];
+        image_page(
+            "image-stencils",
+            "0.8 0.2 0.3 rg q 30 0 0 30 4 4 cm /I0 Do Q q 30 0 0 30 40 4 cm /I1 Do Q
+             q 3 0 0 3 80 4 cm /I0 Do Q q 20 8 -8 20 100 4 cm /I0 Do Q
+             q /H gs 30 0 0 30 4 40 cm /I0 Do Q
+             /Pattern cs /P scn q 30 0 0 30 40 40 cm /I0 Do Q q 20 8 -8 20 100 40 cm /I1 Do Q
+             q 30 0 0 30 4 80 cm /I1 Do Q",
+            &stencils,
+            &[],
+            true,
+            "32b1ca6c3408ac4ab5c9b2fece62959e",
+        );
+    }
+
+    #[test]
+    fn images_shown_small_decode_subsampled_as_mupdf_does() {
+        // Images shown at under half their size decode by 2^n: streamed
+        // samples averaged in plain blocks, before decode arrays and color
+        // keys; indexed ones after their palette, with Bresenham's blocks
+        // spread over an odd size. nupdf used Bresenham's for all.
+        let indexed: Vec<u8> = (0..37u32)
+            .flat_map(|y| (0..50u32).map(move |x| ((x / 3 + y / 5) % 4) as u8))
+            .collect();
+        let gray: Vec<u8> = (0..37u32)
+            .flat_map(|y| (0..50u32).map(move |x| ((x * 5 + y * 3) % 256) as u8))
+            .collect();
+        let stencil: Vec<u8> = (0..61u32)
+            .flat_map(|y| (0..8u32).map(move |x| if (x + y / 3) % 2 == 0 { 0xF0 } else { 0x3C }))
+            .collect();
+        let images = [
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8",
+                50,
+                37,
+                &rgb(50, 37),
+            ),
+            image(
+                "/ColorSpace[/Indexed/DeviceRGB 3<ff0000 00ff00 0000ff ffff00>]/BitsPerComponent 8",
+                50,
+                37,
+                &indexed,
+            ),
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8/Mask[0 80 0 255 0 255]/Decode[1 0 1 0 1 0]",
+                50,
+                37,
+                &rgb(50, 37),
+            ),
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 8/SMask 9 0 R",
+                50,
+                37,
+                &gray,
+            ),
+            image("/ImageMask true/BitsPerComponent 1", 61, 61, &stencil),
+        ];
+        let mask = image("/ColorSpace/DeviceGray/BitsPerComponent 8", 50, 37, &gray);
+        image_page(
+            "image-subsampled",
+            "q 9 0 0 7 4 4 cm /I0 Do Q q 9 0 0 7 20 4 cm /I1 Do Q q 3 0 0 3 36 4 cm /I1 Do Q
+             q 9 0 0 7 44 4 cm /I2 Do Q q 11 0 0 8 60 4 cm /I3 Do Q
+             0 0 1 rg q 7 0 0 7 76 4 cm /I4 Do Q q 14 0 0 14 90 4 cm /I4 Do Q
+             q 0 9 -7 0 20 30 cm /I1 Do Q q 18 0 0 14 30 30 cm /I1 Do Q",
+            &images,
+            &[&mask],
+            true,
+            "66816cf0b6d5a0d5f4e5c31e51f08992",
+        );
+    }
+
+    #[test]
+    fn jpx_images_decode_and_draw() {
+        // Codestreams MuPDF wrote (tests/data/render/README.md).
+        let gray = include_bytes!("../../tests/data/render/gray8.j2k");
+        let rgb = include_bytes!("../../tests/data/render/rgb8.j2k");
+        let jpx_image = |data: &[u8], dict: &str| {
+            let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+            crate::draw::testkit::stream(
+                &format!(
+                    "/Type/XObject/Subtype/Image/Width 8/Height 8/BitsPerComponent 8{dict}/Filter[/ASCIIHexDecode/JPXDecode]"
+                ),
+                &format!("{hex}>"),
+            )
+        };
+        let images = [
+            jpx_image(gray, "/ColorSpace/DeviceGray"),
+            jpx_image(rgb, "/ColorSpace/DeviceRGB"),
+            jpx_image(rgb, "/ColorSpace/DeviceRGB/SMask 10 0 R"),
+            jpx_image(gray, ""),
+            jpx_image(rgb, "/ColorSpace/DeviceGray"),
+        ];
+        let smask = image(
+            "/ColorSpace/DeviceGray/BitsPerComponent 8",
+            2,
+            1,
+            &[255, 60],
+        );
+        image_page(
+            "image-jpx",
+            "q 40 0 0 40 4 4 cm /I0 Do Q q 40 0 0 40 50 4 cm /I1 Do Q
+             q 40 0 0 40 4 60 cm /I2 Do Q q 40 0 0 40 50 60 cm /I3 Do Q
+             q 20 0 0 20 100 4 cm /I4 Do Q q 3 0 0 3 100 100 cm /I1 Do Q",
+            &images,
+            &[&smask],
+            true,
+            "f55c0dff9e0370ffa67b3cf56c710937",
+        );
+    }
+
+    #[test]
+    fn matted_images_unblend_from_their_soft_mask_color() {
+        // /Matte: the colors were blended with gray by the soft mask's
+        // alpha, which decoding takes out again, at full size and shown
+        // small (no streamed subsampling: Bresenham's blocks after).
+        let alpha: Vec<u8> = (0..50u32 * 37).map(|i| (i % 50 * 5) as u8).collect();
+        let images = [image(
+            "/ColorSpace/DeviceRGB/BitsPerComponent 8/SMask 6 0 R",
+            50,
+            37,
+            &rgb(50, 37),
+        )];
+        let mask = image(
+            "/ColorSpace/DeviceGray/BitsPerComponent 8/Matte[0.5 0.5 0.5]",
+            50,
+            37,
+            &alpha,
+        );
+        image_page(
+            "image-matte",
+            "q 100 0 0 74 4 4 cm /I0 Do Q q 9 0 0 7 4 100 cm /I0 Do Q",
+            &images,
+            &[&mask],
+            true,
+            "dc757a1684800776d18482df8c99429f",
+        );
+    }
+
+    #[test]
+    fn inline_keyed_and_truncated_images_draw() {
+        // Color keys on 1, 2, 4 and 16-bit samples and on palette
+        // indexes; data cut short, padded; inline images, filtered or not.
+        let images = [
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 1/Mask[1 1]",
+                8,
+                2,
+                &[0xF0, 0x0F],
+            ),
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 2/Mask[1 2]",
+                4,
+                2,
+                &[0b0001_1011, 0b1110_0100],
+            ),
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 4/Mask[3 9]",
+                4,
+                2,
+                &[0x01, 0x5A, 0xCF, 0x37],
+            ),
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 16/Mask[0 30000]",
+                2,
+                2,
+                &[0x10, 0, 0x80, 0, 0xFF, 0xFF, 0x00, 0x20],
+            ),
+            image(
+                "/ColorSpace[/Indexed/DeviceRGB 3<ff0000 00ff00 0000ff ffff00>]/BitsPerComponent 8/Mask[1 2]",
+                4,
+                1,
+                &[0, 1, 2, 3],
+            ),
+            image("/ColorSpace/DeviceRGB/BitsPerComponent 8", 4, 4, &rgb(4, 2)),
+        ];
+        image_page(
+            "image-keyed",
+            "0.9 0.8 0.2 rg 0 0 128 128 re f
+             q 28 0 0 28 2 2 cm /I0 Do Q q 28 0 0 28 34 2 cm /I1 Do Q
+             q 28 0 0 28 66 2 cm /I2 Do Q q 28 0 0 28 98 2 cm /I3 Do Q
+             q 28 0 0 28 2 34 cm /I4 Do Q q 28 0 0 28 34 34 cm /I5 Do Q
+             q 28 0 0 28 66 34 cm BI /W 2 /H 2 /CS /RGB /BPC 8 ID \u{1}\u{2}\u{3}\u{fe}\u{fd}\u{fc}\u{40}\u{80}\u{c0}\u{11}\u{22}\u{33} EI Q
+             q 28 0 0 28 98 34 cm BI /W 4 /H 2 /CS /G /BPC 4 /F /AHx /D [1 0] ID 0123456789abcdef> EI Q
+             q 28 0 0 28 2 66 cm BI /W 3 /H 3 /IM true /D [1 0] /F [/AHx] ID e0a040> EI Q",
+            &images,
+            &[],
+            true,
+            "284222802964b48d6695951695dfa230",
+        );
+    }
+
+    #[test]
+    fn images_scale_down_flipped_clipped_and_off_the_grid() {
+        // Shrunk images mirrored each way and turned, at fractional
+        // offsets (which give them an alpha edge), cut by the page's edge
+        // and by a clip, translucent, and with a soft mask.
+        let alpha: Vec<u8> = (0..50u32 * 37).map(|i| (i % 50 * 5) as u8).collect();
+        let images = [
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8",
+                50,
+                37,
+                &rgb(50, 37),
+            ),
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8/SMask 6 0 R",
+                50,
+                37,
+                &rgb(50, 37),
+            ),
+        ];
+        let mask = image("/ColorSpace/DeviceGray/BitsPerComponent 8", 50, 37, &alpha);
+        image_page(
+            "image-scaled-flipped",
+            "q -30 0 0 22 34.3 4.6 cm /I0 Do Q q 30 0 0 -22 40.5 26.2 cm /I0 Do Q
+             q -30 0 0 -22 104.7 26.4 cm /I0 Do Q
+             q 0 -30 -22 0 26.3 64.5 cm /I0 Do Q q 0 30 22 0 40.2 34.1 cm /I1 Do Q
+             q -40 0 0 30 20 110 cm /I0 Do Q q 40 0 0 -30 110 30 cm /I0 Do Q
+             q 70 70 30 30 re W n 40 0 0 30 64.4 64.4 cm /I1 Do Q
+             q /H gs 33 0 0 25 90.5 90.5 cm /I0 Do Q
+             q 0 -30 22 0 64 64 cm /I1 Do Q",
+            &images,
+            &[&mask],
+            true,
+            "12006e0ff12fd304484149a4c264ff64",
+        );
+    }
+
+    #[test]
+    fn color_keys_out_of_range_and_mismatched_mattes() {
+        // Keys past the sample range are masked or clamped into it, and
+        // 1-bit palette keys out of range are dropped or taken as 1; a
+        // /Matte whose mask is another size is ignored.
+        let pal = "[/Indexed/DeviceRGB 1<ff0000 0000ff>]";
+        let images = [
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 8/Mask[300 400]",
+                4,
+                1,
+                &[10, 44, 144, 200],
+            ),
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 4/Mask[-3 2]",
+                4,
+                1,
+                &[0x01, 0x2F],
+            ),
+            image(
+                &format!("/ColorSpace{pal}/BitsPerComponent 1/Mask[5 5]"),
+                8,
+                1,
+                &[0xA5],
+            ),
+            image(
+                &format!("/ColorSpace{pal}/BitsPerComponent 1/Mask[0 5]"),
+                8,
+                1,
+                &[0xA5],
+            ),
+            image(
+                "/ColorSpace/DeviceGray/BitsPerComponent 1/Mask[0 3]",
+                8,
+                1,
+                &[0xA5],
+            ),
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8/SMask 10 0 R",
+                4,
+                4,
+                &rgb(4, 4),
+            ),
+        ];
+        let matte = image(
+            "/ColorSpace/DeviceGray/BitsPerComponent 8/Matte[1 1 1]",
+            2,
+            2,
+            &[255, 128, 64, 0],
+        );
+        image_page(
+            "image-odd-keys",
+            "0.2 0.8 0.3 rg 0 0 128 128 re f
+             q 28 0 0 28 2 2 cm /I0 Do Q q 28 0 0 28 34 2 cm /I1 Do Q
+             q 28 0 0 28 66 2 cm /I2 Do Q q 28 0 0 28 98 2 cm /I3 Do Q
+             q 28 0 0 28 2 34 cm /I4 Do Q q 28 0 0 28 34 34 cm /I5 Do Q",
+            &images,
+            &[&matte],
+            true,
+            "18f0a45d302c71680d31c8ce214582a5",
+        );
     }
 }

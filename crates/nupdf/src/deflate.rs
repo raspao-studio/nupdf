@@ -1488,6 +1488,195 @@ mod tests {
         }
     }
 
+    fn pseudo_random(n: usize, seed: u32) -> Vec<u8> {
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (x >> 16) as u8
+            })
+            .collect()
+    }
+
+    /// Inputs that steer zlib down its other paths: maximal matches,
+    /// incompressible data (stored blocks), far and near repeats, a mix
+    /// that changes block types, and input too short for dynamic trees.
+    fn inputs() -> Vec<(&'static str, Vec<u8>)> {
+        let random = pseudo_random(50_000, 9);
+        let mut far = pseudo_random(20_000, 4);
+        far.extend_from_within(..15_000);
+        far.extend(pseudo_random(40_000, 5));
+        far.extend_from_within(..5_000);
+        let mut near = Vec::new();
+        for i in 0..4000u32 {
+            near.extend_from_slice(&i.to_le_bytes()[..3]);
+            near.extend_from_slice(b"abc");
+        }
+        let mut mixed = sample(60_000, 5);
+        mixed.extend(pseudo_random(30_000, 6));
+        mixed.extend(vec![b'z'; 40_000]);
+        mixed.extend(sample(30_000, 8));
+        vec![
+            ("sample", sample(5000, 3)),
+            ("text", sample(70_000, 7)),
+            ("runs", vec![b'a'; 100_000]),
+            ("random", random),
+            ("far", far),
+            ("near", near),
+            ("mixed", mixed),
+            ("short", b"BT /F1 12 Tf (Hi) Tj ET".to_vec()),
+        ]
+    }
+
+    /// MuPDF 1.28.6's deflate of each input, at each level: the length
+    /// and CRC-32, from tests/data/deflate/zlib_oracle.py.
+    #[rustfmt::skip]
+    const MUPDF_DEFLATE: &[(&str, i32, usize, u32)] = &[
+        ("sample", -1, 1017, 0x972a31db),
+        ("sample", 0, 5011, 0x043ff313),
+        ("sample", 1, 1183, 0xe046a7de),
+        ("sample", 2, 1137, 0xc8168608),
+        ("sample", 3, 1087, 0xca794c86),
+        ("sample", 4, 1069, 0x6eacfb65),
+        ("sample", 5, 1043, 0x36a29b08),
+        ("sample", 6, 1017, 0x972a31db),
+        ("sample", 7, 1015, 0x89618642),
+        ("sample", 8, 1015, 0x89618642),
+        ("sample", 9, 1015, 0x89618642),
+        ("text", -1, 11823, 0x24119dc1),
+        ("text", 0, 70016, 0xce829df7),
+        ("text", 1, 14985, 0x32ad1ee6),
+        ("text", 2, 14061, 0xcc9b4625),
+        ("text", 3, 13125, 0x67ef1a81),
+        ("text", 4, 12920, 0x93875819),
+        ("text", 5, 12425, 0x981a179e),
+        ("text", 6, 11823, 0x24119dc1),
+        ("text", 7, 11603, 0x9e73e246),
+        ("text", 8, 11347, 0x8dcbdc89),
+        ("text", 9, 11347, 0x8dcbdc89),
+        ("runs", -1, 121, 0x1993b6b2),
+        ("runs", 0, 100016, 0x589f299a),
+        ("runs", 1, 461, 0x4467d0ce),
+        ("runs", 2, 461, 0x5b108768),
+        ("runs", 3, 461, 0x5b108768),
+        ("runs", 4, 121, 0x22a650e5),
+        ("runs", 5, 121, 0x22a650e5),
+        ("runs", 6, 121, 0x1993b6b2),
+        ("runs", 7, 121, 0x3e4fca05),
+        ("runs", 8, 121, 0x3e4fca05),
+        ("runs", 9, 121, 0x3e4fca05),
+        ("random", -1, 50026, 0x75742cd9),
+        ("random", 0, 50011, 0x06152910),
+        ("random", 1, 50026, 0xf6fbc331),
+        ("random", 2, 50026, 0x24c9cb4f),
+        ("random", 3, 50026, 0x24c9cb4f),
+        ("random", 4, 50026, 0x80e9592d),
+        ("random", 5, 50026, 0x80e9592d),
+        ("random", 6, 50026, 0x75742cd9),
+        ("random", 7, 50026, 0xc400fab7),
+        ("random", 8, 50026, 0xc400fab7),
+        ("random", 9, 50026, 0xc400fab7),
+        ("far", -1, 65239, 0xb42ff722),
+        ("far", 0, 80016, 0x9052104f),
+        ("far", 1, 65246, 0x10e9e84a),
+        ("far", 2, 65246, 0xc3fdd987),
+        ("far", 3, 65246, 0xc3fdd987),
+        ("far", 4, 65239, 0x9f98a427),
+        ("far", 5, 65239, 0x9f98a427),
+        ("far", 6, 65239, 0xb42ff722),
+        ("far", 7, 65239, 0xb1b3cc6b),
+        ("far", 8, 65239, 0xb1b3cc6b),
+        ("far", 9, 65239, 0xb1b3cc6b),
+        ("near", -1, 6081, 0x4fbb89a6),
+        ("near", 0, 24011, 0x95e966b8),
+        ("near", 1, 6067, 0x953a8b45),
+        ("near", 2, 6132, 0x8199c6ec),
+        ("near", 3, 6132, 0x8199c6ec),
+        ("near", 4, 6081, 0xd90a73c8),
+        ("near", 5, 6081, 0xd90a73c8),
+        ("near", 6, 6081, 0x4fbb89a6),
+        ("near", 7, 6061, 0x693e8b04),
+        ("near", 8, 6059, 0x52b9a245),
+        ("near", 9, 6059, 0x52b9a245),
+        ("mixed", -1, 46858, 0xbd746a98),
+        ("mixed", 0, 160021, 0xaf38be34),
+        ("mixed", 1, 51766, 0xddf736e9),
+        ("mixed", 2, 50189, 0x85be67ba),
+        ("mixed", 3, 48734, 0xb299e173),
+        ("mixed", 4, 48509, 0xe5234319),
+        ("mixed", 5, 47721, 0x7ddb225c),
+        ("mixed", 6, 46858, 0xbd746a98),
+        ("mixed", 7, 46552, 0x3557e7ce),
+        ("mixed", 8, 46260, 0x54ea5008),
+        ("mixed", 9, 46258, 0x29515eeb),
+        ("short", -1, 31, 0x7a222c0f),
+        ("short", 0, 34, 0x49872a15),
+        ("short", 1, 31, 0xced88db6),
+        ("short", 2, 31, 0x2ba1f0c4),
+        ("short", 3, 31, 0x2ba1f0c4),
+        ("short", 4, 31, 0x2ba1f0c4),
+        ("short", 5, 31, 0x2ba1f0c4),
+        ("short", 6, 31, 0x7a222c0f),
+        ("short", 7, 31, 0xeba19076),
+        ("short", 8, 31, 0xeba19076),
+        ("short", 9, 31, 0xeba19076),
+    ];
+
+    #[test]
+    fn every_level_deflates_as_mupdf_saves() {
+        let dump = std::env::var_os("NUPDF_DUMP_DEFLATE_CASES");
+        let mut wrong = Vec::new();
+        for (name, data) in inputs() {
+            if let Some(dir) = &dump {
+                let path = std::path::Path::new(dir).join(format!("{name}.bin"));
+                std::fs::write(path, &data).unwrap_or_else(|e| panic!("{e}"));
+            }
+            for &(_, level, len, sum) in MUPDF_DEFLATE.iter().filter(|c| c.0 == name) {
+                let out = compress(&data, level).unwrap_or_default();
+                if (out.len(), crc(&out)) != (len, sum) {
+                    wrong.push(format!(
+                        "{name} level {level}: {} {:08x}",
+                        out.len(),
+                        crc(&out)
+                    ));
+                }
+                assert_eq!(inflate(&out), data, "{name} level {level}");
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    #[test]
+    fn the_static_tables_are_zlibs() {
+        // Evaluated at run time too: the tables `TABLES` holds, by the
+        // values zlib's trees.h lists.
+        let t = tables();
+        let ct = |c: Ct| (c.fc, c.dl);
+        assert_eq!(ct(t.static_ltree[0]), (12, 8));
+        assert_eq!(ct(t.static_ltree[143]), (253, 8));
+        assert_eq!(ct(t.static_ltree[144]), (19, 9));
+        assert_eq!(ct(t.static_ltree[255]), (511, 9));
+        assert_eq!(ct(t.static_ltree[256]), (0, 7));
+        assert_eq!(ct(t.static_ltree[280]), (3, 8));
+        assert_eq!(ct(t.static_ltree[287]), (227, 8));
+        assert_eq!(ct(t.static_dtree[1]), (16, 5));
+        assert_eq!(ct(t.static_dtree[29]), (23, 5));
+        assert_eq!(&t.dist_code[..8], [0, 1, 2, 3, 4, 4, 5, 5]);
+        assert_eq!(&t.dist_code[256..264], [0, 0, 16, 17, 18, 18, 19, 19]);
+        assert_eq!(t.dist_code[511], 29);
+        assert_eq!(
+            (
+                t.length_code[0],
+                t.length_code[8],
+                t.length_code[254],
+                t.length_code[255]
+            ),
+            (0, 8, 27, 28)
+        );
+        assert_eq!((t.base_length[8], t.base_length[28]), (8, 0));
+        assert_eq!((t.base_dist[4], t.base_dist[29]), (4, 24576));
+    }
+
     #[test]
     fn adler32_matches_zlib() {
         assert_eq!(adler32(1, b""), 1);

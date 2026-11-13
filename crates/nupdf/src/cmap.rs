@@ -872,6 +872,331 @@ mod tests {
         assert_eq!(c.decode(b"\xff"), (0, 1));
     }
 
+    /// A document with `objects` as objects 2, 3, ...
+    fn doc_of(objects: &[&str]) -> Document {
+        let mut file = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n".to_vec();
+        for (i, body) in objects.iter().enumerate() {
+            file.extend_from_slice(format!("{} 0 obj{body}endobj\n", i + 2).as_bytes());
+        }
+        file.extend_from_slice(
+            format!("trailer<</Root 1 0 R/Size {}>>\n", objects.len() + 2).as_bytes(),
+        );
+        Document::open(file).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    fn cmap_stream(dict: &str, program: &str) -> String {
+        format!(
+            "<<{dict}/Length {}>>stream\n{program}\nendstream",
+            program.len() + 1
+        )
+    }
+
+    /// Parses `program`, returning the CMap and the warnings.
+    fn parsed(program: &str) -> (Cmap, Vec<String>) {
+        let doc = doc_of(&[]);
+        let before = doc.diagnostics().snapshot().len();
+        let cmap = parse(program.as_bytes(), &doc).unwrap_or_else(|e| panic!("{e}"));
+        let w = doc.diagnostics().snapshot()[before..]
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        (cmap, w)
+    }
+
+    #[test]
+    fn a_cmap_program_maps_cids_and_unicode() {
+        let (c, w) = parsed(
+            "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+             /CMapName /Test-H def /WMode 1 def\n\
+             2 begincodespacerange <00> <7f> <8000> <ffff> endcodespacerange\n\
+             1 begincidrange <20> <7e> 1 endcidrange\n\
+             1 begincidchar <8140> 633 endcidchar\n\
+             endcmap CMapName currentdict /CMap defineresource pop end end\n\
+             1 begincidchar <41> 9 endcidchar",
+        );
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!((c.name.as_str(), c.wmode), ("Test-H", 1));
+        assert_eq!(c.decode(b"\x81\x40"), (0x8140, 2));
+        assert_eq!(
+            (c.lookup(0x20), c.lookup(0x41), c.lookup(0x8140)),
+            (1, 34, 633)
+        );
+        // Nothing after endcmap is read.
+        assert_eq!(c.lookup(0x7f), -1);
+
+        let (c, w) = parsed(
+            "1 begincodespacerange <0000> <ffff> endcodespacerange\n\
+             3 beginbfchar <0001> <0041> <0002> <d83dde00> <0003> <006600660069> endbfchar\n\
+             3 beginbfrange <0010> <0012> <0061>\n\
+             <0020> <0021> <00660066>\n\
+             <0030> <0032> [<0078> <> <00790079>] endbfrange",
+        );
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.lookup(1), 0x41);
+        assert_eq!(c.lookup_full(2), [0x1f600]);
+        assert_eq!(c.lookup_full(3), [0x66, 0x66, 0x69]);
+        assert_eq!((c.lookup(0x10), c.lookup(0x12)), (0x61, 0x63));
+        // A multi-unit destination counts up in its last unit.
+        assert_eq!(c.lookup_full(0x20), [0x66, 0x66]);
+        assert_eq!(c.lookup_full(0x21), [0x66, 0x67]);
+        // An array maps code by code; an empty string maps nothing.
+        assert_eq!(c.lookup(0x30), 0x78);
+        assert_eq!(c.lookup_full(0x31), Vec::<i32>::new());
+        assert_eq!(c.lookup_full(0x32), [0x79, 0x79]);
+    }
+
+    #[test]
+    fn cmap_syntax_errors_warn_and_skip_as_in_mupdf() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "/CMapName 5 /WMode /V",
+                &[
+                    "expected name after CMapName in cmap",
+                    "expected integer after WMode in cmap",
+                ],
+            ),
+            (
+                "begincodespacerange 5 endcodespacerange",
+                &["expected string or endcodespacerange"],
+            ),
+            (
+                "begincodespacerange <00> 5 endcodespacerange",
+                &["expected string or endcodespacerange"],
+            ),
+            (
+                "begincidrange 5 endcidrange",
+                &["expected string or endcidrange"],
+            ),
+            ("begincidrange <00> 5 endcidrange", &["expected string"]),
+            (
+                "begincidrange <00> <01> <02> endcidrange",
+                &["expected integer"],
+            ),
+            (
+                "begincidchar 5 endcidchar",
+                &["expected string or endcidchar"],
+            ),
+            ("begincidchar <00> <01> endcidchar", &["expected integer"]),
+            ("beginbfchar 5 endbfchar", &["expected string or endbfchar"]),
+            ("beginbfchar <00> 5 endbfchar", &["expected string"]),
+            (
+                "beginbfrange 5 endbfrange",
+                &["expected string or endbfrange"],
+            ),
+            ("beginbfrange <00> 5 endbfrange", &["expected string"]),
+            (
+                "beginbfrange <02> <01> <00> endbfrange",
+                &["bfrange limits out of range"],
+            ),
+            (
+                "beginbfrange <010000> <010001> <00> endbfrange",
+                &["bfrange limits out of range"],
+            ),
+            (
+                "beginbfrange <00> <01> 5 endbfrange",
+                &["expected string or array or endbfrange"],
+            ),
+            (
+                "begincodespacerange <00> <ff> endcodespacerange beginbfrange <00> <01> [<0041> 5] endbfrange",
+                &["expected string or ]"],
+            ),
+            // Ranges without a code space get a two-byte one.
+            (
+                "begincidrange <05> <01> 0 endcidrange",
+                &["range limits out of range in cmap "],
+            ),
+            (
+                "begincidchar <05> 1 endcidchar",
+                &["CMap is missing codespace range"],
+            ),
+        ];
+        for (program, want) in cases {
+            let (_, w) = parsed(program);
+            assert_eq!(&w, want, "{program}");
+        }
+        // Parsing resumes after the section that went wrong.
+        let (c, _) = parsed(
+            "1 begincodespacerange <00> <ff> endcodespacerange \
+             beginbfrange 5 <00> <01> endbfrange 1 beginbfchar <41> <0042> endbfchar",
+        );
+        assert_eq!(c.lookup(0x41), 0x42);
+        // Keywords count with trailing garbage, as MuPDF's is_keyword does.
+        let (c, _) = parsed(
+            "1 begincodespacerangeX <00> <ff> endcodespacerangeY \
+             begincidcharZ <41> 7 endcidcharW",
+        );
+        assert_eq!(c.lookup(0x41), 7);
+    }
+
+    #[test]
+    fn table_limits_and_range_bookkeeping() {
+        let mut warnings = Vec::new();
+        let mut w = |m: &str| warnings.push(m.to_string());
+        let mut c = Cmap::new();
+        c.name = "Big".into();
+        for i in 0..39 {
+            c.add_codespace(i, i, 1, &mut w);
+        }
+        c.add_codespace(50, 50, 1, &mut w);
+        assert_eq!(c.codespaces.len(), 39);
+        // Too long a one-to-many mapping is dropped.
+        c.map_one_to_many(1, &[0x41; 33], &mut w)
+            .unwrap_or_default();
+        assert_eq!(c.lookup_full(1), Vec::<i32>::new());
+        assert_eq!(
+            warnings,
+            [
+                "assert: too many code space ranges",
+                "ignoring one to many mapping in cmap Big",
+            ]
+        );
+        // Ranges that do not merge fill the table to its limit.
+        let mut c = Cmap::new();
+        c.add_codespace(0, 0xffff_ffff, 4, &mut |_| {});
+        let mut result = Ok(());
+        for i in 0..70_000u32 {
+            result = c.map_range(i * 2, i * 2, (i * 7) as i32, &mut |_| {});
+            if result.is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            result,
+            Err("limit error: too many entries in CMap table".into())
+        );
+        let mut c = Cmap::new();
+        c.add_codespace(0, 0xffff, 2, &mut |_| {});
+        let mut result = Ok(());
+        for i in 0..30_000u32 {
+            result = c.map_one_to_many(i, &[1, 2], &mut |_| {});
+            if result.is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            result,
+            Err("limit error: too many entries in CMap table".into())
+        );
+
+        // A range filling the gap between two it continues joins all three.
+        let mut c = Cmap::new();
+        c.add_codespace(0, 0xffff, 2, &mut |_| {});
+        let _ = c.map_range(0, 9, 100, &mut |_| {});
+        let _ = c.map_range(20, 29, 120, &mut |_| {});
+        let _ = c.map_range(10, 19, 110, &mut |_| {});
+        assert_eq!(c.sorted_ranges(), [(0, 29, 100)]);
+        // One continued by the next range joins it from below.
+        let _ = c.map_range(40, 49, 140, &mut |_| {});
+        let _ = c.map_range(35, 39, 135, &mut |_| {});
+        assert_eq!(c.sorted_ranges(), [(0, 29, 100), (35, 49, 135)]);
+        // A one-to-one range over a one-to-many mapping replaces it.
+        let _ = c.map_one_to_many(60, &[1, 2], &mut |_| {});
+        let _ = c.map_range(60, 60, 5, &mut |_| {});
+        assert_eq!(c.lookup_full(60), [5]);
+        // Wide ranges sort after the 16-bit ones.
+        let _ = c.map_range(0x10000, 0x10001, 1, &mut |_| {});
+        assert_eq!(c.sorted_ranges().last(), Some(&(0x10000, 0x10001, 1)));
+    }
+
+    #[test]
+    fn identity_tests_and_lookups_follow_usecmap_chains() {
+        let v = Cmap::identity(1, 2);
+        assert_eq!((v.name.as_str(), v.wmode), ("Identity-V", 1));
+        let h = Cmap::identity(0, 2);
+        assert!(h.is_effectively_identity(&Cmap::new()));
+        // A one-to-many mapping, here or in the other CMap, is not.
+        let mut many = Cmap::identity(0, 2);
+        let _ = many.map_one_to_many(5, &[1, 2], &mut |_| {});
+        assert!(!many.is_effectively_identity(&Cmap::new()));
+        assert!(!h.is_effectively_identity(&many));
+        // Nor is an offset range, or two ranges.
+        let mut off = Cmap::new();
+        let _ = off.map_range(0, 0xffff, 1, &mut |_| {});
+        assert!(!off.is_effectively_identity(&Cmap::new()));
+        let mut two = Cmap::new();
+        let _ = two.map_range(0, 5, 0, &mut |_| {});
+        let _ = two.map_range(7, 9, 70, &mut |_| {});
+        assert!(!two.is_effectively_identity(&Cmap::new()));
+        // An empty CMap over an identity one is identity.
+        let mut child = Cmap::new();
+        child.set_usecmap(Arc::new(Cmap::identity(0, 2)));
+        assert!(child.is_effectively_identity(&Cmap::new()));
+        assert_eq!(child.codespaces.len(), 1);
+        assert_eq!(child.lookup(0x1234), 0x1234);
+        assert_eq!(child.lookup_full(0x99), [0x99]);
+        // A chain deeper than MuPDF follows ends unmapped.
+        let mut deep = Arc::new(Cmap::identity(0, 2));
+        for _ in 0..40 {
+            let mut c = Cmap::new();
+            c.set_usecmap(deep);
+            deep = Arc::new(c);
+        }
+        assert_eq!(deep.lookup(7), -1);
+        assert_eq!(deep.lookup_full(7), Vec::<i32>::new());
+        assert!(!deep.is_effectively_identity(&Cmap::new()));
+        assert!(builtin("Identity-H").is_some());
+        assert!(builtin("Nope").is_none());
+    }
+
+    #[test]
+    fn embedded_cmaps_follow_their_usecmap_as_in_mupdf() {
+        let load = |objects: &[&str]| {
+            let doc = doc_of(objects);
+            let before = doc.diagnostics().snapshot().len();
+            let c = load_embedded(&doc, &Object::Ref(crate::ObjRef::new(2, 0)));
+            let w: Vec<String> = doc.diagnostics().snapshot()[before..]
+                .iter()
+                .map(|d| d.message.clone())
+                .collect();
+            (c, w)
+        };
+        let body =
+            "1 begincodespacerange <00> <ff> endcodespacerange 1 begincidchar <41> 7 endcidchar";
+        // /UseCMap naming a system CMap, and /WMode from the dictionary.
+        let (c, w) = load(&[&cmap_stream("/UseCMap/Identity-H/WMode 1", body)]);
+        let c = c.unwrap_or_else(|e| panic!("{e}"));
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!((c.wmode, c.lookup(0x41), c.lookup(0x1234)), (1, 7, 0x1234));
+        let (c, w) = load(&[&cmap_stream("/UseCMap/Nope-H", body)]);
+        assert!(c.is_ok());
+        assert_eq!(
+            w,
+            [
+                "format error: no builtin cmap file: Nope-H",
+                "cannot load system CMap: Nope-H"
+            ]
+        );
+        // /UseCMap naming another stream.
+        let parent = cmap_stream(
+            "",
+            "1 begincodespacerange <00> <ff> endcodespacerange 1 begincidchar <42> 8 endcidchar",
+        );
+        let (c, _) = load(&[&cmap_stream("/UseCMap 3 0 R", body), &parent]);
+        let c = c.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((c.lookup(0x41), c.lookup(0x42)), (7, 8));
+        assert_eq!(c.decode(b"\x42"), (0x42, 1));
+        let (c, _) = load(&[&cmap_stream("/UseCMap 2 0 R", body)]);
+        assert_eq!(c.err().as_deref(), Some("format error: recursive CMap"));
+        let (c, _) = load(&[&cmap_stream("/UseCMap 3 0 R", body), "5"]);
+        assert_eq!(
+            c.err().as_deref(),
+            Some("format error: object is not a stream")
+        );
+        // usecmap in the program.
+        let (c, w) = load(&[&cmap_stream("", &format!("/Identity-H usecmap {body}"))]);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.map(|c| c.lookup(0x99)), Ok(0x99));
+        let (c, w) = load(&[&cmap_stream("", &format!("/Nope-V usecmap {body}"))]);
+        assert!(c.is_ok());
+        assert_eq!(
+            w,
+            [
+                "format error: no builtin cmap file: Nope-V",
+                "cannot load system CMap: "
+            ]
+        );
+    }
+
     #[test]
     fn vertical_cmaps_find_codes_through_their_horizontal_parent() {
         let c = load_system(b"UniGB-UTF16-V").unwrap_or_else(|e| panic!("{e}"));

@@ -696,4 +696,267 @@ mod tests {
         };
         assert!(!remove_page_fill(&mut page));
     }
+
+    // Whole pages, segmented as MuPDF segments them (oracle/js/stext.js
+    // with the same options on the same files).
+
+    /// A 400 by 400 page with Helvetica as F1 and Helvetica-Bold as F2.
+    fn page(content: &str, resources: &str, opts: &str) -> StextPage {
+        let pdf = format!(
+            "%PDF-1.7\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+             2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+             3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 400]/Contents 4 0 R/Resources<</Font<<\
+             /F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
+             /F2<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>>>{resources}>>>>endobj\n\
+             4 0 obj<</Length {}>>stream\n{content}\nendstream endobj\n\
+             trailer<</Root 1 0 R/Size 5>>\n",
+            content.len()
+        );
+        let doc =
+            crate::document::Document::open(pdf.into_bytes()).unwrap_or_else(|e| panic!("{e:?}"));
+        let obj = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let opts = crate::stext::Options::parse(opts).unwrap_or_else(|e| panic!("{e}"));
+        crate::stext::extract_page(&doc, &obj, opts, crate::content::Store::default())
+            .0
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Each block in brief: `<Div>` and `</Div>` around a structure's
+    /// blocks, a text block's lines joined by `|`, `[i]`, `[v]`.
+    fn outline(blocks: &[Block]) -> Vec<String> {
+        let mut out = Vec::new();
+        for b in blocks {
+            match b {
+                Block::Struct(s) => {
+                    out.push(format!("<{}>", s.standard));
+                    out.extend(outline(&s.blocks));
+                    out.push(format!("</{}>", s.standard));
+                }
+                Block::Text(t) => out.push(
+                    t.lines
+                        .iter()
+                        .map(|l| {
+                            l.chars
+                                .iter()
+                                .map(|c| crate::stext::rune_char(c.c))
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                ),
+                Block::Image(_) => out.push("[i]".into()),
+                Block::Vector(_) => out.push("[v]".into()),
+                Block::Grid(_) => out.push("[g]".into()),
+            }
+        }
+        out
+    }
+
+    /// The structures' indexes, depth first.
+    fn indexes(blocks: &[Block], out: &mut Vec<i32>) {
+        for b in blocks {
+            if let Block::Struct(s) = b {
+                out.push(s.index);
+                indexes(&s.blocks, out);
+            }
+        }
+    }
+
+    const COLUMNS: &str = "BT /F2 16 Tf 20 370 Td (A Heading Line) Tj ET \
+        BT /F1 10 Tf 20 346 Td (The first paragraph runs on for) Tj ET \
+        BT /F1 10 Tf 20 334 Td (several lines of plain body text) Tj ET \
+        BT /F1 10 Tf 20 322 Td (and ends here.) Tj ET \
+        BT /F1 10 Tf 20 310 Td (   The second one starts with) Tj ET \
+        BT /F1 10 Tf 20 298 Td (an indent and goes on for a) Tj ET \
+        BT /F1 10 Tf 20 286 Td (while longer than that.) Tj ET \
+        BT /F1 10 Tf 20 274 Td (A third without indent but after) Tj ET \
+        BT /F1 10 Tf 20 262 Td (a short line.) Tj ET \
+        BT /F1 10 Tf 230 346 Td (Right column text that is) Tj ET \
+        BT /F1 10 Tf 230 334 Td (set apart by a wide gap) Tj ET \
+        BT /F1 10 Tf 230 322 Td (from the left column.) Tj ET \
+        BT /F1 10 Tf 230 298 Td (Another block below it) Tj ET \
+        BT /F1 10 Tf 230 286 Td (with two lines.) Tj ET \
+        BT /F1 10 Tf 20 60 Td (Footer centered) Tj ET";
+
+    #[test]
+    fn text_columns_and_a_footer_become_divs() {
+        let p = page(COLUMNS, "", "segment");
+        assert_eq!(
+            outline(&p.blocks),
+            [
+                "<Div>",
+                "<Div>",
+                "<Div>",
+                "A Heading Line",
+                "The first paragraph runs on for|several lines of plain body text|and ends here.|   \
+                 The second one starts with|an indent and goes on for a|while longer than that.|\
+                 A third without indent but after|a short line.",
+                "</Div>",
+                "<Div>",
+                "Right column text that is|set apart by a wide gap|from the left column.",
+                "Another block below it|with two lines.",
+                "</Div>",
+                "</Div>",
+                "<Div>",
+                "Footer centered",
+                "</Div>",
+                "</Div>"
+            ]
+        );
+        let mut idx = Vec::new();
+        indexes(&p.blocks, &mut idx);
+        assert_eq!(idx, [0, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn blocks_split_by_a_gap_give_their_lines_to_each_side() {
+        let p = page(
+            "BT /F1 12 Tf 20 360 Td [(gap) -400 (no) -150 (space) -1500 (wide) 300 (back)] TJ ET \
+             BT /F1 12 Tf 20 340 Td (Bold) Tj ET BT /F1 12 Tf 20.3 340 Td (Bold) Tj ET \
+             BT /F1 12 Tf 20 320 Td (E=mc) Tj 6 Ts /F1 7 Tf (2) Tj 0 Ts /F1 12 Tf ( done) Tj ET \
+             BT /F1 12 Tf 20 290 Td (\\225 item one) Tj 0 -14 Td (\\225 item two) Tj 0 -14 Td (1. numbered) Tj ET \
+             BT /F1 12 Tf 30 230 Td (indent start) Tj -10 -14 Td (next line) Tj 0 -30 Td (far below) Tj ET \
+             BT /F1 12 Tf 20 150 Td (left) Tj 200 0 Td (right) Tj ET \
+             BT /F1 12 Tf 20 130 Td (a) Tj -2 0 Td (b) Tj ET",
+            "",
+            "segment",
+        );
+        assert_eq!(
+            outline(&p.blocks),
+            [
+                "<Div>",
+                "<Div>",
+                "<Div>",
+                "<Div>",
+                "<Div>",
+                "gap nospace",
+                "Bold|Bold",
+                "E=mc",
+                "2 done",
+                "\u{2022} item one|\u{2022} item two|1. numbered",
+                "</Div>",
+                "<Div>",
+                "indent start|next line",
+                "far below",
+                "</Div>",
+                "</Div>",
+                "<Div>",
+                "wideback",
+                "</Div>",
+                "</Div>",
+                "<Div>",
+                "left",
+                "ab",
+                "</Div>",
+                "</Div>",
+                "<Div>",
+                "right",
+                "</Div>",
+                "</Div>"
+            ]
+        );
+    }
+
+    #[test]
+    fn vectors_are_fed_and_thin_runs_collated() {
+        let content = "0 g 20 360 m 120 360 l 120 380 l 20 380 l h f \
+            20 340 m 120 340 l 120 350 l 20 350 l 20 340 l f \
+            20 330 m 120 330 l 20 330 l h f \
+            2 w 20 320 m 60 320 l 120 320 l S \
+            1 w 20 300 m 20 310 l 20 318 l S \
+            20 280 m 60 290 l 120 280 l S \
+            20 250 m 40 270 80 270 120 250 c f \
+            1 J 3 w 20 240 m 120 240 l 150 240 m S 0 J \
+            20 230 m 120 230 l 150 230 m S \
+            1 0 0 rg 200 360 1 1 re f 200 361 1 1 re f 200 362 1 1 re f \
+            0 1 0 rg 210 360 1 1 re f 211 360 1 1 re f 212 360 1 1 re f \
+            0 0 1 rg 220 360 1 1 re f 220 362.5 1 1 re f 221.5 362.5 1 1 re f \
+            0 0 1 rg 230 360 2 2 re f 232 360 2 2 re f 240 360 2 2 re f \
+            0 g 250 360 m 250 360 l f \
+            250 300 100 20 re 260 305 10 10 re f* \
+            250 270 100 20 re S \
+            q 0 0 300 400 re W n 250 240 100 20 re f Q \
+            250 200 m 300 200 l 300 220 l 250 220 l 250 200 l 260 210 l S \
+            250 150 m 350 150 l 350 180 l h 260 160 m 340 160 l S \
+            q 2 0 0 2 0 0 cm 10 20 20 10 re f Q \
+            0.5 g 20 100 100 20 re f 1 g 20 70 100 20 re f \
+            q /GS gs 0 g 150 100 50 20 re f Q \
+            q /GS2 gs 0 g 150 70 50 20 re f Q \
+            BT /F1 12 Tf 20 40 Td (Text near vectors) Tj ET \
+            20 20 m 120 20 l 120 30 l 20 30 l h S 20 10 m 25 10 l 25 15 l h f";
+        let p = page(
+            content,
+            "/ExtGState<</GS<</ca 0.5/CA 0.5>>/GS2<</ca 0.1>>>>",
+            "segment,vectors",
+        );
+        let v = |n: usize| vec!["[v]"; n];
+        let want: Vec<&str> = [
+            vec![
+                "<Div>", "<Div>", "<Div>", "<Div>", "[v]", "</Div>", "<Div>", "[v]",
+            ],
+            vec!["</Div>", "</Div>", "<Div>"],
+            v(7),
+            vec!["</Div>", "</Div>", "<Div>", "<Div>"],
+            v(18),
+            vec!["</Div>", "<Div>", "[v]", "Text near vectors", "[v]", "[v]"],
+            vec!["</Div>", "</Div>", "</Div>"],
+        ]
+        .concat();
+        assert_eq!(outline(&p.blocks), want);
+    }
+
+    #[test]
+    fn thin_vectors_continue_up_down_left_and_right() {
+        let v = |x0: f32, y0: f32, x1: f32, y1: f32| fill(Rect::new(x0, y0, x1, y1), 0);
+        // Upwards and downwards from a thin first, then sideways from a
+        // flat first, each within the gap; the last is too far.
+        let blocks = [
+            v(10.0, 10.0, 11.0, 20.0),
+            v(10.0, 21.0, 11.0, 30.0),
+            v(10.0, 0.0, 11.0, 9.0),
+            v(10.0, 50.0, 11.0, 60.0),
+        ];
+        let mut at = 0;
+        assert_eq!(
+            collate_small_vector_run(&blocks, &mut at),
+            Rect::new(10.0, 0.0, 11.0, 30.0)
+        );
+        assert_eq!(at, 2);
+        let blocks = [
+            v(10.0, 10.0, 20.0, 11.0),
+            v(21.0, 10.0, 30.0, 11.0),
+            v(0.0, 10.0, 9.0, 11.0),
+            image(0.0, 0.0, 1.0, 1.0),
+        ];
+        let mut at = 0;
+        assert_eq!(
+            collate_small_vector_run(&blocks, &mut at),
+            Rect::new(0.0, 10.0, 30.0, 11.0)
+        );
+        assert_eq!(at, 2);
+    }
+
+    #[test]
+    fn a_page_with_structure_already_is_left_alone() {
+        let mut p = page(COLUMNS, "", "segment");
+        let before = outline(&p.blocks);
+        assert!(!segment_page(&mut p));
+        assert_eq!(outline(&p.blocks), before);
+    }
+
+    #[test]
+    fn lines_of_spaces_take_no_room() {
+        // A line of spaces across the gap between the columns does not
+        // close it.
+        let spaces = format!(
+            "{COLUMNS} BT /F1 10 Tf 0 330 Td 3 Tr (\\240\\240\\240\\240\\240\\240\\240\\240\
+             \\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\
+             \\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240\\240) Tj ET"
+        );
+        let with = outline(&page(&spaces, "", "segment,preserve-whitespace").blocks);
+        let mut without = outline(&page(COLUMNS, "", "segment").blocks);
+        // The spaces stay in a block of their own, after the structures.
+        without.push(" ".repeat(40));
+        assert_eq!(with, without);
+    }
 }

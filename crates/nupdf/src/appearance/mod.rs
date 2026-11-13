@@ -32,6 +32,8 @@ mod widget;
 
 pub use commit::Committer;
 
+/// The /DA parser, for the fuzzer and for tools reading a field's font.
+pub use text::fonts::{DefaultAppearance, language_from_string, parse_default_appearance};
 pub use widget::{ButtonSynthesis, Form, button as synthesize_button};
 
 /// An appearance made for an annotation: the annotation as it is after

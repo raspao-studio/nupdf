@@ -1307,6 +1307,135 @@ fn put_component(buf: &mut [u8], x: usize, bpc: usize, value: u32) {
     }
 }
 
+/// For tests: `data` decoded as MuPDF's `readStream` decodes the stream
+/// `tests/data/oracle.py` makes of it (the same file: the stream is object
+/// 1 with `extras` in its dictionary, `obj4` an optional second stream
+/// that `$obj4` in `extras` refers to). Returns the decoded length, the
+/// first 16 hex digits of its SHA-256 and the distinct warnings, in the
+/// form of oracle.py's lines.
+#[cfg(test)]
+pub(crate) fn decode_as_mupdf(
+    extras: &str,
+    data: &[u8],
+    obj4: Option<&[u8]>,
+) -> (usize, String, Vec<String>) {
+    use sha2::Digest;
+    let extras = extras.replace("$obj4", if obj4.is_some() { "4 0 R" } else { "null" });
+    let mut objs = vec![
+        [
+            format!("<< /Length {} {extras} >>\nstream\n", data.len()).as_bytes(),
+            data,
+            b"\nendstream",
+        ]
+        .concat(),
+        b"<< /Type /Catalog /Pages 3 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [] /Count 0 >>".to_vec(),
+    ];
+    if let Some(o) = obj4 {
+        objs.push(
+            [
+                format!("<< /Length {} >>\nstream\n", o.len()).as_bytes(),
+                o,
+                b"\nendstream",
+            ]
+            .concat(),
+        );
+    }
+    let mut file = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(file.len());
+        file.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        file.extend_from_slice(o);
+        file.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = file.len();
+    file.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        file.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    file.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 2 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objs.len() + 1
+        )
+        .as_bytes(),
+    );
+    let doc = crate::Document::open(file).unwrap_or_else(|e| panic!("{e:?}"));
+    // A failed load is what the oracle's script prints for the exception.
+    let (out, error) = match doc.object(1) {
+        Some(Object::Stream(s)) => match doc.stream_data(&s) {
+            Ok(out) => (out, None),
+            Err(e) => (
+                Vec::new(),
+                Some(format!("error {}", report::strip(&e.report()))),
+            ),
+        },
+        _ => (Vec::new(), None),
+    };
+    let hash: String = sha2::Sha256::digest(&out)
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let mut warnings: Vec<String> = Vec::new();
+    for m in doc
+        .diagnostics()
+        .snapshot()
+        .into_iter()
+        .map(|d| d.message)
+        .chain(error)
+    {
+        if !warnings.contains(&m) {
+            warnings.push(m);
+        }
+    }
+    (out.len(), hash, warnings)
+}
+
+/// A stream case for [`check_against_mupdf`]: name, dictionary entries,
+/// data, and the data of object 4 if any.
+#[cfg(test)]
+pub(crate) type StreamCase = (&'static str, String, Vec<u8>, Option<Vec<u8>>);
+
+/// For tests: decodes every case with [`decode_as_mupdf`] and compares
+/// it with `table`, MuPDF's results as `tests/data/oracle.py` prints them.
+/// With the environment variable `env` naming a directory, the cases are
+/// written there first (`<name>.bin`, with `.extras` and `.obj4`), for
+/// oracle.py to read.
+#[cfg(test)]
+pub(crate) fn check_against_mupdf(
+    env: &str,
+    cases: &[StreamCase],
+    table: &[(&str, usize, &str, &[&str])],
+) {
+    let dump = std::env::var_os(env);
+    let mut wrong = Vec::new();
+    for (name, extras, data, obj4) in cases {
+        if let Some(dir) = &dump {
+            let path = std::path::Path::new(dir).join(format!("{name}.bin"));
+            let with = |ext: &str| {
+                let mut p = path.clone().into_os_string();
+                p.push(ext);
+                p
+            };
+            std::fs::write(&path, data).unwrap_or_else(|e| panic!("{e}"));
+            std::fs::write(with(".extras"), extras).unwrap_or_else(|e| panic!("{e}"));
+            if let Some(o) = obj4 {
+                std::fs::write(with(".obj4"), o).unwrap_or_else(|e| panic!("{e}"));
+            }
+        }
+        let got = decode_as_mupdf(extras, data, obj4.as_deref());
+        match table.iter().find(|c| c.0 == *name) {
+            Some(&(_, len, hash, warnings))
+                if len == got.0 && hash == got.1 && got.2 == warnings => {}
+            Some(want) => wrong.push(format!("{name}:\n  got   {got:?}\n  MuPDF {want:?}")),
+            None => wrong.push(format!("{name}: no MuPDF result (got {got:?})")),
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1650,5 +1779,492 @@ mod tests {
         assert_eq!(read(&bad, true), (vec![1u8; 16], true));
         let diag = Diagnostics::new();
         assert!(open_cipher(Stream::memory(&bad, &diag), Some(Cipher::Aes(vec![1; 5]))).is_err());
+    }
+
+    /// A PDF LZW encoder (codes MSB first, 9 to 12 bits), clearing the
+    /// table when full unless `clear_when_full` is false. Code widths
+    /// follow the decoder's table, as LZWDecode reads them.
+    fn lzw(data: &[u8], early: u32, clear_when_full: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let (mut acc, mut nbits) = (0u64, 0u32);
+        let mut put = |code: u32, bits: u32, out: &mut Vec<u8>| {
+            acc = acc << bits | u64::from(code);
+            nbits += bits;
+            while nbits >= 8 {
+                nbits -= 8;
+                out.push((acc >> nbits) as u8);
+            }
+        };
+        let mut dict: std::collections::HashMap<Vec<u8>, u32> = Default::default();
+        let (mut next, mut dec_next, mut bits, mut emitted) = (258u32, 258u32, 9u32, 0u32);
+        let mut emit =
+            |code: u32, out: &mut Vec<u8>, put: &mut dyn FnMut(u32, u32, &mut Vec<u8>)| {
+                put(code, bits, out);
+                if code == 256 {
+                    (bits, dec_next, emitted) = (9, 258, 0);
+                    return;
+                }
+                if emitted > 0 && dec_next < 4096 {
+                    dec_next += 1;
+                    if dec_next > (1 << bits) - early - 1 {
+                        bits = (bits + 1).min(12);
+                    }
+                }
+                emitted += 1;
+            };
+        emit(256, &mut out, &mut put);
+        let code_of = |w: &[u8], dict: &std::collections::HashMap<Vec<u8>, u32>| {
+            if w.len() == 1 {
+                u32::from(w[0])
+            } else {
+                dict[w]
+            }
+        };
+        let mut w: Vec<u8> = Vec::new();
+        for &c in data {
+            let mut wc = w.clone();
+            wc.push(c);
+            if w.is_empty() || dict.contains_key(&wc) {
+                w = wc;
+                continue;
+            }
+            emit(code_of(&w, &dict), &mut out, &mut put);
+            if next < 4094 {
+                dict.insert(wc, next);
+                next += 1;
+            } else if clear_when_full {
+                emit(256, &mut out, &mut put);
+                dict.clear();
+                next = 258;
+            }
+            w = vec![c];
+        }
+        if !w.is_empty() {
+            emit(code_of(&w, &dict), &mut out, &mut put);
+        }
+        emit(257, &mut out, &mut put);
+        put(0, 7, &mut out);
+        out
+    }
+
+    /// Raw codes at fixed widths, MSB first.
+    fn codes(codes: &[(u32, u32)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let (mut acc, mut nbits) = (0u64, 0u32);
+        for &(code, bits) in codes.iter().chain(&[(0, 7)]) {
+            acc = acc << bits | u64::from(code);
+            nbits += bits;
+            while nbits >= 8 {
+                nbits -= 8;
+                out.push((acc >> nbits) as u8);
+            }
+        }
+        out
+    }
+
+    /// Rows of samples with a PNG predictor tag before each.
+    fn png_rows(rows: &[(u8, &[u8])]) -> Vec<u8> {
+        rows.iter()
+            .flat_map(|(tag, row)| std::iter::once(*tag).chain(row.iter().copied()))
+            .collect()
+    }
+
+    fn pseudo_random(n: usize, seed: u32) -> Vec<u8> {
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                (x >> 16) as u8
+            })
+            .collect()
+    }
+
+    fn filter_cases() -> Vec<StreamCase> {
+        let text: Vec<u8> = b"TOBEORNOTTOBEORTOBEORNOT#".repeat(20);
+        let noisy = pseudo_random(9000, 7);
+        let flate = |extras: &str| format!("/Filter /FlateDecode {extras}");
+        let parms = |p: &str| flate(&format!("/DecodeParms << {p} >>"));
+        let packed = zlib(&text);
+        let mut bad_check = packed.clone();
+        let n = bad_check.len();
+        bad_check[n - 1] ^= 0xff;
+        let mut corrupt = zlib(&noisy);
+        corrupt[200] ^= 0xff;
+        corrupt[201] ^= 0xff;
+        let rows = png_rows(&[
+            (0, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+            (1, &[1, 1, 1, 2, 2, 2, 3, 3, 3, 250, 250, 250]),
+            (2, &[5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]),
+            (3, &[9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 255, 254]),
+            (4, &[200, 3, 9, 1, 100, 7, 33, 66, 99, 12, 1, 0]),
+            (4, &[0, 255, 0, 255, 0, 255, 128, 128, 128, 1, 2, 3]),
+            (7, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+        ]);
+        let random_rows: Vec<u8> = pseudo_random(13 * 12, 3)
+            .chunks(13)
+            .flat_map(|r| std::iter::once(r[0] % 5).chain(r[1..].iter().copied()))
+            .collect();
+        let s = |v: &str| v.to_string();
+        vec![
+            // Brotli (PDF 2.0).
+            ("brotli", s("/Filter /BrotliDecode"), BROTLI.to_vec(), None),
+            (
+                "brotli_bad",
+                s("/Filter /Br"),
+                b"\xffnot brotli at all".to_vec(),
+                None,
+            ),
+            // LZW.
+            ("lzw", s("/Filter /LZWDecode"), lzw(&text, 1, true), None),
+            (
+                "lzw_early_0",
+                s("/Filter /LZW /DecodeParms << /EarlyChange 0 >>"),
+                lzw(&text, 0, true),
+                None,
+            ),
+            (
+                "lzw_full_table",
+                s("/Filter /LZWDecode"),
+                lzw(&noisy, 1, true),
+                None,
+            ),
+            (
+                "lzw_no_clear",
+                s("/Filter /LZWDecode"),
+                lzw(&noisy, 1, false),
+                None,
+            ),
+            (
+                "lzw_unknown_after_clear",
+                s("/Filter /LZWDecode"),
+                codes(&[(256, 9), (65, 9), (300, 9), (257, 9)]),
+                None,
+            ),
+            (
+                "lzw_code_after_clear",
+                s("/Filter /LZWDecode"),
+                codes(&[(256, 9), (300, 9), (257, 9)]),
+                None,
+            ),
+            (
+                "lzw_premature",
+                s("/Filter /LZWDecode"),
+                codes(&[(256, 9), (65, 9)]),
+                None,
+            ),
+            (
+                "lzw_with_png_predictor",
+                s("/Filter /LZWDecode /DecodeParms << /Predictor 15 /Columns 4 /Colors 3 >>"),
+                lzw(&rows, 1, true),
+                None,
+            ),
+            // ASCII85 and ASCIIHex.
+            (
+                "a85",
+                s("/Filter /ASCII85Decode"),
+                b"87cURD]i,\"Ebo80~>".to_vec(),
+                None,
+            ),
+            ("a85_z", s("/Filter /A85"), b"z 87cUR z~>".to_vec(), None),
+            ("a85_tail_1", s("/Filter /A85"), b"87cURD~>".to_vec(), None),
+            ("a85_tail_2", s("/Filter /A85"), b"87cURD]~>".to_vec(), None),
+            (
+                "a85_tail_3",
+                s("/Filter /A85"),
+                b"87cURD]i~>".to_vec(),
+                None,
+            ),
+            (
+                "a85_tail_4",
+                s("/Filter /A85"),
+                b"87cURD]i,~>".to_vec(),
+                None,
+            ),
+            (
+                "a85_bad_eod",
+                s("/Filter /A85"),
+                b"87cURD]i~x".to_vec(),
+                None,
+            ),
+            (
+                "a85_bad_byte",
+                s("/Filter /A85"),
+                b"87cUR{D]i~>".to_vec(),
+                None,
+            ),
+            (
+                "a85_no_eod",
+                s("/Filter /A85"),
+                b"87cURD]i,\"Ebo80".to_vec(),
+                None,
+            ),
+            (
+                "ahx",
+                s("/Filter /ASCIIHexDecode"),
+                b"48 65 6C 6c\n6f>".to_vec(),
+                None,
+            ),
+            ("ahx_odd", s("/Filter /AHx"), b"48656>".to_vec(), None),
+            ("ahx_bad", s("/Filter /AHx"), b"4865zz>".to_vec(), None),
+            ("ahx_no_eod", s("/Filter /AHx"), b"486566".to_vec(), None),
+            // RunLength.
+            (
+                "rld",
+                s("/Filter /RunLengthDecode"),
+                vec![2, b'a', b'b', b'c', 254, b'x', 0, b'!', 128, b'z'],
+                None,
+            ),
+            (
+                "rld_no_eod",
+                s("/Filter /RL"),
+                vec![1, b'a', b'b', 255, b'q'],
+                None,
+            ),
+            ("rld_short_literal", s("/Filter /RL"), vec![5, b'a'], None),
+            ("rld_short_run", s("/Filter /RL"), vec![250], None),
+            (
+                "rld_stacked",
+                s("/Filter [/RL /RL]"),
+                vec![0, 3, 253, b'x', 128],
+                None,
+            ),
+            // Flate.
+            ("flate", flate(""), packed.clone(), None),
+            ("flate_bad_check", flate(""), bad_check, None),
+            ("flate_corrupt", flate(""), corrupt, None),
+            (
+                "flate_trailing",
+                flate(""),
+                [&packed[..], b"trailing junk"].concat(),
+                None,
+            ),
+            (
+                "flate_not_zlib",
+                flate(""),
+                b"\x00\x01\x02 not zlib".to_vec(),
+                None,
+            ),
+            // Predictors.
+            (
+                "png_rgb",
+                parms("/Predictor 15 /Columns 4 /Colors 3"),
+                zlib(&rows),
+                None,
+            ),
+            (
+                "png_random",
+                parms("/Predictor 12 /Columns 4 /Colors 3"),
+                zlib(&random_rows),
+                None,
+            ),
+            (
+                "png_16bit",
+                parms("/Predictor 11 /Columns 3 /Colors 2 /BitsPerComponent 16"),
+                zlib(&random_rows),
+                None,
+            ),
+            (
+                "png_4bit",
+                parms("/Predictor 10 /Columns 7 /Colors 3 /BitsPerComponent 4"),
+                zlib(&random_rows),
+                None,
+            ),
+            (
+                "png_short_row",
+                parms("/Predictor 15 /Columns 5 /Colors 3"),
+                zlib(&rows[..20]),
+                None,
+            ),
+            (
+                "tiff_8bit",
+                parms("/Predictor 2 /Columns 4 /Colors 3"),
+                zlib(&noisy[..120]),
+                None,
+            ),
+            (
+                "tiff_16bit",
+                parms("/Predictor 2 /Columns 3 /Colors 2 /BitsPerComponent 16"),
+                zlib(&noisy[..120]),
+                None,
+            ),
+            (
+                "tiff_1bit",
+                parms("/Predictor 2 /Columns 21 /Colors 1 /BitsPerComponent 1"),
+                zlib(&noisy[..60]),
+                None,
+            ),
+            (
+                "tiff_2bit",
+                parms("/Predictor 2 /Columns 9 /Colors 3 /BitsPerComponent 2"),
+                zlib(&noisy[..70]),
+                None,
+            ),
+            (
+                "tiff_4bit",
+                parms("/Predictor 2 /Columns 5 /Colors 3 /BitsPerComponent 4"),
+                zlib(&noisy[..80]),
+                None,
+            ),
+            (
+                "tiff_short_row",
+                parms("/Predictor 2 /Columns 4 /Colors 3"),
+                zlib(&noisy[..17]),
+                None,
+            ),
+            (
+                "columns_overflow",
+                parms("/Predictor 12 /Columns 2147483647 /Colors 32 /BitsPerComponent 16"),
+                zlib(&text),
+                None,
+            ),
+            // Filter chains, parameters and the filters without data.
+            (
+                "chain",
+                s("/Filter [/AHx /Fl] /DecodeParms [null << /Predictor 12 /Columns 4 >>]"),
+                {
+                    let z = zlib(&png_rows(&[(2, &[1, 2, 3, 4]), (1, &[5, 6, 7, 8])]));
+                    let mut hex: Vec<u8> = z
+                        .iter()
+                        .flat_map(|b| format!("{b:02x}").into_bytes())
+                        .collect();
+                    hex.push(b'>');
+                    hex
+                },
+                None,
+            ),
+            (
+                "crypt_unencrypted",
+                s("/Filter /Crypt"),
+                b"plain".to_vec(),
+                None,
+            ),
+            (
+                "crypt_identity",
+                s("/Filter /Crypt /DecodeParms << /Name /Identity >>"),
+                b"plain".to_vec(),
+                None,
+            ),
+            (
+                "jbig2_globals_not_stream",
+                s("/Filter /JBIG2Decode /DecodeParms << /JBIG2Globals 5 >>"),
+                b"junk".to_vec(),
+                None,
+            ),
+            (
+                "unknown_filter",
+                s("/Filter /Foo"),
+                b"passes".to_vec(),
+                None,
+            ),
+            (
+                "filter_not_a_name",
+                s("/Filter 5"),
+                b"passes".to_vec(),
+                None,
+            ),
+            (
+                "filters_with_null",
+                s("/Filter [null /AHx]"),
+                b"6869>".to_vec(),
+                None,
+            ),
+        ]
+    }
+
+    /// `printf 'Brotli in PDF 2.0: hello hello hello hello.' | brotli -c`
+    const BROTLI: [u8; 48] = [
+        0x21, 0xa8, 0x00, 0x04, 0x42, 0x72, 0x6f, 0x74, 0x6c, 0x69, 0x20, 0x69, 0x6e, 0x20, 0x50,
+        0x44, 0x46, 0x20, 0x32, 0x2e, 0x30, 0x3a, 0x20, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x68,
+        0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x68, 0x65, 0x6c, 0x6c,
+        0x6f, 0x2e, 0x03,
+    ];
+
+    /// MuPDF 1.28.6's result for each case, from tests/data/oracle.py.
+    #[rustfmt::skip]
+    const MUPDF_FILTERS: &[(&str, usize, &str, &[&str])] = &[
+        ("a85", 12, "7f83b1657ff1fc53", &[]),
+        ("a85_bad_byte", 0, "e3b0c44298fc1c14", &["format error: bad data in a85d: '{'", "read error; treating as end of file"]),
+        ("a85_bad_eod", 6, "334d016f755cd6dc", &["bad eod marker in a85d"]),
+        ("a85_no_eod", 12, "7f83b1657ff1fc53", &[]),
+        ("a85_tail_1", 4, "8d586f8b60df1ad7", &["partial final byte in a85d"]),
+        ("a85_tail_2", 5, "2113cd4a7aebc3a4", &[]),
+        ("a85_tail_3", 6, "334d016f755cd6dc", &[]),
+        ("a85_tail_4", 7, "c1b51085d0841788", &[]),
+        ("a85_z", 12, "f1ff162f7ec232d4", &[]),
+        ("ahx", 5, "185f8db32271fe25", &[]),
+        ("ahx_bad", 0, "e3b0c44298fc1c14", &["format error: bad data in ahxd: 'z'", "read error; treating as end of file"]),
+        ("ahx_no_eod", 3, "21c02284e00ce613", &[]),
+        ("ahx_odd", 3, "c778c131f931ed7c", &[]),
+        ("brotli", 43, "dc68344173b5695f", &[]),
+        ("brotli_bad", 0, "e3b0c44298fc1c14", &["library error: brotli decompression error", "read error; treating as end of file"]),
+        ("chain", 8, "f16fda117f2c10af", &[]),
+        ("columns_overflow", 0, "e3b0c44298fc1c14", &["error too many columns lead to an integer overflow (2147483647)"]),
+        ("crypt_identity", 5, "a116c9ed46d62077", &["crypt filter in unencrypted document"]),
+        ("crypt_unencrypted", 5, "a116c9ed46d62077", &["crypt filter in unencrypted document"]),
+        ("filter_not_a_name", 6, "2c28ec094b830e09", &[]),
+        ("filters_with_null", 2, "8f434346648f6b96", &["unknown filter name ()"]),
+        ("flate", 500, "d93b21de421e06aa", &[]),
+        ("flate_bad_check", 500, "d93b21de421e06aa", &["ignoring zlib error: incorrect data check"]),
+        ("flate_corrupt", 9000, "b0768b422b53c852", &["ignoring zlib error: incorrect data check"]),
+        ("flate_not_zlib", 0, "e3b0c44298fc1c14", &["library error: zlib error: incorrect header check", "read error; treating as end of file"]),
+        ("flate_trailing", 500, "d93b21de421e06aa", &[]),
+        ("jbig2_globals_not_stream", 0, "e3b0c44298fc1c14", &["jbig2 globals is not a stream, skipping globals", "jbig2dec error: page has no image, cannot be completed (segment 4294967295)", "library error: cannot complete jbig2 image", "read error; treating as end of file"]),
+        ("lzw", 500, "d93b21de421e06aa", &[]),
+        ("lzw_code_after_clear", 0, "e3b0c44298fc1c14", &["format error: out of range code encountered in lzw decode", "read error; treating as end of file"]),
+        ("lzw_early_0", 500, "d93b21de421e06aa", &[]),
+        ("lzw_full_table", 9000, "2eb2268b750a45e7", &[]),
+        ("lzw_no_clear", 0, "e3b0c44298fc1c14", &["tolerating a single out of range code in lzw decode", "missing clear code in lzw decode", "format error: out of range code encountered in lzw decode", "read error; treating as end of file"]),
+        ("lzw_premature", 2, "f3c43500fa3e97e6", &["premature end in lzw decode"]),
+        ("lzw_unknown_after_clear", 0, "e3b0c44298fc1c14", &["format error: out of range code encountered in lzw decode", "read error; treating as end of file"]),
+        ("lzw_with_png_predictor", 84, "8b882b7881ed63c0", &["unknown png predictor 7, treating as none"]),
+        ("png_16bit", 144, "837cb0f94d496a06", &[]),
+        ("png_4bit", 143, "b4312ed1cd82be8d", &["unknown png predictor 61, treating as none", "unknown png predictor 116, treating as none", "unknown png predictor 147, treating as none", "unknown png predictor 255, treating as none", "unknown png predictor 238, treating as none", "unknown png predictor 38, treating as none", "unknown png predictor 134, treating as none", "unknown png predictor 68, treating as none", "unknown png predictor 250, treating as none", "unknown png predictor 98, treating as none", "unknown png predictor 219, treating as none", "unknown png predictor 178, treating as none"]),
+        ("png_random", 144, "c01a769efabc1046", &[]),
+        ("png_rgb", 84, "8b882b7881ed63c0", &["unknown png predictor 7, treating as none"]),
+        ("png_short_row", 18, "18cd8d6999a5ad45", &[]),
+        ("rld", 7, "cb4fd602bde9140c", &[]),
+        ("rld_no_eod", 4, "c94b72b9893c2b29", &[]),
+        ("rld_short_literal", 0, "e3b0c44298fc1c14", &["format error: premature end of data in run length decode", "read error; treating as end of file"]),
+        ("rld_short_run", 0, "e3b0c44298fc1c14", &["format error: premature end of data in run length decode", "read error; treating as end of file"]),
+        ("rld_stacked", 0, "e3b0c44298fc1c14", &["RLE bomb defused"]),
+        ("tiff_16bit", 120, "38172a95581a9fb1", &[]),
+        ("tiff_1bit", 60, "4efce29d2ea78361", &[]),
+        ("tiff_2bit", 70, "c76b78392fba7720", &[]),
+        ("tiff_4bit", 80, "fe3c3b1a436f4642", &[]),
+        ("tiff_8bit", 120, "ae4a8cf8b8dd2544", &[]),
+        ("tiff_short_row", 17, "169d2f0432928901", &[]),
+        ("unknown_filter", 6, "2c28ec094b830e09", &["unknown filter name (Foo)"]),
+    ];
+
+    #[test]
+    fn filters_decode_as_in_mupdf() {
+        check_against_mupdf("NUPDF_DUMP_FILTER_CASES", &filter_cases(), MUPDF_FILTERS);
+    }
+
+    #[test]
+    fn truncated_brotli_gives_what_was_decoded() {
+        // MuPDF 1.28.6 never returns from this stream (its brotli filter
+        // loops once the input runs out mid-block), so there is no result
+        // to pin; nupdf ends the data where the input does, quietly.
+        let (len, _, warnings) = decode_as_mupdf("/Filter /BrotliDecode", &BROTLI[..20], None);
+        assert_eq!(len, 16);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_lzw_encoder_round_trips() {
+        // The test encoder against nupdf's decoder, where both agree with
+        // MuPDF above: the fixtures mean what they say.
+        let diag = Diagnostics::new();
+        let text = b"TOBEORNOTTOBEORTOBEORNOT#".repeat(20);
+        assert_eq!(
+            run("LZWDecode", None, &lzw(&text, 1, true), &diag).ok(),
+            Some(text)
+        );
+        let noisy = pseudo_random(9000, 7);
+        assert_eq!(
+            run("LZWDecode", None, &lzw(&noisy, 1, true), &diag).ok(),
+            Some(noisy)
+        );
     }
 }

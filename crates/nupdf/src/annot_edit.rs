@@ -1008,4 +1008,236 @@ mod tests {
         assert!(text(&doc, 3).contains(&format!("/Annots[{num} 0 R]")));
         assert_eq!(text(&doc, 4), "[]");
     }
+
+    #[test]
+    fn the_setters_write_what_mupdf_writes() {
+        // clean.js annots on MINIMAL: a stamp with text, author, subject,
+        // opacity, icon and flags; a caret at full opacity; a polygon with
+        // vertices and an interior colour; a highlight with one quad; a
+        // note opened; a square "opened" (no popup, not a note).
+        let doc = open(MINIMAL);
+        let mut ed = Editor::new(&doc);
+        let stamp = ed.create(0, "Stamp").unwrap();
+        ed.set_contents(stamp, "Hi");
+        ed.set_author(stamp, "Me").unwrap();
+        ed.set_subject(stamp, "Sub").unwrap();
+        ed.set_opacity(stamp, 0.5);
+        ed.set_icon(stamp, Some("Approved")).unwrap();
+        ed.set_flags(stamp, 2);
+        let caret = ed.create(0, "Caret").unwrap();
+        ed.set_opacity(caret, 1.0);
+        let polygon = ed.create(0, "Polygon").unwrap();
+        let v = [(10.0, 10.0), (50.0, 10.0), (30.0, 40.0)].map(|(x, y)| Point::new(x, y));
+        ed.set_vertices(0, polygon, &v).unwrap();
+        ed.set_interior_color(polygon, &[0.0, 0.0, 1.0]).unwrap();
+        let highlight = ed.create(0, "Highlight").unwrap();
+        let quad =
+            [(10.0, 10.0), (60.0, 10.0), (10.0, 30.0), (60.0, 30.0)].map(|(x, y)| Point::new(x, y));
+        ed.set_quad_points(0, highlight, &[quad]).unwrap();
+        let note = ed.create(0, "Text").unwrap();
+        ed.set_is_open(note, true);
+        let square = ed.create(0, "Square").unwrap();
+        ed.set_is_open(square, true);
+        assert!(ed.update().is_empty());
+        assert_eq!(
+            text(&doc, stamp),
+            "<</Type/Annot/Subtype/Stamp/Rect[12 730 202 780]/C[1 0 0]/Name/Approved/P 3 0 R\
+             /F 2/Contents(Hi)/T(Me)/Subj(Sub)/CA .5/AP<</N 14 0 R>>>>"
+        );
+        assert_eq!(
+            text(&doc, caret),
+            "<</Type/Annot/Subtype/Caret/Rect[11 765.5 31 779.5]/C[0 0 1]/P 3 0 R/F 4\
+             /AP<</N 15 0 R>>>>"
+        );
+        assert_eq!(
+            text(&doc, polygon),
+            "<</Type/Annot/Subtype/Polygon/BS<</Type/Border/W 1>>/RD[1 1 1 1]/C[1 0 0]/P 3 0 R\
+             /F 4/Vertices[10 782 50 782 30 752]/IC[0 0 1]/Rect[9 751 51 783]/AP<</N 16 0 R>>>>"
+        );
+        assert_eq!(
+            text(&doc, highlight),
+            "<</Type/Annot/Subtype/Highlight/C[1 1 0]/P 3 0 R/F 4\
+             /QuadPoints[10 782 60 782 10 762 60 762]/Rect[5.285798 760.75 64.7142 783.25]\
+             /AP<</N 17 0 R>>>>"
+        );
+        assert_eq!(
+            text(&doc, note + 1),
+            "<</Type/Annot/Subtype/Popup/Parent 10 0 R/Rect[32 680 232 780]/Open true>>"
+        );
+        assert!(!text(&doc, square).contains("/Open"));
+        assert_eq!(
+            ed.set_quad_points(0, highlight, &[]),
+            Err("invalid number of quadrilaterals".into())
+        );
+        assert_eq!(
+            ed.set_vertices(0, stamp, &v),
+            Err("Stamp annotations have no Vertices property".into())
+        );
+        assert_eq!(
+            ed.set_author(caret + 100, "x"),
+            Err(" annotations have no T property".into())
+        );
+    }
+
+    #[test]
+    fn a_callout_line_leaves_the_box_on_the_side_it_points_to() {
+        // clean.js annots: four boxes around the callout's start, the
+        // page's top left, each placed after creation.
+        let doc = open(MINIMAL);
+        let mut ed = Editor::new(&doc);
+        let mut cl = Vec::new();
+        for r in [
+            Rect::new(-300.0, -300.0, -100.0, -200.0),
+            Rect::new(100.0, -50.0, 200.0, 50.0),
+            Rect::new(-200.0, -50.0, -100.0, 50.0),
+            Rect::new(-10.0, -10.0, 10.0, 10.0),
+        ] {
+            let num = ed.create(0, "FreeText").unwrap();
+            ed.set_rect(0, num, r).unwrap();
+            let t = text(&doc, num);
+            let at = t.find("/CL").unwrap();
+            cl.push(t[at..at + t[at..].find(']').unwrap() + 1].to_string());
+        }
+        assert_eq!(
+            cl,
+            [
+                "/CL[0 792 -160 992]",
+                "/CL[0 792 100 792]",
+                "/CL[0 792 -100 792]",
+                "/CL[0 792 0 792]"
+            ]
+        );
+    }
+
+    #[test]
+    fn free_text_on_a_turned_page_turns_with_it() {
+        let bytes = String::from_utf8_lossy(MINIMAL).replace("/Count 1>>", "/Count 1/Rotate 90>>");
+        let doc = open(bytes.as_bytes());
+        let mut ed = Editor::new(&doc);
+        let num = ed.create(0, "FreeText").unwrap();
+        ed.update();
+        assert_eq!(
+            text(&doc, num),
+            "<</Type/Annot/Subtype/FreeText/Rotate 90/Rect[12 12 112 212]/CL[0 0 12 21.677414]\
+             /BS<</Type/Border/W 0>>/DA(/Helv 12 Tf 0 0 0 rg)/P 3 0 R/F 4/RD[0 0 0 0]\
+             /AP<</N 8 0 R>>>>"
+        );
+    }
+
+    #[test]
+    fn text_markup_gets_its_colour_and_redactions_none() {
+        let doc = open(MINIMAL);
+        let mut ed = Editor::new(&doc);
+        let nums: Vec<i32> = ["Underline", "StrikeOut", "Squiggly", "Redact"]
+            .iter()
+            .map(|s| ed.create(0, s).unwrap())
+            .collect();
+        let color = |n: i32| {
+            let t = text(&doc, n);
+            t.find("/C[")
+                .map(|at| t[at..at + t[at..].find(']').unwrap() + 1].to_string())
+        };
+        assert_eq!(
+            nums.iter().map(|&n| color(n)).collect::<Vec<_>>(),
+            [
+                Some("/C[0 1 0]".to_string()),
+                Some("/C[1 0 0]".to_string()),
+                Some("/C[1 0 1]".to_string()),
+                None
+            ]
+        );
+        assert_eq!(
+            text(&doc, nums[3]),
+            "<</Type/Annot/Subtype/Redact/P 3 0 R/F 4>>"
+        );
+    }
+
+    #[test]
+    fn popups_are_moved_where_they_are_kept() {
+        // A note with its popup as an object, one with a direct popup, and
+        // a square with none, on a page whose /Annots is an object.
+        let bytes = b"%PDF-1.7\n\
+            1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+            3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Annots 4 0 R>>endobj\n\
+            4 0 obj[5 0 R 6 0 R 7 0 R 8 0 R]endobj\n\
+            5 0 obj<</Type/Annot/Subtype/Text/Rect[0 0 10 10]/Popup 6 0 R>>endobj\n\
+            6 0 obj<</Type/Annot/Subtype/Popup/Parent 5 0 R/Rect[0 0 1 1]>>endobj\n\
+            7 0 obj<</Type/Annot/Subtype/Text/Rect[0 0 10 10]/Popup<</Type/Annot/Subtype/Popup/Rect[0 0 1 1]>>>>endobj\n\
+            8 0 obj<</Type/Annot/Subtype/Square/Rect[0 0 10 10]>>endobj\n\
+            trailer<</Root 1 0 R/Size 9>>\n";
+        let doc = open(bytes);
+        let mut ed = Editor::new(&doc);
+        ed.load_page(0).unwrap();
+        let r = Rect::new(10.0, 10.0, 20.0, 20.0);
+        ed.set_popup(0, 5, r).unwrap();
+        ed.set_is_open(5, false);
+        ed.set_popup(0, 7, r).unwrap();
+        ed.set_is_open(7, true);
+        ed.set_popup(0, 8, r).unwrap();
+        assert_eq!(
+            text(&doc, 6),
+            "<</Type/Annot/Subtype/Popup/Parent 5 0 R/Rect[10 80 20 90]/Open false>>"
+        );
+        assert!(
+            text(&doc, 7)
+                .contains("/Popup<</Type/Annot/Subtype/Popup/Rect[10 80 20 90]/Open true>>")
+        );
+        // The square's new popup goes at the end of the /Annots object.
+        assert_eq!(text(&doc, 4), "[5 0 R 6 0 R 7 0 R 8 0 R 9 0 R]");
+        assert!(text(&doc, 8).contains("/Popup 9 0 R"));
+        // Deleting from an /Annots object changes that object.
+        assert_eq!(ed.delete(0, &reference(5)), Ok(true));
+        assert_eq!(text(&doc, 4), "[7 0 R 8 0 R 9 0 R]");
+        assert_eq!(ed.delete(0, &reference(5)), Ok(false));
+    }
+
+    #[test]
+    fn a_border_held_as_an_object_is_changed_there() {
+        let bytes = b"%PDF-1.7\n\
+            1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+            3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Annots[5 0 R]>>endobj\n\
+            4 0 obj<</W 2>>endobj\n\
+            5 0 obj<</Type/Annot/Subtype/Square/Rect[10 10 50 50]/BS 4 0 R/Border[0 0 2]>>endobj\n\
+            trailer<</Root 1 0 R/Size 6>>\n";
+        let doc = open(bytes);
+        let mut ed = Editor::new(&doc);
+        ed.load_page(0).unwrap();
+        ed.set_border_width(5, 4.0).unwrap();
+        // As MuPDF 1.28.6 leaves it after setBorderWidth(4).
+        assert_eq!(text(&doc, 4), "<</Type/Border/W 4>>");
+        assert_eq!(
+            text(&doc, 5),
+            "<</Type/Annot/Subtype/Square/Rect[9 9 51 51]/BS 4 0 R/RD[1 1 1 1]>>"
+        );
+    }
+
+    #[test]
+    fn a_page_that_does_not_load_takes_no_annotations() {
+        let doc = open(MINIMAL);
+        let mut ed = Editor::new(&doc);
+        assert!(ed.create(0, "Square").is_ok());
+        assert!(ed.create(3, "Square").is_err());
+        assert!(ed.delete(3, &reference(6)).is_err());
+    }
+
+    #[test]
+    fn annotations_on_a_direct_page_see_its_later_changes() {
+        let bytes = b"%PDF-1.7\n\
+            1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[<</Type/Page/MediaBox[0 0 100 100]>>]/Count 1>>endobj\n\
+            trailer<</Root 1 0 R/Size 3>>\n";
+        let doc = open(bytes);
+        let mut ed = Editor::new(&doc);
+        let a = ed.create(0, "Square").unwrap();
+        let b = ed.create(0, "Circle").unwrap();
+        ed.update();
+        // Each /P is the page as it is at the end: with both annotations.
+        for n in [a, b] {
+            assert!(text(&doc, n).contains(&format!(
+                "/P<</Type/Page/MediaBox[0 0 100 100]/Annots[{a} 0 R {b} 0 R]>>"
+            )));
+        }
+    }
 }

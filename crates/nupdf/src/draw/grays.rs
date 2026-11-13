@@ -600,6 +600,166 @@ mod tests {
         assert_eq!(bm.data, vec![255, 255]);
     }
 
+    fn outline(pts: &[(u8, i64, i64)], contours: &[usize]) -> Outline {
+        Outline {
+            points: pts.iter().map(|&(_, x, y)| (x, y)).collect(),
+            tags: pts.iter().map(|&(t, _, _)| t).collect(),
+            contours: contours.to_vec(),
+            even_odd: false,
+            overlap: false,
+        }
+    }
+
+    fn draw(o: &Outline) -> Bitmap {
+        render(o, 1000).unwrap_or_else(|| panic!("render failed"))
+    }
+
+    const C: u8 = TAG_CONIC;
+    const ON: u8 = TAG_ON;
+    const CU: u8 = TAG_CUBIC;
+
+    #[test]
+    fn conic_contours_close_the_same_however_they_start() {
+        // A rounded square, 40 pixels, from its on-curve points; from its
+        // corners alone, the on-curve points implied between them; and
+        // starting on a corner with the last point on the curve.
+        let s = 2560;
+        let explicit = outline(
+            &[
+                (ON, s / 2, 0),
+                (C, s, 0),
+                (ON, s, s / 2),
+                (C, s, s),
+                (ON, s / 2, s),
+                (C, 0, s),
+                (ON, 0, s / 2),
+                (C, 0, 0),
+            ],
+            &[7],
+        );
+        let implied = outline(&[(C, s, 0), (C, s, s), (C, 0, s), (C, 0, 0)], &[3]);
+        let last_on = outline(
+            &[
+                (C, s, 0),
+                (ON, s, s / 2),
+                (C, s, s),
+                (ON, s / 2, s),
+                (C, 0, s),
+                (ON, 0, s / 2),
+                (C, 0, 0),
+                (ON, s / 2, 0),
+            ],
+            &[7],
+        );
+        let a = draw(&explicit);
+        assert_eq!(a.data, draw(&implied).data);
+        assert_eq!(a.data, draw(&last_on).data);
+        // Inside full, the corners rounded off.
+        assert_eq!(a.data[20 * 40 + 20], 255);
+        assert!(a.data[0] < 255);
+        let ink: u32 = a.data.iter().map(|&v| u32::from(v)).sum();
+        assert!(ink > 255 * 1300 && ink < 255 * 1600, "{ink}");
+    }
+
+    #[test]
+    fn cubic_contours_close_to_their_start() {
+        // A cubic blob, closed by a last on-curve point and by a cubic
+        // that runs back to the start.
+        let closed = outline(
+            &[
+                (ON, 0, 0),
+                (CU, 1500, -300),
+                (CU, 2000, 1500),
+                (ON, 1000, 2000),
+                (CU, 0, 2500),
+                (CU, -300, 800),
+            ],
+            &[5],
+        );
+        let explicit = outline(
+            &[
+                (ON, 0, 0),
+                (CU, 1500, -300),
+                (CU, 2000, 1500),
+                (ON, 1000, 2000),
+                (CU, 0, 2500),
+                (CU, -300, 800),
+                (ON, 0, 0),
+            ],
+            &[6],
+        );
+        assert_eq!(draw(&closed).data, draw(&explicit).data);
+    }
+
+    #[test]
+    fn invalid_outlines_do_not_render() {
+        let cases = [
+            // A contour starting on a cubic control point.
+            outline(&[(CU, 0, 0), (ON, 640, 0), (ON, 640, 640)], &[2]),
+            // A cubic control point without its pair.
+            outline(&[(ON, 0, 0), (CU, 640, 0), (ON, 640, 640)], &[2]),
+            // A contour ending past the points, or before it starts.
+            outline(&[(ON, 0, 0), (ON, 640, 0), (ON, 640, 640)], &[5]),
+            outline(&[(ON, 0, 0), (ON, 640, 0), (ON, 640, 640)], &[2, 1]),
+            // A conic followed by a cubic.
+            outline(
+                &[(ON, 0, 0), (C, 640, 0), (CU, 640, 640), (CU, 0, 640)],
+                &[3],
+            ),
+        ];
+        for (i, o) in cases.iter().enumerate() {
+            assert!(render(o, 1000).is_none(), "case {i}");
+        }
+        // Boxes past ten times the size, as FreeType refuses them.
+        assert!(render(&square(0, 0, 64 * 200, 64), 10).is_none());
+        // An empty box is an empty bitmap.
+        let empty = render(&square(0, 0, 0, 0), 10).unwrap_or_else(|| panic!("render failed"));
+        assert!(empty.data.is_empty());
+    }
+
+    #[test]
+    fn overlapping_contours_by_rule_and_oversampled() {
+        // Two squares overlapping in the middle.
+        let mut o = square(0, 0, 1280, 1280);
+        let other = square(640, 640, 1920, 1920);
+        o.points.extend(other.points);
+        o.tags.extend(other.tags);
+        o.contours.push(7);
+        let nonzero = draw(&o);
+        o.even_odd = true;
+        let even_odd = draw(&o);
+        // Pixel (15, 15) is in both squares: in for non-zero, out for
+        // even-odd.
+        let at = 15 * 30 + 15;
+        assert_eq!((nonzero.data[at], even_odd.data[at]), (255, 0));
+        o.even_odd = false;
+        o.overlap = true;
+        let over = draw(&o);
+        assert_eq!(over.data[at], 255);
+        assert_eq!(over.data[5 * 30 + 5], 255);
+        assert_eq!(over.data[25 * 30 + 5], 0);
+    }
+
+    #[test]
+    fn long_slopes_cover_what_their_area_says() {
+        // Edges crossing many cells in x and in y, shallow and steep,
+        // up and down: the coverage adds up to the shape's area.
+        let pts = [(0, 0), (6400, 70), (6400, 6400), (6330, 6400)];
+        let o = outline(&pts.map(|(x, y)| (ON, x, y)), &[3]);
+        let bm = draw(&o);
+        assert_eq!((bm.w, bm.h), (100, 100));
+        let ink: u32 = bm.data.iter().map(|&v| u32::from(v)).sum();
+        // The shoelace formula, in pixels.
+        let twice: i64 = (0..4)
+            .map(|i| {
+                let (a, b) = (pts[i], pts[(i + 1) % 4]);
+                a.0 * b.1 - b.0 * a.1
+            })
+            .sum();
+        let area = twice as f64 / 2.0 / 4096.0;
+        assert!((f64::from(ink) / 255.0 - area).abs() < 2.0, "{ink} {area}");
+    }
+
     #[test]
     fn half_pixels_are_half_covered() {
         let bm = render(&square(32, 0, 96, 64), 100).unwrap_or_else(|| panic!("render failed"));

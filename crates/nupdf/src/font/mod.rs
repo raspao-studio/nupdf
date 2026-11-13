@@ -134,19 +134,89 @@ fn ps_unicode(name: &[u8]) -> Option<(u32, bool)> {
     (v != 0).then_some((v, dot < name.len()))
 }
 
+/// The flag `ps_unicode_value` sets on the code point of a suffixed name.
+const VARIANT: u32 = 0x8000_0000;
+
+/// `ft_extra_glyph_names` and `_unicodes`: names the Adobe Glyph List
+/// maps elsewhere, and the code point each also stands for.
+const EXTRA_GLYPHS: [(&[u8], u32); 10] = [
+    (b"Delta", 0x0394),
+    (b"Omega", 0x03A9),
+    (b"fraction", 0x2215),
+    (b"hyphen", 0x00AD),
+    (b"macron", 0x02C9),
+    (b"mu", 0x03BC),
+    (b"periodcentered", 0x2219),
+    (b"space", 0x00A0),
+    (b"Tcommaaccent", 0x021A),
+    (b"tcommaaccent", 0x021B),
+];
+
 /// `ps_unicodes_init`: the Unicode charmap of a font with glyph names,
-/// None when no name maps to a code point.
+/// None when no name maps to a code point. Entries keep the variant flag;
+/// duplicates stay, in glyph order.
 fn synthesize_unicode(names: impl Iterator<Item = (u32, Vec<u8>)>) -> Option<Arc<Vec<(u32, u32)>>> {
-    let mut map: Vec<(u32, bool, u32)> = names
-        .filter_map(|(g, n)| ps_unicode(&n).map(|(u, variant)| (u, variant, g)))
-        .collect();
+    // Per extra glyph: unseen, its first glyph, or mapped by a name.
+    let mut extra: [Option<Option<u32>>; 10] = [None; 10];
+    let mut map: Vec<(u32, u32)> = Vec::new();
+    for (g, n) in names {
+        if n.is_empty() {
+            continue;
+        }
+        if let Some(k) = EXTRA_GLYPHS.iter().position(|e| e.0 == n.as_slice())
+            && extra[k].is_none()
+        {
+            extra[k] = Some(Some(g));
+        }
+        if let Some((u, variant)) = ps_unicode(&n) {
+            if let Some(k) = EXTRA_GLYPHS.iter().position(|e| !variant && e.1 == u) {
+                extra[k] = Some(None);
+            }
+            map.push((if variant { u | VARIANT } else { u }, g));
+        }
+    }
+    for (e, state) in EXTRA_GLYPHS.iter().zip(extra) {
+        if let Some(Some(g)) = state {
+            map.push((e.1, g));
+        }
+    }
     if map.is_empty() {
         return None;
     }
-    // Plain names before suffixed ones, the first glyph before later ones.
-    map.sort_by_key(|&(u, variant, g)| (u, variant, g));
-    map.dedup_by_key(|e| e.0);
-    Some(Arc::new(map.into_iter().map(|(u, _, g)| (u, g)).collect()))
+    // compare_uni_maps: by code point, plain names before suffixed ones.
+    map.sort_by_key(|&(u, _)| (u & !VARIANT, u));
+    Some(Arc::new(map))
+}
+
+/// `ps_unicodes_char_index`: FreeType's search, which takes the plain
+/// entry it meets first, else the last suffixed one it passed.
+fn unicode_index(map: &[(u32, u32)], unicode: u32) -> u32 {
+    let (mut min, mut max) = (0usize, map.len());
+    let mut mid = max / 2;
+    let mut result = None;
+    while min < max {
+        let (u, g) = map[mid];
+        if u == unicode {
+            result = Some(g);
+            break;
+        }
+        let base = u & !VARIANT;
+        if base == unicode {
+            result = Some(g);
+        }
+        if base < unicode {
+            min = mid + 1;
+        } else {
+            max = mid;
+        }
+        // A guess for a continuous block, when it falls in the range.
+        mid = unicode
+            .checked_sub(base)
+            .and_then(|d| mid.checked_add(d as usize))
+            .filter(|&m| m >= min && m < max)
+            .unwrap_or(min + (max - min) / 2);
+    }
+    result.unwrap_or(0)
 }
 
 impl Face {
@@ -154,16 +224,27 @@ impl Face {
     /// and CFF drivers in MuPDF's order. The error is FreeType's name.
     pub fn open(data: Arc<[u8]>) -> Result<Face, &'static str> {
         if sfnt::Sfnt::recognize(&data) {
-            let s = sfnt::Sfnt::open(data.clone())?;
-            let tag = data.get(0..4).unwrap_or_default();
-            let ttc_true = tag == b"ttcf" && s.has_glyf;
-            if tag == [0, 1, 0, 0] || tag == b"true" || ttc_true {
+            // FT_Open_Face reports a read past the end as no known format.
+            let s = sfnt::Sfnt::open(data.clone()).map_err(|e| match e {
+                "Invalid_Stream_Operation" => "Unknown_File_Format",
+                e => e,
+            })?;
+            // The TrueType driver takes its version tags (a collection's
+            // by its first font), the CFF driver the rest.
+            if matches!(
+                s.format_tag,
+                sfnt::TAG_TRUETYPE | sfnt::TAG_TRUETYPE_CJK | sfnt::TAG_TRUE
+            ) {
+                s.check_loca()?;
                 return Ok(Self::from_sfnt(s, Format::TrueType));
             }
-            if s.has_cff {
-                return Ok(Self::from_sfnt(s, Format::Cff));
+            if s.format_tag != sfnt::TAG_OTTO {
+                return Err("Unknown_File_Format");
             }
-            return Err("Unknown_File_Format");
+            if !s.has_cff {
+                return Err("Table_Missing");
+            }
+            return Ok(Self::from_sfnt(s, Format::Cff));
         }
         if type1::Type1::recognize(&data) {
             return Ok(Self::from_type1(type1::Type1::open(data)?));
@@ -377,10 +458,12 @@ impl Face {
     /// `find_unicode_charmap`, as FT_Open_Face selects a charmap: a
     /// UCS-4 one from the end, else any Unicode one from the end.
     fn select_default(&mut self) {
-        let ucs4 = self.charmaps.iter().rposition(|c| {
+        let ucs4 = (0..self.charmaps.len()).rev().find(|&i| {
+            let c = &self.charmaps[i];
             c.encoding == Encoding::Unicode
                 && ((c.platform_id == 3 && c.encoding_id == 10)
-                    || (c.platform_id == 0 && c.encoding_id == 4))
+                    || (c.platform_id == 0 && c.encoding_id == 4)
+                    || (c.platform_id == 0 && c.encoding_id == 6 && self.cmap_format(i) == 13))
         });
         self.charmap = ucs4.or_else(|| {
             self.charmaps
@@ -424,9 +507,7 @@ impl Face {
             (Source::Sfnt(i), Program::Sfnt(s)) => {
                 s.subtables.get(*i).map_or(0, |t| s.char_index(t, code))
             }
-            (Source::Unicode(map), _) => map
-                .binary_search_by_key(&code, |&(u, _)| u)
-                .map_or(0, |i| map[i].1),
+            (Source::Unicode(map), _) => unicode_index(map, code),
             (Source::Codes(codes), _) => codes.get(code as usize).copied().unwrap_or(0),
             (Source::CffCodes, Program::Cff(c)) => {
                 c.codes.get(code as usize).map_or(0, |&g| u32::from(g))
@@ -611,7 +692,8 @@ pub fn cjk_metrics() -> Arc<[u8]> {
             cmap.extend_from_slice(&be16(v));
         }
         let tables: [(&[u8; 4], Vec<u8>); 6] = [
-            (b"CFF ", Vec::new()),
+            // An empty table would be a missing one.
+            (b"CFF ", vec![0; 4]),
             (b"cmap", cmap),
             (b"head", head),
             (b"hhea", hhea),
@@ -671,14 +753,102 @@ fn mul_div(a: i64, b: i64, c: i64) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    //! Faces of the bundled fonts and of fonts built here. The expected
+    //! glyphs and advances are MuPDF 1.28.6's for the same bytes.
+
+    use super::sfnt::tests::{
+        base, be16, be32, cmap, fmt0, fmt4, fmt12, head, post, post2, set, sfnt_at, ttc, ttf,
+        without,
+    };
     use super::*;
+
+    fn face(data: Arc<[u8]>) -> Face {
+        Face::open(data).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn codes(f: &Face, codes: &[u32]) -> Vec<u32> {
+        codes.iter().map(|&c| f.char_index(c)).collect()
+    }
+
+    /// A Type 1 charstring number.
+    fn t1_num(v: i32) -> Vec<u8> {
+        match v {
+            -107..=107 => vec![(v + 139) as u8],
+            108..=1131 => vec![((v - 108) / 256 + 247) as u8, ((v - 108) % 256) as u8],
+            -1131..=-108 => vec![((-v - 108) / 256 + 251) as u8, ((-v - 108) % 256) as u8],
+            _ => panic!("{v} needs a 32-bit number"),
+        }
+    }
+
+    /// A charstring of width `w` drawing a box from (x0, y0) to (x1, y1).
+    pub(crate) fn t1_box(w: i32, x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<u8> {
+        let mut cs = [t1_num(0), t1_num(w), vec![13]].concat();
+        cs.extend([t1_num(x0), t1_num(y0), vec![21]].concat());
+        cs.extend([t1_num(x1 - x0), t1_num(0), vec![5]].concat());
+        cs.extend([t1_num(0), t1_num(y1 - y0), vec![5]].concat());
+        cs.extend([t1_num(x0 - x1), t1_num(0), vec![5]].concat());
+        cs.extend([vec![9, 14]].concat());
+        cs
+    }
+
+    /// eexec encryption, as hex.
+    fn eexec(plain: &[u8]) -> Vec<u8> {
+        let mut r: u16 = 55665;
+        let mut out = Vec::new();
+        for &p in plain {
+            let c = p ^ (r >> 8) as u8;
+            r = (u16::from(c).wrapping_add(r))
+                .wrapping_mul(52845)
+                .wrapping_add(22719);
+            out.extend(format!("{c:02x}").bytes());
+        }
+        out
+    }
+
+    /// A Type 1 font of the glyphs (name, charstring), `encoding` being
+    /// what follows `/Encoding` (None for no entry).
+    pub(crate) fn type1(encoding: Option<&str>, glyphs: &[(&str, Vec<u8>)]) -> Arc<[u8]> {
+        let mut clear = String::from(
+            "%!PS-AdobeFont-1.0: Test 001\n/FontName /Test def\n\
+             /FontMatrix [0.001 0 0 0.001 0 0] readonly def\n\
+             /FontBBox {-10 -200 1010 800} readonly def\n\
+             /ItalicAngle -12 def\n/Weight (Bold) def\n/isFixedPitch true def\n",
+        );
+        if let Some(e) = encoding {
+            clear += &format!("/Encoding {e}\n");
+        }
+        clear += "currentfile eexec\n";
+        let mut private = b"\0\0\0\0dup /Private 8 dict dup begin /lenIV -1 def\n".to_vec();
+        private.extend(format!("/CharStrings {} dict dup begin\n", glyphs.len()).bytes());
+        for (name, cs) in glyphs {
+            private.extend(format!("/{name} {} RD ", cs.len()).bytes());
+            private.extend(cs);
+            private.extend(b" ND\n");
+        }
+        private.extend(b"end\nend\n");
+        let mut out = clear.into_bytes();
+        out.extend(eexec(&private));
+        out.extend(b"\n");
+        out.into()
+    }
+
+    fn t1_glyphs() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            (".notdef", t1_box(250, 0, 0, 0, 0)),
+            ("A", t1_box(600, 10, 0, 590, 700)),
+            ("B", t1_box(650, 20, 0, 600, 700)),
+            ("space", t1_box(250, 0, 0, 0, 0)),
+            ("ff", t1_box(500, 0, 0, 480, 700)),
+        ]
+    }
 
     #[test]
     fn the_base_fonts_open_as_cff_with_their_encodings() {
         let data: Arc<[u8]> = base14("Helvetica").unwrap_or_default().into();
         let face = Face::open(data).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(face.format, Format::Cff);
+        assert_eq!(face.format_name(), "CFF");
         assert_eq!(face.units_per_em, 1000);
         assert!(face.num_glyphs > 200);
         let a = face.get_name_index(b"A");
@@ -688,14 +858,378 @@ mod tests {
         assert_eq!(face.char_index(0x41), a);
         // NimbusSans' A is 667 units wide, as Helvetica's.
         assert_eq!(face.advance(a), Some(667));
+        assert_eq!(face.advance(face.num_glyphs), None);
         assert!(face.charmaps.iter().any(|c| c.platform_id == 7));
+        // Its own encoding maps code 65 to A too, and is no sfnt cmap.
+        let adobe = face.charmaps.iter().position(|c| c.platform_id == 7);
+        let mut by_code = face.clone();
+        by_code.charmap = adobe;
+        assert_eq!(by_code.cmap_format(adobe.unwrap_or(0)), -1);
+        assert_eq!(by_code.get_char_index(65), a);
+        assert!(by_code.select_unicode());
+        assert_eq!(by_code.charmap, face.charmap);
+        // The outline is the glyph's, scaled to 1024 pixels an em.
+        let cbox = face.glyph_cbox(a).and_then(Result::ok).flatten();
+        assert!(cbox.is_some_and(|b| b.x1 > b.x0 && b.y1 > 600.0));
+        let outline = face.glyph_outline(a).and_then(Result::ok);
+        assert!(outline.is_some_and(|o| !o.points.is_empty()));
+        for name in [
+            "Courier",
+            "Courier-Oblique",
+            "Courier-Bold",
+            "Courier-BoldOblique",
+            "Helvetica-Oblique",
+            "Helvetica-Bold",
+            "Helvetica-BoldOblique",
+            "Times-Roman",
+            "Times-Italic",
+            "Times-Bold",
+            "Times-BoldItalic",
+            "Symbol",
+            "ZapfDingbats",
+        ] {
+            let f = base14(name).and_then(|d| Face::open(d.into()).ok());
+            assert!(f.is_some_and(|f| f.num_glyphs > 100), "{name}");
+        }
+        assert!(base14("Arial").is_none());
+    }
+
+    #[test]
+    fn symbolic_base_fonts_map_codes_through_their_own_encoding() {
+        let symbol = face(base14("Symbol").unwrap_or_default().into());
+        let alpha = symbol.get_name_index(b"alpha");
+        assert!(alpha > 0);
+        assert_eq!(symbol.char_index(0x3b1), alpha);
+        let custom = symbol
+            .charmaps
+            .iter()
+            .position(|c| c.encoding == Encoding::AdobeCustom);
+        let mut by_code = symbol.clone();
+        by_code.charmap = custom;
+        assert_eq!(by_code.get_char_index(0x61), alpha);
+    }
+
+    #[test]
+    fn charmaps_are_chosen_as_freetype_chooses_them() {
+        let ffff = (0xffffu16, 0xffffu16, 1i16, None);
+        let a_to_1 = || fmt4(&[(0x41, 0x41, -0x40, None), ffff.clone()]);
+        // A UCS-4 format 13 subtable on platform 0 wins over a later
+        // (3,1) one.
+        let f = face(ttf(&base(
+            8,
+            Some(cmap(&[
+                (0, 6, fmt12(13, &[(0x41, 0x5a, 3)])),
+                (3, 1, a_to_1()),
+            ])),
+        )));
+        assert_eq!(codes(&f, &[0x41, 0x5a, 0x5b]), [3, 3, 0]);
+        assert_eq!(f.cmap_format(0), 13);
+        // The last Unicode subtable is the default, a format 14 one too.
+        let fmt14 = [be16(&[14]), be32(&[10, 0])].concat();
+        let f = face(ttf(&base(
+            8,
+            Some(cmap(&[(3, 1, a_to_1()), (0, 5, fmt14)])),
+        )));
+        assert_eq!((f.charmap, codes(&f, &[0x41])), (Some(1), vec![0]));
+        // Symbol and ISO subtables.
+        let sym = fmt4(&[(0xf041, 0xf042, 0x0fc0, None), ffff.clone()]);
+        let f = face(ttf(&base(8, Some(cmap(&[(3, 0, sym.clone())])))));
+        assert_eq!((f.charmap, codes(&f, &[0x41, 0xf041])), (None, vec![0, 0]));
+        let mut no_unicode = f.clone();
+        assert!(!no_unicode.select_unicode());
+        assert_eq!(no_unicode.charmap, None);
+        let f = face(ttf(&base(8, Some(cmap(&[(2, 0, a_to_1())])))));
+        assert_eq!(codes(&f, &[0x41]), [1]);
+        // ft_char_index: the code, then the code in the symbol area, then
+        // an ellipsis for U+22EF.
+        let pua = fmt4(&[
+            (0x2026, 0x2026, -0x2024, None),
+            (0xf041, 0xf041, 0x0fc2, None),
+            ffff.clone(),
+        ]);
+        let f = face(ttf(&base(8, Some(cmap(&[(3, 1, pua)])))));
+        assert_eq!(codes(&f, &[0x41, 0x22ef, 0x2026, 0x42]), [3, 2, 2, 0]);
+        assert_eq!(f.format_name(), "TrueType");
+    }
+
+    #[test]
+    fn glyph_names_make_a_unicode_charmap_when_there_is_none() {
+        let names = post(
+            0x2_0000,
+            false,
+            &post2(&[0, 36, 258, 259, 260, 3], &[b"uni0042", b"a.sc", b"a"]),
+        );
+        let f = face(ttf(&set(
+            base(6, Some(cmap(&[(1, 0, fmt0(&[(0x41, 1)]))]))),
+            b"post",
+            names,
+        )));
+        // The plain name before the suffixed one; space for no-break
+        // space too, as no name claims U+00A0.
+        assert_eq!(
+            codes(&f, &[0x41, 0x42, 0x61, 0x20, 0xa0, 0x43]),
+            [1, 2, 4, 5, 5, 0]
+        );
+        assert_eq!(f.charmaps.len(), 2);
+        assert_eq!(f.charmaps[0].encoding, Encoding::AppleRoman);
+        assert_eq!(f.name_index(b"uni0042"), 2);
+        // Two glyphs of one name: FreeType's search finds the later.
+        let mut tail = be16(&[6]);
+        tail.extend([0u8, 35, 34, 0x80, 64, 2]);
+        let f = face(ttf(&set(
+            without(base(6, None), b"cmap"),
+            b"post",
+            post(0x2_5000, false, &tail),
+        )));
+        assert_eq!(codes(&f, &[0x41, 0x61, 0x24]), [2, 4, 5]);
+        // Format 1 with 258 glyphs: the Macintosh order.
+        let f = face(ttf(&set(
+            without(base(258, None), b"cmap"),
+            b"post",
+            post(0x1_0000, false, &[]),
+        )));
+        assert_eq!(codes(&f, &[0x41, 0x20, 0x61]), [36, 3, 68]);
+        // No names, no charmap.
+        let f = face(ttf(&set(
+            without(base(6, None), b"cmap"),
+            b"post",
+            post(0x1_0000, false, &[]),
+        )));
+        assert_eq!((f.charmaps.len(), codes(&f, &[0x41])), (0, vec![0]));
+        // An extra name is not added when a name maps its code point.
+        let map = synthesize_unicode(
+            [
+                (1, b"space".to_vec()),
+                (2, b"uni00A0".to_vec()),
+                (3, b"Omega".to_vec()),
+            ]
+            .into_iter(),
+        )
+        .unwrap_or_default();
+        assert_eq!(*map, [(0x20, 1), (0xa0, 2), (0x3a9, 3), (0x2126, 3)]);
+        assert_eq!(unicode_index(&map, 0x2126), 3);
+        assert!(
+            synthesize_unicode([(0, b".notdef".to_vec()), (1, Vec::new())].into_iter()).is_none()
+        );
     }
 
     #[test]
     fn suffixed_names_map_after_plain_ones() {
         assert_eq!(ps_unicode(b"uni0041"), Some((0x41, false)));
+        assert_eq!(ps_unicode(b"uni0041.alt"), Some((0x41, true)));
+        assert_eq!(ps_unicode(b"uniXYZW"), None);
         assert_eq!(ps_unicode(b"a.sc"), Some((0x61, true)));
         assert_eq!(ps_unicode(b"u1F600"), Some((0x1f600, false)));
+        assert_eq!(ps_unicode(b"u1F600.big"), Some((0x1f600, true)));
         assert_eq!(ps_unicode(b".notdef"), None);
+        assert_eq!(ps_unicode(b".sc"), None);
+        // Only suffixed entries for a code: the last one the search met.
+        let map = [(0x41 | VARIANT, 1), (0x41 | VARIANT, 2), (0x42, 3)];
+        assert_eq!(unicode_index(&map, 0x41), 1);
+        assert_eq!(unicode_index(&map, 0x42), 3);
+        assert_eq!(unicode_index(&map, 0x43), 0);
+        let block: Vec<(u32, u32)> = (0x20..0x80).map(|u| (u, u - 0x1f)).collect();
+        assert_eq!(unicode_index(&block, 0x7e), 0x5f);
+        assert_eq!(unicode_index(&block, 0x10), 0);
+    }
+
+    #[test]
+    fn sfnt_faces_fail_as_the_freetype_drivers_do() {
+        let err = |d: Arc<[u8]>| Face::open(d).err();
+        assert_eq!(err(ttc(b"OTTO", &base(4, None))), Some("Table_Missing"));
+        assert_eq!(
+            err(sfnt_at(0, b"OTTO", &base(4, None)).into()),
+            Some("Table_Missing")
+        );
+        assert_eq!(
+            err(sfnt_at(0, b"typ1", &base(4, None)).into()),
+            Some("Unknown_File_Format")
+        );
+        assert_eq!(
+            err(ttf(&without(base(4, None), b"loca"))),
+            Some("Locations_Missing")
+        );
+        assert_eq!(
+            err(ttf(&without(without(base(4, None), b"loca"), b"glyf"))),
+            Some("Unknown_File_Format")
+        );
+        // A read past the end is no known format.
+        let mut t = without(base(4, None), b"hhea");
+        t.push((b"hhea", vec![0; 8]));
+        assert_eq!(err(ttf(&t)), Some("Unknown_File_Format"));
+        assert_eq!(
+            err(Arc::from(&b"garbage!"[..])),
+            Some("Unknown_File_Format")
+        );
+        // The CJK stand-in opens as an OpenType font without glyphs.
+        let cjk = face(cjk_metrics());
+        assert_eq!(
+            (cjk.format, cjk.units_per_em, cjk.ascender),
+            (Format::Cff, 1000, 1151)
+        );
+        assert_eq!((cjk.char_index(0x4e00), cjk.advance(0)), (0, Some(1000)));
+        assert_eq!(
+            err(ttf(&set(base(4, None), b"head", head(0)))),
+            Some("Invalid_Table")
+        );
+        assert!(cjk.glyph_cbox(0).is_none() && cjk.glyph_outline(0).is_none());
+        // Collections and the other TrueType tags take the TrueType driver.
+        for d in [
+            ttc(&[0, 1, 0, 0], &base(4, None)),
+            sfnt_at(0, &[0, 2, 0, 0], &base(4, None)).into(),
+        ] {
+            assert_eq!(face(d).format, Format::TrueType);
+        }
+        let mac = face(sfnt_at(0, b"true", &without(base(4, None), b"hhea")).into());
+        assert_eq!((mac.format, mac.advance(1)), (Format::TrueType, Some(0)));
+    }
+
+    /// A TrueType font of three glyphs: empty, a triangle, and a
+    /// composite of the triangle moved right.
+    fn glyph_font() -> Arc<[u8]> {
+        let triangle = [
+            be16(&[1, 100, 0, 500, 700]),
+            be16(&[2, 0]),
+            vec![1, 1, 1],
+            be16(&[100, 400, -200]),
+            be16(&[0, 0, 700]),
+        ]
+        .concat();
+        let composite = [be16(&[-1, 300, 0, 800, 700]), be16(&[0x0003, 1, 200, 0])].concat();
+        let mut glyf = triangle.clone();
+        while glyf.len() % 2 != 0 {
+            glyf.push(0);
+        }
+        let second = glyf.len();
+        glyf.extend(composite);
+        let loca = be16(&[0, 0, (second / 2) as i64, (glyf.len() / 2) as i64]);
+        let t = base(3, None);
+        let t = set(set(t, b"glyf", glyf), b"loca", loca);
+        ttf(&t)
+    }
+
+    #[test]
+    fn truetype_glyphs_bound_and_draw_from_glyf() {
+        let f = face(glyph_font());
+        let cbox = |g: u32| {
+            f.glyph_cbox(g)
+                .and_then(Result::ok)
+                .flatten()
+                .map(|b| (b.x0, b.y0, b.x1, b.y1))
+        };
+        assert_eq!(cbox(0), None);
+        assert_eq!(cbox(1), Some((100.0, 0.0, 500.0, 700.0)));
+        assert_eq!(cbox(2), Some((300.0, 0.0, 700.0, 700.0)));
+        assert!(f.glyph_cbox(7).is_some_and(|r| r.is_err()));
+        let o = f.glyph_outline(1).and_then(Result::ok).unwrap_or_default();
+        // 1024 pixels an em, in 26.6, from the left side bearing.
+        assert_eq!(o.points.len(), 3);
+        assert!(f.glyph_outline(9).is_some_and(|r| r.is_err()));
+        // The bundled glyphless font: an invisible box half an em wide.
+        let g = face(Arc::from(
+            &include_bytes!("../../fonts/glyphless/pdf.ttf")[..],
+        ));
+        assert_eq!((g.format, g.num_glyphs), (Format::TrueType, 2));
+        assert_eq!(
+            g.advance(1).map(|a| a as f32 / f32::from(g.units_per_em)),
+            Some(0.5)
+        );
+        let cbox = |g: &Face, gid| g.glyph_cbox(gid).and_then(Result::ok).flatten();
+        assert!(cbox(&g, 0).is_none());
+        let b = cbox(&g, 1).map(|b| (b.x0, b.y0, b.x1, b.y1));
+        assert_eq!(b, Some((0.0, 0.0, 1024.0, 2048.0)));
+    }
+
+    #[test]
+    fn type1_faces_have_names_style_and_their_encoding() {
+        let f = face(type1(Some("StandardEncoding def"), &t1_glyphs()));
+        assert_eq!((f.format, f.format_name()), (Format::Type1, "Type 1"));
+        assert_eq!((f.num_glyphs, f.units_per_em), (5, 1000));
+        assert_eq!((f.bold, f.italic, f.fixed_width), (true, true, true));
+        assert_eq!(
+            (f.ascender, f.descender, f.bbox),
+            (800, -200, [-10, -200, 1010, 800])
+        );
+        assert_eq!(
+            codes(&f, &[0x41, 0x42, 0x20, 0xa0, 0xfb00, 0x43]),
+            [1, 2, 3, 3, 4, 0]
+        );
+        assert_eq!(
+            (f.advance(1), f.advance(2), f.advance(9)),
+            (Some(600), Some(650), None)
+        );
+        assert_eq!(f.name_index(b"B"), 2);
+        assert_eq!(f.glyph_name(4).as_deref(), Some(&b"ff"[..]));
+        let std = f
+            .charmaps
+            .iter()
+            .position(|c| c.encoding == Encoding::AdobeStandard);
+        let mut by_code = f.clone();
+        by_code.charmap = std;
+        assert_eq!(by_code.get_char_index(0x41), 1);
+        assert_eq!(by_code.get_char_index(0x20), 3);
+        let cbox = f.glyph_cbox(1).and_then(Result::ok).flatten();
+        assert_eq!(cbox.map(|b| (b.x0, b.y1)), Some((10.0, 700.0)));
+        assert!(f.glyph_cbox(5).is_some_and(|r| r.is_err()));
+        assert!(
+            f.glyph_outline(1)
+                .is_some_and(|r| r.is_ok_and(|o| o.points.len() == 4))
+        );
+        assert!(f.glyph_outline(5).is_some_and(|r| r.is_err()));
+        // The other encodings.
+        let expert = face(type1(Some("ExpertEncoding def"), &t1_glyphs()));
+        assert!(
+            expert
+                .charmaps
+                .iter()
+                .any(|c| c.encoding == Encoding::AdobeExpert)
+        );
+        let latin1 = face(type1(Some("ISOLatin1Encoding def"), &t1_glyphs()));
+        assert!(
+            latin1
+                .charmaps
+                .iter()
+                .any(|c| c.encoding == Encoding::AdobeLatin1)
+        );
+        let array = "256 array 0 1 255 {1 index exch /.notdef put} for dup 97 /A put dup 98 /B put readonly def";
+        let custom = face(type1(Some(array), &t1_glyphs()));
+        let i = custom
+            .charmaps
+            .iter()
+            .position(|c| c.encoding == Encoding::AdobeCustom);
+        let mut by_code = custom.clone();
+        by_code.charmap = i;
+        assert_eq!(
+            (by_code.get_char_index(0x61), by_code.get_char_index(0x41)),
+            (1, 0)
+        );
+        assert_eq!(by_code.get_char_index(300), 0);
+        let none = face(type1(None, &t1_glyphs()));
+        assert_eq!(none.charmaps.len(), 1);
+    }
+
+    #[test]
+    fn names_fall_back_to_other_names_of_their_code_point() {
+        let f = face(type1(
+            Some("StandardEncoding def"),
+            &[
+                (".notdef", t1_box(250, 0, 0, 0, 0)),
+                ("uni00C5", t1_box(600, 0, 0, 1, 1)),
+                ("Omega", t1_box(600, 0, 0, 1, 1)),
+            ],
+        ));
+        assert_eq!(f.name_index(b"Aring"), 1);
+        assert_eq!(f.name_index(b"uni2126"), 2);
+        assert_eq!(f.name_index(b"nonesuch"), 0);
+        assert_eq!(f.name_index(b""), 0);
+        assert_eq!(f.name_index(b"Zcaron"), 0);
+    }
+
+    #[test]
+    fn mul_div_rounds_as_freetype() {
+        assert_eq!(mul_div(10, 3, 4), 8);
+        assert_eq!(mul_div(-10, 3, 4), -8);
+        assert_eq!(mul_div(10, -3, -4), 8);
+        assert_eq!(mul_div(1, 1, 0), 0x7FFF_FFFF);
     }
 }

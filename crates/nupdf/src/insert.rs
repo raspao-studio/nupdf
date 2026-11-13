@@ -368,4 +368,84 @@ mod tests {
         assert_eq!(printed(&doc, 2), "<</Type/Pages/Count 1/Kids[3 0 R]>>");
         assert_eq!(doc.page_count(), Ok(1));
     }
+
+    /// Three pages labelled by a number tree of two leaves.
+    fn label_tree() -> Document {
+        crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R/PageLabels 6 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R]/Count 3>>",
+            "<</Type/Page/Parent 2 0 R>>",
+            "<</Type/Page/Parent 2 0 R>>",
+            "<</Type/Page/Parent 2 0 R>>",
+            "<</Kids[7 0 R 8 0 R]>>",
+            "<</Limits[0 0]/Nums[0<</S/r>>]>>",
+            "<</Limits[2 2]/Nums[2<</S/A>>]>>",
+        ])
+    }
+
+    #[test]
+    fn a_label_tree_is_flattened_and_the_ranges_after_move() {
+        // Inserting where a range starts and inside one moves it the same.
+        for at in [2, 1] {
+            let doc = label_tree();
+            let page = new_page(&doc);
+            insert_page(&doc, at, page).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(printed(&doc, 6), "<</Nums[0<</S/r>>3<</S/A>>]>>");
+            assert_eq!(printed(&doc, 7), "<</Limits[0 0]/Nums[0<</S/r>>]>>");
+        }
+    }
+
+    #[test]
+    fn a_single_label_range_stays_as_it_is() {
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R/PageLabels<</Nums[0<</S/R>>]>>>>",
+            "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+            "<</Type/Page/Parent 2 0 R>>",
+            "<</Type/Page/Parent 2 0 R>>",
+        ]);
+        let page = new_page(&doc);
+        insert_page(&doc, 1, page).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            printed(&doc, 1),
+            "<</Type/Catalog/Pages 2 0 R/PageLabels<</Nums[0<</S/R>>]>>>>"
+        );
+        assert_eq!(
+            printed(&doc, 2),
+            "<</Type/Pages/Kids[3 0 R 5 0 R 4 0 R]/Count 3>>"
+        );
+    }
+
+    #[test]
+    fn an_empty_tree_needs_its_kids() {
+        let doc =
+            crate::testutil::doc_of(&["<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Count 0>>"]);
+        let page = new_page(&doc);
+        assert_eq!(
+            insert_page(&doc, 0, page),
+            Err("malformed page tree".into())
+        );
+        assert_eq!(printed(&doc, 2), "<</Type/Pages/Count 0>>");
+    }
+
+    #[test]
+    fn a_parent_cycle_is_found_after_counts_have_changed() {
+        // As MuPDF leaves it: the counts on the loop rose until the slow
+        // pointer met the fast one.
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1/Parent 4 0 R>>",
+            "<</Type/Page/Parent 2 0 R>>",
+            "<</Type/Pages/Parent 2 0 R/Count 7>>",
+        ]);
+        let page = new_page(&doc);
+        assert_eq!(
+            insert_page(&doc, 0, page),
+            Err("cycle in parent chain".into())
+        );
+        assert_eq!(
+            printed(&doc, 2),
+            "<</Type/Pages/Kids[5 0 R 3 0 R]/Count 8/Parent 4 0 R>>"
+        );
+        assert_eq!(printed(&doc, 4), "<</Type/Pages/Parent 2 0 R/Count 13>>");
+    }
 }

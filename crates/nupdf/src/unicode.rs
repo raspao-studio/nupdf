@@ -233,5 +233,57 @@ mod tests {
         assert_eq!(to_upper('1' as i32), '1' as i32);
         assert!(is_alpha(0xe9));
         assert!(!is_alpha('1' as i32));
+        // Lower case by ranges, by single runes, and of ASCII.
+        assert_eq!(to_lower(0x391), 0x3b1);
+        assert_eq!(to_lower(0x410), 0x430);
+        assert_eq!(to_lower(0x100), 0x101);
+        assert_eq!(to_lower(0x178), 0xff);
+        assert_eq!(to_lower('Q' as i32), 'q' as i32);
+        assert_eq!(to_lower('[' as i32), '[' as i32);
+        assert_eq!(to_lower(0x4e00), 0x4e00);
+        assert_eq!(to_upper(0x3b1), 0x391);
+        assert_eq!(to_upper(0x101), 0x100);
+        assert!(is_alpha(0x4e00));
+        assert!(!is_alpha(-1));
+    }
+
+    #[test]
+    fn hangul_syllables_decompose_and_compose_by_arithmetic() {
+        // A syllable without a final consonant is a leading consonant and
+        // a vowel.
+        assert_eq!(decompose(0xAC00), Some((0x1100, 0x1161)));
+        assert_eq!(compose(0x1100, 0x1161), Some(0xAC00));
+        assert_eq!(decompose(0xD7A3), Some((0xD788, 0x11C2)));
+        assert_eq!(compose(0x41, 0x42), None);
+        assert_eq!(compose(-1, 0x301), None);
+        assert_eq!(decompose(-1), None);
+    }
+
+    #[test]
+    fn runes_past_unicode_read_as_ucdn_record_zero() {
+        for c in [-1, 0x110000] {
+            assert_eq!(general_category(c), 2);
+            assert_eq!(script(c), SCRIPT_UNKNOWN);
+            assert_eq!(combining_class(c), 0);
+        }
+        assert_eq!(general_category(0x301), CATEGORY_MN);
+        assert_eq!(script('a' as i32), SCRIPT_LATIN);
+        assert_eq!(script(0x3b1), SCRIPT_GREEK);
+        assert_eq!(script(0x4e00), SCRIPT_HAN);
+        assert_eq!(script(' ' as i32), SCRIPT_COMMON);
+    }
+
+    #[test]
+    fn hyphens_spaces_and_whitespace() {
+        for c in ['-' as i32, 0xad, 0x2010, 0x2011] {
+            assert!(is_hyphen(c));
+        }
+        assert!(!is_hyphen(0x2012));
+        assert!(is_space_equivalent(0xa0) && is_space_equivalent(0x3000));
+        assert!(!is_space_equivalent(' ' as i32));
+        for c in [9, 13, 32, 0x2028, 0x2029, 0x2003] {
+            assert!(is_whitespace(c));
+        }
+        assert!(!is_whitespace('x' as i32));
     }
 }

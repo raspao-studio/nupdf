@@ -455,6 +455,9 @@ fn ft_error_string(e: &str) -> &'static str {
         "Invalid_Table" => "broken table",
         "Table_Missing" => "SFNT font table missing",
         "Horiz_Header_Missing" => "horizontal header (hhea) table missing",
+        "Hmtx_Table_Missing" => "horizontal metrics (hmtx) table missing",
+        "Locations_Missing" => "locations (loca) table missing",
+        "Array_Too_Large" => "array allocation size too large",
         _ => "broken file",
     }
 }
@@ -568,8 +571,10 @@ fn read_encoding(
 pub fn bound_glyph(font: &Font, gid: i32, trm: Matrix) -> Rect {
     let tiny = Rect::new(0.0, 0.0, 0.000_000_1, 0.000_000_1);
     let r = match &font.t3 {
+        // MuPDF measures an infinite or empty box again, which gives the
+        // same box: an infinite one stays, an empty one becomes tiny.
         Some(t3) => match usize::try_from(gid).ok().and_then(|g| t3.bboxes.get(g)) {
-            Some(r) if r.is_infinite() || r.is_empty() => tiny,
+            Some(r) if r.is_empty() => tiny,
             Some(r) => *r,
             None => font.bbox,
         },
@@ -1168,11 +1173,18 @@ impl Loader<'_> {
             .unwrap_or_default();
         let collection = match stored(doc, dict, b"CIDSystemInfo") {
             Some(info) => {
+                // pdf_dict_get_string: "" for what is no string; the C
+                // string stops at a NUL, and fz_snprintf at 255 bytes.
                 let s = |k: &[u8]| match doc.dict_get(&info, k) {
-                    Object::String(s) => String::from_utf8_lossy(&s).into_owned(),
-                    _ => "(null)".to_string(),
+                    Object::String(s) => {
+                        let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+                        s[..end].to_vec()
+                    }
+                    _ => Vec::new(),
                 };
-                format!("{}-{}", s(b"Registry"), s(b"Ordering"))
+                let mut name = [s(b"Registry"), s(b"Ordering")].join(&b'-');
+                name.truncate(255);
+                String::from_utf8_lossy(&name).into_owned()
             }
             None => {
                 self.warn(
@@ -1687,7 +1699,117 @@ fn remap_imp(
 
 #[cfg(test)]
 mod tests {
+    //! Fonts loaded from PDFs built here. The expected glyphs, widths and
+    //! Unicode are what MuPDF 1.28.6 shows for the same files (mutool run
+    //! oracle/js/trace.js), and its warnings.
+
     use super::*;
+    use crate::font::sfnt::tests::{
+        base, cmap, fmt0, fmt4, post, post2, set, sfnt_at, ttf, without,
+    };
+    use crate::object::ObjRef;
+
+    /// A stream object of `dict` entries and `data`.
+    fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
+        let mut out = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\nendstream");
+        out
+    }
+
+    /// A one-page PDF showing `content` with font 4 as /F1; objects 6 on
+    /// are `extra`.
+    fn pdf(font: &str, extra: &[Vec<u8>], content: &str) -> Vec<u8> {
+        pdf_raw(font.as_bytes().to_vec(), extra, content)
+    }
+
+    fn pdf_raw(font: Vec<u8>, extra: &[Vec<u8>], content: &str) -> Vec<u8> {
+        let mut objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
+            font,
+            stream("", content.as_bytes()),
+        ];
+        objects.extend(extra.iter().cloned());
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n", i + 1).bytes());
+            out.extend_from_slice(o);
+            out.extend(b"\nendobj\n");
+        }
+        let xref = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+        for o in offsets {
+            out.extend(format!("{o:010} 00000 n \n").bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .bytes(),
+        );
+        out
+    }
+
+    /// Text showing each code (hex) at 10 points.
+    fn show(hex: &str) -> String {
+        format!("BT /F1 10 Tf 10 100 Td <{hex}> Tj ET")
+    }
+
+    fn open(data: Vec<u8>) -> Document {
+        Document::open(data).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    fn load(doc: &Document) -> Result<FontDesc, String> {
+        Loader { doc }.load(&Object::Ref(ObjRef::new(4, 0)), None)
+    }
+
+    fn loaded(data: Vec<u8>) -> (Document, FontDesc) {
+        let doc = open(data);
+        let fd = load(&doc).unwrap_or_else(|e| panic!("{e}"));
+        (doc, fd)
+    }
+
+    /// The glyph, width and Unicode MuPDF's interpreter takes for a code.
+    fn glyph(fd: &FontDesc, code: u32) -> (i32, i32, u32) {
+        let cid = fd.encoding.lookup(code);
+        let gid = fd.cid_to_gid(cid);
+        let w = fd.lookup_hmtx(cid).w;
+        let mut ucs = fd
+            .to_unicode
+            .as_ref()
+            .map(|u| u.lookup_full(cid as u32))
+            .unwrap_or_default();
+        if ucs.len() == 1 && (ucs[0] < 32 || (127..160).contains(&ucs[0])) {
+            ucs.clear();
+        }
+        if ucs.is_empty()
+            && let Some(&u) = fd.cid_to_ucs.as_ref().and_then(|m| m.get(cid as usize))
+        {
+            ucs.push(i32::from(u));
+        }
+        let u = match ucs.first() {
+            None | Some(0) => glyphs::REPLACEMENT,
+            Some(&u) => u as u32,
+        };
+        (gid, w, u)
+    }
+
+    fn glyphs_of(fd: &FontDesc, codes: &[u32]) -> Vec<(i32, i32, u32)> {
+        codes.iter().map(|&c| glyph(fd, c)).collect()
+    }
+
+    fn warnings(doc: &Document) -> Vec<String> {
+        doc.diagnostics()
+            .snapshot()
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
 
     #[test]
     fn clean_names_find_the_standard_font() {
@@ -1728,5 +1850,1215 @@ mod tests {
         assert_eq!(vertical_form(0x3001), 0xFE11);
         assert_eq!(vertical_form(0xFF0D), 0xFE31);
         assert_eq!(vertical_form(0x41), 0x41);
+    }
+
+    // ---- simple fonts ----
+
+    fn helvetica() -> Vec<u8> {
+        pdf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            &[],
+            &show("41422000"),
+        )
+    }
+
+    fn times_widths() -> Vec<u8> {
+        pdf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold /FirstChar 65 /LastChar 67 \
+             /Widths [600 700 800] /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [66 /Euro /bullet 128 /Aring] >> >>",
+            &[],
+            &show("41424344809f"),
+        )
+    }
+
+    fn symbol() -> Vec<u8> {
+        pdf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>",
+            &[],
+            &show("61622a"),
+        )
+    }
+
+    fn substitute(flags: i32, name: &str) -> Vec<u8> {
+        pdf(
+            &format!(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /{name} /FirstChar 65 /LastChar 66 /Widths [500 900] \
+                 /FontDescriptor 6 0 R >>"
+            ),
+            &[format!(
+                "<< /Type /FontDescriptor /FontName /{name} /Flags {flags} /Ascent 700 /Descent -250 /MissingWidth 333 >>"
+            )
+            .into_bytes()],
+            &show("414243"),
+        )
+    }
+
+    /// A FontFile2 stream of a TrueType font.
+    fn truetype_file(data: &[u8]) -> Vec<u8> {
+        stream(&format!("/Length1 {}", data.len()), data)
+    }
+
+    /// A TrueType font of 6 glyphs 500 + 100 g wide, with `cmap_table`
+    /// and glyph names .notdef A B space a Euro.
+    fn tt_font(cmap_table: Option<Vec<u8>>) -> Vec<u8> {
+        let names = post(
+            0x2_0000,
+            false,
+            &post2(&[0, 36, 37, 3, 68, 258], &[b"Euro"]),
+        );
+        let t = match cmap_table {
+            Some(c) => set(set(base(6, Some(c)), b"post", names), b"glyf", vec![0; 4]),
+            None => set(without(base(6, None), b"cmap"), b"post", names),
+        };
+        ttf(&t).to_vec()
+    }
+
+    fn ffff() -> (u16, u16, i16, Option<Vec<u16>>) {
+        (0xffff, 0xffff, 1, None)
+    }
+
+    /// A simple TrueType font dictionary of `flags`, embedding `font`.
+    fn truetype(flags: i32, encoding: &str, font: Vec<u8>, content: &str) -> Vec<u8> {
+        pdf(
+            &format!(
+                "<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+Test {encoding} /FontDescriptor 6 0 R >>"
+            ),
+            &[
+                format!(
+                    "<< /Type /FontDescriptor /FontName /Test /Flags {flags} /FontFile2 7 0 R >>"
+                )
+                .into_bytes(),
+                truetype_file(&font),
+            ],
+            content,
+        )
+    }
+
+    /// (3,1): A B space a Euro at their code points.
+    fn unicode_cmap() -> Vec<u8> {
+        cmap(&[(
+            3,
+            1,
+            fmt4(&[
+                (0x20, 0x20, -0x1d, None),
+                (0x41, 0x42, -0x40, None),
+                (0x61, 0x61, -0x5d, None),
+                (0x20ac, 0x20ac, -0x20a7, None),
+                ffff(),
+            ]),
+        )])
+    }
+
+    fn tt_unicode() -> Vec<u8> {
+        truetype(
+            32,
+            "/Encoding /WinAnsiEncoding",
+            tt_font(Some(unicode_cmap())),
+            &show("414220618043"),
+        )
+    }
+
+    fn tt_symbolic() -> Vec<u8> {
+        let sym = cmap(&[
+            (3, 0, fmt4(&[(0xf041, 0xf042, 0x0fc0, None), ffff()])),
+            (3, 1, fmt4(&[(0x61, 0x61, -0x5d, None), ffff()])),
+        ]);
+        truetype(4, "", tt_font(Some(sym)), &show("41426143"))
+    }
+
+    fn tt_mac() -> Vec<u8> {
+        let mac = cmap(&[(1, 0, fmt0(&[(0x41, 1), (0x42, 2), (0x20, 3), (0xdb, 5)]))]);
+        truetype(
+            32,
+            "/Encoding << /BaseEncoding /WinAnsiEncoding /Differences [97 /Euro /a] >>",
+            tt_font(Some(mac)),
+            &show("4142206162"),
+        )
+    }
+
+    fn tt_names_only() -> Vec<u8> {
+        truetype(
+            4,
+            "/Encoding << /Differences [65 /B /A /Euro] >>",
+            tt_font(None),
+            &show("414243"),
+        )
+    }
+
+    /// A simple font of `subtype` with a descriptor embedding `file`
+    /// under `key`.
+    fn embedded(
+        subtype: &str,
+        flags: i32,
+        key: &str,
+        file: Vec<u8>,
+        rest: &str,
+        content: &str,
+    ) -> Vec<u8> {
+        pdf(
+            &format!(
+                "<< /Type /Font /Subtype /{subtype} /BaseFont /Embedded {rest} /FontDescriptor 6 0 R >>"
+            ),
+            &[
+                format!(
+                    "<< /Type /FontDescriptor /FontName /Embedded /Flags {flags} /{key} 7 0 R >>"
+                )
+                .into_bytes(),
+                file,
+            ],
+            content,
+        )
+    }
+
+    fn type1_file() -> Vec<u8> {
+        let glyphs = [
+            (".notdef", crate::font::tests::t1_box(250, 0, 0, 0, 0)),
+            ("A", crate::font::tests::t1_box(600, 10, 0, 590, 700)),
+            ("g1", crate::font::tests::t1_box(650, 20, 0, 600, 700)),
+        ];
+        let array = "256 array 0 1 255 {1 index exch /.notdef put} for dup 65 /A put dup 66 /g1 put readonly def";
+        let data = crate::font::tests::type1(Some(array), &glyphs);
+        stream(
+            &format!("/Length1 {} /Length2 0 /Length3 0", data.len()),
+            &data,
+        )
+    }
+
+    fn t1_embedded_symbolic() -> Vec<u8> {
+        embedded("Type1", 4, "FontFile", type1_file(), "", &show("414243"))
+    }
+
+    fn t1_embedded_differences() -> Vec<u8> {
+        embedded(
+            "Type1",
+            32,
+            "FontFile",
+            type1_file(),
+            "/Encoding << /Differences [66 /A /g1] >>",
+            &show("414243"),
+        )
+    }
+
+    fn cff_embedded() -> Vec<u8> {
+        let cff = crate::font::base14("Helvetica").unwrap_or_default();
+        embedded(
+            "Type1",
+            32,
+            "FontFile3",
+            stream("/Subtype /Type1C", cff),
+            "/Encoding /MacRomanEncoding",
+            &show("4142a5"),
+        )
+    }
+
+    fn otto_embedded() -> Vec<u8> {
+        let cff = crate::font::base14("Courier").unwrap_or_default();
+        let t = set(base(4, None), b"CFF ", cff.to_vec());
+        let otto = sfnt_at(0, b"OTTO", &t);
+        embedded(
+            "Type1",
+            32,
+            "FontFile3",
+            stream("/Subtype /OpenType", &otto),
+            "",
+            &show("4142"),
+        )
+    }
+
+    fn otto_broken() -> Vec<u8> {
+        let mut otto = sfnt_at(0, b"OTTO", &set(base(4, None), b"CFF ", vec![1; 8]));
+        otto[4..6].copy_from_slice(&99u16.to_be_bytes());
+        embedded(
+            "TrueType",
+            32,
+            "FontFile3",
+            stream("/Subtype /OpenType", &otto),
+            "",
+            &show("41"),
+        )
+    }
+
+    fn broken_embedded() -> Vec<u8> {
+        pdf(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Arial,Bold /FontDescriptor 6 0 R >>",
+            &[
+                b"<< /Type /FontDescriptor /FontName /Arial,Bold /Flags 32 /FontFile2 7 0 R /Ascent 9000 /Descent 100 >>".to_vec(),
+                stream("", b"not a font at all"),
+            ],
+            &show("4142"),
+        )
+    }
+
+    fn not_a_stream() -> Vec<u8> {
+        pdf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Oblique /FontDescriptor 6 0 R >>",
+            &[
+                b"<< /Type /FontDescriptor /Flags 32 /FontFile 7 0 R /Ascent 0 /Descent 0 >>"
+                    .to_vec(),
+                b"<< /Not /AStream >>".to_vec(),
+            ],
+            &show("41"),
+        )
+    }
+
+    fn to_unicode() -> Vec<u8> {
+        let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+            /CMapName /Test def 1 begincodespacerange <00> <FF> endcodespacerange\n\
+            2 beginbfchar <41> <0058> <42> <00660066> endbfchar\n\
+            1 beginbfrange <43> <44> <0061> endbfrange\n\
+            endcmap CMapName currentdict /CMap defineresource pop end end";
+        pdf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R /FirstChar 30 /LastChar 20 /Widths [1 2 3] >>",
+            &[stream("", cmap)],
+            &show("4142434445"),
+        )
+    }
+
+    fn to_unicode_broken() -> Vec<u8> {
+        pdf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>",
+            &[stream("/Filter /FlateDecode", b"garbage")],
+            &show("41"),
+        )
+    }
+
+    fn s22pdf() -> Vec<u8> {
+        let mut font = b"<< /Type /Font /Subtype /TrueType /BaseFont /".to_vec();
+        font.extend(b"\xCB\xCE\xCC\xE5");
+        font.extend(b" /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R /FirstChar 32 /LastChar 33 /Widths [500 600] >>");
+        let objects = [b"<< /Type /FontDescriptor /Flags 4 >>".to_vec()];
+        pdf_raw(font, &objects, &show("b0a1b0a2"))
+    }
+
+    fn guess(dict: &str, extra: &[Vec<u8>]) -> Vec<u8> {
+        pdf(dict, extra, &show("41"))
+    }
+
+    // ---- Type 3 ----
+
+    fn type3(rest: &str) -> Vec<u8> {
+        pdf(
+            &format!(
+                "<< /Type /Font /Subtype /Type3 /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 0 750 750] \
+                 /FirstChar 65 /LastChar 67 /Widths [1000 500 6 0 R] {rest} >>"
+            ),
+            &[
+                b"750".to_vec(),
+                stream("", b"750 0 0 0 750 750 d1 0 0 750 750 re f"),
+                stream("", b"500 0 d0 0 0 m 500 500 l S"),
+            ],
+            &show("41424344"),
+        )
+    }
+
+    fn type3_full() -> Vec<u8> {
+        type3(
+            "/Name /T3 /Encoding << /Differences [65 /square /line /none] >> /CharProcs << /square 7 0 R /line 8 0 R /none 9 0 R >> /Resources << >>",
+        )
+    }
+
+    // ---- Type 0 ----
+
+    /// A Type 0 font of `encoding` over a CID font (object 6) of
+    /// `subtype` and `cid` entries, with a descriptor (7) of `desc`;
+    /// objects 8 on are `extra`.
+    fn type0(
+        encoding: &str,
+        subtype: &str,
+        cid: &str,
+        desc: &str,
+        extra: &[Vec<u8>],
+        content: &str,
+    ) -> Vec<u8> {
+        let mut objects = vec![
+            format!("<< /Type /Font /Subtype /{subtype} {cid} >>").into_bytes(),
+            format!("<< /Type /FontDescriptor {desc} >>").into_bytes(),
+        ];
+        objects.extend(extra.iter().cloned());
+        pdf(
+            &format!(
+                "<< /Type /Font /Subtype /Type0 /BaseFont /T0 {encoding} /DescendantFonts [6 0 R] >>"
+            ),
+            &objects,
+            content,
+        )
+    }
+
+    const IDENTITY: &str =
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>";
+    const JAPAN: &str = "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >>";
+
+    fn t0_embedded(cidtogid: &str) -> Vec<u8> {
+        let map: Vec<u8> = [0u16, 2, 1, 3, 4]
+            .iter()
+            .flat_map(|g| g.to_be_bytes())
+            .collect();
+        type0(
+            "/Encoding /Identity-H",
+            "CIDFontType2",
+            &format!(
+                "/BaseFont /Embedded {IDENTITY} /FontDescriptor 7 0 R /W [1 [400 500] 3 4 600 5 [10 0 R]] /DW 900 {cidtogid}"
+            ),
+            "/Flags 4 /FontFile2 8 0 R",
+            &[
+                truetype_file(&tt_font(Some(unicode_cmap()))),
+                stream("", &map),
+                b"777".to_vec(),
+            ],
+            &show("000100020003000400050006"),
+        )
+    }
+
+    fn t0_vertical() -> Vec<u8> {
+        type0(
+            "/Encoding /Identity-V",
+            "CIDFontType0",
+            &format!(
+                "/BaseFont /MS-Mincho {JAPAN} /FontDescriptor 7 0 R /W [1 2 500] /W2 [1 [-1000 250 880] 3 4 -900 300 800] /DW2 [880 -1100]"
+            ),
+            "/Flags 4",
+            &[],
+            &show("0001000200030004"),
+        )
+    }
+
+    fn t0_vertical_japan() -> Vec<u8> {
+        type0(
+            "/Encoding /UniJIS-UCS2-V",
+            "CIDFontType0",
+            &format!("/BaseFont /KozMinPro-Regular {JAPAN} /FontDescriptor 7 0 R"),
+            "/Flags 4",
+            &[],
+            &show("30013002"),
+        )
+    }
+
+    fn t0_substitute(base_font: &str, info: &str, extra_entries: &str) -> Vec<u8> {
+        type0(
+            &format!("/Encoding /Identity-H {extra_entries}"),
+            "CIDFontType2",
+            &format!("/BaseFont /{base_font} {info} /FontDescriptor 7 0 R /W [36 [700]]"),
+            "/Flags 32",
+            &[],
+            &show("00240025"),
+        )
+    }
+
+    fn t0_embedded_cmap() -> Vec<u8> {
+        let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+            /CMapName /Test-H def /WMode 0 def /UseCMap /Identity-H usecmap\n\
+            1 begincodespacerange <00> <FF> endcodespacerange\n\
+            1 begincidrange <41> <42> 1 endcidrange\n\
+            endcmap CMapName currentdict /CMap defineresource pop end end";
+        let to_unicode = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+            1 begincodespacerange <00> <FF> endcodespacerange\n\
+            2 beginbfchar <41> <0058> <42> <00590059> endbfchar\n\
+            endcmap CMapName currentdict /CMap defineresource pop end end";
+        type0(
+            "/Encoding 8 0 R /ToUnicode 9 0 R",
+            "CIDFontType2",
+            &format!("/BaseFont /Embedded {IDENTITY} /FontDescriptor 7 0 R /CIDToGIDMap /Identity"),
+            "/Flags 4 /FontFile2 10 0 R",
+            &[
+                stream("/Type /CMap /CMapName /Test-H", cmap),
+                stream("", to_unicode),
+                truetype_file(&tt_font(Some(unicode_cmap()))),
+            ],
+            &show("4142"),
+        )
+    }
+
+    const FFFD: u32 = glyphs::REPLACEMENT;
+
+    #[test]
+    fn base_14_fonts_load_from_the_bundled_programs() {
+        let (_, fd) = loaded(helvetica());
+        assert_eq!(fd.font.name, b"Helvetica");
+        assert!(!fd.is_embedded && !fd.font.ft_substitute && !fd.font.is_serif);
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x20]),
+            [(34, 667, 65), (35, 667, 66), (1, 278, 32)]
+        );
+        assert_eq!(glyph(&fd, 0).2, FFFD);
+        // Widths and an encoding of differences over WinAnsi.
+        let (_, fd) = loaded(times_widths());
+        assert!(fd.font.is_serif && fd.font.is_bold);
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x43, 0x44, 0x80, 0x9f]),
+            [
+                (34, 600, 65),
+                (263, 700, 0x20ac),
+                (116, 800, 0x2022),
+                (37, 0, 68),
+                (175, 0, 0xc5),
+                (198, 0, 0x178)
+            ]
+        );
+        // Symbol is symbolic: its own encoding, no standard one.
+        let (_, fd) = loaded(symbol());
+        assert_ne!(fd.flags & FD_SYMBOLIC, 0);
+        assert_eq!(
+            glyphs_of(&fd, &[0x61, 0x62, 0x2a]),
+            [(66, 631, 0x3b1), (67, 549, 0x3b2), (11, 500, 0x2217)]
+        );
+        // A dictionary without a subtype is guessed simple.
+        let (doc, fd) = loaded(guess("<< /Type /Font /BaseFont /Courier >>", &[]));
+        assert_eq!(glyph(&fd, 0x41), (34, 600, 65));
+        assert_eq!(
+            warnings(&doc),
+            ["unknown font format, guessing type1 or truetype."]
+        );
+    }
+
+    #[test]
+    fn fonts_without_programs_take_a_substitute_by_their_flags() {
+        let cases = [
+            (
+                2 | 32 | 64 | (1 << 18),
+                "Garamond",
+                (false, true, true, true),
+            ),
+            (1 | 32, "Consolas", (true, false, false, false)),
+            (32, "Frutiger-BoldOblique", (false, false, true, true)),
+        ];
+        for (flags, name, style) in cases {
+            let (_, fd) = loaded(substitute(flags, name));
+            let f = &fd.font;
+            assert_eq!(
+                (f.is_mono, f.is_serif, f.is_bold, f.is_italic),
+                style,
+                "{name}"
+            );
+            assert!(f.ft_substitute && f.ft_stretch);
+            assert_eq!(f.name, name.as_bytes());
+            // The PDF's widths, and the missing width past them.
+            assert_eq!(
+                glyphs_of(&fd, &[0x41, 0x42, 0x43]),
+                [(34, 500, 65), (35, 900, 66), (36, 333, 67)]
+            );
+            assert_eq!(
+                (fd.ascent, fd.descent, f.ascender, f.descender),
+                (700.0, -250.0, 0.7, -0.25)
+            );
+            // Glyphs are stretched to those widths.
+            assert_eq!(advance_glyph(f, 35, 0), 0.9);
+            assert_eq!(advance_glyph(f, 900, 0), 0.333);
+            assert_eq!(advance_glyph(f, -1, 0), 0.333);
+            let b = bound_glyph(f, 34, Matrix::IDENTITY);
+            assert!(b.x1 > b.x0 && b.x1 <= 0.55);
+        }
+    }
+
+    #[test]
+    fn embedded_truetype_fonts_pick_their_cmap_as_mupdf_does() {
+        // Non-symbolic with a (3,1) map: glyphs by the names' code points.
+        let (_, fd) = loaded(tt_unicode());
+        assert!(fd.is_embedded);
+        assert_eq!(fd.font.name, b"ABCDEF+Test");
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x20, 0x61, 0x80, 0x43]),
+            [
+                (1, 600, 65),
+                (2, 700, 66),
+                (3, 800, 32),
+                (4, 900, 97),
+                (5, 1000, 0x20ac),
+                (0, 500, 67)
+            ]
+        );
+        // The font's metrics, as the descriptor gives none.
+        assert_eq!((fd.ascent, fd.descent), (800.0, -200.0));
+        // Symbolic: the (3,0) map, codes in the symbol area.
+        let (_, fd) = loaded(tt_symbolic());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x61, 0x43]),
+            [(1, 600, 65), (2, 700, 66), (0, 500, FFFD), (0, 500, FFFD)]
+        );
+        // A Macintosh map: names through MacRoman codes, then glyph names.
+        let (_, fd) = loaded(tt_mac());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x20, 0x61, 0x62]),
+            [
+                (1, 600, 65),
+                (2, 700, 66),
+                (3, 800, 32),
+                (5, 1000, 0x20ac),
+                (4, 900, 97)
+            ]
+        );
+        // No map at all: glyph names only.
+        let (doc, fd) = loaded(tt_names_only());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x43]),
+            [(2, 700, 66), (1, 600, 65), (5, 1000, 0x20ac)]
+        );
+        assert_eq!(warnings(&doc), ["freetype could not find any cmaps"]);
+    }
+
+    #[test]
+    fn embedded_type1_and_cff_fonts_encode_by_glyph_name() {
+        // Symbolic, with its own encoding and private names.
+        let (_, fd) = loaded(t1_embedded_symbolic());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x43]),
+            [(1, 600, 65), (2, 650, FFFD), (0, 250, FFFD)]
+        );
+        let (_, fd) = loaded(t1_embedded_differences());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x43]),
+            [(1, 600, 65), (1, 600, 65), (2, 650, FFFD)]
+        );
+        assert!(fd.font.is_bold && fd.font.is_italic && fd.font.is_mono);
+        // A bare CFF program, and one in an OpenType wrapper.
+        let (_, fd) = loaded(cff_embedded());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0xa5]),
+            [(34, 667, 65), (35, 667, 66), (116, 350, 0x2022)]
+        );
+        let (_, fd) = loaded(otto_embedded());
+        assert!(fd.is_embedded && fd.font.is_mono);
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42]),
+            [(34, 600, 65), (35, 600, 66)]
+        );
+    }
+
+    #[test]
+    fn broken_programs_fall_back_with_mupdfs_warnings() {
+        let (doc, fd) = loaded(otto_broken());
+        assert!(!fd.is_embedded && fd.font.ft_substitute);
+        assert_eq!(glyph(&fd, 0x41).0, 34);
+        assert_eq!(
+            warnings(&doc),
+            [
+                "syntax error: invalid TTF header",
+                "ignored error when loading embedded font; attempting to load system font"
+            ]
+        );
+        // A standard name falls back to its builtin font; bogus metrics
+        // give the default ascender.
+        let (doc, fd) = loaded(broken_embedded());
+        assert!(!fd.font.ft_substitute && fd.font.is_bold);
+        assert_eq!(glyphs_of(&fd, &[0x41]), [(34, 722, 65)]);
+        assert_eq!(
+            (fd.ascent, fd.descent, fd.font.ascender, fd.font.descender),
+            (9000.0, -100.0, 0.8, -0.2)
+        );
+        assert_eq!(
+            warnings(&doc),
+            [
+                "library error: FT_New_Memory_Face(Arial,Bold): unknown file format",
+                "ignored error when loading embedded font; attempting to load system font",
+                "bogus font (Arial,Bold) ascent/descent values (9000 / -100)",
+            ]
+        );
+        // A font file that is no stream; zero metrics are not bogus.
+        let (doc, fd) = loaded(not_a_stream());
+        assert_eq!((fd.font.ascender, fd.font.descender), (0.8, -0.2));
+        assert_eq!(glyph(&fd, 0x41).0, 34);
+        assert_eq!(
+            warnings(&doc),
+            [
+                "format error: object is not a stream",
+                "ignored error when loading embedded font; attempting to load system font"
+            ]
+        );
+        // An OpenType wrapper whose CFF runs past the data.
+        let mut otto = sfnt_at(0, b"OTTO", &set(base(4, None), b"CFF ", vec![1; 8]));
+        // The CFF table's record, the ninth.
+        let n = 12 + 16 * 8;
+        otto[n + 12..n + 16].copy_from_slice(&0xffffu32.to_be_bytes());
+        let doc = open(embedded(
+            "Type1",
+            32,
+            "FontFile3",
+            stream("/Subtype /OpenType", &otto),
+            "",
+            &show("41"),
+        ));
+        assert!(load(&doc).is_ok());
+        assert!(
+            warnings(&doc)
+                .contains(&"syntax error: invalid TTF subtable offset/length".to_string())
+        );
+        // One without CFF is opened as it is, and fails.
+        let otto = sfnt_at(0, b"OTTO", &base(4, None));
+        let doc = open(embedded(
+            "Type1",
+            32,
+            "FontFile3",
+            stream("/Subtype /OpenType", &otto),
+            "",
+            &show("41"),
+        ));
+        assert!(load(&doc).is_ok());
+        assert!(warnings(&doc).contains(
+            &"library error: FT_New_Memory_Face(Embedded): SFNT font table missing".to_string()
+        ));
+    }
+
+    #[test]
+    fn to_unicode_cmaps_override_the_encodings_names() {
+        let (_, fd) = loaded(to_unicode());
+        // FirstChar past LastChar: one width, for code 0.
+        assert_eq!(fd.lookup_hmtx(0).w, 1);
+        let u: Vec<u32> = glyphs_of(&fd, &[0x41, 0x42, 0x43, 0x44, 0x45])
+            .iter()
+            .map(|g| g.2)
+            .collect();
+        assert_eq!(u, [0x58, 0x66, 0x61, 0x62, 0x45]);
+        assert_eq!(
+            fd.to_unicode.as_ref().map(|t| t.lookup_full(0x42)),
+            Some(vec![0x66, 0x66])
+        );
+        // A stream that inflates to nothing is an empty map.
+        let (doc, fd) = loaded(to_unicode_broken());
+        assert_eq!(glyph(&fd, 0x41), (34, 667, 65));
+        assert_eq!(
+            warnings(&doc),
+            [
+                "library error: zlib error: incorrect header check",
+                "read error; treating as end of file"
+            ]
+        );
+        // A ToUnicode that is no CMap.
+        let doc = open(pdf(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode /NoSuchCMap >>",
+            &[],
+            &show("41"),
+        ));
+        let fd = load(&doc).unwrap_or_else(|e| panic!("{e}"));
+        // MuPDF gives up on the names too.
+        assert_eq!(glyph(&fd, 0x41).2, FFFD);
+        assert!(warnings(&doc).contains(&"cannot load ToUnicode CMap".to_string()));
+    }
+
+    #[test]
+    fn s22pdf_chinese_fonts_are_read_as_gbk() {
+        let (doc, fd) = loaded(s22pdf());
+        assert_eq!(fd.font.name, b"SimSun,Regular");
+        assert_eq!(fd.encoding.name, "GBK-EUC-H");
+        // No width for those CIDs: the missing width, 0.
+        let w_u = |code| {
+            let (_, w, u) = glyph(&fd, code);
+            (w, u)
+        };
+        assert_eq!([w_u(0xb0a1), w_u(0xb0a2)], [(0, 0x554a), (0, 0x963f)]);
+        assert_eq!(
+            warnings(&doc),
+            ["workaround for S22PDF lying about chinese font encodings"]
+        );
+    }
+
+    #[test]
+    fn type3_fonts_keep_their_procedures_widths_and_matrix() {
+        let (_, fd) = loaded(type3_full());
+        let t3 = fd.font.t3.as_ref().unwrap_or_else(|| panic!("no type 3"));
+        assert_eq!(fd.font.name, b"T3");
+        assert_eq!(t3.matrix.a, 0.001);
+        let b = fd.font.bbox;
+        assert!(
+            b.x0 == 0.0 && b.y0 == 0.0 && (b.x1 - 0.75).abs() < 1e-6 && (b.y1 - 0.75).abs() < 1e-6
+        );
+        assert!(t3.procs[65].is_some() && t3.procs[66].is_some() && t3.procs[67].is_none());
+        assert!(t3.resources.is_some());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x43, 0x44]),
+            [
+                (65, 1000, 0x25a1),
+                (66, 500, 66),
+                (67, 750, 67),
+                (68, 0, 68)
+            ]
+        );
+        assert_eq!(
+            (
+                advance_glyph(&fd.font, 66, 0),
+                advance_glyph(&fd.font, 300, 0)
+            ),
+            (0.5, 0.0)
+        );
+        // Glyph boxes are what the interpreter found, else the font's.
+        assert_eq!(
+            bound_glyph(&fd.font, 65, Matrix::IDENTITY),
+            Rect::new(0.0, 0.0, 0.000_000_1, 0.000_000_1)
+        );
+        assert_eq!(bound_glyph(&fd.font, 400, Matrix::IDENTITY), fd.font.bbox);
+        let mut font = Font::clone(&fd.font);
+        if let Some(t3) = font.t3.as_mut() {
+            t3.bboxes[65] = Rect::new(0.0, 0.0, 0.5, 0.5);
+        }
+        assert_eq!(
+            bound_glyph(&font, 65, Matrix::scale(2.0, 2.0)),
+            Rect::new(0.0, 0.0, 1.0, 1.0)
+        );
+        // Without its own resources a font borrows the page's, else
+        // warns; without a name it is named for its object.
+        let doc = open(type3(
+            "/Encoding << /Differences [65 /square] >> /CharProcs << /square 7 0 R >>",
+        ));
+        let page = Object::Dict(Default::default());
+        let fd = Loader { doc: &doc }.load(&Object::Ref(ObjRef::new(4, 0)), Some(&page));
+        assert!(fd.is_ok_and(|fd| fd.font.t3.as_ref().is_some_and(|t| t.resources.is_some())));
+        assert!(warnings(&doc).is_empty());
+        let (doc, fd) = loaded(type3(
+            "/Encoding << /Differences [65 /square] >> /CharProcs << /square 7 0 R >>",
+        ));
+        assert_eq!(fd.font.name, b"Type3 (4 0 R)");
+        assert_eq!(warnings(&doc), ["no resource dictionary for type 3 font!"]);
+        // Guessed from its CharProcs.
+        let (doc, fd) = loaded(guess(
+            "<< /Type /Font /FontMatrix [0.001 0 0 0.001 0 0] /Encoding << /Differences [65 /a] >> /CharProcs << /a 6 0 R >> /FirstChar 65 /LastChar 65 /Widths [500] >>",
+            &[stream("", b"500 0 d0")],
+        ));
+        assert_eq!(glyph(&fd, 0x41), (65, 500, 97));
+        // An empty box is invalid; the identity matrix is the default.
+        assert!(fd.font.invalid_bbox && fd.font.bbox.is_empty());
+        assert_eq!(
+            warnings(&doc).first().map(String::as_str),
+            Some("unknown font format, guessing type3.")
+        );
+    }
+
+    #[test]
+    fn type3_fonts_need_an_encoding_widths_and_procedures() {
+        let err = |rest: &str| {
+            let doc = open(pdf(
+                &format!("<< /Type /Font /Subtype /Type3 {rest} >>"),
+                &[],
+                &show("41"),
+            ));
+            load(&doc).err()
+        };
+        assert_eq!(
+            err("").as_deref(),
+            Some("syntax error: Type3 font missing Encoding")
+        );
+        assert_eq!(
+            err("/Encoding /WinAnsiEncoding").as_deref(),
+            Some("syntax error: Type3 font missing Widths")
+        );
+        assert_eq!(
+            err("/Encoding /WinAnsiEncoding /Widths [] /FirstChar 300 /LastChar 2").as_deref(),
+            Some("syntax error: Type3 font missing CharProcs")
+        );
+    }
+
+    #[test]
+    fn cid_fonts_map_cids_to_glyphs_and_widths() {
+        // A CIDToGIDMap stream; W in both forms, an indirect width and DW.
+        let (_, fd) = loaded(t0_embedded("/CIDToGIDMap 9 0 R"));
+        assert!(fd.is_embedded);
+        assert_eq!(
+            glyphs_of(&fd, &[1, 2, 3, 4, 5, 6]),
+            [
+                (2, 400, FFFD),
+                (1, 500, FFFD),
+                (3, 600, FFFD),
+                (4, 600, FFFD),
+                (5, 777, FFFD),
+                (6, 900, FFFD)
+            ]
+        );
+        let (_, fd) = loaded(t0_embedded("/CIDToGIDMap /Identity"));
+        assert_eq!(glyphs_of(&fd, &[1, 2]), [(1, 400, FFFD), (2, 500, FFFD)]);
+        let (doc, fd) = loaded(t0_embedded("/CIDToGIDMap /Foo"));
+        assert_eq!(glyph(&fd, 1).0, 1);
+        assert_eq!(warnings(&doc), ["ignoring unknown CIDToGIDMap entry"]);
+        // An embedded CMap over Identity-H, and a ToUnicode by code.
+        let (_, fd) = loaded(t0_embedded_cmap());
+        assert_eq!(fd.encoding.name, "Test-H");
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x0105]),
+            [(1, 1000, 0x58), (2, 1000, 0x59), (0x105, 1000, FFFD)]
+        );
+        assert_eq!(
+            fd.to_unicode.as_ref().map(|t| t.lookup_full(2)),
+            Some(vec![0x59, 0x59])
+        );
+    }
+
+    #[test]
+    fn substitute_cid_fonts_map_through_unicode() {
+        let (doc, fd) = loaded(t0_substitute("Arial-BoldMT", IDENTITY, ""));
+        assert!(fd.font.ft_substitute && fd.font.is_bold && fd.font.ft_stretch);
+        assert_eq!(
+            glyphs_of(&fd, &[0x24, 0x25]),
+            [(34, 700, 65), (35, 1000, 66)]
+        );
+        assert_eq!(advance_glyph(&fd.font, 34, 0), 0.7);
+        assert_eq!(
+            warnings(&doc),
+            ["non-embedded font using identity encoding: Arial-BoldMT (mapping via TrueType-UCS2)"]
+        );
+        let (doc, fd) = loaded(t0_substitute(
+            "Arial-BoldMT",
+            IDENTITY,
+            "/ToUnicode /Identity-H",
+        ));
+        assert_eq!(
+            glyphs_of(&fd, &[0x24, 0x25]),
+            [(5, 700, 0x24), (6, 1000, 0x25)]
+        );
+        assert_eq!(
+            warnings(&doc),
+            ["non-embedded font using identity encoding: Arial-BoldMT (mapping via Identity-H)"]
+        );
+        let (doc, _) = loaded(t0_substitute("Verdana", "", ""));
+        assert_eq!(
+            warnings(&doc).first().map(String::as_str),
+            Some("CIDFont is missing CIDSystemInfo dictionary; assuming Adobe-Identity")
+        );
+        let (doc, fd) = loaded(t0_substitute(
+            "Verdana",
+            "/CIDSystemInfo << /Registry (Foo) /Ordering (Bar) >>",
+            "",
+        ));
+        assert_eq!(glyph(&fd, 0x24).0, 34);
+        assert!(warnings(&doc).contains(&"unknown cid collection: Foo-Bar".to_string()));
+        // A known CJK name takes the CJK font, whose glyphs nupdf lacks.
+        let (_, fd) = loaded(t0_substitute("SimSun", IDENTITY, ""));
+        assert!(fd.font.ft_substitute && !fd.font.ft_stretch);
+        assert_eq!(glyphs_of(&fd, &[0x24]), [(0, 700, 65)]);
+        assert_eq!(bound_glyph(&fd.font, 0, Matrix::IDENTITY), fd.font.bbox);
+        // Guessed from its descendant.
+        let (doc, fd) = loaded(guess(
+            "<< /Type /Font /Encoding /Identity-H /DescendantFonts [6 0 R] >>",
+            &[
+                format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica {IDENTITY} /FontDescriptor 7 0 R >>").into_bytes(),
+                b"<< /Flags 32 >>".to_vec(),
+            ],
+        ));
+        assert!(!fd.font.ft_stretch);
+        assert_eq!(
+            warnings(&doc).first().map(String::as_str),
+            Some("unknown font format, guessing type0.")
+        );
+    }
+
+    #[test]
+    fn vertical_cid_fonts_take_w2_and_dw2() {
+        let (_, fd) = loaded(t0_vertical());
+        assert_eq!(fd.wmode, 1);
+        let v = |cid| {
+            let v = fd.lookup_vmtx(cid);
+            (v.x, v.y, v.w)
+        };
+        assert_eq!(
+            [v(1), v(2), v(3), v(4)],
+            [
+                (250, 880, -1000),
+                (250, 880, -1100),
+                (300, 800, -900),
+                (300, 800, -900)
+            ]
+        );
+        let u: Vec<u32> = glyphs_of(&fd, &[1, 2, 3]).iter().map(|g| g.2).collect();
+        assert_eq!(u, [0x20, 0x21, 0x22]);
+        assert_eq!(fd.font.ascender, 0.8);
+        assert_eq!(advance_glyph(&fd.font, 0, 1), (1151.0 + 286.0) / 1000.0);
+        // Punctuation takes its vertical form to find a glyph.
+        let (_, fd) = loaded(t0_vertical_japan());
+        assert_eq!(fd.encoding.name, "UniJIS-UCS2-V");
+        let u: Vec<u32> = glyphs_of(&fd, &[0x3001, 0x3002])
+            .iter()
+            .map(|g| g.2)
+            .collect();
+        assert_eq!(u, [0x3001, 0x3002]);
+    }
+
+    #[test]
+    fn type0_fonts_fail_without_their_parts() {
+        let err = |font: &str, extra: &[Vec<u8>]| load(&open(pdf(font, extra, &show("41")))).err();
+        assert_eq!(
+            err(
+                "<< /Type /Font /Subtype /Type0 /Encoding /Identity-H >>",
+                &[]
+            )
+            .as_deref(),
+            Some("syntax error: cid font is missing descendant fonts")
+        );
+        let cid = |subtype: &str, rest: &str| {
+            format!("<< /Type /Font /Subtype /{subtype} {IDENTITY} {rest} >>").into_bytes()
+        };
+        let t0 = "<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /DescendantFonts [6 0 R] >>";
+        assert_eq!(
+            err(t0, &[cid("Type1", "")]).as_deref(),
+            Some("syntax error: unknown cid font type")
+        );
+        assert_eq!(
+            err(t0, &[cid("CIDFontType0", "")]).as_deref(),
+            Some("syntax error: missing font descriptor")
+        );
+        assert_eq!(
+            err(
+                "<< /Type /Font /Subtype /Type0 /DescendantFonts [6 0 R] >>",
+                &[cid("CIDFontType0", "")]
+            )
+            .as_deref(),
+            Some("syntax error: font missing encoding")
+        );
+        // The hail mary font is Times.
+        let doc = open(helvetica());
+        let fd = Loader { doc: &doc }
+            .hail_mary()
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            (fd.font.name.as_slice(), fd.font.is_serif),
+            (&b""[..], true)
+        );
+        assert_eq!(glyph(&fd, 0x41).0, 34);
+    }
+
+    #[test]
+    fn width_tables_take_the_widest_width_of_each_glyph() {
+        let (_, fd) = loaded(t0_substitute("Arial-BoldMT", IDENTITY, ""));
+        let (table, default) = make_width_table(&fd);
+        assert_eq!((table.get(34), default), (Some(&700), 1000));
+        assert!(table.iter().all(|&w| w == 700 || w == 1000));
+        // A copy for another thread has a font of its own.
+        let copy = fd.copy_for_thread();
+        assert!(!Arc::ptr_eq(&copy.font, &fd.font));
+        assert_eq!(
+            format!("{:?}", GlyphBoxes::new(300)),
+            "GlyphBoxes(2 blocks)"
+        );
+    }
+
+    #[test]
+    fn mupdf_names_glyph_codes_and_numbers_as_it_prints_them() {
+        assert_eq!(mac_roman_code(b"notequal"), Some(173));
+        assert_eq!(mac_roman_code(b"Adieresis"), Some(128));
+        assert_eq!(mac_roman_code(b"nonesuch"), None);
+        assert_eq!(
+            ft_error_string("Locations_Missing"),
+            "locations (loca) table missing"
+        );
+        assert_eq!(ft_error_string("Invalid_File_Format"), "broken file");
+        assert_eq!(ucs2_cmap("Adobe-Japan2", true), Some("Adobe-Japan2-UCS2"));
+        assert_eq!(ucs2_cmap("Adobe-Japan2", false), None);
+        assert_eq!(ucs2_cmap("Adobe-CNS1", false), Some("Adobe-CNS1-UCS2"));
+        assert_eq!(ucs2_cmap("Adobe-Korea1", false), Some("Adobe-Korea1-UCS2"));
+    }
+
+    /// A non-symbolic TrueType font of private glyph names, mapped by a
+    /// (3,1) cmap and by name: `mything`, `uni0061` and an empty name.
+    fn tt_private_names() -> Vec<u8> {
+        let names = post(
+            0x2_0000,
+            false,
+            &post2(&[0, 258, 259, 260, 68], &[b"mything", b"", b"other"]),
+        );
+        let map = cmap(&[(
+            3,
+            1,
+            fmt4(&[(0x41, 0x43, -0x40, None), (0x61, 0x61, -0x5d, None), ffff()]),
+        )]);
+        let mut t = set(base(5, Some(map)), b"post", names);
+        // A box with no area.
+        t = set(
+            t,
+            b"head",
+            crate::font::sfnt::tests::head(1000)[..36]
+                .iter()
+                .copied()
+                .chain([0; 18])
+                .collect(),
+        );
+        truetype(
+            32,
+            "/Encoding << /Differences [68 /mything /a.alt /other 1.5 /x / 255 /a /b] >>",
+            ttf(&t).to_vec(),
+            &show("4142434445464748ff"),
+        )
+    }
+
+    fn t1_private_symbolic() -> Vec<u8> {
+        let glyphs = [
+            (".notdef", crate::font::tests::t1_box(250, 0, 0, 0, 0)),
+            ("xyz1", crate::font::tests::t1_box(600, 10, 0, 590, 700)),
+        ];
+        let array =
+            "256 array 0 1 255 {1 index exch /.notdef put} for dup 66 /xyz1 put readonly def";
+        let data = crate::font::tests::type1(Some(array), &glyphs);
+        let file = stream(&format!("/Length1 {}", data.len()), &data);
+        embedded(
+            "Type1",
+            4,
+            "FontFile",
+            file,
+            "/Encoding [1 2 3]",
+            &show("42"),
+        )
+    }
+
+    /// A TrueType font without glyph names (`post` format 3).
+    fn tt_unnamed() -> Vec<u8> {
+        let t = base(6, Some(unicode_cmap()));
+        truetype(32, "", ttf(&t).to_vec(), &show("41422061"))
+    }
+
+    #[test]
+    fn unnamed_truetype_glyphs_take_the_winansi_names() {
+        let (_, fd) = loaded(tt_unnamed());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x20, 0x61]),
+            [(1, 600, 65), (2, 700, 66), (3, 800, 32), (4, 900, 97)]
+        );
+    }
+
+    #[test]
+    fn truetype_names_fall_back_to_glyph_names_and_code_points() {
+        let (_, fd) = loaded(tt_private_names());
+        assert_eq!(
+            glyphs_of(&fd, &[0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0xff]),
+            [
+                (1, 600, FFFD),
+                (2, 700, FFFD),
+                (3, 800, FFFD),
+                (1, 600, FFFD),
+                (4, 900, 0x61),
+                (3, 800, FFFD),
+                (0, 500, 0x78),
+                // The empty name is glyph 2's.
+                (2, 700, FFFD),
+                (4, 900, 0x61),
+            ]
+        );
+        // The head's empty box is invalid: the unit square instead.
+        assert!(fd.font.invalid_bbox);
+        assert_eq!(fd.font.bbox, Rect::UNIT);
+        assert_eq!(bound_glyph(&fd.font, -1, Matrix::IDENTITY), Rect::UNIT);
+        // A symbolic Type 1 font's private names keep no Unicode: MuPDF
+        // would read them as the standard encoding's, but its test of the
+        // name (no code point) never passes, as unknown names give U+FFFD.
+        let (_, fd) = loaded(t1_private_symbolic());
+        assert_eq!(glyph(&fd, 0x42), (1, 600, FFFD));
+    }
+
+    #[test]
+    fn cid_system_info_without_strings_names_an_empty_collection() {
+        // pdf_dict_get_string gives "" for what is no string; the name is
+        // cut at a NUL and at 255 bytes, as fz_snprintf cuts it.
+        let (doc, _) = loaded(t0_substitute(
+            "Verdana",
+            "/CIDSystemInfo << /Registry /Adobe /Ordering (Identity) >>",
+            "",
+        ));
+        assert!(warnings(&doc).contains(&"unknown cid collection: -Identity".to_string()));
+        let long = "x".repeat(300);
+        let (doc, _) = loaded(t0_substitute(
+            "Verdana",
+            &format!("/CIDSystemInfo << /Registry (Ado\\000be) /Ordering ({long}) >>"),
+            "",
+        ));
+        // (MuPDF's warning is then cut to 255 bytes in all.)
+        let want = format!("unknown cid collection: Ado-{}", &long[..251]);
+        assert!(warnings(&doc).contains(&want));
+    }
+
+    #[test]
+    fn untrustworthy_font_metrics_take_the_defaults() {
+        let font = |asc: i16, desc: i16| {
+            let t = set(
+                base(2, None),
+                b"hhea",
+                crate::font::sfnt::tests::hhea(asc, desc, 2),
+            );
+            new_font(b"T", ttf(&t)).unwrap_or_else(|e| panic!("{e}"))
+        };
+        let f = font(0, 0);
+        assert_eq!((f.ascender, f.descender), (0.8, 0.0));
+        let f = font(9000, 4000);
+        assert_eq!((f.ascender, f.descender), (0.8, -0.2));
+        let f = font(900, 100);
+        assert_eq!((f.ascender, f.descender), (0.9, -0.1));
+        // A font of no program and no procedures has no advances.
+        assert_eq!(advance_glyph(&Font::new(b"none\0ignored"), 1, 0), 0.0);
+        assert_eq!(Font::new(b"none\0ignored").name, b"none");
+        assert!(new_font(b"Bad", Arc::from(&b"junk"[..])).is_err());
+    }
+
+    #[test]
+    fn substitutes_take_mupdfs_vertical_forms() {
+        let pairs = [
+            (0x0021, 0xFE15),
+            (0x0028, 0xFE35),
+            (0x0029, 0xFE36),
+            (0x002C, 0xFE10),
+            (0x003A, 0xFE13),
+            (0x003B, 0xFE14),
+            (0x003F, 0xFE16),
+            (0x005B, 0xFE47),
+            (0x005D, 0xFE48),
+            (0x005F, 0xFE33),
+            (0x007B, 0xFE37),
+            (0x007D, 0xFE38),
+            (0x2013, 0xFE32),
+            (0x2014, 0xFE31),
+            (0x2025, 0xFE30),
+            (0x2026, 0xFE19),
+            (0x3001, 0xFE11),
+            (0x3002, 0xFE12),
+            (0x3008, 0xFE3F),
+            (0x3009, 0xFE40),
+            (0x300A, 0xFE3D),
+            (0x300B, 0xFE3E),
+            (0x300C, 0xFE41),
+            (0x300D, 0xFE42),
+            (0x300E, 0xFE43),
+            (0x300F, 0xFE44),
+            (0x3010, 0xFE3B),
+            (0x3011, 0xFE3C),
+            (0x3014, 0xFE39),
+            (0x3015, 0xFE3A),
+            (0x3016, 0xFE17),
+            (0x3017, 0xFE18),
+            (0xFF01, 0xFE15),
+            (0xFF08, 0xFE35),
+            (0xFF09, 0xFE36),
+            (0xFF0C, 0xFE10),
+            (0xFF1A, 0xFE13),
+            (0xFF1B, 0xFE14),
+            (0xFF1F, 0xFE16),
+            (0xFF3B, 0xFE47),
+            (0xFF3D, 0xFE48),
+            (0xFF3F, 0xFE33),
+            (0xFF5B, 0xFE37),
+            (0xFF5D, 0xFE38),
+            (0x30FC, 0xFE31),
+            (0xFF0D, 0xFE31),
+        ];
+        for (c, v) in pairs {
+            assert_eq!(vertical_form(c), v, "{c:04X}");
+        }
+        assert_eq!(vertical_form(0x41), 0x41);
+    }
+
+    #[test]
+    fn to_unicode_remaps_are_bounded() {
+        // An encoding of 2^24 four-byte codes (with one 16-bit range, as
+        // a CMap of wide ranges alone counts as the identity): the remap
+        // stops there.
+        let cmap = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+            /CMapName /Big def 1 begincodespacerange <00000000> <FFFFFFFF> endcodespacerange\n\
+            2 begincidrange <00000000> <00000001> 5 <00000100> <01000100> 0 endcidrange\n\
+            endcmap CMapName currentdict /CMap defineresource pop end end";
+        let to_unicode = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+            1 begincodespacerange <00000000> <FFFFFFFF> endcodespacerange\n\
+            1 beginbfchar <00000001> <0041> endbfchar\n\
+            endcmap CMapName currentdict /CMap defineresource pop end end";
+        let doc = open(type0(
+            "/Encoding 8 0 R /ToUnicode 9 0 R",
+            "CIDFontType2",
+            &format!("/BaseFont /Helvetica {IDENTITY} /FontDescriptor 7 0 R"),
+            "/Flags 32",
+            &[stream("", cmap), stream("", to_unicode)],
+            &show("00000001"),
+        ));
+        assert_eq!(
+            load(&doc).err().as_deref(),
+            Some("limit error: ToUnicode remap too large")
+        );
     }
 }

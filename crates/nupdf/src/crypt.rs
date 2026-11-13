@@ -1258,4 +1258,608 @@ mod tests {
         assert!(aes.is_some());
         assert!(Aes::new(&key, 80).is_none());
     }
+
+    #[test]
+    fn aes_192_runs_both_ways() {
+        // NIST SP 800-38A, F.2.3 (CBC-AES192), first block.
+        let key = hex("8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b");
+        let iv = hex("000102030405060708090a0b0c0d0e0f");
+        let plain = hex("6bc1bee22e409f96e93d7e117393172a");
+        let Some(aes) = Aes::new(&key, 192) else {
+            panic!("no AES-192");
+        };
+        let mut data = plain.clone();
+        let mut v = [0u8; 16];
+        v.copy_from_slice(&iv);
+        aes.cbc_encrypt(&mut v, &mut data);
+        assert_eq!(data, hex("4f021db243bc633d7178183a9fa071e8"));
+        v.copy_from_slice(&iv);
+        aes.cbc_decrypt(&mut v, &mut data);
+        assert_eq!(data, plain);
+    }
+
+    /// The dictionary written in `text`.
+    fn dict(text: &str) -> Dict {
+        let doc = crate::testutil::doc_of(&["<<>>", text]);
+        match doc.object(2) {
+            Some(Object::Dict(d)) => (*d).clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    const O: &str = "<00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff>";
+    const ID: &str = "[<0123456789abcdef0123456789abcdef><0123456789abcdef0123456789abcdef>]";
+
+    /// A handler from `entries` with 32-byte /O and /U, and what it
+    /// warned.
+    fn handler(entries: &str, id: &str) -> (Result<Crypt, String>, Vec<String>) {
+        let d = dict(&format!("<</Filter/Standard/O{O}/U{O}{entries}>>"));
+        let id = if id.is_empty() {
+            Object::Null
+        } else {
+            let doc = crate::testutil::doc_of(&["<<>>", id]);
+            doc.object(2).unwrap_or(Object::Null)
+        };
+        let diag = Diagnostics::new();
+        let out = Crypt::new(&d, &id, &|o| o.clone(), &diag);
+        let said = diag.snapshot().into_iter().map(|d| d.message).collect();
+        (out, said)
+    }
+
+    #[test]
+    fn handlers_are_refused_with_mupdf_messages() {
+        let diag = Diagnostics::new();
+        let new = |text: &str| Crypt::new(&dict(text), &Object::Null, &|o| o.clone(), &diag).err();
+        assert_eq!(
+            new("<<>>").as_deref(),
+            Some("format error: unspecified encryption handler")
+        );
+        assert_eq!(
+            new("<</Filter/Adobe.PubSec>>").as_deref(),
+            Some("format error: unknown encryption handler: 'Adobe.PubSec'")
+        );
+        let err = |entries: &str| handler(entries, ID).0.err();
+        let cases = [
+            ("/V 3", "unknown encryption version"),
+            (
+                "/V 5",
+                "encryption dictionary missing version and revision value",
+            ),
+            ("/V 2/R 7", "unknown crypt revision 7"),
+            ("/V 2/R 3/Length 41", "invalid encryption key length"),
+            ("/V 2/R 3/Length 256", "invalid encryption key length"),
+            (
+                "/V 5/R 6",
+                "encryption dictionary missing owner encryption key",
+            ),
+            (
+                "/V 4/R 4/StmF/Other",
+                "Crypt Filter not Identity or StdCF (0 0 R)",
+            ),
+            (
+                "/V 4/R 4/CF<</X<<>>>>/StmF/StdCF",
+                "cannot parse crypt filter (0 0 R)",
+            ),
+            (
+                "/V 4/R 4/CF<</StdCF 1>>/StmF/StdCF",
+                "cannot parse crypt filter (0 0 R)",
+            ),
+            (
+                "/V 4/R 4/CF<</StdCF<</CFM/V2/Length 41>>>>/StmF/StdCF",
+                "invalid key length: 41",
+            ),
+            (
+                "/V 4/R 4/CF<</StdCF<</CFM/V2/Length 3>>>>/StmF/StdCF",
+                "invalid key length: 24",
+            ),
+        ];
+        for (entries, message) in cases {
+            assert_eq!(
+                err(entries),
+                Some(format!("format error: {message}")),
+                "{entries}"
+            );
+        }
+        // Revision 5 and 6 need /O and /U of 48 bytes and /OE and /UE.
+        let long = "<00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff>";
+        let r6 = |extra: &str| {
+            let d = dict(&format!(
+                "<</Filter/Standard/V 5/R 6/O{long}/U{long}{extra}>>"
+            ));
+            Crypt::new(&d, &Object::Null, &|o| o.clone(), &diag).err()
+        };
+        assert_eq!(
+            r6("").as_deref(),
+            Some("format error: encryption dictionary missing owner encryption key")
+        );
+        assert_eq!(
+            r6(&format!("/OE{O}")).as_deref(),
+            Some("format error: encryption dictionary missing user encryption key")
+        );
+        assert!(r6(&format!("/OE{O}/UE{O}")).is_none());
+        let user = Crypt::new(
+            &dict(&format!("<</Filter/Standard/V 2/R 3/O{O}/U 5>>")),
+            &Object::Null,
+            &|o| o.clone(),
+            &diag,
+        );
+        assert_eq!(
+            user.err().as_deref(),
+            Some("format error: encryption dictionary missing user password")
+        );
+        let owner = Crypt::new(
+            &dict(&format!("<</Filter/Standard/V 2/R 3/O<0102>/U{O}>>")),
+            &Object::Null,
+            &|o| o.clone(),
+            &diag,
+        );
+        assert_eq!(
+            owner.err().as_deref(),
+            Some("format error: encryption dictionary missing owner password")
+        );
+    }
+
+    #[test]
+    fn missing_entries_are_guessed_with_warnings() {
+        let (c, said) = handler("/V 1", "");
+        let c = c.unwrap();
+        assert_eq!((c.version(), c.revision(), c.length()), (1, 2, 40));
+        assert_eq!(
+            said,
+            [
+                "encryption dictionary missing revision value, guessing...",
+                "encryption dictionary missing permissions",
+                "missing file identifier, may not be able to do decryption"
+            ]
+        );
+        assert_eq!(handler("/V 2/P -4", ID).0.unwrap().revision(), 3);
+        assert_eq!(handler("/V 4/P -4", ID).0.unwrap().revision(), 4);
+        // A length in bytes is taken as bits.
+        let c = handler("/V 2/R 3/Length 16/P -4/EncryptMetadata false", ID)
+            .0
+            .unwrap();
+        assert_eq!(c.length(), 128);
+        assert!(!c.encrypt_metadata());
+        assert_eq!(c.description(), "Standard V2 R3 128-bit RC4");
+        // A short /U is used as far as it goes.
+        let d = dict(&format!("<</Filter/Standard/V 2/R 3/P -4/O{O}/U<0102>>>"));
+        let diag = Diagnostics::new();
+        assert!(Crypt::new(&d, &Object::Null, &|o| o.clone(), &diag).is_ok());
+        assert!(diag.has("crypt.short_key"));
+    }
+
+    #[test]
+    fn crypt_filters_pick_methods_and_lengths() {
+        let filter = |cf: &str, r: i32| {
+            let (c, said) = handler(
+                &format!("/V 4/R {r}/P -4/CF<</StdCF<<{cf}>>>>/StmF/StdCF/StrF/Identity"),
+                ID,
+            );
+            let c = c.unwrap();
+            (
+                c.stream_method(),
+                c.stream_filter().length,
+                c.string_method(),
+                said,
+            )
+        };
+        assert_eq!(filter("/CFM/AESV2", 4).0, Method::AesV2);
+        assert_eq!(filter("/CFM/None", 4).0, Method::None);
+        let (m, len, strings, said) = filter("/CFM/Odd", 4);
+        assert_eq!((m, len, strings), (Method::None, 40, Method::None));
+        assert_eq!(said, ["unknown encryption method: Odd"]);
+        let (m, _, _, said) = filter("/CFM/AESV3/Length 16", 4);
+        assert_eq!(m, Method::AesV3);
+        assert_eq!(
+            said,
+            ["unexpected encryption method for revision 4 crypto: None"]
+        );
+        // Revision 6 only has AES-256.
+        let long = "<00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff>";
+        let d = dict(&format!(
+            "<</Filter/Standard/V 5/R 6/P -4/O{long}/U{long}/OE{O}/UE{O}\
+             /CF<</StdCF<</CFM/V2/Length 16>>>>/StmF/StdCF/StrF/StdCF>>"
+        ));
+        let diag = Diagnostics::new();
+        let c = Crypt::new(&d, &Object::Null, &|o| o.clone(), &diag).unwrap();
+        assert_eq!(
+            c.stream_filter(),
+            CryptFilter {
+                method: Method::AesV3,
+                length: 256
+            }
+        );
+        assert!(diag.has("crypt.illegal_method"));
+        assert!(diag.has("crypt.illegal_length"));
+        assert_eq!(c.description(), "Standard V5 R6 256-bit AES");
+        // StdCF without a /CF dictionary is RC4.
+        let c = handler("/V 4/R 4/P -4/StmF/StdCF/StrF/Identity", ID)
+            .0
+            .unwrap();
+        assert_eq!(
+            (c.stream_method(), c.string_method()),
+            (Method::Rc4, Method::None)
+        );
+        assert_eq!(
+            c.description(),
+            "Standard V4 R4 40-bit streams: RC4 strings: None"
+        );
+        assert_eq!(
+            c.stream_cipher(&c.stream_filter(), 1, 0).map(|_| ()),
+            Some(())
+        );
+        assert_eq!(
+            c.stream_cipher(
+                &CryptFilter {
+                    method: Method::None,
+                    length: 40
+                },
+                1,
+                0
+            ),
+            None
+        );
+        // Strings under Identity stay as they are, both ways.
+        assert_eq!(c.encrypt_data(1, 0, b"plain"), b"plain");
+        let (obj, error) = c.decrypt_object(
+            Object::String(Arc::from(&b"plain"[..])),
+            1,
+            0,
+            &Diagnostics::new(),
+        );
+        assert_eq!(
+            (obj, error),
+            (Object::String(Arc::from(&b"plain"[..])), None)
+        );
+    }
+
+    #[test]
+    fn method_names_are_mupdf_names() {
+        assert_eq!(
+            [Method::None, Method::Rc4, Method::AesV2, Method::AesV3].map(Method::name),
+            ["None", "RC4", "AES", "AES"]
+        );
+        for m in [
+            NewMethod::Rc4_40,
+            NewMethod::Rc4_128,
+            NewMethod::Aes128,
+            NewMethod::Aes256,
+        ] {
+            assert_eq!(NewMethod::from_name(m.name()), Some(m));
+        }
+        assert_eq!(NewMethod::from_name("des"), None);
+    }
+
+    fn aes128() -> Crypt {
+        let diag = Diagnostics::new();
+        Crypt::for_writing(
+            NewMethod::Aes128,
+            "owner\0ignored",
+            "user",
+            Some(b"0123456789abcdef"),
+            -4,
+            &[7; 32],
+            &diag,
+        )
+    }
+
+    #[test]
+    fn a_password_ends_at_its_first_nul() {
+        let mut c = aes128();
+        assert_eq!(c.authenticate("owner"), Ok(4));
+        assert_eq!(c.authenticate("owner\0ignored"), Ok(4));
+        assert_eq!(c.authenticate("user"), Ok(2));
+        assert_eq!(c.authenticate("nobody"), Ok(0));
+    }
+
+    #[test]
+    fn aes_strings_decrypt_unless_they_are_damaged() {
+        let mut c = aes128();
+        assert_eq!(c.authenticate("user"), Ok(2));
+        let diag = Diagnostics::new();
+        let secret = c.encrypt_data(5, 0, b"a secret string");
+        assert_eq!(c.encrypt_data(5, 0, b""), b"");
+        let decrypt = |data: &[u8]| {
+            let diag = Diagnostics::new();
+            let (obj, error) = c.decrypt_object(Object::String(Arc::from(data)), 5, 0, &diag);
+            let said: Vec<String> = diag.snapshot().into_iter().map(|d| d.message).collect();
+            (obj, error, said)
+        };
+        assert_eq!(
+            decrypt(&secret).0,
+            Object::String(Arc::from(&b"a secret string"[..]))
+        );
+        // Not a whole number of blocks after the IV.
+        assert_eq!(
+            decrypt(&secret[..20]).2,
+            ["invalid string length for aes encryption"]
+        );
+        // The last block damaged: its padding byte is out of range.
+        let mut damaged = secret.clone();
+        let last = damaged.len() - 1;
+        damaged[last - 16] ^= 0x40;
+        assert_eq!(decrypt(&damaged).2, ["aes padding out of range"]);
+        assert_eq!(decrypt(b"").0, Object::String(Arc::from(&b""[..])));
+        // A signature's /Contents are not encrypted.
+        let mut sig = Dict::new();
+        sig.put(b"Type", Object::name(b"Sig"));
+        sig.put(b"Filter", Object::name(b"Adobe.PPKLite"));
+        sig.put(b"ByteRange", Object::Array(Arc::new(vec![])));
+        sig.put(b"Contents", Object::String(Arc::from(&b"<sig>"[..])));
+        sig.put(b"Name", Object::String(Arc::from(secret.as_slice())));
+        let (obj, _) = c.decrypt_object(Object::Dict(Arc::new(sig)), 5, 0, &diag);
+        let d = obj.as_dict().cloned().unwrap_or_default();
+        assert_eq!(
+            d.get(b"Contents"),
+            Some(&Object::String(Arc::from(&b"<sig>"[..])))
+        );
+        assert_eq!(
+            d.get(b"Name"),
+            Some(&Object::String(Arc::from(&b"a secret string"[..])))
+        );
+    }
+
+    #[test]
+    fn an_aes_key_of_the_wrong_size_fails_the_object() {
+        // An AESV2 filter whose /Length makes a 40-bit file key, so an
+        // object key of 40 + 40 bits.
+        let (c, _) = handler(
+            "/V 4/R 4/P -4/CF<</StdCF<</CFM/AESV2/Length 5>>>>/StmF/StdCF/StrF/StdCF",
+            ID,
+        );
+        let c = c.unwrap();
+        let diag = Diagnostics::new();
+        let item = Object::String(Arc::from(&[0u8; 32][..]));
+        let (_, error) = c.decrypt_object(
+            Object::Array(Arc::new(vec![item.clone(), item])),
+            1,
+            0,
+            &diag,
+        );
+        assert_eq!(
+            error.as_deref(),
+            Some("format error: AES key init failed (keylen=80)")
+        );
+        // Writing with it leaves the data as it is.
+        assert_eq!(c.encrypt_data(1, 0, b"data"), b"data");
+    }
+
+    /// An encryption dictionary: /O and /U of `ou` bytes (with /OE and /UE
+    /// of 32 for `ou` 48), then `entries`, which win over them.
+    fn encrypt_dict(entries: &str, ou: usize) -> String {
+        let s = |n: usize| format!("<{}>", "ab".repeat(n));
+        let mut d = format!("<< /O {} /U {}", s(ou), s(ou));
+        if ou == 48 {
+            d += &format!(" /OE {} /UE {}", s(32), s(32));
+        }
+        format!("{d} {entries} >>")
+    }
+
+    fn parse(text: &str) -> Object {
+        let diag = Diagnostics::new();
+        let mut lx = crate::lex::Lexer::new(text.as_bytes(), 0, &diag);
+        crate::parse::parse_stm_obj(&mut lx).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    /// `Crypt::new` of an encryption dictionary, and its warnings.
+    fn read(entries: &str, ou: usize, id: &str) -> (Result<Crypt, String>, Vec<String>) {
+        let Object::Dict(dict) = parse(&encrypt_dict(entries, ou)) else {
+            panic!("{entries}");
+        };
+        let diag = Diagnostics::new();
+        let crypt = Crypt::new(&dict, &parse(id), &|o| o.clone(), &diag);
+        (
+            crypt,
+            diag.snapshot().into_iter().map(|d| d.message).collect(),
+        )
+    }
+
+    /// Encryption dictionaries and the handlers they make, with the
+    /// warnings: those `mutool show <file> trailer` prints for a file
+    /// with each dictionary as its /Encrypt.
+    #[test]
+    fn encryption_dictionaries_are_read_as_mupdf_reads_them() {
+        let cases: &[(&str, usize, &str, &[&str])] = &[
+            (
+                "/V 1 /R 2 /P -4",
+                32,
+                "v1 r2 len40 stm RC4 str RC4 p-4 meta true",
+                &[],
+            ),
+            (
+                "/V 1 /P -4",
+                32,
+                "v1 r2 len40 stm RC4 str RC4 p-4 meta true",
+                &["encryption dictionary missing revision value, guessing..."],
+            ),
+            (
+                "/V 2 /P -4 /Length 16",
+                32,
+                "v2 r3 len128 stm RC4 str RC4 p-4 meta true",
+                &["encryption dictionary missing revision value, guessing..."],
+            ),
+            (
+                "/V 4 /P -4",
+                32,
+                "v4 r4 len40 stm None str None p-4 meta true",
+                &["encryption dictionary missing revision value, guessing..."],
+            ),
+            (
+                "/V 2 /R 3",
+                32,
+                "v2 r3 len40 stm RC4 str RC4 p-4 meta true",
+                &["encryption dictionary missing permissions"],
+            ),
+            (
+                "/V 1 /R 2 /P -4 /U <abab>",
+                32,
+                "v1 r2 len40 stm RC4 str RC4 p-4 meta true",
+                &["encryption password key too short (2)"],
+            ),
+            (
+                "/V 4 /R 4 /P -4 /EncryptMetadata false /CF << /StdCF << /CFM /AESV2 /Length 16 >> >> /StmF /StdCF /StrF /StdCF",
+                32,
+                "v4 r4 len128 stm AES str AES p-4 meta false",
+                &[],
+            ),
+            (
+                "/V 4 /R 4 /P -4 /Length 128 /CF << /StdCF << /CFM /V2 >> >> /StmF /StdCF /StrF /Identity",
+                32,
+                "v4 r4 len128 stm RC4 str None p-4 meta true",
+                &[],
+            ),
+            (
+                "/V 4 /R 4 /P -4 /StmF /StdCF /StrF /StdCF",
+                32,
+                "v4 r4 len40 stm RC4 str RC4 p-4 meta true",
+                &[],
+            ),
+            (
+                "/V 4 /R 4 /P -4 /CF << /StdCF << /CFM /None >> >> /StmF /StdCF /StrF /StdCF",
+                32,
+                "v4 r4 len40 stm None str None p-4 meta true",
+                &[],
+            ),
+            (
+                "/V 4 /R 4 /P -4 /CF << /StdCF << /CFM /Foo >> >> /StmF /StdCF",
+                32,
+                "v4 r4 len40 stm None str None p-4 meta true",
+                &["unknown encryption method: Foo"],
+            ),
+            (
+                "/V 4 /R 4 /P -4 /CF << /StdCF << /CFM /AESV3 /Length 16 >> >> /StmF /StdCF",
+                32,
+                "v4 r4 len40 stm AES str None p-4 meta true",
+                &["unexpected encryption method for revision 4 crypto: None"],
+            ),
+            (
+                "/V 5 /R 6 /P -4 /CF << /StdCF << /CFM /AESV2 /Length 16 >> >> /StmF /StdCF",
+                48,
+                "v5 r6 len256 stm AES str None p-4 meta true",
+                &[
+                    "illegal encryption method for revision 5/6, assuming AESV3",
+                    "illegal key length for revision 5/6, assuming 256 bits",
+                ],
+            ),
+            (
+                "/V 5 /R 5 /P -4 /CF << /StdCF << /CFM /AESV3 /Length 32 >> >> /StmF /StdCF /StrF /StdCF",
+                48,
+                "v5 r5 len256 stm AES str AES p-4 meta true",
+                &[],
+            ),
+        ];
+        for &(entries, ou, want, warnings) in cases {
+            let (crypt, got) = read(&format!("/Filter /Standard {entries}"), ou, ID_OURS);
+            let c = crypt.unwrap_or_else(|e| panic!("{entries}: {e}"));
+            let shape = format!(
+                "v{} r{} len{} stm {} str {} p{} meta {}",
+                c.version(),
+                c.revision(),
+                c.length(),
+                c.stream_method().name(),
+                c.string_method().name(),
+                c.permissions(),
+                c.encrypt_metadata()
+            );
+            assert_eq!(shape, want, "{entries}");
+            assert_eq!(got, warnings, "{entries}");
+        }
+        // A missing /ID_OURS only warns.
+        let (crypt, got) = read("/Filter /Standard /V 1 /R 2 /P -4", 32, "null");
+        assert!(crypt.is_ok());
+        assert_eq!(
+            got,
+            ["missing file identifier, may not be able to do decryption"]
+        );
+    }
+
+    #[test]
+    fn broken_encryption_dictionaries_fail_as_in_mupdf() {
+        let f = "/Filter /Standard";
+        let cases: &[(&str, usize, &str)] = &[
+            ("/V 1 /R 2", 32, "unspecified encryption handler"),
+            (
+                "/Filter /Foo /V 1 /R 2",
+                32,
+                "unknown encryption handler: 'Foo'",
+            ),
+            ("{f} /V 3 /R 3", 32, "unknown encryption version"),
+            (
+                "{f} /V 5 /P -4",
+                48,
+                "encryption dictionary missing version and revision value",
+            ),
+            ("{f} /V 2 /R 7 /P -4", 32, "unknown crypt revision 7"),
+            (
+                "{f} /V 1 /R 2 /P -4",
+                20,
+                "encryption dictionary missing owner password",
+            ),
+            (
+                "{f} /V 1 /R 2 /P -4 /U 5",
+                32,
+                "encryption dictionary missing user password",
+            ),
+            (
+                "{f} /V 2 /R 3 /P -4 /Length 41",
+                32,
+                "invalid encryption key length",
+            ),
+            (
+                "{f} /V 2 /R 3 /P -4 /Length 256",
+                32,
+                "invalid encryption key length",
+            ),
+            (
+                "{f} /V 5 /R 6 /P -4 /OE <ab>",
+                48,
+                "encryption dictionary missing owner encryption key",
+            ),
+            (
+                "{f} /V 5 /R 6 /P -4 /UE <ab>",
+                48,
+                "encryption dictionary missing user encryption key",
+            ),
+            (
+                "{f} /V 4 /R 4 /P -4 /StmF /Foo",
+                32,
+                "Crypt Filter not Identity or StdCF (0 0 R)",
+            ),
+            (
+                "{f} /V 4 /R 4 /P -4 /CF << /Other << >> >> /StmF /StdCF",
+                32,
+                "cannot parse crypt filter (0 0 R)",
+            ),
+            (
+                "{f} /V 4 /R 4 /P -4 /CF << /StdCF << /Length 41 >> >> /StmF /StdCF",
+                32,
+                "invalid key length: 41",
+            ),
+            (
+                "{f} /V 4 /R 4 /P -4 /CF << /StdCF << /CFM /AESV3 >> >> /StmF /StdCF",
+                32,
+                "invalid key length: 256",
+            ),
+        ];
+        for &(entries, ou, want) in cases {
+            let entries = entries.replace("{f}", f);
+            let (crypt, _) = read(&entries, ou, ID_OURS);
+            assert_eq!(
+                crypt.err(),
+                Some(format!("format error: {want}")),
+                "{entries}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_methods_are_named_as_the_options_name_them() {
+        for name in ["rc4-40", "rc4-128", "aes-128", "aes-256"] {
+            assert_eq!(NewMethod::from_name(name).map(NewMethod::name), Some(name));
+        }
+        assert_eq!(NewMethod::from_name("aes-512"), None);
+        assert_eq!(Method::None.name(), "None");
+    }
+
+    const ID_OURS: &str = "[<0102030405060708090a0b0c0d0e0f10><0102030405060708090a0b0c0d0e0f10>]";
 }

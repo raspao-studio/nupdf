@@ -302,8 +302,10 @@ impl Compiler<'_> {
         Ok(())
     }
 
-    fn add_class(&mut self, which: u8) -> Result<(), Fail> {
-        let ranges: &[(i32, i32)] = match which {
+    /// `addranges_d` and the rest, picked by the whole rune: one whose low
+    /// byte is a class letter passes C's `strchr` test but adds nothing.
+    fn add_class(&mut self, which: i32) -> Result<(), Fail> {
+        let ranges: &[(i32, i32)] = match u8::try_from(which).unwrap_or(0) {
             b'd' => &[(0x30, 0x39)],
             b'D' => &[(0, 0x2f), (0x3a, 0xffff)],
             b's' => &[
@@ -374,7 +376,7 @@ impl Compiler<'_> {
                         self.add_range('-' as i32, '-' as i32)?;
                     }
                 }
-                self.add_class(self.yychar as u8)?;
+                self.add_class(self.yychar)?;
                 havesave = false;
                 havedash = false;
             } else {
@@ -417,7 +419,7 @@ impl Compiler<'_> {
             let c = self.yychar;
             let class = |me: &mut Self, w: u8, t: i32| -> Result<i32, Fail> {
                 me.new_class()?;
-                me.add_class(w)?;
+                me.add_class(i32::from(w))?;
                 Ok(t)
             };
             match u8::try_from(c).unwrap_or(0xff) {
@@ -1199,6 +1201,346 @@ mod tests {
         assert_eq!(find("[^a-c]", "ABCd", ICASE), Some((3, 4)));
         assert_eq!(find("[\\W]", "\u{e9}", ICASE), Some((0, 2)));
         assert_eq!(find("q", "abc", 0), None);
+    }
+
+    fn err(pattern: &str) -> String {
+        match Regex::compile(pattern.as_bytes(), 0) {
+            Ok(_) => panic!("{pattern:?} compiled"),
+            Err(e) => e
+                .strip_prefix("regcomp failure: ")
+                .unwrap_or(&e)
+                .to_string(),
+        }
+    }
+
+    /// Each pattern, text, flags and match as MuJS's RegExp (the same
+    /// code as fitz/regexp.c) gives them in `mutool run`.
+    type Case<'a> = (&'a str, &'a str, u32, Option<(usize, usize)>);
+
+    fn check(cases: &[Case]) {
+        for &(p, t, f, want) in cases {
+            assert_eq!(find(p, t, f), want, "/{p}/ on {t:?}");
+        }
+    }
+
+    #[test]
+    fn character_classes_and_their_escapes() {
+        check(&[
+            ("[abc]", "xxb", 0, Some((2, 3))),
+            ("[^abc]", "abcd", 0, Some((3, 4))),
+            ("[a-]+", "x-a-", 0, Some((1, 4))),
+            ("[-a]+", "x-a-", 0, Some((1, 4))),
+            ("[a-c-e]+", "xb-e", 0, Some((1, 4))),
+            ("[a-c-]+", "x-b", 0, Some((1, 3))),
+            ("\\d+", "ab123", 0, Some((2, 5))),
+            ("\\D+", "12ab3", 0, Some((2, 4))),
+            ("\\s+", "a \t b", 0, Some((1, 4))),
+            ("\\S+", "  ab ", 0, Some((2, 4))),
+            ("\\w+", "..ab_1..", 0, Some((2, 6))),
+            ("\\W+", "ab..cd", 0, Some((2, 4))),
+            ("[\\d\\s]+", "ab1 2c", 0, Some((2, 5))),
+            ("[\\D]+", "12ab", 0, Some((2, 4))),
+            ("[\\S]+", "  ab", 0, Some((2, 4))),
+            ("[\\w-]+", "..a-b..", 0, Some((2, 5))),
+            ("[a\\d]+", "xa1b", 0, Some((1, 3))),
+            ("[\\W]+", "ab..", 0, Some((2, 4))),
+            ("[a-\\d]+", "x-a1", 0, Some((1, 4))),
+            ("[\\d-a]+", "x-a1", 0, Some((1, 4))),
+            ("[x\\d-]+", "yx-", 0, Some((1, 3))),
+            ("[\\b]", "a\u{8}b", 0, Some((1, 2))),
+            ("[\\-]", "a-", 0, Some((1, 2))),
+            ("[\\]]", "a]", 0, Some((1, 2))),
+            ("[\\0a]", "xa", 0, Some((1, 2))),
+            ("[\\s\\S]+", "a\nb", 0, Some((0, 3))),
+            ("[\\D\\d]+", "a\nb", 0, Some((0, 3))),
+            ("[\\w\\W]+", "a\nb", 0, Some((0, 3))),
+            ("[^]", "a", 0, Some((0, 1))),
+            ("[]", "a", 0, None),
+            ("[^\\d]", "1a", 0, Some((1, 2))),
+            ("[^\\D]", "a1", 0, Some((1, 2))),
+            ("\\s", "a\u{a0}", 0, Some((1, 3))),
+            ("\\s", "a\u{feff}", 0, Some((1, 4))),
+            ("\\s", "a\u{2029}", 0, Some((1, 4))),
+            ("[\u{e0}-\u{ff}]+", "x\u{e9}\u{e8}", 0, Some((1, 5))),
+            // Ranges that overlap, contain or extend each other merge.
+            ("[ca]+", "xabc", 0, Some((1, 2))),
+            ("[a-cb]+", "xabc", 0, Some((1, 4))),
+            ("[ba-c]+", "xabc", 0, Some((1, 4))),
+            ("[b-ca-d]+", "xabcd", 0, Some((1, 5))),
+            ("[da-c]+", "xabcd", 0, Some((1, 5))),
+            ("[a-cd]+", "xabcd", 0, Some((1, 5))),
+            ("[c-db]+", "xbcd", 0, Some((1, 4))),
+            ("[b-cd-e]+", "xbcde", 0, Some((1, 5))),
+            ("[d-eb-d]+", "xbcde", 0, Some((1, 5))),
+            ("[!--]+", "x,-", 0, Some((1, 3))),
+        ]);
+    }
+
+    #[test]
+    fn escapes_name_runes() {
+        check(&[
+            ("\\x41", "zA", 0, Some((1, 2))),
+            ("\\u0041", "zA", 0, Some((1, 2))),
+            ("\\u00E9", "z\u{e9}", 0, Some((1, 3))),
+            ("\\cA", "z\u{1}", 0, Some((1, 2))),
+            // \x00 and \u0000 are the digit 0, which "x0" holds but MuJS
+            // reports no match for: JavaScript strings carry no NUL, and
+            // here 0 is a rune C strings cannot hold either.
+            ("\\x00", "x", 0, None),
+            ("\\u0000", "x", 0, None),
+            ("\\0", "x", 0, None),
+            ("\\f\\n\\r\\t\\v", "a\u{c}\n\r\t\u{b}", 0, Some((1, 6))),
+            ("\\.\\*", "a.*", 0, Some((1, 3))),
+            ("\\-", "a-", 0, Some((1, 2))),
+            ("\\@", "a@", 0, Some((1, 2))),
+            ("\\$\\^", "a$^", 0, Some((1, 3))),
+            ("\\\u{144}", "x\u{144}", 0, Some((1, 3))),
+            ("\\\u{100}", "x\u{100}", 0, Some((1, 3))),
+            ("}", "a}", 0, Some((1, 2))),
+            ("]", "a]", 0, Some((1, 2))),
+        ]);
+    }
+
+    #[test]
+    fn groups_references_and_lookahead() {
+        check(&[
+            ("(a)(b)\\2\\1", "xabba", 0, Some((1, 5))),
+            (
+                "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)\\12",
+                "abcdefghijkll",
+                0,
+                Some((0, 13)),
+            ),
+            ("(?:ab)+", "ababx", 0, Some((0, 4))),
+            ("a(?!b)", "abac", 0, Some((2, 3))),
+            ("a(?=c)", "abac", 0, Some((2, 3))),
+            ("(a)|b", "b", 0, Some((0, 1))),
+            ("(a)?b\\1", "b", 0, Some((0, 1))),
+            ("(a*)b\\1", "aabaa", 0, Some((0, 5))),
+            ("(?=(a))\\1", "a", 0, Some((0, 1))),
+            ("(?!(b))a", "a", 0, Some((0, 1))),
+            ("((a)|b)+", "ab", 0, Some((0, 2))),
+            ("()\\1a", "a", 0, Some((0, 1))),
+            ("(a)|\\1b", "b", 0, Some((0, 1))),
+            ("(?:)", "x", 0, Some((0, 0))),
+            ("()", "x", 0, Some((0, 0))),
+            ("(?=)a", "a", 0, Some((0, 1))),
+            ("(?!)a", "a", 0, None),
+            ("(a)\\1", "ab", 0, None),
+            ("a|b|c", "xc", 0, Some((1, 2))),
+            ("a|", "b", 0, Some((0, 0))),
+            ("|a", "a", 0, Some((0, 0))),
+            ("a||b", "b", 0, Some((0, 0))),
+        ]);
+    }
+
+    #[test]
+    fn quantifiers_greedy_lazy_and_counted() {
+        check(&[
+            ("a{2}", "aaa", 0, Some((0, 2))),
+            ("a{2,}", "aaaa", 0, Some((0, 4))),
+            ("a{1,2}?", "aa", 0, Some((0, 1))),
+            ("a{0,1}", "aa", 0, Some((0, 1))),
+            ("a*?b", "aab", 0, Some((0, 3))),
+            ("a??", "a", 0, Some((0, 0))),
+            ("(ab){2}?", "ababab", 0, Some((0, 4))),
+            ("a{2,}?", "aaaa", 0, Some((0, 2))),
+            ("a+?", "aaa", 0, Some((0, 1))),
+            ("x*", "", 0, Some((0, 0))),
+            ("a{12}", "aaaaaaaaaaaaa", 0, Some((0, 12))),
+            ("a{1,12}", "aaaaaaaaaaaaaaa", 0, Some((0, 12))),
+            ("a{0}b", "ab", 0, Some((1, 2))),
+            ("xa{0,}", "xaa", 0, Some((0, 3))),
+            ("(?:a|b){2,3}?", "abab", 0, Some((0, 2))),
+            ("(a|b)*?c", "abc", 0, Some((0, 3))),
+            ("x{2,}?y", "xxxy", 0, Some((0, 4))),
+            ("(?:ab){1,100}", "abababab", 0, Some((0, 8))),
+            ("\u{e9}+", "x\u{e9}\u{e9}", 0, Some((1, 5))),
+        ]);
+    }
+
+    #[test]
+    fn anchors_boundaries_and_the_newline_flag() {
+        check(&[
+            ("^a", "ba", 0, None),
+            ("a$", "ba\nc", NEWLINE, Some((1, 2))),
+            ("^c", "ba\nc", NEWLINE, Some((3, 4))),
+            ("^c", "ba\rc", NEWLINE, Some((3, 4))),
+            ("a$", "ba\rc", NEWLINE, Some((1, 2))),
+            ("a$", "ba\nc", 0, None),
+            ("a$\\nb", "a\nb", NEWLINE, Some((0, 3))),
+            ("^$", "a\n\nb", NEWLINE, Some((2, 2))),
+            ("\\bab", "xab ab", 0, Some((4, 6))),
+            ("\\Bb", "ab", 0, Some((1, 2))),
+            ("b\\B", "ab b", 0, None),
+            ("\\Bx", "xx", 0, Some((1, 2))),
+            ("\\B", "a", 0, None),
+            ("\\b", " ", 0, None),
+            (".", "\n", 0, None),
+            (".", "\r", 0, None),
+            (".", "\u{2028}", 0, None),
+            (".+", "ab\nc", 0, Some((0, 2))),
+        ]);
+    }
+
+    #[test]
+    fn ignoring_case_compares_upper_cases() {
+        check(&[
+            ("abc", "xABC", ICASE, Some((1, 4))),
+            ("\u{e9}", "\u{c9}", ICASE, Some((0, 2))),
+            ("[\u{e9}]", "\u{c9}", ICASE, Some((0, 2))),
+            ("(a)\\1", "aA", ICASE, Some((0, 2))),
+            ("[a-z]+", "XY", ICASE, Some((0, 2))),
+            ("[^a-z]+", "XY1", ICASE, Some((2, 3))),
+            ("A+", "aaa", ICASE, Some((0, 3))),
+            (".", "a", ICASE, Some((0, 1))),
+            ("\\D", "1a", ICASE, Some((1, 2))),
+            // A non-ASCII rune never canonicalizes to ASCII.
+            ("\u{17f}", "s", ICASE, None),
+            ("s", "\u{17f}", ICASE, None),
+            ("[\u{17f}]", "S", ICASE, None),
+            ("[k]", "\u{212a}", ICASE, None),
+            ("\u{212a}", "k", ICASE, None),
+            // A reference compares as many runes as its capture has bytes.
+            ("(\u{e9})\\1", "\u{e9}\u{c9}", ICASE, None),
+            ("(a)\\1", "ab", ICASE, None),
+        ]);
+    }
+
+    #[test]
+    fn not_bol_keeps_the_start_from_being_a_line_start() {
+        let re = Regex::compile(b"^a", NEWLINE).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(re.exec(b"a", 0, 0), Ok(Some((0, 1))));
+        assert_eq!(re.exec(b"a", 0, NOTBOL), Ok(None));
+        assert_eq!(re.exec(b"a\na", 0, NOTBOL), Ok(Some((2, 3))));
+        // A match may start past `sp`, but not before it.
+        assert_eq!(re.exec(b"a\nxa", 2, 0), Ok(None));
+    }
+
+    /// Runs `f` on a stack as deep as the page workers' (MuPDF's limits
+    /// assume a C stack; a test thread's 2 MB is not enough in debug).
+    fn on_big_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(crate::parallel::STACK_SIZE)
+            .spawn(f)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    #[test]
+    fn deep_or_long_matches_fail_as_regexec_does() {
+        on_big_stack(deep_or_long_matches);
+    }
+
+    fn deep_or_long_matches() {
+        let long = "a".repeat(5000);
+        let re = Regex::compile(b"a*", 0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            re.exec(long.as_bytes(), 0, 0),
+            Err("regexec failure".into())
+        );
+        // The runaway limit stops exponential backtracking.
+        let re = Regex::compile(b"(a|aa)*c", 0).unwrap_or_else(|e| panic!("{e}"));
+        let text = "a".repeat(40);
+        assert_eq!(
+            re.exec(text.as_bytes(), 0, RUNAWAY),
+            Err("regexec failure".into())
+        );
+        assert_eq!(re.exec(b"aaaa", 0, RUNAWAY), Ok(None));
+        // So does a deep match inside a lookahead.
+        for p in ["(?=a*)", "(?!a*b)"] {
+            let re = Regex::compile(p.as_bytes(), 0).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(
+                re.exec(long.as_bytes(), 0, 0),
+                Err("regexec failure".into())
+            );
+        }
+        // A pattern ends at a NUL, as a C string does.
+        assert_eq!(find("ab\0c", "xab", 0), Some((1, 3)));
+    }
+
+    #[test]
+    fn each_compile_error_has_mupdfs_message() {
+        for (p, e) in [
+            ("\\x4", "unterminated escape sequence"),
+            ("\\xg1", "invalid escape sequence"),
+            ("\\u12", "unterminated escape sequence"),
+            ("\\u12g4", "invalid escape sequence"),
+            ("\\c", "unterminated escape sequence"),
+            ("a\\", "unterminated escape sequence"),
+            ("a{x}", "invalid quantifier"),
+            ("a{1x}", "invalid quantifier"),
+            ("a{1,x}", "invalid quantifier"),
+            ("a{1,2", "invalid quantifier"),
+            ("a{,2}", "invalid quantifier"),
+            ("a{", "invalid quantifier"),
+            ("{", "invalid quantifier"),
+            ("a{300}", "numeric overflow"),
+            ("a{1,300}", "numeric overflow"),
+            ("a{3,2}", "invalid quantifier"),
+            ("[b-a]", "invalid character class range"),
+            ("[a--]+", "invalid character class range"),
+            ("[cb-a]", "invalid character class range"),
+            ("[abc", "unterminated character class"),
+            ("\\1", "invalid back-reference"),
+            ("(a)\\2", "invalid back-reference"),
+            ("(a\\1)", "invalid back-reference"),
+            ("(a)\\10", "invalid back-reference"),
+            ("(?:a", "unmatched '('"),
+            ("(?=a", "unmatched '('"),
+            ("(?!a", "unmatched '('"),
+            ("*", "syntax error"),
+            ("a**", "syntax error"),
+            ("a{1}{2}", "syntax error"),
+            ("a{254}{1}", "syntax error"),
+            ("a)", "unmatched ')'"),
+            ("(?:)*", "infinite loop matching the empty string"),
+            ("(a|)*", "infinite loop matching the empty string"),
+            ("(^)*", "infinite loop matching the empty string"),
+            ("(\\b)+", "infinite loop matching the empty string"),
+            ("(a*)*", "infinite loop matching the empty string"),
+            ("(?x)", "syntax error"),
+            ("\\q", "invalid escape character"),
+            ("\\_", "invalid escape character"),
+            ("\\\u{e9}", "invalid escape character"),
+            ("(?:a{250}){131}b{20}", "program too large"),
+            ("(?:a{250}){140}", "program too large"),
+        ] {
+            assert_eq!(err(p), e, "/{p}/");
+        }
+    }
+
+    #[test]
+    fn limits_on_classes_ranges_captures_and_size() {
+        on_big_stack(limits);
+    }
+
+    fn limits() {
+        assert!(Regex::compile("\\d".repeat(128).as_bytes(), 0).is_ok());
+        assert_eq!(err(&"\\d".repeat(129)), "too many character classes");
+        let class = |n: u32| -> String {
+            let runes: String = (0..n)
+                .filter_map(|i| char::from_u32(0x100 + 2 * i))
+                .collect();
+            format!("[{runes}]")
+        };
+        assert_eq!(find(&class(31), "x\u{102}", 0), Some((1, 3)));
+        assert_eq!(err(&class(32)), "too many character class ranges");
+        assert!(Regex::compile("(a)".repeat(15).as_bytes(), 0).is_ok());
+        assert_eq!(err(&"(a)".repeat(16)), "too many captures");
+        assert!(Regex::compile("a".repeat(4000).as_bytes(), 0).is_ok());
+        assert_eq!(err(&"a".repeat(5000)), "stack overflow");
+        assert_eq!(err(&"a".repeat(17000)), "program too large");
+    }
+
+    #[test]
+    fn an_escaped_rune_sharing_a_class_letters_low_byte_adds_nothing() {
+        // U+0144 and U+0164 end in the bytes of `D` and `d`: C's strchr
+        // takes them for class escapes, but its switch adds no ranges.
+        assert_eq!(find("[\\\u{144}]", "1x", 0), None);
+        assert_eq!(find("[\\\u{164}]", "x1", 0), None);
+        assert_eq!(find("[\\\u{164}a]", "x1a", 0), Some((2, 3)));
     }
 
     #[test]

@@ -162,6 +162,19 @@ fn chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
 /// An image's pixmap, as `fz_get_pixmap_from_image` decodes it with no
 /// scaling (`Image.toPixmap()` in MuPDF's scripts).
 pub fn from_image(doc: &Document, image: &Image) -> Result<Pixmap, String> {
+    from_image_subsampled(doc, image, 0).map(|(p, _)| p)
+}
+
+/// An image's pixmap decoded to be shown `2^l2` times smaller, as
+/// `compressed_image_get_pixmap` does it: the samples of images that
+/// stream (not JPX, indexed or /Matte ones) are averaged in blocks as
+/// they are read, before decode arrays and color keys apply. The rest
+/// of the factor, for the caller's `fz_subsample_pixmap`, comes back.
+pub fn from_image_subsampled(
+    doc: &Document,
+    image: &Image,
+    l2: u32,
+) -> Result<(Pixmap, u32), String> {
     if image.stream.is_none()
         && let Some((dict, data)) = &image.inline
     {
@@ -178,7 +191,7 @@ pub fn from_image(doc: &Document, image: &Image) -> Result<Pixmap, String> {
         let mut out = vec![0; len as usize];
         let n = st.read(&mut out);
         out.truncate(n);
-        return decomp(doc, image, &out);
+        return decomp(doc, image, &out, l2);
     }
     let Some(stream) = &image.stream else {
         return Err(report::format("image has no data"));
@@ -188,7 +201,7 @@ pub fn from_image(doc: &Document, image: &Image) -> Result<Pixmap, String> {
     };
     if image.is_jpx {
         let data = doc.stream_data(&s).map_err(|e| e.report())?;
-        return jpx_pixmap(doc, image, &data);
+        return jpx_pixmap(doc, image, &data).map(|p| (p, l2));
     }
     // What the read of each row needs, whole rows of packed samples.
     let (w, h) = (image.width.max(0) as u64, image.height.max(0) as u64);
@@ -220,11 +233,11 @@ pub fn from_image(doc: &Document, image: &Image) -> Result<Pixmap, String> {
             .image_samples(&s, len as usize)
             .map_err(|e| e.report())?,
     };
-    decomp(doc, image, &data)
+    decomp(doc, image, &data, l2)
 }
 
 /// `fz_decomp_image_from_stream` at full size, from the decoded samples.
-fn decomp(doc: &Document, image: &Image, data: &[u8]) -> Result<Pixmap, String> {
+fn decomp(doc: &Document, image: &Image, data: &[u8], l2: u32) -> Result<(Pixmap, u32), String> {
     let diag = doc.diagnostics();
     let (w, h) = (image.width.max(0) as usize, image.height.max(0) as usize);
     let n = image.n;
@@ -262,6 +275,18 @@ fn decomp(doc: &Document, image: &Image, data: &[u8]) -> Result<Pixmap, String> 
     if read < stride * h {
         diag.warn("image.truncated", "padding truncated image");
     }
+    // `subsample_stream`: blocks averaged as the samples stream in. A
+    // /Matte image keeps its size, and indexed ones are subsampled after
+    // they turn into their base colors, by the caller.
+    let mut rest = l2;
+    if l2 > 0 && !indexed && !(use_colorkey && image.mask.is_some()) {
+        let f = 1usize << l2.min(6);
+        crate::draw::image::pixblock(&mut tile.samples, w as i32, h as i32, tile.n as i32, l2);
+        tile.w = w.div_ceil(f);
+        tile.h = h.div_ceil(f);
+        tile.samples.truncate(tile.w * tile.h * tile.n);
+        rest = 0;
+    }
     if image.image_mask {
         // 0 is opaque and 1 transparent.
         for v in &mut tile.samples {
@@ -286,7 +311,7 @@ fn decomp(doc: &Document, image: &Image, data: &[u8]) -> Result<Pixmap, String> 
         let mask = from_image(doc, mask)?;
         unblend_masked_tile(&mut tile, &mask, n, key);
     }
-    Ok(tile)
+    Ok((tile, rest))
 }
 
 /// `fz_unpack_stream` read whole: samples of `depth` bits to bytes,
@@ -671,5 +696,94 @@ mod tests {
             b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
         ));
         assert_eq!(&pam[pam.len() - 4..], &[128, 0, 255, 128]);
+    }
+
+    fn pix(colorspace: Option<ColorSpace>, alpha: bool, samples: &[u8]) -> Pixmap {
+        let n = colorspace.as_ref().map_or(0, ColorSpace::n) + usize::from(alpha);
+        Pixmap {
+            w: samples.len() / n,
+            h: 1,
+            n,
+            alpha,
+            colorspace,
+            samples: samples.to_vec(),
+        }
+    }
+
+    #[test]
+    fn pam_names_each_kind_of_pixmap() {
+        let lab = ColorSpace::Icc(Family::Lab, Default::default());
+        for (p, tupl) in [
+            (pix(None, true, &[7]), "GRAYSCALE"),
+            (pix(Some(ColorSpace::Gray), false, &[7]), "GRAYSCALE"),
+            (
+                pix(Some(ColorSpace::Gray), true, &[7, 9]),
+                "GRAYSCALE_ALPHA",
+            ),
+            (pix(Some(ColorSpace::Rgb), false, &[1, 2, 3]), "RGB"),
+            (pix(Some(ColorSpace::Cmyk), false, &[1, 2, 3, 4]), "CMYK"),
+            (
+                pix(Some(ColorSpace::Cmyk), true, &[0, 0, 0, 0, 0]),
+                "CMYK_ALPHA",
+            ),
+        ] {
+            let pam = p.pam().unwrap_or_else(|e| panic!("{e}"));
+            let head = format!("TUPLTYPE {tupl}\nENDHDR\n");
+            assert!(
+                pam.windows(head.len()).any(|w| w == head.as_bytes()),
+                "{tupl}"
+            );
+        }
+        // Clear pixels stay clear rather than dividing by zero.
+        let clear = pix(Some(ColorSpace::Cmyk), true, &[0, 0, 0, 0, 0]);
+        let pam = clear.pam().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(&pam[pam.len() - 5..], &[0; 5]);
+        assert!(pix(Some(lab), false, &[1, 2, 3]).pam().is_err());
+    }
+
+    /// The PNG's IHDR color type and its rows inflated.
+    fn png_rows(p: &Pixmap) -> (u8, Vec<u8>) {
+        use std::io::Read;
+        let png = p.png().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+        let color = png[8 + 8 + 9];
+        let at = png
+            .windows(4)
+            .position(|w| w == b"IDAT")
+            .unwrap_or_else(|| panic!("no IDAT"));
+        let len = u32::from_be_bytes([png[at - 4], png[at - 3], png[at - 2], png[at - 1]]) as usize;
+        let mut rows = Vec::new();
+        flate2::read::ZlibDecoder::new(&png[at + 4..at + 4 + len])
+            .read_to_end(&mut rows)
+            .unwrap_or_else(|e| panic!("{e}"));
+        (color, rows)
+    }
+
+    #[test]
+    fn png_writes_gray_rgb_and_alpha_unpremultiplied() {
+        assert_eq!(
+            png_rows(&pix(Some(ColorSpace::Gray), false, &[7, 8])),
+            (0, vec![0, 7, 8])
+        );
+        // Alpha alone is written as gray.
+        assert_eq!(png_rows(&pix(None, true, &[200])), (0, vec![0, 200]));
+        assert_eq!(
+            png_rows(&pix(Some(ColorSpace::Gray), true, &[64, 128])),
+            (4, vec![0, 128, 128])
+        );
+        assert_eq!(
+            png_rows(&pix(Some(ColorSpace::Rgb), false, &[1, 2, 3])),
+            (2, vec![0, 1, 2, 3])
+        );
+        assert_eq!(
+            png_rows(&pix(
+                Some(ColorSpace::Rgb),
+                true,
+                &[64, 0, 128, 128, 0, 0, 0, 0]
+            )),
+            (6, vec![0, 128, 0, 255, 128, 0, 0, 0, 0])
+        );
+        let cmyk = pix(Some(ColorSpace::Cmyk), false, &[1, 2, 3, 4]);
+        assert!(cmyk.png().is_err());
     }
 }

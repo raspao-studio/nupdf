@@ -1960,6 +1960,11 @@ mod tests {
         let o = Options::parse("clip-rect=0:0:10:20").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(o.clip, Rect::new(0.0, 0.0, 10.0, 20.0));
         assert!(Options::parse("bogus").is_err());
+        assert!(Options::parse("clip-rect=0:0:10").is_err());
+        assert!(Options::parse("dehyphenate=perhaps").is_err());
+        let o = Options::parse("dehyphenate=yes, dehyphenate=false,mediabox-clip=0")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(o.flags, 0);
         let o =
             Options::parse("vectors,lazy-vectors,fuzzy-vectors").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
@@ -2111,5 +2116,599 @@ mod tests {
             assert!(d.page.blocks.is_empty());
         });
         assert_eq!(got.len(), 1);
+    }
+
+    // Whole pages. The expected outlines are MuPDF's (oracle/js/stext.js
+    // on the same files, with the same options).
+
+    const HELVETICA_FD: &str = "/FontDescriptor<</Type/FontDescriptor/FontName/Helvetica/Flags 32\
+        /FontBBox[0 -200 1000 900]/ItalicAngle 0/Ascent 800/Descent -200/CapHeight 700/StemV 80>>";
+
+    /// A one-page document, 400 by 400: Helvetica as F1, Helvetica-Bold as
+    /// F2 and Times as F3 besides `fonts`, other `resources`, and `extras`
+    /// as objects 5 on.
+    fn doc(content: &[u8], fonts: &str, resources: &str, extras: &[&[u8]]) -> Document {
+        let mut objs: Vec<Vec<u8>> = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 400]/Contents 4 0 R/Resources<</Font<<\
+                 /F1 <</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
+                 /F2<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold>>\
+                 /F3<</Type/Font/Subtype/Type1/BaseFont/Times-Roman>>{fonts}>>{resources}>>>>"
+            )
+            .into_bytes(),
+            stream("", content),
+        ];
+        objs.extend(extras.iter().map(|e| e.to_vec()));
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        for (i, o) in objs.iter().enumerate() {
+            pdf.extend(format!("{} 0 obj", i + 1).bytes());
+            pdf.extend(o);
+            pdf.extend(b"endobj\n");
+        }
+        pdf.extend(format!("trailer<</Root 1 0 R/Size {}>>\n", objs.len() + 1).bytes());
+        Document::open(pdf).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
+        let mut s = format!("<<{dict}/Length {}>>stream\n", data.len()).into_bytes();
+        s.extend(data);
+        s.extend(b"\nendstream");
+        s
+    }
+
+    fn stext_of(doc: &Document, opts: &str) -> StextPage {
+        let page = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let opts = Options::parse(opts).unwrap_or_else(|e| panic!("{e}"));
+        extract_page(doc, &page, opts, Store::default())
+            .0
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn line_text(line: &StextLine) -> String {
+        line.chars.iter().map(|c| rune_char(c.c)).collect()
+    }
+
+    /// Each block in brief: a text block's lines joined by `|`, others by
+    /// kind, vectors with their flags, structures around their blocks.
+    fn outline(blocks: &[Block]) -> Vec<String> {
+        let mut out = Vec::new();
+        for b in blocks {
+            match b {
+                Block::Text(t) => {
+                    out.push(t.lines.iter().map(line_text).collect::<Vec<_>>().join("|"))
+                }
+                Block::Image(_) => out.push("[image]".into()),
+                Block::Vector(v) => out.push(format!("[vector {}]", v.flags)),
+                Block::Grid(_) => out.push("[grid]".into()),
+                Block::Struct(s) => {
+                    out.push(format!("<{}>", s.standard));
+                    out.extend(outline(&s.blocks));
+                    out.push(format!("</{}>", s.standard));
+                }
+            }
+        }
+        out
+    }
+
+    fn outline_of(doc: &Document, opts: &str) -> Vec<String> {
+        outline(&stext_of(doc, opts).blocks)
+    }
+
+    fn all_lines(blocks: &[Block]) -> Vec<&StextLine> {
+        let mut out = Vec::new();
+        for b in blocks {
+            match b {
+                Block::Text(t) => out.extend(t.lines.iter()),
+                Block::Struct(s) => out.extend(all_lines(&s.blocks)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn ligatures_doc() -> Document {
+        doc(
+            b"BT /L 12 Tf 20 360 Td (o\\001ce \\002ow e\\003ort o\\004ce wa\\005e) Tj \
+              0 -20 Td (a\\006b\\007c\\010d) Tj 0 -20 Td (\\011 \\012 \\013) Tj ET",
+            "/L<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding<</Differences[1/fi/fl/ff/ffi\
+             /ffl/uni00A0/uni2003/tab/uniFB06/uniFE8E/uniFB50]>>>>",
+            "",
+            &[],
+        )
+    }
+
+    #[test]
+    fn ligatures_and_spaces_are_taken_apart_unless_kept() {
+        let d = ligatures_doc();
+        assert_eq!(
+            outline_of(&d, ""),
+            [
+                "ofice flow effort office waffle",
+                "a b c\u{fffd}d",
+                "st \u{671} \u{627}"
+            ]
+        );
+        assert_eq!(
+            outline_of(&d, "preserve-ligatures,preserve-whitespace,preserve-spans"),
+            [
+                "o\u{fb01}ce \u{fb02}ow e\u{fb00}ort o\u{fb03}ce wa\u{fb04}e",
+                "a\u{a0}b\u{2003}c\u{fffd}d",
+                "\u{fb06} |\u{fb50} \u{fe8e}"
+            ]
+        );
+        // The Arabic presentation forms read right to left.
+        let p = stext_of(&d, "");
+        let bidi: Vec<i32> = all_lines(&p.blocks)[2]
+            .chars
+            .iter()
+            .map(|c| c.bidi)
+            .collect();
+        assert_eq!(bidi, [0, 0, 0, 3, 3, 1]);
+    }
+
+    #[test]
+    fn a_line_ending_in_a_hyphen_joins_the_next_when_dehyphenating() {
+        let d = doc(
+            b"BT /F1 12 Tf 20 360 Td (A hyphen-) Tj 0 -14 Td (ated word and a soft\\255) Tj \
+              0 -14 Td (hyphen and last-) Tj ET",
+            "",
+            "",
+            &[],
+        );
+        let plain = stext_of(&d, "");
+        assert_eq!(
+            plain.text(),
+            "A hyphen-\nated word and a soft-\nhyphen and last-\n\n"
+        );
+        let joined = stext_of(&d, "dehyphenate");
+        assert_eq!(
+            joined.text(),
+            "A hyphenated word and a softhyphen and last\n"
+        );
+        let flags: Vec<i32> = all_lines(&joined.blocks).iter().map(|l| l.flags).collect();
+        assert_eq!(flags, [LINE_JOINED, LINE_JOINED, LINE_JOINED]);
+    }
+
+    #[test]
+    fn rotated_text_keeps_its_direction() {
+        let d = doc(
+            b"BT /F1 12 Tf 0 1 -1 0 100 50 Tm (Up the page) Tj ET \
+              BT /F1 12 Tf 0.7071 0.7071 -0.7071 0.7071 200 50 Tm (Diagonal) Tj ET \
+              BT /F1 12 Tf -1 0 0 -1 300 300 Tm (Upside down) Tj ET \
+              BT /F1 12 Tf 20 380 Td (Flat) Tj ET",
+            "",
+            "",
+            &[],
+        );
+        let p = stext_of(&d, "");
+        assert_eq!(
+            outline(&p.blocks),
+            ["Up the page", "Diagonal", "Upside down", "Flat"]
+        );
+        let dirs: Vec<(i32, i32)> = all_lines(&p.blocks)
+            .iter()
+            .map(|l| {
+                (
+                    (l.dir.x * 100.0).round() as i32,
+                    (l.dir.y * 100.0).round() as i32,
+                )
+            })
+            .collect();
+        assert_eq!(dirs, [(0, -100), (71, -71), (-100, 0), (100, 0)]);
+    }
+
+    const HEBREW_CMAP: &[u8] = b"/CIDInit/ProcSet findresource begin 12 dict begin begincmap \
+        /CMapName/H def 1 begincodespacerange <00><FF> endcodespacerange 2 beginbfrange \
+        <61><6A><05D0> <30><39><0030> endbfrange endcmap CMapName currentdict /CMap \
+        defineresource pop end end";
+
+    #[test]
+    fn right_to_left_runs_are_reversed_into_reading_order() {
+        let d = doc(
+            b"BT /H 12 Tf 20 360 Td (abc def) Tj 0 -20 Td (ab 12 cd) Tj 0 -20 Td [(ab) -2000 (cd)] Tj ET \
+              BT /F1 12 Tf 20 280 Td (Latin ) Tj /H 12 Tf (abc) Tj /F1 12 Tf ( again) Tj ET",
+            "/H<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>",
+            "",
+            &[&stream("", HEBREW_CMAP)],
+        );
+        assert_eq!(
+            outline_of(&d, ""),
+            [
+                "\u{5d5}\u{5d4}\u{5d3} \u{5d2}\u{5d1}\u{5d0}",
+                " \u{5d1}\u{5d0}12 \u{5d3}\u{5d2}",
+                "Latin  \u{5d2}\u{5d1}\u{5d0}again"
+            ]
+        );
+        assert_eq!(
+            outline_of(&d, "preserve-spans"),
+            [
+                "\u{5d5}\u{5d4}\u{5d3} \u{5d2}\u{5d1}\u{5d0}",
+                " \u{5d1}\u{5d0}|12 |\u{5d3}\u{5d2}",
+                "Latin |\u{5d2}\u{5d1}\u{5d0}| |again"
+            ]
+        );
+    }
+
+    #[test]
+    fn right_to_left_gaps_make_spaces_lines_or_nothing() {
+        // Gaps of each size between Hebrew runs, glyphs placed leftwards
+        // and rightwards, and digits within.
+        let d = doc(
+            b"BT /H 12 Tf 20 380 Td [(ab) -100 (cd) -250 (ef) -500 (gh) 100 (ij) 300 (ab) -3000 (cd)] TJ ET \
+              BT /H 12 Tf 200 360 Td (b) Tj -14 0 Td (a) Tj -10 0 Td (c) Tj -9 0 Td (d) Tj -20 0 Td (e) Tj \
+              3 0 Td (f) Tj ET \
+              BT /H 12 Tf 20 330 Td (ab) Tj /F1 12 Tf (12) Tj /H 12 Tf (cd) Tj ET \
+              BT /H 12 Tf 200 300 Td (a) Tj -7 0 Td (b) Tj -8 0 Td (c) Tj -3 0 Td (d) Tj ET \
+              BT /H 12 Tf 100 270 Td (a) Tj 2 0 Td (b) Tj 8 0 Td (c) Tj 30 0 Td (d) Tj ET",
+            "/H<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>",
+            "",
+            &[&stream("", HEBREW_CMAP)],
+        );
+        let want = [
+            "\u{5d1}\u{5d0}\u{5d9}\u{5d8}\u{5d7}\u{5d6} \u{5d5}\u{5d4} \u{5d3}\u{5d2}\u{5d1}\u{5d0}|\u{5d3}\u{5d2}",
+            "\u{5d1} \u{5d0} \u{5d2} \u{5d3}|\u{5d4}\u{5d5}",
+            "\u{5d1}\u{5d0}12\u{5d3}\u{5d2}",
+            "\u{5d0}\u{5d1} \u{5d2}\u{5d3}",
+            "\u{5d2}\u{5d1}\u{5d0}|\u{5d3}",
+        ];
+        let p = stext_of(&d, "");
+        assert_eq!(outline(&p.blocks), want);
+        let flags: Vec<i32> = all_lines(&p.blocks)[2]
+            .chars
+            .iter()
+            .map(|c| c.flags)
+            .collect();
+        assert_eq!(flags, [16, 20, 16, 20, 16, 20, 16]);
+        let inhibited: Vec<String> = want.iter().map(|s| s.replace(' ', "")).collect();
+        assert_eq!(outline_of(&d, "inhibit-spaces"), inhibited);
+    }
+
+    #[test]
+    fn vertical_text_makes_vertical_lines() {
+        let cmap = b"/CIDInit/ProcSet findresource begin 12 dict begin begincmap /CMapName/V def \
+            1 begincodespacerange <0000><FFFF> endcodespacerange 1 beginbfrange <0001><0005><4E00> \
+            endbfrange endcmap CMapName currentdict /CMap defineresource pop end end";
+        let d = doc(
+            b"BT /V 16 Tf 200 380 Td <00010002000300040005> Tj ET \
+              BT /V 16 Tf 150 380 Td <0001000200030004> Tj ET",
+            &format!(
+                "/V<</Type/Font/Subtype/Type0/BaseFont/Helvetica/Encoding/Identity-V/ToUnicode 5 0 R\
+                 /DescendantFonts[<</Type/Font/Subtype/CIDFontType2/BaseFont/Helvetica\
+                 /CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>/DW 1000{HELVETICA_FD}>>]>>"
+            ),
+            "",
+            &[&stream("", cmap)],
+        );
+        let p = stext_of(&d, "");
+        assert_eq!(
+            outline(&p.blocks),
+            [
+                "\u{4e00}|\u{4e01}|\u{4e02}|\u{4e03}|\u{4e04}",
+                "\u{4e00}|\u{4e01}|\u{4e02}|\u{4e03}"
+            ]
+        );
+        let l = all_lines(&p.blocks)[0];
+        assert_eq!((l.wmode, l.dir), (1, Point::new(0.0, 1.0)));
+        let q = l.chars[0].quad;
+        let near = |p: Point, x: f32, y: f32| (p.x - x).abs() < 1e-3 && (p.y - y).abs() < 1e-3;
+        assert!(
+            near(q.ul, 208.0, 50.08) && near(q.lr, 192.0, 34.08),
+            "{q:?}"
+        );
+    }
+
+    fn actualtext_doc() -> Document {
+        doc(
+            b"BT /F1 12 Tf 20 360 Td /Span<</ActualText(fi)>>BDC (X) Tj EMC ( plain) Tj ET \
+              BT /F1 12 Tf 20 340 Td /Span<</ActualText(longer text)>>BDC (ab) Tj EMC ET \
+              BT /F1 12 Tf 20 320 Td /Span<</ActualText(z)>>BDC (abc) Tj EMC ET \
+              BT /F1 12 Tf 20 300 Td /Span<</ActualText(abXYcd)>>BDC (ab12cd) Tj EMC ET \
+              BT /F1 12 Tf 20 280 Td /Span<</ActualText()>>BDC (gone) Tj EMC ET \
+              BT /F1 12 Tf 20 260 Td /Span<</ActualText(outer)>>BDC /Span<</ActualText(in)>>BDC (q) Tj EMC (r) Tj EMC ET \
+              BT /F1 12 Tf 20 240 Td /Span<</ActualText(abc)>>BDC (a) Tj (b) Tj (c) Tj EMC ET \
+              BT /F1 12 Tf 20 220 Td /Span<</ActualText(\\376\\377\\0\\351\\0t\\0\\351)>>BDC (ete) Tj EMC ET \
+              /Span<</ActualText(path)>>BDC 20 180 10 10 re f EMC \
+              BT /F1 12 Tf 20 160 Td /Span<</ActualText(lost)>>BDC 7 Tr (hidden) Tj EMC ET \
+              BT /F1 12 Tf 20 140 Td /Span<</ActualText(abcdef)>>BDC (ab) Tj (ef) Tj EMC ET \
+              /Span<</ActualText(nothing)>>BDC EMC \
+              BT /F1 12 Tf -100 120 Td /Span<</ActualText(clipped away)>>BDC (xy) Tj EMC ET",
+            "",
+            "",
+            &[],
+        )
+    }
+
+    #[test]
+    fn actualtext_replaces_what_the_glyphs_say() {
+        let d = actualtext_doc();
+        assert_eq!(
+            outline_of(&d, ""),
+            [
+                "fi plain",
+                "longer text",
+                "z",
+                "ab XY cd",
+                "inr",
+                "abc",
+                "\u{e9}t\u{e9}",
+                "hidden"
+            ]
+        );
+        assert_eq!(
+            outline_of(&d, "preserve-spans"),
+            [
+                "f|i| plain",
+                "lo|nger text",
+                "z",
+                "ab XY cd",
+                "i|n|r",
+                "abc",
+                "\u{e9}t\u{e9}",
+                "hidden"
+            ]
+        );
+        // The replacement characters of a run with matching ends.
+        let p = stext_of(&d, "");
+        let flags: Vec<i32> = all_lines(&p.blocks)[3]
+            .chars
+            .iter()
+            .map(|c| c.flags)
+            .collect();
+        assert_eq!(flags, [16, 16, 532, 16, 16, 532, 16, 16]);
+        assert_eq!(
+            outline_of(&d, "ignore-actualtext,clip=no"),
+            [
+                "X plain", "ab", "abc", "ab12cd", "gone", "qr", "abc", "ete", "hidden", "abef",
+                "xy"
+            ]
+        );
+    }
+
+    fn clip_doc() -> Document {
+        doc(
+            b"q 0 0 100 400 re W n BT /F1 12 Tf 20 360 Td (Cut by the clip path here) Tj ET Q \
+              BT /F1 12 Tf 20 340 Td 1 Tr (Stroked) Tj 3 Tr ( invisible) Tj ET \
+              BT /F1 12 Tf 20 320 Td 5 Tr (Fill stroke clip) Tj ET \
+              BT /F1 12 Tf 20 300 Td 7 Tr (Clip only) Tj ET 0 0 400 400 re f \
+              BT /F1 12 Tf 20 280 Td 2 Tr (Fill and stroke) Tj 4 Tr ( fill clip) Tj 6 Tr ( stroke clip) Tj ET \
+              BT /F1 12 Tf 380 260 Td (Off the edge) Tj ET \
+              BT /F1 12 Tf 20 450 Td (Above) Tj ET",
+            "",
+            "",
+            &[],
+        )
+    }
+
+    #[test]
+    fn clipping_drops_glyphs_outside_the_clip_and_the_page() {
+        let d = clip_doc();
+        assert_eq!(
+            outline_of(&d, ""),
+            [
+                "Cut by the clip ",
+                "Stroked invisible",
+                "Fill stroke clip|Fill stroke clip"
+            ]
+        );
+        assert_eq!(
+            outline_of(&d, "preserve-spans"),
+            [
+                "Cut by the clip ",
+                "Stroked| invisible",
+                "Fill stroke clip|Fill stroke clip"
+            ]
+        );
+        let all = stext_of(&d, "clip=no");
+        assert_eq!(
+            outline(&all.blocks),
+            [
+                "Cut by the clip path here",
+                "Stroked invisible",
+                "Fill stroke clip|Fill stroke clip",
+                "Clip only",
+                "Fill and stroke fill clip stroke clip| fill clip stroke clip",
+                "Off the edge|Off the edge",
+                "Above|Above"
+            ]
+        );
+        // Stroked, filled and clipped glyphs say so.
+        let lines = all_lines(&all.blocks);
+        let flags = |l: usize, c: usize| lines[l].chars[c].flags;
+        assert_eq!(flags(1, 0), char_flags::STROKED);
+        assert_eq!(flags(1, 7), 0);
+        assert_eq!(flags(2, 0), char_flags::STROKED);
+        assert_eq!(flags(3, 0), char_flags::CLIPPED | char_flags::FILLED);
+        assert_eq!(flags(4, 0), char_flags::CLIPPED | char_flags::FILLED);
+        // A clip rectangle of its own, without the page's.
+        let o = outline_of(&d, "clip=no,clip-rect=0:0:200:50");
+        assert_eq!(o, ["Cut by the clip path here"]);
+    }
+
+    #[test]
+    fn images_shadings_masks_groups_and_patterns() {
+        let img = stream(
+            "/Type/XObject/Subtype/Image/Width 2/Height 2/ColorSpace/DeviceGray/BitsPerComponent 8",
+            b"\x00\x80\xff\x40",
+        );
+        let mask = stream(
+            "/Type/XObject/Subtype/Image/Width 8/Height 2/ImageMask true/BitsPerComponent 1",
+            b"\xaa\x55",
+        );
+        let group = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 100 100]/Group<</S/Transparency>>/Resources<<>>",
+            b"0.5 g 0 0 50 50 re f",
+        );
+        let smask = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 400 400]/Group<</S/Transparency/CS/DeviceGray>>",
+            b"1 g 0 0 200 200 re f",
+        );
+        let tile = stream(
+            "/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 10 10]/XStep 10/YStep 10/Resources<<>>",
+            b"0 0 5 5 re f",
+        );
+        let d = doc(
+            b"q 50 0 0 50 20 300 cm /Im Do Q \
+              q 40 0 0 10 100 300 cm /Mk Do Q \
+              q 0 0 1 rg 40 0 0 10 160 300 cm BI /W 8 /H 2 /IM true /BPC 1 ID \xaa\x55 EI Q \
+              q 20 0 0 20 220 300 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x80 EI Q \
+              q 0 0 100 100 re W n /Sh sh Q \
+              q 1 0 0 1 200 100 cm /G1 Do Q \
+              q /SM gs 0 g 0 0 100 50 re f BT /F1 12 Tf 10 20 Td (In mask) Tj ET Q \
+              q /Pattern cs /P1 scn 250 20 100 50 re f Q \
+              q /Pattern cs /P1 scn 40 0 0 10 250 200 cm /Mk Do Q \
+              BT /F1 12 Tf 20 380 Td (Graphics page) Tj ET",
+            "",
+            "/XObject<</Im 5 0 R/Mk 6 0 R/G1 7 0 R>>/Shading<</Sh<</ShadingType 2\
+             /ColorSpace/DeviceRGB/Coords[0 0 100 0]/Function<</FunctionType 2/Domain[0 1]\
+             /C0[1 0 0]/C1[0 0 1]/N 1>>>>>>/ExtGState<</SM<</SMask<</S/Luminosity/G 8 0 R>>>>>>\
+             /Pattern<</P1 9 0 R>>",
+            &[&img, &mask, &group, &smask, &tile],
+        );
+        assert_eq!(outline_of(&d, ""), ["In mask", "Graphics page"]);
+        let p = stext_of(&d, "preserve-images");
+        assert_eq!(
+            outline(&p.blocks),
+            [
+                "[image]",
+                "[image]",
+                "[image]",
+                "[image]",
+                "[image]",
+                "In mask",
+                "Graphics page"
+            ]
+        );
+        // The first image's box, and the shading's, cut to its clip.
+        assert_eq!(p.blocks[0].bbox(), Rect::new(20.0, 50.0, 70.0, 100.0));
+        assert_eq!(p.blocks[4].bbox(), Rect::new(0.0, 300.0, 100.0, 400.0));
+    }
+
+    #[test]
+    fn type3_glyphs_are_text() {
+        let d = doc(
+            b"BT /T3 12 Tf 20 360 Td (abcab) Tj ET BT /F1 12 Tf 20 340 Td (Plain) Tj ET",
+            "/T3<</Type/Font/Subtype/Type3/FontBBox[0 0 1000 1000]/FontMatrix[0.001 0 0 0.001 0 0]\
+             /CharProcs<</a 5 0 R/g1 6 0 R/g2 7 0 R>>/Encoding<</Differences[97/a/g1/g2]>>\
+             /FirstChar 97/LastChar 99/Widths[600 600 600]/Resources<<>>>>",
+            "",
+            &[
+                &stream("", b"600 0 d0 0 0 500 700 re f"),
+                &stream("", b"600 0 0 0 500 700 d1 0 0 500 700 re f"),
+                &stream(
+                    "",
+                    b"600 0 0 0 500 700 d1 q 500 0 0 700 0 0 cm BI /W 1 /H 1 /IM true /BPC 1 ID \x80 EI Q",
+                ),
+            ],
+        );
+        assert_eq!(outline_of(&d, ""), ["abcab", "Plain"]);
+        assert_eq!(outline_of(&d, "preserve-spans"), ["a|bc|a|b", "Plain"]);
+    }
+
+    #[test]
+    fn spacing_decides_spaces_lines_and_blocks() {
+        let d = doc(
+            b"BT /F1 12 Tf 20 360 Td [(gap) -400 (no) -150 (space) -1500 (wide) 300 (back)] TJ ET \
+              BT /F1 12 Tf 20 340 Td (Bold) Tj ET BT /F1 12 Tf 20.3 340 Td (Bold) Tj ET \
+              BT /F1 12 Tf 20 320 Td (E=mc) Tj 6 Ts /F1 7 Tf (2) Tj 0 Ts /F1 12 Tf ( done) Tj ET \
+              BT /F1 12 Tf 20 290 Td (\\225 item one) Tj 0 -14 Td (\\225 item two) Tj 0 -14 Td (1. numbered) Tj ET \
+              BT /F1 12 Tf 30 230 Td (indent start) Tj -10 -14 Td (next line) Tj 0 -30 Td (far below) Tj ET \
+              BT /F1 12 Tf 20 150 Td (left) Tj 200 0 Td (right) Tj ET \
+              BT /F1 12 Tf 20 130 Td (a) Tj -2 0 Td (b) Tj ET",
+            "",
+            "",
+            &[],
+        );
+        let blocks = [
+            "gap nospace|wideback",
+            "Bold|Bold",
+            "E=mc",
+            "2 done",
+            "\u{2022} item one|\u{2022} item two|1. numbered",
+            "indent start|next line",
+            "far below",
+            "left|right",
+            "ab",
+        ];
+        assert_eq!(outline_of(&d, ""), blocks);
+        let mut inhibited = blocks;
+        inhibited[0] = "gapnospace|wideback";
+        assert_eq!(outline_of(&d, "inhibit-spaces"), inhibited);
+        // Added spaces are synthetic; a wide gap's is large.
+        let p = stext_of(&d, "");
+        let first = all_lines(&p.blocks)[0];
+        assert_eq!(
+            first.chars[3].flags,
+            char_flags::FILLED | char_flags::SYNTHETIC | char_flags::SYNTHETIC_LARGE
+        );
+        assert_eq!(
+            p.blocks.len(),
+            blocks.len(),
+            "one block per expected outline entry"
+        );
+    }
+
+    #[test]
+    fn accurate_boxes_come_from_the_glyphs() {
+        let d = doc(b"BT /F1 20 Tf 20 360 Td (ax) Tj ET", "", "", &[]);
+        let font_box = stext_of(&d, "");
+        let glyph_box = stext_of(&d, "accurate-bboxes");
+        let q = |p: &StextPage| all_lines(&p.blocks)[0].chars[0].quad;
+        // Without, the font's ascender and descender; with, the glyph's.
+        assert!(q(&glyph_box).ul.y > q(&font_box).ul.y);
+        assert!(q(&glyph_box).ll.y < q(&font_box).ll.y);
+    }
+
+    #[test]
+    fn paths_split_into_rectangles_lines_and_leftovers() {
+        let d = doc(
+            b"0 g 20 360 m 120 360 l 120 380 l 20 380 l h f \
+              20 340 m 120 340 l 120 350 l 20 350 l 20 340 l f \
+              20 330 m 120 330 l 20 330 l h f \
+              2 w 20 320 m 60 320 l 120 320 l S \
+              1 w 20 300 m 20 310 l 20 318 l S \
+              20 280 m 60 290 l 120 280 l S \
+              20 250 m 40 270 80 270 120 250 c f \
+              1 J 3 w 20 240 m 120 240 l 150 240 m S 0 J \
+              20 230 m 120 230 l 150 230 m S \
+              1 0 0 rg 200 360 1 1 re f 200 361 1 1 re f 200 362 1 1 re f \
+              0 1 0 rg 210 360 1 1 re f 211 360 1 1 re f 212 360 1 1 re f \
+              0 0 1 rg 220 360 1 1 re f 220 362.5 1 1 re f 221.5 362.5 1 1 re f \
+              0 0 1 rg 230 360 2 2 re f 232 360 2 2 re f 240 360 2 2 re f \
+              0 g 250 360 m 250 360 l f \
+              250 300 100 20 re 260 305 10 10 re f* \
+              250 270 100 20 re S \
+              q 0 0 300 400 re W n 250 240 100 20 re f Q \
+              250 200 m 300 200 l 300 220 l 250 220 l 250 200 l 260 210 l S \
+              250 150 m 350 150 l 350 180 l h 260 160 m 340 160 l S \
+              q 2 0 0 2 0 0 cm 10 20 20 10 re f Q \
+              0.5 g 20 100 100 20 re f 1 g 20 70 100 20 re f \
+              q /GS gs 0 g 150 100 50 20 re f Q \
+              q /GS2 gs 0 g 150 70 50 20 re f Q \
+              BT /F1 12 Tf 20 40 Td (Text near vectors) Tj ET \
+              20 20 m 120 20 l 120 30 l 20 30 l h S 20 10 m 25 10 l 25 15 l h f",
+            "",
+            "/ExtGState<</GS<</ca 0.5/CA 0.5>>/GS2<</ca 0.1>>>>",
+            &[],
+        );
+        let mut want: Vec<String> = [
+            2, 2, 3, 3, 1, 0, 7, 1, 3, 2, 2, 2, 2, 2, 2, 2, 6, 2, 3, 2, 1, 7, 1, 2, 2, 2, 2, 2,
+        ]
+        .iter()
+        .map(|f| format!("[vector {f}]"))
+        .collect();
+        want.extend([
+            "Text near vectors".into(),
+            "[vector 3]".into(),
+            "[vector 0]".into(),
+        ]);
+        assert_eq!(outline_of(&d, "vectors"), want);
+        assert_eq!(outline_of(&d, "vectors,lazy-vectors"), want);
+        assert_eq!(outline_of(&d, "vectors,clip=no"), want);
+        // Fuzzy merging takes two of the small squares into one block.
+        want.remove(15);
+        assert_eq!(outline_of(&d, "vectors,fuzzy-vectors"), want);
+        assert_eq!(outline_of(&d, "vectors,lazy-vectors,fuzzy-vectors"), want);
     }
 }

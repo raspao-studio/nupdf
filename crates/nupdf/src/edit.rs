@@ -477,4 +477,201 @@ mod tests {
             matches!(doc.object(1), Some(Object::Dict(d)) if matches!(d.get(b"Pages"), Some(Object::Dict(_))))
         );
     }
+
+    #[test]
+    fn metadata_in_a_direct_info_stays_in_the_trailer() {
+        let doc = open(
+            b"%PDF-1.4\n\
+            1 0 obj<</Type/Catalog/Pages 2 0 R/Metadata 3 0 R>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n\
+            3 0 obj<</Length 0>>stream\n\nendstream endobj\n\
+            trailer<</Root 1 0 R/Size 4/Info<</Title(Old)>>>>\n",
+        );
+        set_metadata(&doc, "Title", "New\0ignored");
+        assert!(matches!(doc.trailer().get(b"Info"), Some(Object::Dict(_))));
+        assert_eq!(doc.metadata("Title").as_deref(), Some("New"));
+        strip_metadata(&doc);
+        assert!(doc.trailer().get(b"Info").is_none());
+        let catalog = Object::Ref(crate::object::ObjRef::new(1, 0));
+        assert_eq!(doc.dict_get(&catalog, b"Metadata"), Object::Null);
+    }
+
+    #[test]
+    fn info_that_is_not_a_dictionary_is_replaced() {
+        let doc = open(
+            b"%PDF-1.4\n\
+            1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n\
+            trailer<</Root 1 0 R/Size 3/Info 7>>\n",
+        );
+        set_metadata(&doc, "Subject", "s");
+        assert!(matches!(doc.trailer().get(b"Info"), Some(Object::Ref(_))));
+        assert_eq!(doc.metadata("Subject").as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn a_direct_catalog_loses_its_metadata_in_the_trailer() {
+        let pdf = crate::testutil::pdf_of(&[
+            "null",
+            "<</Type/Pages/Kids[]/Count 0>>",
+            "<</Length 0>>stream\n\nendstream",
+        ]);
+        let doc = open(&crate::testutil::with_trailer(
+            &pdf,
+            "<</Root<</Type/Catalog/Pages 2 0 R/Metadata 3 0 R>>/Size 4>>",
+        ));
+        strip_metadata(&doc);
+        let Some(Object::Dict(root)) = doc.trailer().get(b"Root").cloned() else {
+            panic!("root is not direct");
+        };
+        assert!(root.get(b"Metadata").is_none());
+        assert!(root.get(b"Pages").is_some());
+    }
+
+    #[test]
+    fn an_xref_stream_trailer_is_touched_when_metadata_goes() {
+        let doc = open(include_bytes!("../../../corpus/smoke/meta-xref-stream.pdf"));
+        assert!(doc.trailer_owner().is_some());
+        strip_metadata(&doc);
+        assert!(doc.is_edited());
+        assert!(doc.trailer().get(b"Info").is_none());
+    }
+
+    #[test]
+    fn direct_pages_in_direct_kids_are_edited_in_their_parent() {
+        // The root /Pages node is an object; its /Kids is direct, and so
+        // are the pages and the node in it.
+        let doc = open(
+            b"%PDF-1.4\n\
+            1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[<</Type/Page>><</Type/Pages/Kids[<</Type/Page>>]/Count 1>>]/Count 2>>endobj\n\
+            trailer<</Root 1 0 R/Size 3>>\n",
+        );
+        edit_page(&doc, 1, &mut |d| d.put(b"Rotate", Object::Int(90)))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let rotate = |i| doc.dict_get(&doc.page(i).unwrap_or(Object::Null), b"Rotate");
+        assert_eq!((rotate(0), rotate(1)), (Object::Null, Object::Int(90)));
+        assert!(edit_page(&doc, 5, &mut |_| {}).is_err());
+    }
+
+    #[test]
+    fn a_direct_root_in_the_trailer_takes_its_changed_pages() {
+        let pdf = crate::testutil::pdf_of(&["null"]);
+        let doc = open(&crate::testutil::with_trailer(
+            &pdf,
+            "<</Root<</Type/Catalog/Pages<</Type/Pages/Kids[<</Type/Page>>]/Count 1>>>>/Size 2>>",
+        ));
+        assert_eq!(doc.page_count(), Ok(1));
+        edit_page(&doc, 0, &mut |d| d.put(b"Rotate", Object::Int(180)))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            doc.dict_get(&doc.page(0).unwrap_or(Object::Null), b"Rotate"),
+            Object::Int(180)
+        );
+        assert!(matches!(doc.trailer().get(b"Root"), Some(Object::Dict(_))));
+    }
+
+    #[test]
+    fn locations_follow_references_and_edit_where_values_are() {
+        let doc = open(
+            b"%PDF-1.4\n\
+            1 0 obj<</Type/Catalog/Pages 2 0 R/Extra<</A[1 2 3]/B 4 0 R>>>>endobj\n\
+            2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n\
+            4 0 obj(text)endobj\n\
+            trailer<</Root 1 0 R/Size 5>>\n",
+        );
+        let root = Loc::trailer()
+            .child(&doc, Step::Key(b"Root"))
+            .unwrap_or_else(|| panic!("no root"));
+        let extra = root
+            .child(&doc, Step::Key(b"Extra"))
+            .unwrap_or_else(|| panic!("no extra"));
+        let item = extra
+            .child(&doc, Step::Key(b"A"))
+            .and_then(|a| a.child(&doc, Step::Index(1)))
+            .unwrap_or_else(|| panic!("no item"));
+        assert_eq!(item.value(&doc), Some(Object::Int(2)));
+        assert!(extra.child(&doc, Step::Key(b"Missing")).is_none());
+        assert!(extra.child(&doc, Step::Index(0)).is_none());
+        // A value behind a reference resolves to its object.
+        let b = extra
+            .child(&doc, Step::Key(b"B"))
+            .unwrap_or_else(|| panic!("no b"));
+        assert_eq!(
+            b.resolved(&doc),
+            Some(Object::String(Arc::from(&b"text"[..])))
+        );
+        // Edited in place inside the catalog...
+        item.edit(&doc, |v| {
+            *v = Object::Int(20);
+            Ok(())
+        })
+        .unwrap_or_else(|e: String| panic!("{e}"));
+        assert_eq!(item.value(&doc), Some(Object::Int(20)));
+        // ...or in the referenced object.
+        b.edit(&doc, |v| {
+            *v = Object::Int(5);
+            Ok(())
+        })
+        .unwrap_or_else(|e: String| panic!("{e}"));
+        assert_eq!(doc.object(4), Some(Object::Int(5)));
+        // The trailer itself.
+        Loc::trailer()
+            .edit(&doc, |t| {
+                dict_mut(t)?.put(b"Extra", Object::Bool(true));
+                Ok(())
+            })
+            .unwrap_or_else(|e: String| panic!("{e}"));
+        assert_eq!(doc.trailer().get(b"Extra"), Some(&Object::Bool(true)));
+        let mut not = Object::Int(1);
+        assert_eq!(
+            dict_mut(&mut not).err().as_deref(),
+            Some("not a dict (integer)")
+        );
+        assert_eq!(
+            array_mut(&mut not).err().as_deref(),
+            Some("not an array (integer)")
+        );
+        let mut arr = Object::Array(Arc::new(vec![]));
+        assert!(array_mut(&mut arr).is_ok());
+    }
+
+    #[test]
+    fn a_reference_chain_too_long_is_not_followed() {
+        let mut objs = vec![
+            "<</Type/Catalog/Pages 2 0 R/Long 3 0 R>>".to_string(),
+            "<</Type/Pages/Kids[]/Count 0>>".to_string(),
+        ];
+        for n in 3..16 {
+            objs.push(format!("{} 0 R", n + 1));
+        }
+        objs.push("<</X 1>>".into());
+        let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+        let doc = crate::testutil::doc_of(&refs);
+        let long = Loc::trailer()
+            .child(&doc, Step::Key(b"Root"))
+            .and_then(|r| r.child(&doc, Step::Key(b"Long")))
+            .unwrap_or_else(|| panic!("no long"));
+        // Past MuPDF's chain limit the value is taken as it is stored.
+        assert!(matches!(long.resolved(&doc), Some(Object::Ref(_))));
+        assert!(long.child(&doc, Step::Key(b"X")).is_none());
+    }
+
+    #[test]
+    fn kinds_are_named_as_mupdf_names_them() {
+        let cases = [
+            (Object::Null, "null"),
+            (Object::Bool(true), "boolean"),
+            (Object::Int(1), "integer"),
+            (Object::Real(1.5), "real"),
+            (Object::String(Arc::from(&b""[..])), "string"),
+            (Object::name(b"N"), "name"),
+            (Object::Array(Arc::new(vec![])), "array"),
+            (Object::Dict(Arc::new(Dict::new())), "dictionary"),
+            (Object::Ref(crate::object::ObjRef::new(1, 0)), "reference"),
+        ];
+        for (obj, name) in cases {
+            assert_eq!(kind(&obj), name);
+        }
+    }
 }
