@@ -49,6 +49,7 @@ fn one(data: &[u8]) {
         if let Ok(p) = result {
             let _ = p.text();
             let _ = nupdf::extract::page_markdown(&p);
+            let _ = nupdf::extract::layout(&p);
             for block in &p.blocks {
                 if let nupdf::stext::Block::Text(t) = block {
                     let _ = nupdf::extract::block_text(t);

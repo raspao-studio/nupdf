@@ -22,6 +22,9 @@ pub enum Format {
     Jsonl,
     Text,
     Markdown,
+    /// Each page's text as it stands on the page, rows across and down
+    /// (DECISIONS D51).
+    Layout,
 }
 
 /// What `extract` was asked for.
@@ -145,7 +148,8 @@ impl Serialize for Piece {
 
 /// A page made ready on the thread that extracted it, so that the page
 /// loop only fits blocks into the budget: each block's length and output,
-/// and for Markdown the page's Markdown with every block.
+/// and for Markdown the page's Markdown with every block (for layout, the
+/// page laid out).
 struct Prepared {
     page: Result<StextPage, String>,
     blocks: Vec<(usize, Piece)>,
@@ -159,7 +163,7 @@ fn prepare(n: usize, page: Result<StextPage, String>, f: &Fields, args: &Args) -
         for (k, b) in p.blocks.iter().enumerate() {
             let piece = match args.format {
                 Format::Text => Piece::Text(blocks_text(&[b])),
-                Format::Markdown => Piece::None,
+                Format::Markdown | Format::Layout => Piece::None,
                 Format::Json | Format::Jsonl if f.depth == 0 => {
                     if f.has("text") {
                         Piece::Text(blocks_text(&[b]))
@@ -181,6 +185,8 @@ fn prepare(n: usize, page: Result<StextPage, String>, f: &Fields, args: &Args) -
         if args.format == Format::Markdown {
             let all: Vec<&Block> = p.blocks.iter().collect();
             markdown = ex::markdown(&all, ex::body_size(&all));
+        } else if args.format == Format::Layout {
+            markdown = ex::layout(p);
         }
     }
     Prepared {
@@ -511,8 +517,13 @@ fn walk(
         ..
     } = *ready;
     let page_count = ready.page_count.clone();
-    // Text and Markdown go block by block, as JSON with blocks does.
-    let by_block = fields.depth >= 1 || matches!(args.format, Format::Text | Format::Markdown);
+    // Text and Markdown go block by block, as JSON with blocks does; a
+    // laid-out page is one piece, its rows crossing blocks.
+    let by_block = match args.format {
+        Format::Layout => false,
+        Format::Text | Format::Markdown => true,
+        Format::Json | Format::Jsonl => fields.depth >= 1,
+    };
     let (mut chars, mut items) = (0usize, 0usize);
     let mut truncated = false;
     let mut next = None;
@@ -629,6 +640,10 @@ fn walk(
                     text.push_str("\u{c}\n");
                 }
             }
+            Format::Layout => {
+                text.push_str(&markdown);
+                text.push_str("\u{c}\n");
+            }
             Format::Markdown => {
                 text.push_str(&format!("<!-- {id} -->\n\n"));
                 let md = if taken.len() == all.len() {
@@ -687,7 +702,7 @@ fn walk(
             body.insert("page_errors".into(), errors.into());
             Ok(Extracted::Lines(pages, Value::Object(body)))
         }
-        Format::Text | Format::Markdown => {
+        Format::Text | Format::Markdown | Format::Layout => {
             body.insert("truncated".into(), truncated.into());
             body.insert("next_cursor".into(), next.map_or(Value::Null, Value::from));
             body.insert("page_errors".into(), errors.into());

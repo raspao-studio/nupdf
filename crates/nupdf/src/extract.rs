@@ -368,6 +368,122 @@ pub fn markdown(blocks: &[&Block], body: f32) -> String {
     parts.join("\n\n")
 }
 
+/// The widest a layout row is laid out, in columns: text placed further
+/// right starts at this column instead.
+pub const MAX_LAYOUT_COLUMNS: usize = 400;
+
+/// A page's text laid out as it stands on the page, nupdf's own format
+/// (DECISIONS D51): horizontal lines that share a baseline go on one row,
+/// left to right, each at a column that follows its distance from the
+/// page's leftmost text; rows go top to bottom, with an empty line where
+/// the page leaves a wide gap. A label and its value, or a table's cells,
+/// end up on one row whatever order the content stream drew them in.
+/// Lines that are not horizontal follow, a line each.
+pub fn layout(page: &StextPage) -> String {
+    let blocks: Vec<&Block> = page.blocks.iter().collect();
+    let mut flat: Vec<&StextLine> = Vec::new();
+    let mut other: Vec<&StextLine> = Vec::new();
+    for t in text_blocks(&blocks) {
+        for l in &t.lines {
+            if l.chars.is_empty() {
+                continue;
+            }
+            if l.wmode == 0 && l.dir.x > 0.0 && l.dir.y.abs() < 0.05 * l.dir.x {
+                flat.push(l);
+            } else {
+                other.push(l);
+            }
+        }
+    }
+    let mut out = String::new();
+    if !flat.is_empty() {
+        lay_rows(&flat, &mut out);
+    }
+    for l in other {
+        let text = chars_text(&l.chars);
+        let text = text.trim_end();
+        if !text.is_empty() {
+            out.push_str(text);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// A line's baseline, and its height.
+fn baseline(l: &StextLine) -> (f32, f32) {
+    let y = l.chars.first().map_or(l.bbox.y1, |c| c.origin.y);
+    (y, (l.bbox.y1 - l.bbox.y0).max(1.0))
+}
+
+/// The median of `v`, which is not empty.
+fn median(v: &mut [f32]) -> f32 {
+    v.sort_by(f32::total_cmp);
+    v[v.len() / 2]
+}
+
+/// Lays horizontal lines out in rows, as [`layout`] describes.
+fn lay_rows(lines: &[&StextLine], out: &mut String) {
+    // A column is as wide as the page's median character.
+    let mut widths: Vec<f32> = lines
+        .iter()
+        .flat_map(|l| &l.chars)
+        .filter(|c| c.c != ' ' as i32)
+        .map(|c| c.quad.ur.x - c.quad.ul.x)
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .collect();
+    let column = if widths.is_empty() {
+        5.0
+    } else {
+        median(&mut widths).max(1.0)
+    };
+    let left = lines
+        .iter()
+        .map(|l| l.bbox.x0)
+        .filter(|x| x.is_finite())
+        .fold(f32::INFINITY, f32::min);
+    let mut heights: Vec<f32> = lines.iter().map(|l| baseline(l).1).collect();
+    let line_height = median(&mut heights);
+    let mut sorted: Vec<&StextLine> = lines.to_vec();
+    sorted.sort_by(|a, b| baseline(a).0.total_cmp(&baseline(b).0));
+    // Rows: a line joins the row whose baseline is within half a line.
+    let mut rows: Vec<(f32, f32, Vec<&StextLine>)> = Vec::new();
+    for l in sorted {
+        let (y, h) = baseline(l);
+        match rows.last_mut() {
+            Some((ry, rh, members)) if (y - *ry).abs() <= 0.5 * h.min(*rh) => members.push(l),
+            _ => rows.push((y, h, vec![l])),
+        }
+    }
+    let mut previous: Option<f32> = None;
+    for (y, _, mut members) in rows {
+        if previous.is_some_and(|p| y - p > 2.0 * line_height) {
+            out.push('\n');
+        }
+        previous = Some(y);
+        members.sort_by(|a, b| a.bbox.x0.total_cmp(&b.bbox.x0));
+        let mut row = String::new();
+        let mut used = 0usize;
+        for l in members {
+            let at = ((l.bbox.x0 - left) / column).round();
+            let at = if at.is_finite() && at > 0.0 {
+                (at as usize).min(MAX_LAYOUT_COLUMNS)
+            } else {
+                0
+            };
+            // Text from another line is kept a space apart at least.
+            let at = if used > 0 { at.max(used + 1) } else { at };
+            row.extend(std::iter::repeat_n(' ', at - used));
+            let text = chars_text(&l.chars);
+            let text = text.trim_end();
+            used = at + text.chars().count();
+            row.push_str(text);
+        }
+        out.push_str(row.trim_end());
+        out.push('\n');
+    }
+}
+
 /// A page's Markdown.
 pub fn page_markdown(page: &StextPage) -> String {
     let blocks: Vec<&Block> = page.blocks.iter().collect();
@@ -535,5 +651,65 @@ mod tests {
         assert_eq!(escape("# not a heading", true), "\\# not a heading");
         assert_eq!(escape("1. not a list", true), "1\\. not a list");
         assert_eq!(escape("1. fine", false), "1. fine");
+    }
+
+    #[test]
+    fn a_label_and_its_value_share_a_row_in_layout() {
+        // The value is drawn first and far to the right, as in a form.
+        let p = page(
+            "BT /F1 12 Tf 300 300 Td (393.25) Tj ET \
+             BT /F1 12 Tf 20 300 Td (Total) Tj ET",
+        );
+        let text = layout(&p);
+        let row = text.lines().find(|l| l.contains("Total"));
+        let row = row.unwrap_or_else(|| panic!("{text:?}"));
+        assert!(row.starts_with("Total "), "{row:?}");
+        assert!(row.trim_end().ends_with("393.25"), "{row:?}");
+    }
+
+    #[test]
+    fn layout_rows_go_down_the_page_and_columns_line_up() {
+        let p = page(
+            "BT /F1 12 Tf 20 200 Td (Date) Tj ET \
+             BT /F1 12 Tf 200 200 Td (2026-02-11) Tj ET \
+             BT /F1 12 Tf 20 214 Td (Number) Tj ET \
+             BT /F1 12 Tf 200 214 Td (BW-7781) Tj ET",
+        );
+        let text = layout(&p);
+        let rows: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(rows.len(), 2, "{text:?}");
+        assert!(rows[0].starts_with("Number"), "{text:?}");
+        assert!(rows[1].starts_with("Date"), "{text:?}");
+        assert_eq!(
+            rows[0].find("BW-7781"),
+            rows[1].find("2026-02-11"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_wide_gap_between_rows_is_one_empty_line() {
+        let p = page("BT /F1 12 Tf 20 360 Td (one) Tj 0 -14 Td (two) Tj 0 -100 Td (three) Tj ET");
+        assert_eq!(layout(&p), "one\ntwo\n\nthree\n");
+    }
+
+    #[test]
+    fn layout_keeps_the_left_margin_out_and_bounds_far_columns() {
+        let p = page(
+            "BT /F1 12 Tf 100 300 Td (left) Tj ET \
+             BT /F1 12 Tf 1 0 0 1 900000 300 Tm (x) Tj ET",
+        );
+        let text = layout(&p);
+        assert!(text.starts_with("left"), "{text:?}");
+        assert!(
+            text.lines()
+                .all(|l| l.chars().count() <= MAX_LAYOUT_COLUMNS + 64),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_without_text_has_no_layout() {
+        assert_eq!(layout(&page("0 0 10 10 re f")), "");
     }
 }
