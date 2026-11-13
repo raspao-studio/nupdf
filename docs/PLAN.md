@@ -41,7 +41,7 @@ These are the claims nupdf must prove with numbers before it goes public. Each m
 3. **Parallel by construction.** A parsed document is `Send + Sync`. Pages are processed concurrently without per-thread contexts or locks around the document.
 4. **Agents are the primary user.** Versioned JSON everywhere, stable addresses for content, diagnostics as data, mutations that verify themselves. Spec: [AGENT-INTERFACE](AGENT-INTERFACE.md).
 5. **Ratchet, never regress.** Parity and performance baselines are committed. CI fails when parity drops; benches flag slowdowns.
-6. **Credit the source.** Modules written by following MuPDF name the files they follow and carry Artifex's copyright line. See [NOTICE](../NOTICE.md).
+6. **Credit the source.** Modules written by following MuPDF name the files they follow and carry Artifex's copyright line. See [NOTICE](https://github.com/raspao-studio/nupdf/blob/main/NOTICE.md).
 
 ## Non-goals for 1.0
 
