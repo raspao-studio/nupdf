@@ -16,12 +16,20 @@ use crate::stream::{Next, Source, Stream};
 
 /// `fz_open_dctd` with the PDF's /ColorTransform (-1 when absent).
 pub fn open(chain: Stream<'_>, color_transform: i32) -> Stream<'_> {
+    open_scaled(chain, color_transform, 0)
+}
+
+/// `fz_open_dctd` with an `l2factor`: the image decoded at `1 / 2^l2factor`
+/// of its size (rounded up) in the IDCT, as MuPDF decodes JPEG images it
+/// shows small. Factors above 3 are 3, an eighth being libjpeg's least.
+pub fn open_scaled(chain: Stream<'_>, color_transform: i32, l2factor: u32) -> Stream<'_> {
     let diag = chain.diag();
     Stream::new(
         Dct {
             chain: Some(chain),
             decoder: None,
             color_transform,
+            l2factor: l2factor.min(3),
             scanline: Vec::new(),
             rp: 0,
         },
@@ -33,6 +41,7 @@ struct Dct<'a> {
     chain: Option<Stream<'a>>,
     decoder: Option<Decoder<'a>>,
     color_transform: i32,
+    l2factor: u32,
     /// A scanline that did not fit in the last chunk, and how much of it
     /// has gone out.
     scanline: Vec<u8>,
@@ -76,6 +85,7 @@ impl<'a> Dct<'a> {
                 _ => {}
             }
         }
+        d.set_scale(8 >> self.l2factor);
         d.start()
     }
 }

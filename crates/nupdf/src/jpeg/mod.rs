@@ -8,8 +8,9 @@
 
 //! A JPEG decoder that reproduces libjpeg 10, the decoder MuPDF bundles,
 //! for the way MuPDF drives it: default parameters (integer IDCT, smoothing
-//! of incomplete progressive images, full-size output), one scanline at a
-//! time, from a source that never suspends.
+//! of incomplete progressive images), output at full size or scaled down
+//! by a power of two in the IDCT, one scanline at a time, from a source
+//! that never suspends.
 //!
 //! libjpeg 7 and later upsample subsampled components inside the IDCT
 //! (a 16x16 transform gives a 2x2-subsampled chroma block its full size),
@@ -359,6 +360,10 @@ pub struct Decoder<'s> {
     consuming_data: bool,
     jpeg_cs: ColorSpace,
     out_cs: ColorSpace,
+    /// `scale_num` over a `scale_denom` of 8.
+    scale_num: usize,
+    /// `min_DCT_h_scaled_size` and `min_DCT_v_scaled_size`, which are equal.
+    min_dct: usize,
     // Output.
     output_width: usize,
     output_height: usize,
@@ -416,6 +421,8 @@ impl<'s> Decoder<'s> {
             consuming_data: false,
             jpeg_cs: ColorSpace::Unknown,
             out_cs: ColorSpace::Unknown,
+            scale_num: 8,
+            min_dct: 8,
             output_width: 0,
             output_height: 0,
             out_components: 0,
@@ -474,6 +481,12 @@ impl<'s> Decoder<'s> {
     /// Overrides the color space the data is in (before `start`).
     pub fn set_jpeg_color_space(&mut self, cs: ColorSpace) {
         self.jpeg_cs = cs;
+    }
+
+    /// `scale_num` with a `scale_denom` of 8 (from 1 to 8): the image comes
+    /// out that many eighths of its size, rounded up.
+    pub fn set_scale(&mut self, num: usize) {
+        self.scale_num = num.clamp(1, 8);
     }
 
     pub fn output_width(&self) -> usize {
@@ -729,17 +742,35 @@ impl<'s> Decoder<'s> {
 
     // Master control (jdmaster.c, jdapistd.c).
 
-    /// `jpeg_calc_output_dimensions`, at libjpeg's default scale.
+    /// `jpeg_calc_output_dimensions` (`jpeg_core_output_dimensions` and
+    /// the IDCT scaling of each component), for 8x8 blocks and a
+    /// `scale_denom` of 8.
     fn calc_output_dimensions(&mut self) {
         let info = &mut self.info;
-        self.output_width = info.image_width;
-        self.output_height = info.image_height;
+        // The smallest k with scale_num * 8 <= 8 * k.
+        let k = self.scale_num;
+        self.min_dct = k;
+        self.output_width = div_round_up(info.image_width * k, 8);
+        self.output_height = div_round_up(info.image_height * k, 8);
         let (max_h, max_v) = (info.max_h, info.max_v);
+        // Subsampled components are scaled up in the IDCT where whole 2:1
+        // ratios allow it (fancy upsampling being on), up to 2:1 between
+        // a block's sides.
+        let ssize = |max: usize, samp: usize| {
+            let mut ssize = 1;
+            while k * ssize <= 8 && max.is_multiple_of(samp * ssize * 2) {
+                ssize *= 2;
+            }
+            ssize
+        };
         for c in &mut info.comps {
-            // Scale subsampled components up in the IDCT where an exact 2:1
-            // ratio allows it.
-            c.dct_h = if max_h % (c.h * 2) == 0 { 16 } else { 8 };
-            c.dct_v = if max_v % (c.v * 2) == 0 { 16 } else { 8 };
+            c.dct_h = k * ssize(max_h, c.h);
+            c.dct_v = k * ssize(max_v, c.v);
+            if c.dct_h > c.dct_v * 2 {
+                c.dct_h = c.dct_v * 2;
+            } else if c.dct_v > c.dct_h * 2 {
+                c.dct_v = c.dct_h * 2;
+            }
         }
         self.out_components = match self.out_cs {
             ColorSpace::Grayscale => 1,
@@ -811,7 +842,7 @@ impl<'s> Decoder<'s> {
             self.planes.push(vec![0; stride * rows]);
             self.plane_stride.push(stride);
         }
-        self.rowgroups_avail = 8;
+        self.rowgroups_avail = self.min_dct;
 
         self.start_input_pass()
     }
@@ -1160,8 +1191,8 @@ impl<'s> Decoder<'s> {
         let (max_h, max_v) = (self.info.max_h, self.info.max_v);
         self.color_stride = round_up(self.output_width, max_h);
         for c in &self.info.comps {
-            let h_in = c.h * c.dct_h / 8;
-            let v_in = c.v * c.dct_v / 8;
+            let h_in = c.h * c.dct_h / self.min_dct;
+            let v_in = c.v * c.dct_v / self.min_dct;
             self.rowgroup_height.push(v_in);
             self.fullsize_row.push(0);
             let up = if !c.needed || h_in == max_h && v_in == max_v {
@@ -2367,6 +2398,31 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn damaged_variants_decode_scaled_down_to_size() {
+        // Every variant decoded at a half, a quarter and an eighth: as
+        // many samples as the scaled size has, or what a full decode gives
+        // when that is nothing (the error is the same).
+        for (name, data, ct) in variants() {
+            let (full, _, _) = mupdf_decode(&data, ct);
+            for l2 in 1..=3u32 {
+                let diag = Diagnostics::new();
+                let mut s = crate::dct::open_scaled(Stream::memory(&data, &diag), ct, l2);
+                let out = s.read_bytewise(1 << 24).unwrap_or_default();
+                if full == 0 {
+                    assert!(out.is_empty(), "{name} at 1/{}", 1 << l2);
+                } else {
+                    assert!(
+                        !out.is_empty() && out.len() <= full,
+                        "{name} at 1/{}: {} of {full}",
+                        1 << l2,
+                        out.len()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
