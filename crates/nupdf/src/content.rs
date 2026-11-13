@@ -388,6 +388,9 @@ pub struct Store {
     /// being drawn, by font.
     pub t3_loading: Vec<Object>,
     pub t3_running: Vec<usize>,
+    /// Whether a page's resources, by object number, use blending
+    /// (`pdf_resources_use_blending` from the page).
+    pub blending: HashMap<i32, bool>,
 }
 
 impl Store {
@@ -491,10 +494,72 @@ pub fn process_raw_contents(
 fn process_raw(doc: &Document, contents: &Object, proc: &mut dyn Processor) -> Result<(), String> {
     let data = contents_data(doc, contents)?;
     let diag = doc.diagnostics();
+    if SKIP_UNMARKED.with(Cell::get) && !may_mark(&data, diag) {
+        return Ok(());
+    }
     let mut csi = Csi::new(doc, proc);
     let mut lx = Lexer::small(&data, 0, diag);
     csi.process_stream(&mut lx)?;
     csi.process_end()
+}
+
+thread_local! {
+    /// Set by [`skipping_unmarked`].
+    static SKIP_UNMARKED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `f`, with contents that cannot show text, an image or a shading not
+/// run at all: for whoever only asks what a page shows of those.
+pub fn skipping_unmarked<R>(f: impl FnOnce() -> R) -> R {
+    let before = SKIP_UNMARKED.with(|s| s.replace(true));
+    let out = f();
+    SKIP_UNMARKED.with(|s| s.set(before));
+    out
+}
+
+/// Whether `data` uses an operator that can show text, an image or a
+/// shading, or run anything else: text, XObjects, inline images, shadings,
+/// colors that can be patterns, graphics states (soft masks run forms),
+/// marked content (its /ActualText is text), and fonts, whose loading can
+/// repair the document. Lexed as the interpreter lexes, every keyword is
+/// seen, the ones inside arrays and dictionaries too.
+fn may_mark(data: &[u8], diag: &Diagnostics) -> bool {
+    let mut lx = Lexer::small(data, 0, diag);
+    let mut buf = Vec::new();
+    // Each token reads at least a byte.
+    for _ in 0..=data.len() {
+        match lx.next_raw(&mut buf) {
+            RawToken::Eof | RawToken::EndStream => return false,
+            RawToken::Keyword => {
+                if matches!(
+                    cstr(&buf),
+                    b"Tj"
+                        | b"TJ"
+                        | b"'"
+                        | b"\""
+                        | b"Tf"
+                        | b"Do"
+                        | b"BI"
+                        | b"sh"
+                        | b"sc"
+                        | b"SC"
+                        | b"scn"
+                        | b"SCN"
+                        | b"gs"
+                        | b"BDC"
+                        | b"BMC"
+                        | b"DP"
+                        | b"MP"
+                        | b"d0"
+                        | b"d1"
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 /// `pdf_open_contents_stream`, read whole.
