@@ -5,9 +5,11 @@
 // Vollbeding. This software is based in part on the work of the
 // Independent JPEG Group.
 
-//! The integer inverse DCTs libjpeg uses for 8-bit data: `jpeg_idct_islow`
-//! and the 16-point variants (`16x16`, `16x8`, `8x16`) that upsample chroma
-//! inside the transform. Arithmetic is 64-bit (`INT32` is `long` on the
+//! The integer inverse DCTs libjpeg uses for 8-bit data: `jpeg_idct_islow`,
+//! the 16-point variants (`16x16`, `16x8`, `8x16`) that upsample chroma
+//! inside the transform, and the reduced ones (`4x4`, `2x2`, `1x1` and
+//! their 2:1 shapes) that decode an image at a half, a quarter or an
+//! eighth of its size, as MuPDF asks for images it shows small. Arithmetic is 64-bit (`INT32` is `long` on the
 //! platforms MuPDF builds for), and the workspace is `int`, so values are
 //! truncated to 32 bits between the passes exactly as in C.
 
@@ -55,24 +57,64 @@ const F_1_971951411: i64 = 16154;
 const F_1_065388962: i64 = 8728;
 const F_3_141271809: i64 = 25733;
 
-/// Which transform a component uses, from its scaled block size.
+/// Which transform a component uses, from its scaled block size (named
+/// width by height, as libjpeg names them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Method {
     Islow,
     I16x16,
     I16x8,
     I8x16,
+    I8x4,
+    I4x8,
+    I4x4,
+    I4x2,
+    I2x4,
+    I2x2,
+    I2x1,
+    I1x2,
+    I1x1,
 }
 
 impl Method {
-    /// `jddctmgr.c` `start_pass`, for the sizes 8x8 blocks can scale to.
+    /// `jddctmgr.c` `start_pass`, for the sizes 8x8 blocks can scale to
+    /// at power-of-two scales.
     pub fn for_size(h: usize, v: usize) -> Option<Method> {
         match (h, v) {
             (8, 8) => Some(Method::Islow),
             (16, 16) => Some(Method::I16x16),
             (16, 8) => Some(Method::I16x8),
             (8, 16) => Some(Method::I8x16),
+            (8, 4) => Some(Method::I8x4),
+            (4, 8) => Some(Method::I4x8),
+            (4, 4) => Some(Method::I4x4),
+            (4, 2) => Some(Method::I4x2),
+            (2, 4) => Some(Method::I2x4),
+            (2, 2) => Some(Method::I2x2),
+            (2, 1) => Some(Method::I2x1),
+            (1, 2) => Some(Method::I1x2),
+            (1, 1) => Some(Method::I1x1),
             _ => None,
+        }
+    }
+
+    /// The block's width and height in samples.
+    #[cfg(test)]
+    pub fn size(self) -> (usize, usize) {
+        match self {
+            Method::Islow => (8, 8),
+            Method::I16x16 => (16, 16),
+            Method::I16x8 => (16, 8),
+            Method::I8x16 => (8, 16),
+            Method::I8x4 => (8, 4),
+            Method::I4x8 => (4, 8),
+            Method::I4x4 => (4, 4),
+            Method::I4x2 => (4, 2),
+            Method::I2x4 => (2, 4),
+            Method::I2x2 => (2, 2),
+            Method::I2x1 => (2, 1),
+            Method::I1x2 => (1, 2),
+            Method::I1x1 => (1, 1),
         }
     }
 }
@@ -219,9 +261,10 @@ fn kernel16(tmp0: i64, x: [i64; 8]) -> [i64; 16] {
     ]
 }
 
-/// Pass 1 of the 8-point transforms: columns into `ws` (8 rows of 8).
-fn columns8(coef: &Block, table: &[i32; 64], ws: &mut [i32]) {
-    for c in 0..8 {
+/// Pass 1 of the 8-point transforms: the first `cols` columns into `ws`
+/// (8 rows of `cols`).
+fn columns8(coef: &Block, table: &[i32; 64], ws: &mut [i32], cols: usize) {
+    for c in 0..cols {
         let q = |r: usize| dequantize(coef, table, r * 8 + c);
         if (1..8).all(|r| coef[r * 8 + c] == 0) {
             let mut dc = q(0);
@@ -231,7 +274,7 @@ fn columns8(coef: &Block, table: &[i32; 64], ws: &mut [i32]) {
             // `int` shift; the full path truncates the same way.
             let v = (dc as i32).wrapping_shl(PASS1_BITS);
             for r in 0..8 {
-                ws[r * 8 + c] = v;
+                ws[r * cols + c] = v;
             }
             continue;
         }
@@ -243,7 +286,7 @@ fn columns8(coef: &Block, table: &[i32; 64], ws: &mut [i32]) {
         let z3 = q(4) << CONST_BITS;
         let out = kernel8(z2, z3, [0, q(1), q(2), q(3), 0, q(5), q(6), q(7)]);
         for (r, v) in out.into_iter().enumerate() {
-            ws[r * 8 + c] = (v >> (CONST_BITS - PASS1_BITS)) as i32;
+            ws[r * cols + c] = (v >> (CONST_BITS - PASS1_BITS)) as i32;
         }
     }
 }
@@ -302,6 +345,175 @@ fn rows16(ws: &[i32], rows: usize, out: &mut [u8], stride: usize, at: usize) {
     }
 }
 
+/// Pass 1 of the 4-point transforms (`4x4`, `8x4`): the first `cols`
+/// columns into `ws` (4 rows of `cols`).
+fn columns4(coef: &Block, table: &[i32; 64], ws: &mut [i32], cols: usize) {
+    for c in 0..cols {
+        let q = |r: usize| dequantize(coef, table, r * 8 + c);
+        let mut tmp0 = q(0);
+        if c == 0 {
+            tmp0 = clamp_dc(tmp0);
+        }
+        let tmp2 = q(2);
+        let tmp10 = (tmp0 + tmp2) << PASS1_BITS;
+        let tmp12 = (tmp0 - tmp2) << PASS1_BITS;
+        let (z2, z3) = (q(1), q(3));
+        let z1 = (z2 + z3) * FIX_0_541196100 + (1 << (CONST_BITS - PASS1_BITS - 1));
+        let tmp0 = (z1 + z2 * FIX_0_765366865) >> (CONST_BITS - PASS1_BITS);
+        let tmp2 = (z1 - z3 * FIX_1_847759065) >> (CONST_BITS - PASS1_BITS);
+        ws[c] = (tmp10 + tmp0) as i32;
+        ws[3 * cols + c] = (tmp10 - tmp0) as i32;
+        ws[cols + c] = (tmp12 + tmp2) as i32;
+        ws[2 * cols + c] = (tmp12 - tmp2) as i32;
+    }
+}
+
+/// Pass 2, 4 points per row (`4x4`, `4x8`).
+fn rows4(ws: &[i32], rows: usize, out: &mut [u8], stride: usize, at: usize) {
+    for r in 0..rows {
+        let w = |i: usize| i64::from(ws[r * 4 + i]);
+        let Some(dst) = out.get_mut(at + r * stride..at + r * stride + 4) else {
+            return;
+        };
+        let tmp0 = (w(0) + PASS2_OFFSET) << CONST_BITS;
+        let tmp2 = w(2) << CONST_BITS;
+        let tmp10 = tmp0 + tmp2;
+        let tmp12 = tmp0 - tmp2;
+        let (z2, z3) = (w(1), w(3));
+        let z1 = (z2 + z3) * FIX_0_541196100;
+        let tmp0 = z1 + z2 * FIX_0_765366865;
+        let tmp2 = z1 - z3 * FIX_1_847759065;
+        let s = CONST_BITS + PASS2_BITS;
+        dst[0] = limit((tmp10 + tmp0) >> s);
+        dst[3] = limit((tmp10 - tmp0) >> s);
+        dst[1] = limit((tmp12 + tmp2) >> s);
+        dst[2] = limit((tmp12 - tmp2) >> s);
+    }
+}
+
+/// `jpeg_idct_4x2`: its workspace is `INT32`, unscaled after pass 1.
+fn idct_4x2(coef: &Block, table: &[i32; 64], out: &mut [u8], stride: usize, at: usize) {
+    let mut ws = [0i64; 8];
+    for c in 0..4 {
+        let q = |r: usize| dequantize(coef, table, r * 8 + c);
+        let mut tmp10 = q(0);
+        if c == 0 {
+            tmp10 = clamp_dc(tmp10);
+        }
+        let tmp0 = q(1);
+        ws[c] = tmp10 + tmp0;
+        ws[4 + c] = tmp10 - tmp0;
+    }
+    let s = CONST_BITS + PASS2_BITS - PASS1_BITS;
+    for r in 0..2 {
+        let w = |i: usize| ws[r * 4 + i];
+        let Some(dst) = out.get_mut(at + r * stride..at + r * stride + 4) else {
+            return;
+        };
+        let tmp0 = (w(0)
+            + (RANGE_CENTER << (PASS2_BITS - PASS1_BITS))
+            + (1 << (PASS2_BITS - PASS1_BITS - 1)))
+            << CONST_BITS;
+        let tmp2 = w(2) << CONST_BITS;
+        let tmp10 = tmp0 + tmp2;
+        let tmp12 = tmp0 - tmp2;
+        let (z2, z3) = (w(1), w(3));
+        let z1 = (z2 + z3) * FIX_0_541196100;
+        let tmp0 = z1 + z2 * FIX_0_765366865;
+        let tmp2 = z1 - z3 * FIX_1_847759065;
+        dst[0] = limit((tmp10 + tmp0) >> s);
+        dst[3] = limit((tmp10 - tmp0) >> s);
+        dst[1] = limit((tmp12 + tmp2) >> s);
+        dst[2] = limit((tmp12 - tmp2) >> s);
+    }
+}
+
+/// `jpeg_idct_2x4`: its workspace is `INT32`, kept at `CONST_BITS`.
+fn idct_2x4(coef: &Block, table: &[i32; 64], out: &mut [u8], stride: usize, at: usize) {
+    let mut ws = [0i64; 8];
+    for c in 0..2 {
+        let q = |r: usize| dequantize(coef, table, r * 8 + c);
+        let mut tmp0 = q(0);
+        if c == 0 {
+            tmp0 = clamp_dc(tmp0);
+        }
+        let tmp2 = q(2);
+        let tmp10 = (tmp0 + tmp2) << CONST_BITS;
+        let tmp12 = (tmp0 - tmp2) << CONST_BITS;
+        let (z2, z3) = (q(1), q(3));
+        let z1 = (z2 + z3) * FIX_0_541196100;
+        let tmp0 = z1 + z2 * FIX_0_765366865;
+        let tmp2 = z1 - z3 * FIX_1_847759065;
+        ws[c] = tmp10 + tmp0;
+        ws[6 + c] = tmp10 - tmp0;
+        ws[2 + c] = tmp12 + tmp2;
+        ws[4 + c] = tmp12 - tmp2;
+    }
+    let s = CONST_BITS + PASS2_BITS - PASS1_BITS;
+    for r in 0..4 {
+        let Some(dst) = out.get_mut(at + r * stride..at + r * stride + 2) else {
+            return;
+        };
+        let tmp10 = ws[r * 2] + ((RANGE_CENTER << s) + (1 << (s - 1)));
+        let tmp0 = ws[r * 2 + 1];
+        dst[0] = limit((tmp10 + tmp0) >> s);
+        dst[1] = limit((tmp10 - tmp0) >> s);
+    }
+}
+
+/// A dequantized term of the smallest transforms, which work in `int`
+/// (`DCTELEM`).
+fn deq32(coef: &Block, table: &[i32; 64], i: usize) -> i32 {
+    i32::from(coef[i]).wrapping_mul(table[i])
+}
+
+/// `jpeg_idct_2x2`, `jpeg_idct_2x1`, `jpeg_idct_1x2` and `jpeg_idct_1x1`:
+/// sums and differences of the first terms in `int`, no workspace.
+fn idct_small(
+    method: Method,
+    coef: &Block,
+    table: &[i32; 64],
+    out: &mut [u8],
+    stride: usize,
+    at: usize,
+) {
+    let mut put = |r: usize, c: usize, v: i32| {
+        if let Some(d) = out.get_mut(at + r * stride + c) {
+            *d = limit(i64::from(v >> (PASS2_BITS - PASS1_BITS)));
+        }
+    };
+    // The clamped DC term with the range center and the final shift's
+    // rounding.
+    let dc = deq32(coef, table, 0).clamp(-1024, 1023)
+        + ((RANGE_CENTER as i32) << (PASS2_BITS - PASS1_BITS))
+        + (1 << (PASS2_BITS - PASS1_BITS - 1));
+    match method {
+        Method::I2x2 => {
+            let tmp5 = deq32(coef, table, 8);
+            let tmp0 = dc.wrapping_add(tmp5);
+            let tmp2 = dc.wrapping_sub(tmp5);
+            let (tmp4, tmp5) = (deq32(coef, table, 1), deq32(coef, table, 9));
+            let tmp1 = tmp4.wrapping_add(tmp5);
+            let tmp3 = tmp4.wrapping_sub(tmp5);
+            put(0, 0, tmp0.wrapping_add(tmp1));
+            put(0, 1, tmp0.wrapping_sub(tmp1));
+            put(1, 0, tmp2.wrapping_add(tmp3));
+            put(1, 1, tmp2.wrapping_sub(tmp3));
+        }
+        Method::I2x1 => {
+            let tmp1 = deq32(coef, table, 1);
+            put(0, 0, dc.wrapping_add(tmp1));
+            put(0, 1, dc.wrapping_sub(tmp1));
+        }
+        Method::I1x2 => {
+            let tmp1 = deq32(coef, table, 8);
+            put(0, 0, dc.wrapping_add(tmp1));
+            put(1, 0, dc.wrapping_sub(tmp1));
+        }
+        _ => put(0, 0, dc),
+    }
+}
+
 /// Transforms one block into `out` at offset `at` (rows `stride` apart).
 pub(crate) fn inverse(
     method: Method,
@@ -314,7 +526,7 @@ pub(crate) fn inverse(
     let mut ws = [0i32; 128];
     match method {
         Method::Islow => {
-            columns8(coef, table, &mut ws);
+            columns8(coef, table, &mut ws, 8);
             rows8(&ws, 8, out, stride, at);
         }
         Method::I16x16 => {
@@ -322,12 +534,29 @@ pub(crate) fn inverse(
             rows16(&ws, 16, out, stride, at);
         }
         Method::I16x8 => {
-            columns8(coef, table, &mut ws);
+            columns8(coef, table, &mut ws, 8);
             rows16(&ws, 8, out, stride, at);
         }
         Method::I8x16 => {
             columns16(coef, table, &mut ws);
             rows8(&ws, 16, out, stride, at);
+        }
+        Method::I8x4 => {
+            columns4(coef, table, &mut ws, 8);
+            rows8(&ws, 4, out, stride, at);
+        }
+        Method::I4x8 => {
+            columns8(coef, table, &mut ws, 4);
+            rows4(&ws, 8, out, stride, at);
+        }
+        Method::I4x4 => {
+            columns4(coef, table, &mut ws, 4);
+            rows4(&ws, 4, out, stride, at);
+        }
+        Method::I4x2 => idct_4x2(coef, table, out, stride, at),
+        Method::I2x4 => idct_2x4(coef, table, out, stride, at),
+        Method::I2x2 | Method::I2x1 | Method::I1x2 | Method::I1x1 => {
+            idct_small(method, coef, table, out, stride, at);
         }
     }
 }
@@ -337,12 +566,7 @@ mod tests {
     use super::*;
 
     fn run(method: Method, coef: &Block, q: i32) -> Vec<u8> {
-        let (w, h) = match method {
-            Method::Islow => (8, 8),
-            Method::I16x16 => (16, 16),
-            Method::I16x8 => (16, 8),
-            Method::I8x16 => (8, 16),
-        };
+        let (w, h) = method.size();
         let mut out = vec![0u8; w * h];
         inverse(method, coef, &[q; 64], &mut out, w, 0);
         out
@@ -353,7 +577,23 @@ mod tests {
         // DC 80 with quantizer 1 is 80/8 = 10 above mid-gray.
         let mut coef = [0i16; 64];
         coef[0] = 80;
-        for m in [Method::Islow, Method::I16x16, Method::I16x8, Method::I8x16] {
+        let all = [
+            Method::Islow,
+            Method::I16x16,
+            Method::I16x8,
+            Method::I8x16,
+            Method::I8x4,
+            Method::I4x8,
+            Method::I4x4,
+            Method::I4x2,
+            Method::I2x4,
+            Method::I2x2,
+            Method::I2x1,
+            Method::I1x2,
+            Method::I1x1,
+        ];
+        for m in all {
+            assert_eq!(Method::for_size(m.size().0, m.size().1), Some(m));
             assert!(run(m, &coef, 1).iter().all(|&v| v == 138), "{m:?}");
         }
     }

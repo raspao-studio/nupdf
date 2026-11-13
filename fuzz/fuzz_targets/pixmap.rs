@@ -84,5 +84,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = pix.pam();
         let _ = pix.png();
     }
+    // Decoded smaller, as for drawing: JPEG data through libjpeg's
+    // reduced IDCTs, the rest averaged in blocks.
+    let _ = nupdf::pixmap::from_image_subsampled(&doc, &image, u32::from(a ^ b) % 7);
     let _ = nupdf::image::jpeg_data(&doc, &image);
 });
