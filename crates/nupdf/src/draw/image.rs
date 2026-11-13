@@ -2,11 +2,13 @@
 // Copyright (C) 2026 hum
 // Derived from MuPDF source/fitz/draw-affine.c (fz_paint_image,
 // fz_gridfit_matrix), source/fitz/draw-scale-simple.c (fz_scale_pixmap),
-// source/fitz/pixmap.c (fz_subsample_pixmap) and source/fitz/image.c (the
-// subsampling factor of fz_get_pixmap_from_image),
+// source/fitz/pixmap.c (fz_subsample_pixmap), source/fitz/image.c (the
+// subsampling factor and the subarea of fz_get_pixmap_from_image) and
+// source/fitz/draw-device.c (find_src_area_required),
 // Copyright (C) 2004-2025 Artifex Software, Inc.
 
-//! Images onto pixmaps as MuPDF paints them: decoded at a power of two
+//! Images onto pixmaps as MuPDF paints them: only the part that shows
+//! decoded when that is under 90% of the image, decoded at a power of two
 //! below full size, scaled down with its filter when the page shows them
 //! smaller still, then mapped pixel by pixel in 14-bit fixed point,
 //! nearest or bilinear.
@@ -67,8 +69,8 @@ fn fit_edge(size: &mut f32, origin: &mut f32) {
 /// works it out (truncated), and the power of two to decode it below
 /// full size by.
 pub fn extent_and_factor(img_w: i32, img_h: i32, ctm: Matrix) -> (i32, i32, u32) {
-    let dw = (ctm.a * ctm.a + ctm.b * ctm.b).sqrt() as i32;
-    let dh = (ctm.c * ctm.c + ctm.d * ctm.d).sqrt() as i32;
+    let dw = ctm.a.madd(ctm.a, ctm.b * ctm.b).sqrt() as i32;
+    let dh = ctm.c.madd(ctm.c, ctm.d * ctm.d).sqrt() as i32;
     let (w, h) = (dw.min(img_w), dh.min(img_h));
     let mut l2 = 0;
     if w > 0 && h > 0 {
@@ -77,6 +79,124 @@ pub fn extent_and_factor(img_w: i32, img_h: i32, ctm: Matrix) -> (i32, i32, u32)
         }
     }
     (dw, dh, l2)
+}
+
+/// `find_src_area_required`: the pixels of a `w` by `h` image that the
+/// device pixels in `clip` can need under `ctm`, with room for the
+/// scaler's support.
+pub fn src_area(ctm: Matrix, w: i32, h: i32, clip: IRect) -> IRect {
+    let whole = IRect::new(0, 0, w, h);
+    let (a, b, c, d) = (
+        f64::from(ctm.a),
+        f64::from(ctm.b),
+        f64::from(ctm.c),
+        f64::from(ctm.d),
+    );
+    // fz_try_invert_matrix's test.
+    let det = a * d - b * c;
+    if (-f64::EPSILON..=f64::EPSILON).contains(&det) {
+        return whole;
+    }
+    let inverse = ctm.invert().post_scale(w as f32, h as f32);
+    // fz_matrix_max_expansion.
+    let exp = [inverse.a, inverse.b, inverse.c, inverse.d]
+        .into_iter()
+        .fold(0.0f32, |m, v| if m < v.abs() { v.abs() } else { m });
+    let clip = Rect::new(
+        clip.x0 as f32,
+        clip.y0 as f32,
+        clip.x1 as f32,
+        clip.y1 as f32,
+    );
+    let r = clip.transform(inverse).expand(exp.max(1.0) * 4.0);
+    IRect::from_rect(r).intersect(whole)
+}
+
+/// `fz_default_image_decode` then `fz_adjust_image_subarea`: the part of a
+/// `w` by `h` image to decode for `area`. Over 90% of the image is the
+/// whole of it, and edges within 1% go to the image's; then the sides
+/// move out to whole bytes of samples (`bpp` bits a pixel) and, with the
+/// top, to multiples of the subsampling block.
+pub fn decode_area(mut area: IRect, w: i32, h: i32, bpp: i32, l2: u32) -> IRect {
+    let size = (area.x1 - area.x0).wrapping_mul(area.y1 - area.y0);
+    if size >= (w.wrapping_mul(h) / 10).wrapping_mul(9) {
+        area = IRect::new(0, 0, w, h);
+    } else {
+        let (w1, h1) = (w / 100, h / 100);
+        if area.x0 <= w1 {
+            area.x0 = 0;
+        }
+        if area.y0 <= h1 {
+            area.y0 = 0;
+        }
+        if area.x1 >= w - w1 {
+            area.x1 = w;
+        }
+        if area.y1 >= h - h1 {
+            area.y1 = h;
+        }
+    }
+    adjust_area(area, w, h, bpp, l2)
+}
+
+/// `fz_adjust_image_subarea`.
+pub fn adjust_area(mut area: IRect, w: i32, h: i32, bpp: i32, l2: u32) -> IRect {
+    let f = 1i32 << l2.min(6);
+    let mask = match bpp {
+        1 => 8 * f,
+        2 => 4 * f,
+        4 => 2 * f,
+        _ if bpp & 7 == 0 => f,
+        _ => 0,
+    };
+    if mask != 0 {
+        area.x0 &= !(mask - 1);
+        area.x1 = (area.x1 + mask - 1) & !(mask - 1);
+    } else {
+        // Whole bytes that are not a power of two pixels.
+        let mask = bpp.wrapping_mul(f).wrapping_mul(match bpp {
+            6 | 10 | 14 => 4,
+            12 => 2,
+            _ => 8,
+        });
+        if mask > 0 {
+            area.x0 = area.x0 / mask * mask;
+            area.x1 = area.x1.saturating_add(mask - 1) / mask * mask;
+        }
+    }
+    area.y0 &= !(f - 1);
+    area.x1 = area.x1.min(w);
+    area.y1 = ((area.y1 + f - 1) & !(f - 1)).min(h);
+    area
+}
+
+/// `update_ctm_for_subarea`: `ctm`, which maps the unit square onto a `w`
+/// by `h` image, made to map it onto the image's `area`.
+pub fn subarea_ctm(ctm: Matrix, area: IRect, w: i32, h: i32) -> Matrix {
+    if area == IRect::new(0, 0, w, h) {
+        return ctm;
+    }
+    let m = Matrix {
+        a: (area.x1 - area.x0) as f32 / w as f32,
+        b: 0.0,
+        c: 0.0,
+        d: (area.y1 - area.y0) as f32 / h as f32,
+        e: area.x0 as f32 / w as f32,
+        f: area.y0 as f32 / h as f32,
+    };
+    m.concat(ctm)
+}
+
+/// The size `area` of a `w` by `h` image shows at under `ctm`, as
+/// `fz_compute_image_key` works it out (truncated).
+pub fn area_extent(ctm: Matrix, area: IRect, w: i32, h: i32) -> (i32, i32) {
+    let fw = (area.x1 - area.x0) as f32 / w as f32;
+    let fh = (area.y1 - area.y0) as f32 / h as f32;
+    let (a, b, c, d) = (ctm.a * fw, ctm.b * fw, ctm.c * fh, ctm.d * fh);
+    (
+        a.madd(a, b * b).sqrt() as i32,
+        c.madd(c, d * d).sqrt() as i32,
+    )
 }
 
 /// `fz_subsample_pixmap`: each `2^factor` square averaged into a pixel.
@@ -1438,6 +1558,48 @@ mod tests {
             &[],
             false,
             "4ab6073f5fe0a28339f70ef3d1bad801",
+        );
+    }
+
+    #[test]
+    fn images_mostly_out_of_view_decode_only_what_shows() {
+        // Under 90% of an image in view, MuPDF decodes only that part
+        // (whole bytes and subsampling blocks of it), and scales it with
+        // the matrix moved onto it, which samples other pixels than
+        // scaling the whole image; nupdf scaled the whole image. Here off
+        // the page's left, bottom and right edges and under a clip, scaled
+        // down, subsampled, as a stencil, a JPEG, and drawn twice (the
+        // second time from the decoded part).
+        let stencil: Vec<u8> = (0..61u32)
+            .flat_map(|y| (0..8u32).map(move |x| if (x + y / 3) % 2 == 0 { 0xF0 } else { 0x3C }))
+            .collect();
+        let jpeg: String = include_bytes!("../../tests/data/jpeg/base420.jpg")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let images = [
+            image(
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8",
+                200,
+                60,
+                &rgb(200, 60),
+            ),
+            image("/ImageMask true/BitsPerComponent 1", 61, 61, &stencil),
+            crate::draw::testkit::stream(
+                "/Type/XObject/Subtype/Image/Width 37/Height 29/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter[/ASCIIHexDecode/DCTDecode]",
+                &format!("{jpeg}>"),
+            ),
+        ];
+        image_page(
+            "image-subarea",
+            "q 150 0 0 45 -50 4 cm /I0 Do Q q 80 0 0 24 -30 52 cm /I0 Do Q
+             q 0 0 1 rg 40 0 0 40 100 60 cm /I1 Do Q q 0 0 1 rg 30 0 0 30 4 -12 cm /I1 Do Q
+             q 30 0 0 24 110 100 cm /I2 Do Q q 14 0 0 11 120 84 cm /I2 Do Q
+             q 60 80 40 30 re W n 90 0 0 27 20 76 cm /I0 Do Q q 90 0 0 27 20 76 cm /I0 Do Q",
+            &images,
+            &[],
+            false,
+            "7b5800983e44880a13a2031185e282d2",
         );
     }
 

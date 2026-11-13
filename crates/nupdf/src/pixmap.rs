@@ -13,6 +13,7 @@
 use crate::colorspace::{ColorSpace, Family};
 use crate::diag::report;
 use crate::document::Document;
+use crate::geometry::IRect;
 use crate::image::Image;
 use crate::object::Object;
 
@@ -177,6 +178,34 @@ pub fn from_image_subsampled(
     image: &Image,
     l2: u32,
 ) -> Result<(Pixmap, u32), String> {
+    from_image_area(doc, image, l2, None).map(|(p, l2, _)| (p, l2))
+}
+
+/// [`from_image_subsampled`] for the part `area` of the image only (made
+/// with `draw::image::decode_area`), as `fz_decomp_image_from_stream` cuts
+/// a subarea out of the samples as they stream in. Images that do not
+/// stream (JPX) and /Matte ones are decoded whole. Returns the part
+/// decoded, `None` for the whole image.
+pub fn from_image_area(
+    doc: &Document,
+    image: &Image,
+    l2: u32,
+    area: Option<IRect>,
+) -> Result<(Pixmap, u32, Option<IRect>), String> {
+    let matte = image.colorkey.is_some() && image.mask.is_some();
+    let area = area
+        .filter(|a| !matte && !image.is_jpx && *a != IRect::new(0, 0, image.width, image.height));
+    // `subarea_stream` around the samples, then the rest of the decoding.
+    let finish = |data: &[u8], wh: (usize, usize), native: u32| {
+        let (p, rest) = match area {
+            Some(a) => {
+                let (cut, w, h) = crop(data, image, a, native);
+                decomp(doc, image, &cut, (w, h), l2 - native)?
+            }
+            None => decomp(doc, image, data, wh, l2 - native)?,
+        };
+        Ok((p, rest, area))
+    };
     if image.stream.is_none()
         && let Some((dict, data)) = &image.inline
     {
@@ -193,7 +222,7 @@ pub fn from_image_subsampled(
         let mut out = vec![0; len as usize];
         let n = st.read(&mut out);
         out.truncate(n);
-        return decomp(doc, image, &out, (w as usize, h as usize), l2);
+        return finish(&out, (w as usize, h as usize), 0);
     }
     let Some(stream) = &image.stream else {
         return Err(report::format("image has no data"));
@@ -203,7 +232,7 @@ pub fn from_image_subsampled(
     };
     if image.is_jpx {
         let data = doc.stream_data(&s).map_err(|e| e.report())?;
-        return jpx_pixmap(doc, image, &data).map(|p| (p, l2));
+        return jpx_pixmap(doc, image, &data).map(|p| (p, l2, None));
     }
     let (w, h) = (image.width.max(0) as u64, image.height.max(0) as u64);
     let data = match crate::image::jpeg_parts(doc, image)? {
@@ -212,7 +241,6 @@ pub fn from_image_subsampled(
         // the image is that many times smaller (`fz_decomp_image_from_stream`).
         Some((mut jpeg, params)) => {
             crate::image::patch_jpeg_height(&mut jpeg, image.height);
-            let matte = image.colorkey.is_some() && image.mask.is_some();
             let native = if matte { 0 } else { l2.min(3) };
             let f = 1u64 << native;
             let (w, h) = ((w + f - 1) >> native, (h + f - 1) >> native);
@@ -230,7 +258,7 @@ pub fn from_image_subsampled(
             let mut out = vec![0; len as usize];
             let n = st.read(&mut out);
             out.truncate(n);
-            return decomp(doc, image, &out, (w as usize, h as usize), l2 - native);
+            return finish(&out, (w as usize, h as usize), native);
         }
         None => {
             // What the read of each row needs, whole rows of packed samples.
@@ -243,7 +271,42 @@ pub fn from_image_subsampled(
                 .map_err(|e| e.report())?
         }
     };
-    decomp(doc, image, &data, (w as usize, h as usize), l2)
+    finish(&data, (w as usize, h as usize), 0)
+}
+
+/// `subarea_stream`: the rows of `area` cut out of the packed samples of
+/// the image decoded `2^l2` times smaller, skipping bytes as MuPDF does
+/// (whole bytes, the right margin rounded up). Returns the samples and
+/// the part's size.
+fn crop(data: &[u8], image: &Image, area: IRect, l2: u32) -> (Vec<u8>, usize, usize) {
+    let f = 1i64 << l2;
+    let (iw, ih) = (
+        i64::from(image.width.max(0)),
+        i64::from(image.height.max(0)),
+    );
+    let bits = image.n as i64 * i64::from(image.bpc.max(0));
+    let stream_stride = (((iw + f - 1) >> l2) * bits + 7) / 8;
+    let at = |v: i32| i64::from(v).clamp(0, iw.max(ih));
+    let l_skip = (at(area.x0) >> l2) * bits / 8;
+    let r_skip = ((((iw + f - 1 - at(area.x1)) >> l2).max(0)) * bits + 7) / 8;
+    let t_skip = (at(area.y0) >> l2) * stream_stride;
+    let w = ((at(area.x1) - at(area.x0)).max(0) + f - 1) >> l2;
+    let h = ((at(area.y1) - at(area.y0)).max(0) + f - 1) >> l2;
+    let stride = ((w * bits + 7) / 8) as usize;
+    let mut out = Vec::with_capacity(stride.saturating_mul(h as usize).min(data.len()));
+    let mut pos = (l_skip + t_skip) as usize;
+    for _ in 0..h {
+        let Some(row) = data.get(pos..) else {
+            break;
+        };
+        let row = &row[..stride.min(row.len())];
+        out.extend_from_slice(row);
+        if row.len() < stride {
+            break;
+        }
+        pos += stride + (l_skip + r_skip) as usize;
+    }
+    (out, w as usize, h as usize)
 }
 
 /// `fz_decomp_image_from_stream` from the decoded samples, `w` by `h` of
