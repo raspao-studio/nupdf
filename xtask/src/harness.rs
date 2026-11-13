@@ -675,6 +675,18 @@ pub const CHECKS: &[Check] = &[
         oracle_args: &["dehyphenate"],
     },
     Check {
+        name: "text-annots",
+        about: "the document's text as `mutool draw -F txt` writes it (fz_run_page into structured text: contents, then annotations and widgets; a form feed after each page), through `extract --format text`",
+        oracle_script: "oracle/js/text.js",
+        nupdf_args: &["extract", "--format", "text"],
+        compare: Compare::Fields(&["/text"]),
+        oracle_writes_files: false,
+        oracle_file_fixup: None,
+        nupdf_fixup: None,
+        reread: None,
+        oracle_args: &["", "annots"],
+    },
+    Check {
         name: "search",
         about: "each page's hits of \"the\", as MuPDF's StructuredText.search finds them: the quads of each hit",
         oracle_script: "oracle/js/search.js",
@@ -924,14 +936,30 @@ pub const CHECKS: &[Check] = &[
         "render-72",
         &["72"],
         &[
-            "render", "--no-icc", "--format", "ppm", "--dpi", "72", "-o", "{dir}",
+            "render",
+            "--no-annots",
+            "--no-icc",
+            "--format",
+            "ppm",
+            "--dpi",
+            "72",
+            "-o",
+            "{dir}",
         ],
     ),
     render_check(
         "render-150",
         &["150"],
         &[
-            "render", "--no-icc", "--format", "ppm", "--dpi", "150", "-o", "{dir}",
+            "render",
+            "--no-annots",
+            "--no-icc",
+            "--format",
+            "ppm",
+            "--dpi",
+            "150",
+            "-o",
+            "{dir}",
         ],
     ),
     Check {
@@ -939,7 +967,16 @@ pub const CHECKS: &[Check] = &[
         ..render_check(
             "render-72-icc",
             &["72", "icc"],
-            &["render", "--format", "ppm", "--dpi", "72", "-o", "{dir}"],
+            &[
+                "render",
+                "--no-annots",
+                "--format",
+                "ppm",
+                "--dpi",
+                "72",
+                "-o",
+                "{dir}",
+            ],
         )
     },
     Check {
@@ -947,7 +984,34 @@ pub const CHECKS: &[Check] = &[
         ..render_check(
             "render-150-icc",
             &["150", "icc"],
-            &["render", "--format", "ppm", "--dpi", "150", "-o", "{dir}"],
+            &[
+                "render",
+                "--no-annots",
+                "--format",
+                "ppm",
+                "--dpi",
+                "150",
+                "-o",
+                "{dir}",
+            ],
+        )
+    },
+    Check {
+        about: "each whole page drawn as Page.run (fz_run_page, what `mutool draw` draws) draws it: contents, annotations, then widgets, color management off: pixels within the threshold",
+        ..render_check(
+            "render-annots-72",
+            &["72", "annots"],
+            &[
+                "render", "--no-icc", "--format", "ppm", "--dpi", "72", "-o", "{dir}",
+            ],
+        )
+    },
+    Check {
+        about: "each whole page drawn as Page.run (fz_run_page, what `mutool draw` draws) draws it, color management on: pixels within the threshold",
+        ..render_check(
+            "render-annots-72-icc",
+            &["72", "icc", "annots"],
+            &["render", "--format", "ppm", "--dpi", "72", "-o", "{dir}"],
         )
     },
     Check {
@@ -1799,7 +1863,11 @@ fn run_sides(
         let _ = std::fs::create_dir_all(&ours_dir);
     }
     let args = nupdf_argv(check, file, &ours_dir);
-    let mut ours = side(nupdf, &args, timeout);
+    let mut ours = if writes_text(check) {
+        text_side(nupdf, &args, timeout)
+    } else {
+        side(nupdf, &args, timeout)
+    };
     if pixels && let (Some(a), Some(b)) = (&mut oracle.json, &mut ours.json) {
         diff_written_pixels(a, dir, b, &ours_dir);
     }
@@ -1971,6 +2039,35 @@ fn find_qpdf() -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|d| d.join("qpdf"))
         .find(|p| p.is_file())
+}
+
+/// Whether the check has nupdf write plain text on stdout
+/// (`--format text`), its report going to stderr.
+fn writes_text(check: &Check) -> bool {
+    check
+        .nupdf_args
+        .windows(2)
+        .any(|w| w == ["--format", "text"])
+}
+
+/// [`side`] for a run that writes plain text: the text as `/text`.
+fn text_side(program: &Path, args: &[&std::ffi::OsStr], timeout: Duration) -> Side {
+    match proc::run(program, args, timeout) {
+        Ok(run) => Side {
+            status: run.status,
+            json: run
+                .succeeded()
+                .then(|| json!({ "text": String::from_utf8_lossy(&run.stdout) })),
+            stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
+            ms: run.wall.as_secs_f64() * 1000.0,
+        },
+        Err(e) => Side {
+            status: Status::Exited(-1),
+            json: None,
+            stderr: format!("could not run: {e:#}"),
+            ms: 0.0,
+        },
+    }
 }
 
 fn side(program: &Path, args: &[&std::ffi::OsStr], timeout: Duration) -> Side {
