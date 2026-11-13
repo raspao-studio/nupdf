@@ -325,7 +325,9 @@ fn num(obj: &Object) -> i32 {
 }
 
 // The blending scan (pdf-page.c). MuPDF memoizes the answer for each
-// resource dictionary; it is computed afresh here.
+// resource dictionary, whichever cycle it was reached in; it is computed
+// afresh here, except for a page's resources, kept from the top (where no
+// cycle bears on it) in the store.
 
 fn extgstate_uses_blending(doc: &Document, dict: &Object) -> bool {
     match stored(doc, dict, b"BM") {
@@ -3984,9 +3986,18 @@ fn run_page_imp(
     let transparency = group
         .as_ref()
         .is_some_and(|g| doc.dict_get(g, b"S").is_name(b"Transparency"))
-        || resources
-            .as_ref()
-            .is_some_and(|r| resources_use_blending(doc, r, &mut Vec::new()));
+        || resources.as_ref().is_some_and(|r| {
+            // Pages sharing their resources by reference scan them once:
+            // from the top, the scan is the same every time.
+            let key = r.as_ref().map(|r| r.num);
+            let memo = store.as_mut().map(|s| &mut s.blending);
+            match (key, memo) {
+                (Some(k), Some(memo)) => *memo
+                    .entry(k)
+                    .or_insert_with(|| resources_use_blending(doc, r, &mut Vec::new())),
+                _ => resources_use_blending(doc, r, &mut Vec::new()),
+            }
+        });
     if transparency {
         let cs = match &group {
             Some(g) => match stored(doc, g, b"CS") {
@@ -4309,6 +4320,34 @@ mod tests {
             .map(|d| d.message)
             .collect();
         (log.0, warnings)
+    }
+
+    #[test]
+    fn pages_sharing_blending_resources_each_get_their_group() {
+        // Two pages share resources 5, whose graphics state blends; the
+        // scan is kept for the second, which is grouped as the first.
+        let objs = [
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources 5 0 R/Contents 4 0 R>>"
+                .to_vec(),
+            crate::testutil::stream("", b"0 0 10 10 re f"),
+            b"<</ExtGState<</G<</BM/Multiply>>>>>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources 5 0 R/Contents 4 0 R>>"
+                .to_vec(),
+        ];
+        let doc = crate::testutil::doc_bytes(&objs);
+        let mut store = Store::default();
+        let mut groups = Vec::new();
+        for i in 0..2 {
+            let page = doc.page(i).unwrap_or_else(|e| panic!("{e:?}"));
+            let mut log = Log::default();
+            let out = run_page_contents(&doc, &page, &mut log, store);
+            store = out.store;
+            groups.push(log.0.iter().filter(|c| c.starts_with("group")).count());
+        }
+        assert_eq!(groups, [1, 1]);
+        assert_eq!(store.blending.get(&5), Some(&true));
     }
 
     #[test]
