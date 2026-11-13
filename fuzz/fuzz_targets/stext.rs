@@ -25,8 +25,8 @@ fuzz_target!(|data: &[u8]| {
 
 // A document's pages gathered into structured text as `nupdf stext` does,
 // the first byte choosing the options; the rest is the document. Each page
-// is also taken through what `nupdf extract` makes of it: spans, text and
-// Markdown.
+// is also taken through what `nupdf extract` makes of it: spans, text,
+// Markdown, layout, and nupdf's reading order.
 fn one(data: &[u8]) {
     let pick = u32::from(data.first().copied().unwrap_or(0));
     let Ok(doc) = Document::open(data.get(1..).unwrap_or_default().to_vec()) else {
@@ -50,6 +50,10 @@ fn one(data: &[u8]) {
             let _ = p.text();
             let _ = nupdf::extract::page_markdown(&p);
             let _ = nupdf::extract::layout(&p);
+            // nupdf's reading order, as `--options reading-order` makes it.
+            let mut ordered = p.clone();
+            nupdf::order::reading_order(&mut ordered);
+            let _ = nupdf::extract::layout(&ordered);
             for block in &p.blocks {
                 if let nupdf::stext::Block::Text(t) = block {
                     let _ = nupdf::extract::block_text(t);
