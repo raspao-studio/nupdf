@@ -29,6 +29,10 @@ The first frozen version: 27 schemas, read off what the commands print (DECISION
 
 New reports, at v1: `annots`, `annots-edit`, `attachments`, `fill`, `flatten`, `forms`, `labels`, `links`, `ocr`, `outline`, `sanitize`, `signatures`, `tables`. Added fields: `info` has `text` (pages with text, scanned pages); a written document's `output` has `signatures` when the input was signed.
 
+## Additions to v1 (2026-11-14)
+
+New reports, at v1: `apply`, `attest`, `audit`, `patch`, `query` (DECISIONS D53).
+
 ## v0
 
 Reports before the schemas were frozen, while their shapes could still change.

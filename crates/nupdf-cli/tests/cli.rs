@@ -3723,3 +3723,425 @@ fn a_structure_tree_cycle_ends() {
         "{report}"
     );
 }
+
+#[test]
+fn attest_detects_occluded_text_vector_strikethrough_and_actualtext_spoof() {
+    // Stream draws (PDF user space: origin at bottom-left, y up):
+    // 1) "SECRET" at y=250 covered by a black rectangle (faux redaction / occlusion)
+    // 2) "OLD CLAUSE" at y=200 crossed out by a horizontal vector stroke at y=204
+    // 3) "(Total: 900 USD)" wrapped in /Span << /ActualText (Fee is $100.) >>
+    // 4) Dense vector rectangle cluster at y=40..90 with no text (blind spot)
+    let content = b"BT /F1 12 Tf 20 250 Td (SECRET) Tj ET\n\
+0 0 0 rg 18 246 65 18 re f\n\
+0 0 0 rg BT /F1 12 Tf 20 200 Td (OLD CLAUSE) Tj ET\n\
+0 0 0 RG 1.5 w 18 204 m 105 204 l S\n\
+/Span <</ActualText (Fee is $100.)>> BDC\n\
+BT /F1 12 Tf 20 150 Td (Total: 900 USD) Tj ET\n\
+EMC\n\
+0.2 0.4 0.8 rg 180 40 15 45 re f 200 40 15 35 re f 220 40 15 50 re f 240 40 15 30 re f 260 40 15 40 re f\n";
+    let page_stream = format!(
+        "<</Length {}>>\nstream\n{}endstream",
+        content.len(),
+        std::str::from_utf8(content).unwrap()
+    );
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        &page_stream,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("attest-hazards.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let crops = scratch("attest-crops");
+    let _ = std::fs::remove_dir_all(&crops);
+
+    let report = report_of(&[
+        "attest",
+        file.to_str().unwrap(),
+        "--crops-dir",
+        crops.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.attest/v1");
+    let spans = report["pages"][0]["spans"].as_array().unwrap();
+    assert!(
+        spans.iter().any(
+            |s| s["text"].as_str().unwrap_or_default().contains("SECRET")
+                && matches!(
+                    s["visibility"].as_str(),
+                    Some("zero_contrast_or_occluded" | "invisible_mode")
+                )
+        ),
+        "expected occluded SECRET in {spans:?}"
+    );
+    assert!(
+        spans.iter().any(|s| s["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("OLD CLAUSE")
+            && s["struck_through"] == true),
+        "expected struck_through OLD CLAUSE in {spans:?}"
+    );
+    assert!(
+        spans.iter().any(|s| s["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Fee is $100.")
+            && s["glyph_text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Total: 900 USD")),
+        "expected ActualText spoof detection in {spans:?}"
+    );
+}
+
+#[test]
+fn patch_replaces_text_in_place_and_refuses_neighbor_collision() {
+    let content = b"BT /F1 12 Tf 20 200 Td (Amount: $100) Tj ET\n\
+BT /F1 12 Tf 140 200 Td (Status: OPEN) Tj ET\n";
+    let page_stream = format!(
+        "<</Length {}>>\nstream\n{}endstream",
+        content.len(),
+        std::str::from_utf8(content).unwrap()
+    );
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        &page_stream,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("patch-in.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let extracted = report_of(&["extract", file.to_str().unwrap()]);
+    let amount_id = extracted["pages"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["lines"].as_array().into_iter().flatten())
+        .flat_map(|l| l["spans"].as_array().into_iter().flatten())
+        .find(|s| s["text"].as_str().unwrap_or_default().contains("$100"))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let out = scratch("patch-out.pdf");
+    let _ = std::fs::remove_file(&out);
+    let replace_ok = format!("{amount_id}=Amount: $250");
+    let report = report_of(&[
+        "patch",
+        file.to_str().unwrap(),
+        "--replace",
+        &replace_ok,
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.patch/v1");
+    assert_eq!(report["applied"], true);
+    assert_eq!(report["verification"]["verified"], true);
+    let hits_new = report_of(&["search", out.to_str().unwrap(), "$250"]);
+    assert_eq!(hits_new["hit_count"], 1, "{hits_new}");
+    let hits_old = report_of(&["search", out.to_str().unwrap(), "$100"]);
+    assert_eq!(hits_old["hit_count"], 0, "{hits_old}");
+
+    // Oversized replacement that collides horizontally with "Status: OPEN" must exit 4 and not write.
+    let bad_out = scratch("patch-collision-out.pdf");
+    let _ = std::fs::remove_file(&bad_out);
+    let replace_bad = format!("{amount_id}=Amount: $999,999,999,999.99 USD EXTRA WIDE");
+    let bad = nupdf(&[
+        "patch",
+        file.to_str().unwrap(),
+        "--replace",
+        &replace_bad,
+        "-o",
+        bad_out.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        bad.status.code(),
+        Some(4),
+        "stderr={}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    assert!(!bad_out.exists(), "colliding patch must not write output");
+}
+
+#[test]
+fn apply_commits_disjoint_multi_agent_plans_and_rejects_conflicts() {
+    let content = b"BT /F1 12 Tf 20 240 Td (SSN: 123-45-6789) Tj ET\n\
+BT /F1 12 Tf 20 180 Td (Total: $100) Tj ET\n";
+    let page_stream = format!(
+        "<</Length {}>>\nstream\n{}endstream",
+        content.len(),
+        std::str::from_utf8(content).unwrap()
+    );
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        &page_stream,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("apply-in.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let extracted = report_of(&["extract", file.to_str().unwrap()]);
+    let doc_id = extracted["doc_id"].as_str().unwrap().to_string();
+    let total_id = extracted["pages"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["lines"].as_array().into_iter().flatten())
+        .flat_map(|l| l["spans"].as_array().into_iter().flatten())
+        .find(|s| s["text"].as_str().unwrap_or_default().contains("$100"))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let plan_a = scratch("plan-a.json");
+    let plan_b = scratch("plan-b.json");
+    std::fs::write(
+        &plan_a,
+        serde_json::to_vec(&serde_json::json!({
+            "doc_id": doc_id,
+            "agent": "redactor",
+            "ops": [{"op": "redact", "text": "123-45-6789"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &plan_b,
+        serde_json::to_vec(&serde_json::json!({
+            "doc_id": doc_id,
+            "agent": "editor",
+            "ops": [{"op": "patch", "id": total_id, "text": "Total: $250"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = scratch("apply-out.pdf");
+    let _ = std::fs::remove_file(&out);
+    let report = report_of(&[
+        "apply",
+        file.to_str().unwrap(),
+        "--plan",
+        plan_a.to_str().unwrap(),
+        "--plan",
+        plan_b.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.apply/v1");
+    assert_eq!(report["applied"], true);
+    assert_eq!(report["verified"], true);
+    assert!(report["conflicts"].as_array().unwrap().is_empty());
+
+    // Conflicting second plan patching the exact same target with a different value exits 4.
+    let plan_c = scratch("plan-c.json");
+    std::fs::write(
+        &plan_c,
+        serde_json::to_vec(&serde_json::json!({
+            "doc_id": doc_id,
+            "agent": "rival-editor",
+            "ops": [{"op": "patch", "id": total_id, "text": "Total: $999"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let conflict_out = scratch("apply-conflict.pdf");
+    let _ = std::fs::remove_file(&conflict_out);
+    let conflict = nupdf(&[
+        "apply",
+        file.to_str().unwrap(),
+        "--plan",
+        plan_b.to_str().unwrap(),
+        "--plan",
+        plan_c.to_str().unwrap(),
+        "-o",
+        conflict_out.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        conflict.status.code(),
+        Some(4),
+        "stderr={}",
+        String::from_utf8_lossy(&conflict.stderr)
+    );
+    assert!(!conflict_out.exists());
+}
+
+#[test]
+fn query_extracts_spatial_values_and_aggregates_across_directory() {
+    let dir = scratch("query-corpus");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, amt) in [("inv1.pdf", "$120.00"), ("inv2.pdf", "$180.00")] {
+        let content = format!(
+            "BT /F1 12 Tf 20 200 Td (Total Due) Tj ET\nBT /F1 12 Tf 140 200 Td ({amt}) Tj ET\n"
+        );
+        let stream = format!("<</Length {}>>\nstream\n{content}endstream", content.len());
+        let pdf = pdf_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+            &stream,
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        ]);
+        std::fs::write(dir.join(name), pdf).unwrap();
+    }
+
+    let one = report_of(&[
+        "query",
+        dir.join("inv1.pdf").to_str().unwrap(),
+        "--right-of",
+        "Total Due",
+        "--nearest-only",
+    ]);
+    assert_eq!(one["schema"], "nupdf.query/v1");
+    assert_eq!(one["aggregation"]["sum"], 120.0, "{one}");
+
+    let corpus = report_of(&[
+        "query",
+        dir.to_str().unwrap(),
+        "--right-of",
+        "Total Due",
+        "--nearest-only",
+        "--summary-only",
+    ]);
+    assert_eq!(corpus["schema"], "nupdf.query/v1");
+    assert_eq!(corpus["file_count"], 2, "{corpus}");
+    assert_eq!(corpus["aggregation"]["sum"], 300.0, "{corpus}");
+}
+
+#[test]
+fn audit_verifies_claims_relocates_pages_flags_hazards_and_enforces_strict() {
+    let p1 = b"BT /F1 12 Tf 20 250 Td (Introductory summary.) Tj ET\n";
+    let p2 = b"BT /F1 12 Tf 20 250 Td (Liability capped at $500) Tj ET\n\
+BT /F1 7 Tf 147 254 Td (*) Tj ET\n\
+BT /F1 12 Tf 20 200 Td (Old warranty applies) Tj ET\n\
+0 0 0 RG 1.5 w 18 204 m 140 204 l S\n\
+BT /F1 9 Tf 20 30 Td (* Excludes gross negligence.) Tj ET\n";
+    let s1 = format!(
+        "<</Length {}>>\nstream\n{}endstream",
+        p1.len(),
+        std::str::from_utf8(p1).unwrap()
+    );
+    let s2 = format!(
+        "<</Length {}>>\nstream\n{}endstream",
+        p2.len(),
+        std::str::from_utf8(p2).unwrap()
+    );
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 5 0 R/Resources<</Font<</F1 7 0 R>>>>>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 6 0 R/Resources<</Font<</F1 7 0 R>>>>>>",
+        &s1,
+        &s2,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("audit-in.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let claims = scratch("audit-claims.json");
+    std::fs::write(
+        &claims,
+        serde_json::to_vec(&serde_json::json!([
+            {"claim_id": "c1", "page": 1, "quote": "Liability capped at $500"},
+            {"claim_id": "c2", "page": 2, "quote": "Liability capped at $500"},
+            {"claim_id": "c3", "page": 2, "quote": "Old warranty applies"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let ev_dir = scratch("audit-ev");
+    let _ = std::fs::remove_dir_all(&ev_dir);
+    let report = report_of(&[
+        "audit",
+        file.to_str().unwrap(),
+        "--claims",
+        claims.to_str().unwrap(),
+        "--evidence-dir",
+        ev_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(report["schema"], "nupdf.audit/v1");
+    let results = report["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "wrong_location", "{report}");
+    assert!(
+        results[0]["found_elsewhere"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|loc| loc.as_str().unwrap_or_default().starts_with("p2.")),
+        "{report}"
+    );
+    assert_eq!(results[1]["status"], "verified_with_hazards", "{report}");
+    assert!(
+        results[1]["hazards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h == "hazard.unreferenced_footnote"),
+        "expected footnote hazard: {report}"
+    );
+    assert_eq!(results[2]["status"], "verified_with_hazards", "{report}");
+    assert!(
+        results[2]["hazards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h == "hazard.struck_through"),
+        "expected strikethrough hazard: {report}"
+    );
+
+    let strict = nupdf(&[
+        "audit",
+        file.to_str().unwrap(),
+        "--claims",
+        claims.to_str().unwrap(),
+        "--strict",
+    ]);
+    assert_eq!(strict.status.code(), Some(4));
+}
+
+#[test]
+fn mcp_exposes_all_five_agent_primitives() {
+    let mut mcp = Mcp::start();
+    mcp.send(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"}
+        }
+    }));
+    let _ = mcp.next();
+    mcp.send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
+    let tools = mcp.next()["result"]["tools"].clone();
+    let names: Vec<&str> = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for expected in ["attest", "patch", "apply", "query", "audit"] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected} in MCP tools: {names:?}"
+        );
+    }
+    let minimal = smoke("minimal.pdf");
+    let res = mcp.call(
+        3,
+        "attest",
+        serde_json::json!({"file": minimal.to_str().unwrap()}),
+    );
+    assert_eq!(
+        res["structuredContent"]["schema"], "nupdf.attest/v1",
+        "{res}"
+    );
+    mcp.close();
+}

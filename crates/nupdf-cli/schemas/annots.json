@@ -80,6 +80,38 @@
                     "null"
                   ]
                 },
+                "file": {
+                  "type": "object",
+                  "properties": {
+                    "embedded": {
+                      "type": "boolean"
+                    },
+                    "filename": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "mimetype": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "size": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "embedded",
+                    "filename",
+                    "mimetype",
+                    "size"
+                  ]
+                },
                 "flags": {
                   "type": "integer"
                 },

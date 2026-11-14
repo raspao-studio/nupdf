@@ -1,0 +1,74 @@
+{
+  "exp1_attest": {
+    "latency_ms": 7.05,
+    "rivals_fooled_by_z_order_occlusion": {
+      "pypdf": true,
+      "pdfplumber": true,
+      "PyMuPDF": true,
+      "pypdfium2": true,
+      "mutool": true
+    },
+    "rivals_detected_vector_strikethrough": {
+      "pypdf": false,
+      "pdfplumber": false,
+      "PyMuPDF": false
+    },
+    "rivals_detected_actualtext_spoof": {
+      "pypdf": false,
+      "pdfplumber": false,
+      "PyMuPDF": false
+    },
+    "nupdf_attest": {
+      "detected_vector_strikethrough": true,
+      "detected_z_order_occlusion": true,
+      "detected_actualtext_spoof": true,
+      "blind_spot_crops_emitted": 1,
+      "all_passed": true
+    }
+  },
+  "exp2_patch": {
+    "valid_patch_ms": 4.8,
+    "independent_grader_verified": true,
+    "collision_trap_exit_code": 4,
+    "collision_trap_prevented_corrupt_file": true,
+    "pymupdf_silent_corruption_or_truncation": true
+  },
+  "exp3_multi_agent_apply": {
+    "atomic_3_agent_commit_ms": 6.47,
+    "independent_graders_passed": true,
+    "conflict_trap_exit_code": 4,
+    "conflict_prevented_write": true
+  },
+  "exp4_spatial_query_100_receipts": {
+    "receipt_count": 100,
+    "expected_sum": 7897.5,
+    "nupdf_query_sum": 7897.5,
+    "exact_match": true,
+    "output_bytes": {
+      "nupdf_batch_extract_json": 302961,
+      "nupdf_query_summary": 236,
+      "token_reduction_ratio": 1283.7
+    },
+    "wall_time_ms": {
+      "nupdf_query_cli": 11.72,
+      "pymupdf_in_python": 75.99,
+      "pdfplumber_in_python": 115.45
+    }
+  },
+  "exp5_audit_claims": {
+    "audit_5_claims_ms": 7.93,
+    "llm_tokens_spent": 0,
+    "statuses": {
+      "c1_clean": "verified",
+      "c2_wrong_page": "wrong_location",
+      "c3_hallucinated": "mismatch",
+      "c4_footnote_trap": "verified_with_hazards",
+      "c5_strikethrough_trap": "verified_with_hazards"
+    },
+    "footnote_recovered": "1 Excluding consumable batteries and user-modified hardware.",
+    "relocated_wrong_page_to": [
+      "p3.b1.l1.s1"
+    ],
+    "evidence_cards_rendered": 4
+  }
+}

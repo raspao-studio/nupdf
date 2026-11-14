@@ -16,6 +16,7 @@ mod md5;
 mod navigation;
 mod objects;
 mod ocr;
+mod primitives;
 mod redact;
 mod render;
 mod schemas;
@@ -691,6 +692,153 @@ enum Command {
         /// Most differences reported of each kind; past it, `truncated`.
         #[arg(long, default_value_t = 500)]
         max_items: usize,
+    },
+    /// Attest each page's perceptual truth against its stream text: pixel
+    /// contrast against a text-free render, vector strikethrough, underline
+    /// and box markup, ActualText mismatches, unmapped glyphs, and PNG crops
+    /// of unexplained graphic blind spots.
+    Attest {
+        file: PathBuf,
+        /// Pages to attest, in MuPDF's syntax (`1-3,7`, `N` for the last).
+        #[arg(long)]
+        pages: Option<String>,
+        /// Resolution in dots per inch for contrast and blind-spot renders.
+        #[arg(long, default_value_t = 72.0)]
+        dpi: f32,
+        /// Minimum RGB channel difference (0..=255) against the text-free
+        /// background for a span to count as perceptually visible.
+        #[arg(long, default_value_t = 12)]
+        contrast_threshold: u8,
+        /// Write PNG crops of unexplained blind spots into this directory.
+        #[arg(long, value_name = "DIR")]
+        crops_dir: Option<PathBuf>,
+        /// Work on this many threads, a page per thread at a time.
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
+    },
+    /// Surgically replace text in spans or lines by content id (`p1.b2.l1.s1=NEW`),
+    /// preserving baseline position, size, style and color, and verify before
+    /// writing that neighbours were not collided with or pages overflowed.
+    Patch {
+        file: PathBuf,
+        /// Replacement as `ID=TEXT` (repeatable; empty TEXT deletes the span).
+        #[arg(long = "replace", value_name = "ID=TEXT")]
+        replace: Vec<String>,
+        /// Fail with exit 4 if a font fallback is needed for the new text.
+        #[arg(long)]
+        strict_font: bool,
+        /// Allow replacement text to overlap neighbouring spans on the page.
+        #[arg(long)]
+        no_collision_check: bool,
+        /// Allow replacement text to extend past the page's bounds.
+        #[arg(long)]
+        no_overflow_check: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Execute one or more declarative JSON edit plans anchored to the base
+    /// `doc_id`, checking cross-agent semantic and spatial conflicts before
+    /// committing and verifying the combined output atomically.
+    Apply {
+        file: PathBuf,
+        /// A JSON edit plan file (repeatable).
+        #[arg(long = "plan", value_name = "FILE")]
+        plan: Vec<PathBuf>,
+        /// An inline JSON edit plan string (repeatable).
+        #[arg(long = "inline", value_name = "JSON")]
+        inline: Vec<String>,
+        /// Disallow font fallback on `patch` operations in the plan.
+        #[arg(long)]
+        strict_font: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Query spans and form widgets by spatial relation (`--right-of`,
+    /// `--below`, `--inside`, `--near-widget`), style and regex, and aggregate
+    /// numeric values across a single PDF or an entire directory of PDFs.
+    Query {
+        /// A PDF file, directory of PDFs, or glob pattern.
+        file: PathBuf,
+        /// Pages to search, in MuPDF's syntax (`1-3,7`, `N` for the last).
+        #[arg(long)]
+        pages: Option<String>,
+        /// Match spans to the right of anchor text or content id on the same row.
+        #[arg(long)]
+        right_of: Option<String>,
+        /// Match spans to the left of anchor text or content id on the same row.
+        #[arg(long)]
+        left_of: Option<String>,
+        /// Match spans in the column below anchor text or content id.
+        #[arg(long)]
+        below: Option<String>,
+        /// Match spans in the column above anchor text or content id.
+        #[arg(long)]
+        above: Option<String>,
+        /// Match spans inside `[pN:]x0,y0,x1,y1` in page space.
+        #[arg(long)]
+        inside: Option<String>,
+        /// Match widgets near a label text/id, or spans near a widget field name.
+        #[arg(long)]
+        near_widget: Option<String>,
+        /// Regular expression filter on matched span text.
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Require bold text.
+        #[arg(long, conflicts_with = "no_bold")]
+        bold: bool,
+        /// Require non-bold text.
+        #[arg(long)]
+        no_bold: bool,
+        /// Require italic text.
+        #[arg(long, conflicts_with = "no_italic")]
+        italic: bool,
+        /// Require non-italic text.
+        #[arg(long)]
+        no_italic: bool,
+        /// Minimum font size in points.
+        #[arg(long)]
+        min_size: Option<f32>,
+        /// Maximum font size in points.
+        #[arg(long)]
+        max_size: Option<f32>,
+        /// Exact hex color filter (`#rrggbb`).
+        #[arg(long)]
+        color: Option<String>,
+        /// Keep only the closest spatial match for each anchor occurrence.
+        #[arg(long)]
+        nearest_only: bool,
+        /// Cap the number of matched items returned.
+        #[arg(long)]
+        max_items: Option<usize>,
+        /// Omit per-item `matches` and raw `values`, returning only the compact
+        /// numeric summary (`count`, `sum`, `min`, `max`, `mean`).
+        #[arg(long)]
+        summary_only: bool,
+    },
+    /// Deterministically verify quotes and citations against a PDF with zero
+    /// model tokens: checks `doc_id`, content ids, pages, epistemic hazards
+    /// (strikethroughs, omitted footnotes, ActualText spoofs, invisible text,
+    /// post-signature edits), and renders highlighted PNG evidence cards.
+    Audit {
+        file: PathBuf,
+        /// JSON file containing an array of claims or `{"claims": [...]}`.
+        #[arg(long, value_name = "FILE")]
+        claims: Option<PathBuf>,
+        /// Inline JSON claim object (repeatable).
+        #[arg(long = "claim", value_name = "JSON")]
+        claim: Vec<String>,
+        /// Write highlighted PNG evidence crops into this directory.
+        #[arg(long, value_name = "DIR")]
+        evidence_dir: Option<PathBuf>,
+        /// Resolution in dots per inch for evidence crops.
+        #[arg(long, default_value_t = 108.0)]
+        dpi: f32,
+        /// Count `verified_with_hazards` claims as `verified: true`.
+        #[arg(long)]
+        allow_hazards: bool,
+        /// Exit 4 (`audit.failed`) if any claim is not `verified: true`.
+        #[arg(long)]
+        strict: bool,
     },
     /// Run a command on many files: each as `nupdf <command> <file> ...`,
     /// several at once, a JSON line per file in the order given, then the
@@ -1667,6 +1815,126 @@ fn run(cli: Cli) -> ExitCode {
                 out.insert("diagnostics".into(), diags.into());
                 serde_json::Value::Object(out)
             }),
+        Command::Attest {
+            file,
+            pages,
+            dpi,
+            contrast_threshold,
+            crops_dir,
+            threads,
+        } => open(file).and_then(|(doc, facts)| {
+            primitives::attest_cmd(
+                &doc,
+                &facts,
+                pages.as_deref(),
+                *dpi,
+                *contrast_threshold,
+                crops_dir.as_deref(),
+                *threads,
+            )
+        }),
+        Command::Patch {
+            file,
+            replace,
+            strict_font,
+            no_collision_check,
+            no_overflow_check,
+            write,
+        } => open(file).and_then(|(doc, facts)| {
+            primitives::patch_cmd(
+                &doc,
+                &facts,
+                replace,
+                *strict_font,
+                *no_collision_check,
+                *no_overflow_check,
+                write,
+                password,
+            )
+        }),
+        Command::Apply {
+            file,
+            plan,
+            inline,
+            strict_font,
+            write,
+        } => open(file).and_then(|(doc, facts)| {
+            primitives::apply_cmd(&doc, &facts, plan, inline, *strict_font, write, password)
+        }),
+        Command::Query {
+            file,
+            pages,
+            right_of,
+            left_of,
+            below,
+            above,
+            inside,
+            near_widget,
+            pattern,
+            bold,
+            no_bold,
+            italic,
+            no_italic,
+            min_size,
+            max_size,
+            color,
+            nearest_only,
+            max_items,
+            summary_only,
+        } => {
+            let qargs = primitives::QueryArgs {
+                pages: pages.as_deref(),
+                right_of: right_of.as_deref(),
+                left_of: left_of.as_deref(),
+                below: below.as_deref(),
+                above: above.as_deref(),
+                inside: inside.as_deref(),
+                near_widget: near_widget.as_deref(),
+                pattern: pattern.as_deref(),
+                bold: if *bold {
+                    Some(true)
+                } else if *no_bold {
+                    Some(false)
+                } else {
+                    None
+                },
+                italic: if *italic {
+                    Some(true)
+                } else if *no_italic {
+                    Some(false)
+                } else {
+                    None
+                },
+                min_size: *min_size,
+                max_size: *max_size,
+                color: color.as_deref(),
+                nearest_only: *nearest_only,
+                max_items: *max_items,
+                summary_only: *summary_only,
+            };
+            primitives::query_cmd(file, &qargs, &open)
+        }
+        Command::Audit {
+            file,
+            claims,
+            claim,
+            evidence_dir,
+            dpi,
+            allow_hazards,
+            strict,
+        } => open(file).and_then(|(doc, facts)| {
+            primitives::audit_cmd(
+                &doc,
+                &facts,
+                claims.as_deref(),
+                claim,
+                evidence_dir.as_deref(),
+                *dpi,
+                *allow_hazards,
+                *strict,
+                cli.pretty,
+            )
+        }),
         Command::Batch {
             inputs,
             jobs,

@@ -242,6 +242,63 @@ fn overrides(name: &str) -> BTreeMap<String, Value> {
             ("/structure/differences/[]/a", json!({})),
             ("/structure/differences/[]/b", json!({})),
         ],
+        "attest" => vec![
+            (
+                "/pages/[]/spans/[]/glyph_text",
+                json!({"type": ["string", "null"]}),
+            ),
+            (
+                "/pages/[]/blind_spots/[]/crop_file",
+                json!({"type": ["string", "null"]}),
+            ),
+        ],
+        "patch" => vec![(
+            "/patches/[]/new_bbox",
+            json!({"type": ["array", "null"], "items": {"type": "number"}}),
+        )],
+        "apply" => vec![
+            (
+                "/pages_kept",
+                json!({"type": ["array", "null"], "items": {"type": "integer"}}),
+            ),
+            ("/rotated", json!({"type": ["integer", "null"]})),
+            ("/redact_verified", json!({"type": ["boolean", "null"]})),
+        ],
+        "query" => vec![
+            ("/doc_id", json!({"type": ["string", "null"]})),
+            ("/matches/[]/file", json!({"type": ["string", "null"]})),
+            ("/matches/[]/number", json!({"type": ["number", "null"]})),
+            ("/matches/[]/anchor_id", json!({"type": ["string", "null"]})),
+            ("/matches/[]/distance", json!({"type": ["number", "null"]})),
+            ("/aggregation/sum", json!({"type": ["number", "null"]})),
+            ("/aggregation/min", json!({"type": ["number", "null"]})),
+            ("/aggregation/max", json!({"type": ["number", "null"]})),
+            ("/aggregation/mean", json!({"type": ["number", "null"]})),
+        ],
+        "audit" => vec![
+            ("/results/[]/claim_id", json!({"type": ["string", "null"]})),
+            ("/results/[]/cited_id", json!({"type": ["string", "null"]})),
+            (
+                "/results/[]/resolved_page",
+                json!({"type": ["integer", "null"]}),
+            ),
+            (
+                "/results/[]/resolved_bbox",
+                json!({"type": ["array", "null"], "items": {"type": "number"}}),
+            ),
+            (
+                "/results/[]/actual_text",
+                json!({"type": ["string", "null"]}),
+            ),
+            (
+                "/results/[]/footnote_text",
+                json!({"type": ["string", "null"]}),
+            ),
+            (
+                "/results/[]/evidence_file",
+                json!({"type": ["string", "null"]}),
+            ),
+        ],
         _ => vec![],
     };
     pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
@@ -377,6 +434,66 @@ fn runs(file: &str, work: &Path) -> Vec<Vec<String>> {
         "-o".into(),
         w("split"),
         "--dry-run".into(),
+    ]);
+    out.push(vec![
+        "attest".into(),
+        file.into(),
+        "--dpi".into(),
+        "36".into(),
+        "--crops-dir".into(),
+        w("attest_crops"),
+    ]);
+    out.push(vec![
+        "patch".into(),
+        file.into(),
+        "--replace".into(),
+        "p1.b1.l1.s1=x".into(),
+        "-o".into(),
+        w("patched.pdf"),
+    ]);
+    out.push(vec![
+        "patch".into(),
+        file.into(),
+        "--replace".into(),
+        "p1.b1.l1.s1=x".into(),
+        "--dry-run".into(),
+        "--no-verify".into(),
+    ]);
+    out.push(vec![
+        "apply".into(),
+        file.into(),
+        "--inline".into(),
+        r#"{"ops":[{"op":"meta","set":{"Title":"x"}}]}"#.into(),
+        "--dry-run".into(),
+    ]);
+    out.push(vec![
+        "apply".into(),
+        file.into(),
+        "--inline".into(),
+        r#"{"ops":[{"op":"patch","id":"p1.b1.l1.s1","text":"x"},{"op":"pages","rotate":90}]}"#
+            .into(),
+        "-o".into(),
+        w("applied.pdf"),
+    ]);
+    out.push(vec!["query".into(), file.into()]);
+    out.push(vec![
+        "query".into(),
+        file.into(),
+        "--right-of".into(),
+        "e".into(),
+        "--nearest-only".into(),
+    ]);
+    out.push(vec![
+        "audit".into(),
+        file.into(),
+        "--claim".into(),
+        r#"{"claim_id":"c1","page":1,"quote":"e"}"#.into(),
+        "--claim".into(),
+        r#"{"id":"p1.b1.l1.s1","quote":"not-present-quote"}"#.into(),
+        "--evidence-dir".into(),
+        w("audit_ev"),
+        "--dpi".into(),
+        "36".into(),
     ]);
     out
 }
