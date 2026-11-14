@@ -1968,14 +1968,20 @@ fn a_long_document_reads_the_same_with_and_without_threads_asked_for() {
             }
         }
     }
-    // With a budget the pages still run one after another, stopping at
-    // it, and say the same as threads do, but for the warnings of pages
-    // only threads got to.
+    // With a budget, extract still runs the pages one after another and
+    // search runs them a window at a time, each stopping at it; they say
+    // the same as threads do, but for the warnings of pages only threads
+    // got to. The needles are on the first pages, far in, on the last
+    // page alone, and nowhere.
     let file = text.to_str().unwrap();
     for command in [
         &["extract", "--max-chars", "40"][..],
         &["extract", "--max-items", "3"],
         &["search", "alpha", "--max-items", "2"],
+        &["search", "Page 3", "--max-items", "4"],
+        &["search", "Page 40", "--max-items", "1"],
+        &["search", "Page 4", "--max-items", "11"],
+        &["search", "gamma", "--max-items", "1"],
     ] {
         let run = |threads: &[&str]| {
             let out = nupdf(&[&[command[0], file], &command[1..], threads].concat());
@@ -1983,7 +1989,19 @@ fn a_long_document_reads_the_same_with_and_without_threads_asked_for() {
             serde_json::from_slice::<Value>(&out.stdout).unwrap()
         };
         let (mut unasked, mut threaded) = (run(&[]), run(&["--threads", "8"]));
-        assert_eq!(unasked["truncated"], true, "{command:?}");
+        // "Page 3" is on pages 3 and 30 to 39: 11 hits, capped at 4.
+        // "Page 4" is on pages 4 and 40: 2 hits, under the cap of 11.
+        let capped = !matches!(command[1], "Page 40" | "Page 4" | "gamma");
+        assert_eq!(unasked["truncated"], capped, "{command:?}");
+        if command[1] == "Page 3" {
+            let pages: Vec<_> = unasked["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| &h["page"])
+                .collect();
+            assert_eq!(pages, [3, 30, 31, 32], "{command:?}");
+        }
         for report in [&mut unasked, &mut threaded] {
             report.as_object_mut().unwrap().remove("diagnostics");
         }
