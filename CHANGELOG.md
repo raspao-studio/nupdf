@@ -2,6 +2,12 @@
 
 The crates `nupdf` (the library) and `nupdf-cli` (the `nupdf` command) share a version. Report schemas are versioned on their own ([SCHEMA-CHANGELOG](docs/SCHEMA-CHANGELOG.md)). Until 1.0, only the latest release gets fixes ([SECURITY](SECURITY.md)).
 
+## Unreleased
+
+- **A predefined CMap is decoded when a font first asks for it**, not all 71 at the first font that uses one: about 6 ms off every call that reads text or draws a page of a document with such a font, most of what a call on a small file took.
+- **`merge` writes a page's links onto it once**: a page of thousands of links cost the square of them. Merging `long-008.pdf` with itself goes from 2.95 s to 0.49 s.
+- **`batch` writes each file's line in one write**, where the output got a write for every token of its JSON: on 400 small files, 0.91 s to 0.53 s.
+
 ## 0.1.1
 
 No change to the engine or to any report: this release adds ways to get the `nupdf` command without building it.
