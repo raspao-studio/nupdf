@@ -49,6 +49,10 @@ struct Cli {
     /// Largest cross-reference table a document may have, in object slots.
     #[arg(long, global = true, default_value_t = nupdf::Limits::default().max_xref_entries)]
     max_xref_entries: usize,
+    /// Most glyphs a page may show; a page that shows more fails with a
+    /// limit error.
+    #[arg(long, global = true, default_value_t = nupdf::Limits::default().max_page_glyphs)]
+    max_page_glyphs: usize,
     /// Password for an encrypted document (user or owner).
     #[arg(long, global = true)]
     password: Option<String>,
@@ -937,6 +941,7 @@ fn run(cli: Cli) -> ExitCode {
     let limits = nupdf::Limits {
         max_decoded_bytes: cli.max_decoded_bytes,
         max_xref_entries: cli.max_xref_entries,
+        max_page_glyphs: cli.max_page_glyphs,
         ..nupdf::Limits::default()
     };
     let password = cli.password.as_deref();

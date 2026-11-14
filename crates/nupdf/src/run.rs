@@ -1417,6 +1417,21 @@ impl<'a> Run<'a> {
         }
     }
 
+    /// One more glyph for this page to show, unless it has shown as many
+    /// as a page may (`Limits::max_page_glyphs`): then the page ends here,
+    /// with an error that is not a syntax error to read on from.
+    fn count_glyph(&mut self) -> Result<(), String> {
+        let limit = self.doc.limits().max_page_glyphs;
+        let shown = &mut self.state.store.page_glyphs;
+        if *shown < limit {
+            *shown += 1;
+            return Ok(());
+        }
+        let message = format!("page shows more than {limit} glyphs (--max-page-glyphs)");
+        self.warn("limit.page_glyphs", message.clone());
+        Err(format!("limit error: {message}"))
+    }
+
     /// `show_string`.
     fn show_codes(&mut self, fd: &Arc<FontDesc>, s: &[u8]) -> Result<(), String> {
         let lang = self.lang_from_marked_content();
@@ -1428,6 +1443,7 @@ impl<'a> Run<'a> {
             at += w.max(1);
             let cid = fd.encoding.lookup(cpt);
             if cid >= 0 {
+                self.count_glyph()?;
                 self.show_char(fd, cid, lang)?;
             } else {
                 self.warn("run.encode_character", "cannot encode character");
@@ -4107,6 +4123,9 @@ pub fn run_page_contents_with(
     user: Matrix,
 ) -> PageRun {
     let mut store = Some(store);
+    if let Some(store) = &mut store {
+        store.page_glyphs = 0;
+    }
     let error = run_page_imp(doc, page, dev, &mut store, usage, user).err();
     PageRun {
         error,

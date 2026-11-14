@@ -128,11 +128,13 @@ impl Collector {
     }
 }
 
-fn page_text(doc: &Document, index: i32, opts: &str) -> Option<crate::stext::StextPage> {
-    let opts = Options::parse(opts).ok()?;
-    crate::parallel::sequential(doc, &[index], opts)
-        .next()?
-        .ok()
+/// The page's text, or why it cannot be read.
+fn page_text(doc: &Document, index: i32, opts: &str) -> Result<crate::stext::StextPage, String> {
+    let opts = Options::parse(opts)?;
+    match crate::parallel::sequential(doc, &[index], opts).next() {
+        Some(page) => page,
+        None => Err("no such page".into()),
+    }
 }
 
 fn count_hits(page: &crate::stext::StextPage, needles: &[(String, u32)]) -> Vec<usize> {
@@ -159,18 +161,38 @@ pub fn verify(doc: &Document, t: &Targets) -> Verification {
     let count = doc.page_count().unwrap_or(0);
     let mut hits_after = vec![0usize; t.needles.len()];
     for i in 0..count {
-        // One page's text at a time: each is dropped before the next.
-        let Some(with_hidden) =
-            page_text(doc, i, "clip=no,all-layers").map(|all| count_hits(&all, &t.needles))
-        else {
+        // A page the tree counts and does not have shows nothing.
+        if doc.page(i).is_err() {
             continue;
-        };
+        }
+        // One page's text at a time: each is dropped before the next.
+        let with_hidden =
+            match page_text(doc, i, "clip=no,all-layers").map(|all| count_hits(&all, &t.needles)) {
+                Ok(counts) => counts,
+                Err(e) => {
+                    // A page that is there and was not searched is not a
+                    // clean page: a viewer may show what its run stopped
+                    // short of.
+                    if !t.needles.is_empty() {
+                        c.push(Finding {
+                            class: Class::ContentText,
+                            page: Some(i + 1),
+                            object: None,
+                            detail: format!(
+                                "the page's text was not searched: {}",
+                                crate::diag::report::strip(&e)
+                            ),
+                        });
+                    }
+                    continue;
+                }
+            };
         if with_hidden.iter().all(|&n| n == 0) {
             continue;
         }
         let visible = page_text(doc, i, "clip=no")
             .map(|p| count_hits(&p, &t.needles))
-            .unwrap_or_else(|| vec![0; t.needles.len()]);
+            .unwrap_or_else(|_| vec![0; t.needles.len()]);
         for (k, (needle, _)) in t.needles.iter().enumerate() {
             hits_after[k] += with_hidden[k];
             if visible[k] > 0 {
@@ -699,6 +721,52 @@ mod tests {
         let doc = page_doc(format!("BT 3 Tr /F1 12 Tf 72 700 Td ({SECRET}) Tj ET").as_bytes());
         assert_eq!(classes(&doc), [Class::ContentText]);
         assert_eq!(verify(&doc, &targets()).hits_after, [1]);
+    }
+
+    #[test]
+    fn a_page_that_cannot_be_read_is_not_a_clean_page() {
+        // A page over its glyph limit is not searched, so it is not known
+        // to be clean: a viewer without the limit shows the secret.
+        let content = format!("BT /F1 12 Tf 72 700 Td (padding padding) Tj ({SECRET}) Tj ET");
+        let pdf = crate::draw::testkit::pdf_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R\
+             /Resources<</Font<</F1 5 0 R>>>>>>",
+            &crate::draw::testkit::stream("", &content),
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        ]);
+        let open = |limit: usize| {
+            let limits = crate::Limits {
+                max_page_glyphs: limit,
+                ..Default::default()
+            };
+            Document::open_with(pdf.clone(), limits).unwrap_or_else(|e| panic!("{e:?}"))
+        };
+        let v = verify(&open(10), &targets());
+        assert!(!v.verified());
+        assert_eq!(v.hits_after, [0]);
+        let found: Vec<_> = v.findings.iter().map(|f| (f.class, f.page)).collect();
+        assert_eq!(found, [(Class::ContentText, Some(1))]);
+        assert_eq!(
+            v.findings[0].detail,
+            "the page's text was not searched: page shows more than 10 glyphs (--max-page-glyphs)"
+        );
+        // A page the tree only counts is no finding: there is none.
+        let short = Document::open(
+            &b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 3>>endobj\n\
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 10 10]>>endobj\n\
+trailer<</Root 1 0 R/Size 4>>\n"[..],
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(short.page_count().ok(), Some(3));
+        assert!(short.page(2).is_err());
+        assert!(verify(&short, &targets()).verified());
+        // Read whole, the secret is found as a hit.
+        let v = verify(&open(1000), &targets());
+        assert_eq!(v.hits_after, [1]);
+        assert!(v.findings[0].detail.contains("hits of"));
     }
 
     #[test]

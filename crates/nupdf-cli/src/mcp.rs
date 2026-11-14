@@ -567,6 +567,8 @@ mod tests {
         );
         assert_eq!(props["pretty"], Value::Null);
         assert!(props["password"].is_object() && props["timeout"].is_object());
+        // The limits are every tool's.
+        assert!(props["max_page_glyphs"].is_object() && props["max_decoded_bytes"].is_object());
         assert_eq!(extract["inputSchema"]["required"], json!(["file"]));
     }
 

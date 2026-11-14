@@ -2622,6 +2622,68 @@ fn a_command_out_of_time_writes_nothing() {
 }
 
 #[test]
+fn a_page_over_its_glyph_limit_fails_alone_and_is_never_called_clean() {
+    let file = smoke("stext.pdf");
+    let file = file.to_str().unwrap();
+    // Within the limit every command reads the file as without one.
+    for command in ["extract", "stext", "trace"] {
+        let plain = nupdf(&[command, file]);
+        let roomy = nupdf(&[command, file, "--max-page-glyphs", "100000"]);
+        assert!(plain.status.success());
+        assert_eq!(plain.stdout, roomy.stdout, "{command}");
+    }
+    // Over it, a page is its error; the command and the other pages go on.
+    let report = run_json(&["extract", file, "--max-page-glyphs", "3"]);
+    let error = "page shows more than 3 glyphs (--max-page-glyphs)";
+    assert_eq!(report["page_count"], 2);
+    for page in report["pages"].as_array().unwrap() {
+        assert_eq!(page["error"], error);
+    }
+    assert_eq!(report["diagnostics"][0]["code"], "limit.page_glyphs");
+    assert_eq!(report["diagnostics"][0]["message"], error);
+    let text = nupdf(&[
+        "extract",
+        file,
+        "--format",
+        "text",
+        "--max-page-glyphs",
+        "3",
+    ]);
+    assert!(text.status.success());
+    // `verify` has not searched such a page, and says so with exit 4.
+    let out = nupdf(&["verify", file, "--text", "zebra", "--max-page-glyphs", "3"]);
+    assert_eq!(out.status.code(), Some(4));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["verified"], false);
+    let finding = &report["verification"]["classes"]["content_text"]["findings"][0];
+    assert_eq!(finding["page"], 1);
+    assert_eq!(
+        finding["detail"],
+        format!("the page's text was not searched: {error}")
+    );
+    let clean = nupdf(&["verify", file, "--text", "zebra"]);
+    assert_eq!(clean.status.code(), Some(0));
+    // `redact` cannot find its targets on such a page, and writes nothing.
+    let written = scratch("glyph-limit-redacted.pdf");
+    let _ = std::fs::remove_file(&written);
+    let out = nupdf(&[
+        "redact",
+        file,
+        "--text",
+        "zebra",
+        "--max-page-glyphs",
+        "3",
+        "-o",
+        written.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "input.redaction");
+    assert_eq!(err["error"]["message"], error);
+    assert!(!written.exists());
+}
+
+#[test]
 fn a_report_written_as_it_is_made_is_not_written_out_of_time() {
     let heavy = heavy_pdf("timeout-streamed.pdf", 2_000);
     let heavy = heavy.to_str().unwrap();

@@ -51,6 +51,12 @@ for _ in range(100):
 files["filter-chain"] = pdf(base(stream(d, b"/Filter [" + b"/FlateDecode " * 100 + b"] ")))
 # 7. A page whose content is ten million one-glyph text operators (60 MB of work, 40 KB on disk).
 files["many-ops"] = pdf(base(stream(zlib.compress(b"BT /F1 1 Tf " + b"(a) Tj " * 10_000_000 + b"ET", 9), b"/Filter /FlateDecode ")))
+# 8. A page of ten million stroked paths: nothing to read, and a display list entry each for whoever keeps one.
+files["many-paths"] = pdf(base(stream(zlib.compress(b"0 0 m 9 9 l S " * 10_000_000, 9), b"/Filter /FlateDecode ")))
+# 9. Ten million glyphs that stay on the page, each a line of its own: text nothing clips away.
+files["many-glyphs"] = pdf(base(stream(zlib.compress(b"BT /F1 9 Tf " + b"1 0 0 1 50 50 Tm (a) Tj 1 0 0 1 50 60 Tm (b) Tj " * 5_000_000 + b"ET", 9), b"/Filter /FlateDecode ")))
+# 10. One path of ten million segments.
+files["one-path"] = pdf(base(stream(zlib.compress(b"0 0 m " + b"9 9 l 3 5 l " * 5_000_000 + b"S", 9), b"/Filter /FlateDecode ")))
 for name, data in files.items():
     open(os.path.join(out, name + ".pdf"), "wb").write(data)
     print(name, len(data))
