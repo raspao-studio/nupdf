@@ -1,10 +1,11 @@
 name: release
 
-# Builds the `nupdf` binary for each platform, as an archive and as a Python
-# wheel (`nupdf-cli` on PyPI), and, for a version tag, attaches them and the
-# archives' checksums to that tag's GitHub release, creating it as a draft if it
-# is not there. Publishing the release stays a step done by hand
-# (docs/RELEASING.md); doing it sends the wheels to PyPI (publish.yml). Run by hand from the Actions tab, or on a pull request
+# Builds the `nupdf` binary for each platform, as an archive, as a Python wheel
+# (`nupdf-cli` on PyPI) and as npm packages (`nupdf`, with one `@nupdf/...`
+# package per platform), and, for a version tag, attaches them and the archives'
+# checksums to that tag's GitHub release, creating it as a draft if it is not
+# there. Publishing the release stays a step done by hand (docs/RELEASING.md);
+# doing it sends the wheels to PyPI and the packages to npm (publish.yml). Run by hand from the Actions tab, or on a pull request
 # that changes this file, it builds without releasing: the archives are then
 # only the run's artifacts.
 
@@ -13,7 +14,7 @@ on:
     tags: ["v[0-9]*"]
   # A change to this file builds every platform, without releasing anything.
   pull_request:
-    paths: [.github/workflows/release.yml, crates/nupdf-cli/pyproject.toml]
+    paths: [.github/workflows/release.yml, crates/nupdf-cli/pyproject.toml, "npm/**"]
   workflow_dispatch:
 
 permissions:
@@ -60,6 +61,12 @@ jobs:
           "$bin" --version
           "$bin" info corpus/smoke/minimal.pdf
           "$bin" extract corpus/smoke/minimal.pdf --format text
+      - name: Install it from its npm packages and run it
+        if: matrix.run
+        shell: bash
+        run: |
+          ext=""; [[ "${{ matrix.target }}" == *windows* ]] && ext=".exe"
+          NUPDF_BIN="target/${{ matrix.target }}/release/nupdf$ext" node --test npm/test.mjs
       - name: Make the archive
         id: archive
         shell: bash
@@ -148,10 +155,49 @@ jobs:
           path: wheels/*.whl
           if-no-files-found: error
 
+  # The npm packages, from the binaries in the archives above.
+  npm:
+    name: npm packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: archives
+          pattern: nupdf-*
+          merge-multiple: true
+      - name: Make and pack the packages
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          fi
+          cd archives
+          for f in *.tar.gz; do tar -xzf "$f"; done
+          for f in *.zip; do unzip -q "$f"; done
+          cd ..
+          args=()
+          for dir in archives/nupdf-"$version"-*/; do
+            target="$(basename "$dir")"; target="${target#nupdf-"$version"-}"
+            bin="$dir/nupdf"; [ -f "$bin.exe" ] && bin="$bin.exe"
+            args+=(--binary "$target=$bin")
+          done
+          node npm/build.mjs --version "$version" --out packages --all-targets "${args[@]}"
+          mkdir packed
+          for dir in packages/*/; do npm pack "$dir" --pack-destination packed; done
+          ls -l packed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: packed/*.tgz
+          if-no-files-found: error
+
   release:
     name: attach to the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, wheel]
+    needs: [build, wheel, npm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
