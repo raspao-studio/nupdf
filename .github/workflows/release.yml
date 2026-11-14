@@ -1,9 +1,10 @@
 name: release
 
-# Builds the `nupdf` binary for each platform and, for a version tag, attaches
-# the archives and their checksums to that tag's GitHub release, creating it as
-# a draft if it is not there. Publishing the release stays a step done by hand
-# (docs/RELEASING.md). Run by hand from the Actions tab, or on a pull request
+# Builds the `nupdf` binary for each platform, as an archive and as a Python
+# wheel (`nupdf-cli` on PyPI), and, for a version tag, attaches them and the
+# archives' checksums to that tag's GitHub release, creating it as a draft if it
+# is not there. Publishing the release stays a step done by hand
+# (docs/RELEASING.md); doing it sends the wheels to PyPI (publish.yml). Run by hand from the Actions tab, or on a pull request
 # that changes this file, it builds without releasing: the archives are then
 # only the run's artifacts.
 
@@ -12,7 +13,7 @@ on:
     tags: ["v[0-9]*"]
   # A change to this file builds every platform, without releasing anything.
   pull_request:
-    paths: [.github/workflows/release.yml]
+    paths: [.github/workflows/release.yml, crates/nupdf-cli/pyproject.toml]
   workflow_dispatch:
 
 permissions:
@@ -98,10 +99,59 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
 
+  # The same binary as a wheel, so `pip install nupdf-cli` needs no Rust. The
+  # Linux wheels are built in the manylinux and musllinux images, so they
+  # install on any glibc from 2.17 and any musl from 1.2.
+  wheel:
+    name: wheel ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, manylinux: auto, run: host }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, manylinux: auto, run: host }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, manylinux: musllinux_1_2, run: alpine }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm, manylinux: musllinux_1_2, run: alpine }
+          - { target: aarch64-apple-darwin, os: macos-latest, manylinux: auto, run: host }
+          - { target: x86_64-apple-darwin, os: macos-latest, manylinux: auto, run: no }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, manylinux: auto, run: host }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --manifest-path crates/nupdf-cli/Cargo.toml --out wheels
+      - name: Install the wheel and run it on a file
+        if: matrix.run == 'host'
+        shell: bash
+        run: |
+          python -m venv venv
+          if [ -d venv/Scripts ]; then bin=venv/Scripts; else bin=venv/bin; fi
+          "$bin/python" -m pip install --no-index --find-links wheels nupdf-cli
+          "$bin/nupdf" --version
+          "$bin/nupdf" extract corpus/smoke/minimal.pdf --format text
+      - name: Install the wheel and run it on a file, on Alpine
+        if: matrix.run == 'alpine'
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w python:3.12-alpine sh -c '
+            pip install --no-index --find-links wheels nupdf-cli &&
+            nupdf --version &&
+            nupdf extract corpus/smoke/minimal.pdf --format text'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: wheels/*.whl
+          if-no-files-found: error
+
   release:
     name: attach to the release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, wheel]
     runs-on: ubuntu-latest
     permissions:
       contents: write

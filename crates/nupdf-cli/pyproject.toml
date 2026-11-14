@@ -1,0 +1,28 @@
+# Packages the `nupdf` binary as a Python wheel, so `pip install nupdf-cli` and
+# `uvx nupdf-cli` work without a Rust toolchain. There is no Python code: the
+# wheel carries the binary and puts it on the PATH. The version, description,
+# licence and links come from Cargo.toml.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "nupdf-cli"
+dynamic = ["version", "description", "readme", "license", "authors", "keywords", "urls"]
+requires-python = ">=3.8"
+classifiers = [
+    "Environment :: Console",
+    "Programming Language :: Rust",
+    "Topic :: Text Processing",
+    "Topic :: Office/Business",
+]
+
+[project.urls]
+Homepage = "https://nupdf.dev/"
+Documentation = "https://nupdf.dev/docs/"
+Repository = "https://github.com/raspao-studio/nupdf"
+
+[tool.maturin]
+bindings = "bin"
+strip = true
+locked = true

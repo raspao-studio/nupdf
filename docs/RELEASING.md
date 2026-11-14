@@ -65,9 +65,9 @@ git tag -a v0.1.0 -m "nupdf 0.1.0"
 git push origin v0.1.0
 ```
 
-Pushing the tag starts the `release` workflow, which builds the `nupdf` binary for Linux (x86-64 and ARM, each for glibc 2.35 or newer and as a static musl binary), macOS (Apple silicon and Intel) and Windows (x86-64), runs each on a file where the runner can, and attaches the archives and their SHA-256 checksums to a draft GitHub release for the tag. It fails if the tag is not the workspace's version.
+Pushing the tag starts the `release` workflow, which builds the `nupdf` binary for Linux (x86-64 and ARM, each for glibc 2.35 or newer and as a static musl binary), macOS (Apple silicon and Intel) and Windows (x86-64), runs each on a file where the runner can, and attaches the archives and their SHA-256 checksums to a draft GitHub release for the tag. It builds the same seven binaries as Python wheels (`crates/nupdf-cli/pyproject.toml`), installs each where the runner can, and attaches those too. It fails if the tag is not the workspace's version.
 
-Then open that draft, replace its notes with the CHANGELOG entry, check the seven archives are there, and publish it. If a release for the tag already exists, the workflow adds the archives to it instead.
+Then open that draft, replace its notes with the CHANGELOG entry, check the seven archives and seven wheels are there, and publish it. Publishing it starts the `publish` workflow, which sends the wheels to PyPI as `nupdf-cli` (the name `nupdf` there belongs to another project), so that `pip install nupdf-cli` and `uvx nupdf-cli` give the `nupdf` command. PyPI accepts them without a token because the project there names this repository, the `publish.yml` workflow and the `pypi` environment as a trusted publisher; that is set up once, at https://pypi.org/manage/account/publishing/. A version on PyPI cannot be replaced, only yanked. If a release for the tag already exists, the workflow adds the archives to it instead.
 
 ## After
 

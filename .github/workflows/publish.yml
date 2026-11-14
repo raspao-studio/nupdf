@@ -1,0 +1,28 @@
+name: publish
+
+# Publishing a GitHub release by hand (docs/RELEASING.md) sends the wheels the
+# release workflow attached to it to PyPI, as `nupdf-cli`. PyPI trusts this
+# workflow in the `pypi` environment, so there is no token to keep.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    name: wheels to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Fetch the release's wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ github.event.release.tag_name }}" --repo "$GITHUB_REPOSITORY" --pattern '*.whl' --dir dist
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
