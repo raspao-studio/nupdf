@@ -11,7 +11,7 @@ rust-version = "1.92"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/raspao-studio/nupdf"
 authors = ["hum <hello@byhum.dev>"]
-homepage = "https://raspao-studio.github.io/nupdf/"
+homepage = "https://nupdf.dev/"
 
 [workspace.dependencies]
 nupdf = { path = "crates/nupdf", version = "0.1.0" }

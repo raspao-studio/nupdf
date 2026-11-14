@@ -65,7 +65,7 @@ The library's API may change in minor releases until 1.0; the CLI's JSON reports
 
 ## Docs
 
-The [docs site](https://raspao-studio.github.io/nupdf/) has a getting-started guide and everything below, built from `book/`.
+The [docs site](https://nupdf.dev/docs/) has a getting-started guide and everything below, built from `book/`.
 
 | | |
 |---|---|

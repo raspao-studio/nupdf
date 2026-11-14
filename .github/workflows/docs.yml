@@ -1,14 +1,16 @@
 name: docs
 
-# Builds the mdBook in book/ and publishes it to GitHub Pages
-# (https://raspao-studio.github.io/nupdf/). Pages must be set to deploy from
-# GitHub Actions: Settings, Pages, Source.
+# Publishes https://nupdf.dev to GitHub Pages: the landing page in site/ at
+# the root and the mdBook in book/ under /docs/. Pages must be set to deploy
+# from GitHub Actions, with nupdf.dev as its custom domain: Settings, Pages.
 
 on:
   push:
     branches: [main]
     paths:
       - book/**
+      - site/**
+      - bench/results/**
       - docs/**
       - eval/REPORT.md
       - README.md
@@ -44,6 +46,8 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/mdbook"
           echo "$RUNNER_TEMP/mdbook" >> "$GITHUB_PATH"
       - run: mdbook --version
+      # The landing page's figures are checked against the docs and the bench results.
+      - run: node --test site/test.mjs
       - run: mdbook build book
       # mdBook leaves an include it cannot read in the page as written and
       # still succeeds; publish nothing rather than a page like that.
@@ -59,9 +63,16 @@ jobs:
           lycheeVersion: v0.24.2
           args: --offline --include-fragments --no-progress --exclude-path book/book/404.html book/book
           jobSummary: false
+      - name: Put the landing page at the root and the book under docs/
+        run: |
+          mkdir -p _site/demo
+          cp site/index.html site/llms.txt site/robots.txt site/sitemap.xml site/favicon.svg site/og.png _site/
+          cp site/demo/live.js site/demo/page.json site/demo/page.png _site/demo/
+          cp -r book/book _site/docs
+          echo nupdf.dev > _site/CNAME
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: book/book
+          path: _site
 
   deploy:
     needs: build
