@@ -1,0 +1,13 @@
+{
+  "name": "nupdf",
+  "version": "0.0.0",
+  "description": "A PDF engine for AI agents: read, search, render, edit and redact PDFs from one binary, as a command or an MCP server",
+  "keywords": ["pdf", "cli", "mcp", "agents", "redaction"],
+  "homepage": "https://nupdf.dev/",
+  "repository": { "type": "git", "url": "git+https://github.com/raspao-studio/nupdf.git" },
+  "license": "AGPL-3.0-or-later",
+  "bin": { "nupdf": "bin/nupdf.js" },
+  "files": ["bin/nupdf.js", "platform.js", "README.md", "LICENSE", "NOTICE.md"],
+  "engines": { "node": ">=18" },
+  "optionalDependencies": {}
+}

@@ -1,8 +1,10 @@
 name: publish
 
-# Publishing a GitHub release by hand (docs/RELEASING.md) sends the wheels the
-# release workflow attached to it to PyPI, as `nupdf-cli`. PyPI trusts this
-# workflow in the `pypi` environment, so there is no token to keep.
+# Publishing a GitHub release by hand (docs/RELEASING.md) sends what the release
+# workflow attached to it to the registries: the wheels to PyPI, as `nupdf-cli`,
+# and the packages to npm, as `nupdf` and `@nupdf/...`. Both registries trust
+# this workflow (PyPI in the `pypi` environment, npm in `npm`), so there are no
+# tokens to keep.
 
 on:
   release:
@@ -26,3 +28,36 @@ jobs:
         run: gh release download "${{ github.event.release.tag_name }}" --repo "$GITHUB_REPOSITORY" --pattern '*.whl' --dir dist
       - run: ls -l dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  npm:
+    name: packages to npm
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - run: npm install -g npm@latest
+      - name: Fetch the release's packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ github.event.release.tag_name }}" --repo "$GITHUB_REPOSITORY" --pattern '*.tgz' --dir dist
+      - name: Publish the platform packages, then the one that depends on them
+        run: |
+          version="${{ github.event.release.tag_name }}"; version="${version#v}"
+          publish() {
+            # A rerun passes over what an earlier run already published.
+            name="$(tar -xzOf "$1" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0)).name')"
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published"
+            else
+              npm publish "$1" --access public
+            fi
+          }
+          for f in dist/nupdf-*-"$version".tgz; do publish "$f"; done
+          publish "dist/nupdf-$version.tgz"
