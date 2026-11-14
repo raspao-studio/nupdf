@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://nupdf.dev/</loc></url>
+  <url><loc>https://nupdf.dev/mcp/</loc></url>
+  <url><loc>https://nupdf.dev/redact/</loc></url>
+  <url><loc>https://nupdf.dev/compare/</loc></url>
   <url><loc>https://nupdf.dev/docs/</loc></url>
 </urlset>
