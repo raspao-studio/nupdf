@@ -1,0 +1,132 @@
+name: release
+
+# Builds the `nupdf` binary for each platform and, for a version tag, attaches
+# the archives and their checksums to that tag's GitHub release, creating it as
+# a draft if it is not there. Publishing the release stays a step done by hand
+# (docs/RELEASING.md). Run by hand from the Actions tab, or on a pull request
+# that changes this file, it builds without releasing: the archives are then
+# only the run's artifacts.
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+  # A change to this file builds every platform, without releasing anything.
+  pull_request:
+    paths: [.github/workflows/release.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The gnu builds run on the oldest runner image, so they need only
+          # its glibc (2.35); the musl builds are static and run anywhere.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, run: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, run: true }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, run: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm, run: true }
+          - { target: aarch64-apple-darwin, os: macos-latest, run: true }
+          # Built on Apple silicon; not run, since the runner is not an Intel Mac.
+          - { target: x86_64-apple-darwin, os: macos-latest, run: false }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, run: true }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install the musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked -p nupdf-cli --target ${{ matrix.target }}
+      - name: Run it on a file
+        if: matrix.run
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/nupdf"
+          "$bin" --version
+          "$bin" info corpus/smoke/minimal.pdf
+          "$bin" extract corpus/smoke/minimal.pdf --format text
+      - name: Make the archive
+        id: archive
+        shell: bash
+        run: |
+          # A tag names the version; a run by hand takes it from the workspace.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          fi
+          name="nupdf-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp LICENSE NOTICE.md README.md "dist/$name/"
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "../target/${{ matrix.target }}/release/nupdf.exe" "$name/"
+            7z a -bso0 "$name.zip" "$name"
+            archive="$name.zip"
+          else
+            cp "../target/${{ matrix.target }}/release/nupdf" "$name/"
+            tar -czf "$name.tar.gz" "$name"
+            archive="$name.tar.gz"
+          fi
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          cat "$archive.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.archive.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: attach to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the tag is the workspace's version
+        run: |
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml's version $version"
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach the archives, to a draft if there is no release yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag \
+              --title "nupdf ${GITHUB_REF_NAME#v}" \
+              --notes "Draft made by the release workflow. Replace this with the CHANGELOG entry before publishing."
+          fi
