@@ -620,23 +620,22 @@ D37 made threads something to ask for. Nothing asks: the guide does not name `--
 - **A budget keeps `extract`'s pages one after another.** With `--max-chars` or `--max-items` it stops at the page that fills the budget, which comes soon, since every page of text counts towards it; threads would have run a window of 64 pages by then. With a budget, threads are for whoever asks.
 - **A capped `search` takes pages a window at a time**: 4, then twice as many each time up to 64, on threads, stopping at the window that passes `--max-items`. Hits can be anywhere: page by page, `search the --max-items 5` on `long-017.pdf`, whose first pages have no such word, took 166 ms, against 39 ms for every page on threads. The windows are the same on every machine, so the pages run, and the warnings reported, are too. A hit on the first pages costs four pages.
 - **`render` takes no bands unasked.** Bands can change pixels by a few levels (D37's note on `--threads`), so without `--threads` pages are drawn at once, each whole.
-- **`render` draws pages at once only where they do not depend on each other.** A Type 3 font without /Resources borrows those in use where it is first loaded and stays loaded, so MuPDF draws page 90 of `long-017.pdf` one way after page 89 and another way alone, and nupdf matches it both ways. Threads take pages as they come free, so which page loads such a font first, and with it the pixels, changed from run to run: with `--threads`, before this decision too. `render` now looks through the document first (`parallel::pages_draw_apart`: every object, in a copy opened afresh, a few milliseconds) and, where a Type 3 font without resources of its own has a glyph that names one, draws the pages one after another, whatever `--threads` says. All 3,413 pages of the long tier then come out the same without `--threads`, with 3 and with 8, twice over, and the same as on one thread; 2 of the 30 documents are drawn in order. Text does not depend on what a glyph draws, so the other commands need no such look.
+- **Pages that are tied together run in order, on any number of threads.** A Type 3 font without /Resources borrows those in use where it is first loaded and stays loaded, so MuPDF draws page 90 of `long-017.pdf` one way after page 89 and another way alone, and nupdf matches it both ways. Such a font's box can be measured from what its glyphs draw, so the boxes of text set in it depend on the first page too. Threads take pages as they come free, so which page loaded such a font first, and with it the pixels and the boxes, changed from run to run: with `--threads`, before this decision too. The page runners (`parallel::run_pages`, `map_pages`, `with_workers`) now look through the document first (`parallel::pages_draw_apart`: every object, in a copy opened afresh) and, where a Type 3 font without resources of its own has a glyph that names one, run the pages one after another with one store, whatever the threads. The look takes 0.2 to 2.5 ms on the long tier's documents and 36 ms on `long-008.pdf`, which has thousands of link objects. One of the 30 documents is tied, `long-017.pdf`. Every page of the tier then comes out the same without `--threads`, with 3 and with 8, twice over, and the same as on one thread: 3,413 drawn pages, and the reports of `extract`, `stext`, `search` and `tables`.
 - **`batch` shares the processors among its jobs**: a command run by `batch --jobs J` takes a J-th of them, so J files at once do not start eight threads each.
 - **What changes in a report**: for a document of 32 pages or more read without `--threads`, the diagnostics come sorted and once each, as they always have with `--threads`. Nothing else: the text, the ids and the pixels are those of one thread, which the tests hold the commands to.
-- **Left to do**: `long-017.pdf`, drawn in order, is 2.4 s of the 5.5 s the long tier's rendering now takes. Loading such fonts in page order first, then drawing on threads, would free it.
+- **Tied documents stay on one thread.** `long-017.pdf` is 2.4 s of the 5.9 s the long tier's rendering takes. Loading such fonts ahead, in page order, and then drawing on threads would not be sure to give the same pages: which page first loads a font depends on what a run skips (content outside the area drawn, hidden layers), so a pass ahead of the drawing can load a font where the drawing would not have.
 
 Measured on the 30 long documents (3,414 pages), no `--threads`, best of two runs, `main` at `04256e7` against this change on an Apple M5 Max with other work on it:
 
 | Command | Before | After |
 |---|---|---|
-| `extract --format text` | 1.42 s | 0.66 s |
-| `extract` | 1.48 s | 0.62 s |
-| `search the` | 1.48 s | 0.59 s |
-| `stext` | 1.72 s | 0.63 s |
-| `tables` | 2.33 s | 1.21 s |
-| `info` | 0.96 s | 0.49 s |
-| `render --format ppm` | 9.16 s | 5.47 s |
-| `render` | 16.88 s | 7.22 s |
+| `extract --format text` | 1.60 s | 0.90 s |
+| `extract` | 1.53 s | 0.84 s |
+| `search the` | 1.59 s | 0.81 s |
+| `stext` | 2.05 s | 1.15 s |
+| `tables` | 2.49 s | 1.60 s |
+| `info` | 1.10 s | 0.70 s |
+| `render --format ppm` | 10.07 s | 5.90 s |
 
 ## D54. Rendered pages are written as PNG at zlib level 3
 

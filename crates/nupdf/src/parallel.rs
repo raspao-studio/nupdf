@@ -149,7 +149,7 @@ fn run_jobs<T: Send>(
         let ((r, store), d) = diag::capture(|| job(i, doc, &pages[i], store));
         ((r, d), store)
     };
-    let threads = threads.clamp(1, pages.len().max(1));
+    let threads = in_order_if_tied(doc, threads.clamp(1, pages.len().max(1)));
     let mut done: Vec<Option<Done<T>>> = (0..pages.len()).map(|_| None).collect();
     if threads == 1 {
         let mut store = Store::default();
@@ -278,6 +278,7 @@ pub fn with_workers<T: Send, R>(
     job: &PageJob<'_, T>,
     body: impl FnOnce(&mut dyn FnMut(&[i32]) -> Vec<T>) -> R,
 ) -> R {
+    let threads = in_order_if_tied(doc, threads);
     let shared = Shared {
         round: Mutex::new(Round {
             id: 0,
@@ -466,6 +467,19 @@ pub fn map<T: Send>(
     }
 }
 
+/// `threads`, or one where `doc`'s pages are tied together
+/// ([`pages_draw_apart`]): threads take pages as they come free, so which
+/// page came first for a thread, and with it what such a page draws and
+/// how its text is boxed, would change from run to run. On one thread the
+/// pages run in order with one store, as MuPDF runs them.
+fn in_order_if_tied(doc: &Document, threads: usize) -> usize {
+    if threads > 1 && !pages_draw_apart(doc) {
+        1
+    } else {
+        threads
+    }
+}
+
 /// How deep a font dictionary written inside another object is looked for.
 const MAX_FONT_NESTING: usize = 16;
 
@@ -610,6 +624,83 @@ mod tests {
             .iter()
             .map(|r| r.as_ref().map(|p| p.text()).map_err(Clone::clone))
             .collect()
+    }
+
+    #[test]
+    fn pages_tied_by_a_borrowing_type3_font_run_in_order_on_any_threads() {
+        // A Type 3 font with no box and no resources of its own: its box,
+        // and so the box of the text set in it, is measured from what its
+        // glyph draws, which is the /X of the page that first uses it. On
+        // page 1 that is a square of 1, on the other 47 a square of 3.
+        let pages = 48;
+        let mut objects = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            format!(
+                "<</Type/Pages/Count {pages}/Kids[{}]>>",
+                (0..pages).map(|i| format!("{} 0 R ", 8 + i)).collect::<String>()
+            )
+            .into_bytes(),
+            b"<</Type/Font/Subtype/Type3/FontMatrix[1 0 0 1 0 0]/FontBBox[0 0 0 0]/FirstChar 65/LastChar 65\
+              /Widths[1]/Encoding<</Type/Encoding/Differences[65/a]>>/CharProcs<</a 4 0 R>>\
+              /ToUnicode 99 0 R>>"
+                .to_vec(),
+            crate::testutil::stream("", b"1 0 d0 /X Do"),
+            crate::testutil::stream("/Type/XObject/Subtype/Form/BBox[0 0 1 1]", b"0 0 1 1 re f"),
+            crate::testutil::stream("/Type/XObject/Subtype/Form/BBox[0 0 3 3]", b"0 0 3 3 re f"),
+            crate::testutil::stream("", b"BT /F 10 Tf 10 10 Td (A) Tj ET"),
+        ];
+        for i in 0..pages {
+            let x = if i == 0 { 5 } else { 6 };
+            objects.push(
+                format!(
+                    "<</Type/Page/Parent 2 0 R/MediaBox[0 0 80 80]/Contents 7 0 R\
+                     /Resources<</Font<</F 3 0 R>>/XObject<</X {x} 0 R>>>>>>"
+                )
+                .into_bytes(),
+            );
+        }
+        let doc = Document::open(crate::testutil::pdf_bytes(&objects)).unwrap();
+        assert!(!pages_draw_apart(&doc));
+        let indices: Vec<i32> = (0..pages).collect();
+        let boxes = |results: &[PageResult]| -> Vec<String> {
+            results
+                .iter()
+                .map(|r| format!("{:?}", r.as_ref().map(|p| p.blocks.clone())))
+                .collect()
+        };
+        let in_order = boxes(&extract_sequential(&doc, &indices, Options::default()));
+        // Every page's text has the box of page 1's square; alone, the
+        // last page has that of its own, which is not the same.
+        assert!(in_order.iter().all(|b| b == &in_order[0]));
+        let alone = boxes(&extract_sequential(
+            &doc,
+            &indices[pages as usize - 1..],
+            Options::default(),
+        ));
+        assert_ne!(alone[0], in_order[0]);
+        for threads in [2, 8] {
+            for round in 0..3 {
+                let got = boxes(&extract_pages(&doc, &indices, Options::default(), threads));
+                assert!(got == in_order, "{threads} threads, round {round}");
+                // In windows on kept threads too.
+                let job = |_: i32, doc: &Document, page: &Result<Object, String>, store: Store| {
+                    run_page(
+                        doc,
+                        page,
+                        Options::default(),
+                        store,
+                        crate::page_run::Parts::CONTENTS,
+                    )
+                };
+                let got = with_workers(&doc, threads, &job, |run| {
+                    indices.chunks(7).flat_map(run).collect::<Vec<_>>()
+                });
+                assert!(
+                    boxes(&got) == in_order,
+                    "{threads} threads in windows, round {round}"
+                );
+            }
+        }
     }
 
     #[test]
