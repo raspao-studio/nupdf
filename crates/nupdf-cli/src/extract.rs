@@ -474,7 +474,14 @@ pub fn extract(doc: &Document, doc_id: &str, args: &Args) -> Result<Extracted, S
         indices: &indices,
         page_count,
     };
-    match args.threads {
+    // A budget stops the pages early, and threads would have run 64 of
+    // them by then: with one, threads are for whoever asks.
+    let threads = if args.max_chars.is_some() || args.max_items.is_some() {
+        args.threads
+    } else {
+        crate::threads_for(args.threads, indices.len() - pos.min(indices.len()))
+    };
+    match threads {
         Some(threads) => {
             // Each page is made ready on the thread that extracted it.
             let job = |index: i32, doc: &Document, page: &Result<Object, String>, store: Store| {

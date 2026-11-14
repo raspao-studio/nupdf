@@ -1883,6 +1883,125 @@ fn render_threads_and_bands_do_not_change_the_pixels() {
     assert_eq!(images[0], images[1]);
 }
 
+/// A document of `pages` pages, each with a line of text naming it and,
+/// on every fifth, an operator that is not one.
+fn long_text_pdf(name: &str, pages: usize) -> PathBuf {
+    let mut objects = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        format!(
+            "<</Type/Pages/Count {pages}/Kids[{}]>>",
+            (0..pages)
+                .map(|i| format!("{} 0 R ", 4 + 2 * i))
+                .collect::<String>()
+        ),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
+    ];
+    for i in 0..pages {
+        let odd = if i % 5 == 0 { "nonsense " } else { "" };
+        let content = format!(
+            "{odd}BT /F1 12 Tf 20 100 Td (Page {} alpha beta) Tj ET",
+            i + 1
+        );
+        objects.push(format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<</Font<</F1 3 0 R>>>>/Contents {} 0 R>>",
+            5 + 2 * i
+        ));
+        objects.push(format!(
+            "<</Length {}>>\nstream\n{content}\nendstream",
+            content.len()
+        ));
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    let path = scratch(name);
+    std::fs::write(&path, out).unwrap();
+    path
+}
+
+#[test]
+fn a_long_document_reads_the_same_with_and_without_threads_asked_for() {
+    // 40 pages of text and 32 of inline images, some damaged: enough
+    // pages for the commands to take threads unasked.
+    let text = long_text_pdf("threads-unasked.pdf", 40);
+    let images = smoke("content-inline-images.pdf");
+    assert_eq!(info("content-inline-images.pdf")["page_count"], 32);
+    for file in [text.to_str().unwrap(), images.to_str().unwrap()] {
+        for command in [
+            &["extract"][..],
+            &["extract", "--format", "text"],
+            &["extract", "--format", "markdown", "--pages", "N-1"],
+            &["stext"],
+            &["search", "a", "--options", "regexp"],
+            &["tables"],
+        ] {
+            let run = |threads: &[&str]| {
+                let out = nupdf(&[&[command[0], file], &command[1..], threads].concat());
+                assert!(out.status.success(), "{command:?} {threads:?}");
+                (out.stdout, out.stderr)
+            };
+            let unasked = run(&[]);
+            assert!(!unasked.0.is_empty(), "{command:?}");
+            for threads in ["1", "3", "8"] {
+                assert_eq!(
+                    run(&["--threads", threads]),
+                    unasked,
+                    "{command:?} {threads}"
+                );
+            }
+        }
+    }
+    // With a budget the pages still run one after another, stopping at
+    // it, and say the same as threads do, but for the warnings of pages
+    // only threads got to.
+    let file = text.to_str().unwrap();
+    for command in [
+        &["extract", "--max-chars", "40"][..],
+        &["extract", "--max-items", "3"],
+        &["search", "alpha", "--max-items", "2"],
+    ] {
+        let run = |threads: &[&str]| {
+            let out = nupdf(&[&[command[0], file], &command[1..], threads].concat());
+            assert!(out.status.success(), "{command:?} {threads:?}");
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()
+        };
+        let (mut unasked, mut threaded) = (run(&[]), run(&["--threads", "8"]));
+        assert_eq!(unasked["truncated"], true, "{command:?}");
+        for report in [&mut unasked, &mut threaded] {
+            report.as_object_mut().unwrap().remove("diagnostics");
+        }
+        assert_eq!(unasked, threaded, "{command:?}");
+    }
+    // Pages drawn at once are the pages drawn one at a time.
+    let dir = scratch("threads-unasked-render");
+    let draw = |name: &str, threads: &[&str]| {
+        let out = dir.join(name);
+        let args = [&["render", file, "-o", out.to_str().unwrap()], threads].concat();
+        assert!(nupdf(&args).status.success(), "{threads:?}");
+        (1..=40)
+            .map(|n| std::fs::read(out.join(format!("page-{n:04}.png"))).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(draw("unasked", &[]), draw("one", &["--threads", "1"]));
+}
+
 #[test]
 fn render_region_and_pixel_budget() {
     let input = smoke("stext.pdf");

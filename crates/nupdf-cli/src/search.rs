@@ -139,7 +139,14 @@ pub fn search(doc: &Document, args: &Args) -> Result<Value, String> {
     };
     // Without threads, pages past the last hit kept are not run, as in
     // MuPDF's loop.
-    let found: Box<dyn Iterator<Item = Result<Vec<Value>, String>>> = match args.threads {
+    // So with a cap on the hits and no threads asked for, a long document
+    // is searched that way too: the first hits are often on its first
+    // pages.
+    let threads = match args.max_items {
+        Some(_) => args.threads,
+        None => crate::threads_for(args.threads, indices.len()),
+    };
+    let found: Box<dyn Iterator<Item = Result<Vec<Value>, String>>> = match threads {
         None => Box::new(
             nupdf::parallel::sequential(doc, &indices, args.stext)
                 .enumerate()

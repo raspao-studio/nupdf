@@ -56,7 +56,10 @@ pub struct Settings {
     pub dpi: f32,
     pub region: Option<nupdf::geometry::Rect>,
     pub max_pixels: u64,
-    pub threads: usize,
+    /// Pages at once, with those left over splitting a page into bands;
+    /// without a count, pages at once on the threads a command takes
+    /// unasked and no bands, so the pixels are those of one thread.
+    pub threads: Option<usize>,
     /// Color management, as `mutool draw` has it on unless `-N`.
     pub icc: bool,
     /// What of each page to draw: everything, as `mutool draw`, or the contents alone (`--no-annots`).
@@ -83,8 +86,13 @@ pub fn render(
         .region
         .map(|r| nupdf::geometry::IRect::round(r.transform(ctm)));
     // Threads go to pages first, and those left over to bands of a page.
-    let bands = (settings.threads / pages.len().max(1)).max(1);
-    let pages_threads = settings.threads.min(pages.len().max(1));
+    let (bands, pages_threads) = match settings.threads {
+        Some(threads) => (
+            (threads / pages.len().max(1)).max(1),
+            threads.min(pages.len().max(1)),
+        ),
+        None => (1, crate::threads_unasked().min(pages.len().max(1))),
+    };
     let job =
         |i: usize, doc: &Document, page: &Result<nupdf::Object, String>, store| -> (Value, _) {
             let (rendered, store) = match page {

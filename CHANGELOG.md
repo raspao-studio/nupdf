@@ -7,6 +7,8 @@ The crates `nupdf` (the library) and `nupdf-cli` (the `nupdf` command) share a v
 - **A predefined CMap is decoded when a font first asks for it**, not all 71 at the first font that uses one: about 6 ms off every call that reads text or draws a page of a document with such a font, most of what a call on a small file took.
 - **`merge` writes a page's links onto it once**: a page of thousands of links cost the square of them. Merging `long-008.pdf` with itself goes from 2.95 s to 0.49 s.
 - **`batch` writes each file's line in one write**, where the output got a write for every token of its JSON: on 400 small files, 0.91 s to 0.53 s.
+- **Long documents run on threads without `--threads`**: `extract`, `stext`, `search` and `tables` on 32 pages or more, and `render` on any number, take up to eight threads; a budget (`--max-chars`, `--max-items`) still reads one page after another. Text, ids and pixels are unchanged; a long document's diagnostics now come sorted and once each, as with `--threads` ([D53](docs/DECISIONS.md)). On the 30 long documents `extract` goes from 1.42 s to 0.66 s and `render` from 17.4 s to 4.6 s.
+- **`clean` with a stream option checks its output without decoding the streams it kept**: `clean -z` on the 30 long documents goes from 4.2 s to 1.05 s.
 
 ## 0.1.1
 

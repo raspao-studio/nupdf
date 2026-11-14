@@ -271,6 +271,8 @@ pub fn run(args: &Args) -> Result<Value, Failure> {
     let (tx, rx) = mpsc::channel::<(usize, Value)>();
     let (mut ok, mut failed) = (0usize, 0usize);
     let whole = nupdf::interrupt::current();
+    // Each job's command takes its share of the processors while they run.
+    let _sharing = Sharing::among(jobs);
     std::thread::scope(|s| {
         for _ in 0..jobs {
             let tx = tx.clone();
@@ -339,6 +341,21 @@ fn write_line(sink: &mut dyn Write, line: &Value) {
     bytes.push(b'\n');
     let _ = sink.write_all(&bytes);
     let _ = sink.flush();
+}
+
+/// The processors shared among `jobs` commands, until dropped.
+struct Sharing(usize);
+
+impl Sharing {
+    fn among(jobs: usize) -> Sharing {
+        Sharing(crate::COMMANDS_AT_ONCE.swap(jobs.max(1), Ordering::Relaxed))
+    }
+}
+
+impl Drop for Sharing {
+    fn drop(&mut self) {
+        crate::COMMANDS_AT_ONCE.store(self.0, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]

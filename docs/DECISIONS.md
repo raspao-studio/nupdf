@@ -607,3 +607,30 @@ MuPDF has no command for this; `sanitize` is nupdf's own.
 
   Whole pages match exactly as often as the contents alone do (`render-72`: 5,070 standard files, 954 wild ones), but for the two rich-text annotations below; the colour-managed check's remaining differences are those of `render-72-icc`, CMYK under an output intent's profile, which the annotations of two Isartor files draw in. Of `text-annots`' 29 standard mismatches, 28 are rich text and 1 is contents' text that comes out of the list differently; the wild sample's 7 are in the contents' text.
 - **Known differences**: a FreeText or text field whose text needs rich layout (an /RC or /DS, or characters neither the base 14 fonts nor MuPDF's CJK fonts have) gets its appearance from MuPDF's HTML story engine, which nupdf does not have: nupdf warns `annot.appearance` and draws nothing for it.
+
+## D53. Long documents run on threads without being asked
+
+*2026-11-14*
+
+D37 made threads something to ask for. Nothing asks: the guide does not name `--threads`, and no agent in the eval passed it, so every long document was read on one thread of a machine with many. Now `extract`, `stext`, `search` and `tables` given no `--threads` run a document's pages on threads when there are 32 or more of them, as does the scan for scanned pages that `info` and `ocr` make, and `render` draws pages at once whatever their number.
+
+- **Which way a document runs depends on its pages, never on the machine.** D37's two ways differ in diagnostics (in order as they come, or sorted and reported once), so the choice has to be the same everywhere for a report to be: 32 pages or more run the threaded way, on this process's share of the processors, eight at most, and on a machine with one processor still the threaded way, on one thread. `--threads N` is as before, and its output is still the same at every N.
+- **32 pages**, counting the pages asked for. On 54 standard-tier files of 2 to 10,000 pages, threads made no difference that could be measured below 40 pages (5 to 7 ms a call either way) and took 1.8x to 3.4x off the files from 43 pages up that have text to read.
+- **Eight threads at most.** `extract` on `long-017.pdf`: 240 ms on one thread, 107 on four, 80 on eight, 71 on sixteen.
+- **A budget keeps the pages one after another.** `extract` with `--max-chars` or `--max-items`, and `search` with `--max-items`, stop at the page that fills the budget; threads would have run a window of 64 pages by then. With a budget, threads are for whoever asks.
+- **`render` takes no bands unasked.** Bands can change pixels by a few levels (D37's note on `--threads`); pages at once cannot, so without `--threads` the pixels are those of one thread.
+- **`batch` shares the processors among its jobs**: a command run by `batch --jobs J` takes a J-th of them, so J files at once do not start eight threads each.
+- **What changes in a report**: for a document of 32 pages or more read without `--threads`, the diagnostics come sorted and once each, as they always have with `--threads`. Nothing else: the text, the ids and the pixels are those of one thread, which the tests hold the commands to.
+
+Measured on the 30 long documents (3,414 pages), no `--threads`, best of two runs, `main` at `04256e7` against this change on an Apple M5 Max with other work on it:
+
+| Command | Before | After |
+|---|---|---|
+| `extract --format text` | 1.42 s | 0.66 s |
+| `extract` | 1.48 s | 0.62 s |
+| `search the` | 1.48 s | 0.59 s |
+| `stext` | 1.72 s | 0.63 s |
+| `tables` | 2.33 s | 1.21 s |
+| `info` | 0.96 s | 0.49 s |
+| `render --format ppm` | 9.95 s | 3.89 s |
+| `render` | 17.36 s | 4.59 s |
