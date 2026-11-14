@@ -46,7 +46,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::colorspace::{self, ColorSpace};
-use crate::diag::{Diagnostics, report};
+use crate::diag::{self, Diagnostics, report};
 use crate::document::Document;
 use crate::image::Image;
 use crate::layer;
@@ -469,7 +469,7 @@ pub fn process_glyph(
         let diag = doc.diagnostics();
         let mut csi = Csi::new(doc, proc);
         let mut lx = Lexer::small(data, 0, diag);
-        csi.process_stream(&mut lx).and_then(|()| csi.process_end())
+        csi.process_stream(&mut lx).and_then(|_| csi.process_end())
     };
     if resources.is_some() {
         proc.state().rstack.pop();
@@ -490,17 +490,154 @@ pub fn process_raw_contents(
     process_raw(doc, contents, proc)
 }
 
+/// How much of a content stream is decoded ahead of the interpreter. A
+/// stream is never held whole: MuPDF reads one through a buffer of a few
+/// kilobytes, and a stream that inflates to half a gigabyte of white space
+/// costs it nothing. A stream shorter than this is in one window, and is
+/// read as it always was.
+const WINDOW: usize = 1 << 18;
+
 /// `pdf_process_raw_contents`.
 fn process_raw(doc: &Document, contents: &Object, proc: &mut dyn Processor) -> Result<(), String> {
-    let data = contents_data(doc, contents)?;
     let diag = doc.diagnostics();
-    if SKIP_UNMARKED.with(Cell::get) && !may_mark(&data, diag) {
-        return Ok(());
+    if SKIP_UNMARKED.with(Cell::get) {
+        // Read through once to see whether it is worth running. What that
+        // reports is kept only if it is not: run, the stream is read again
+        // and reports it then.
+        let (marks, reported) = diag::capture(|| {
+            Contents::open(doc, contents).and_then(|mut feed| may_mark(&mut feed, diag, WINDOW))
+        });
+        if !matches!(marks, Ok(true)) {
+            diag.replay(reported);
+            return marks.map(|_| ());
+        }
     }
+    let mut feed = Contents::open(doc, contents)?;
+    process_feed(doc, &mut feed, proc, WINDOW).map(|_| ())
+}
+
+/// Runs the content `feed` gives through `proc`, at most about `want`
+/// bytes of it decoded ahead at a time, and returns the most bytes that
+/// were held at once.
+///
+/// The interpreter keeps its state from one window of bytes to the next.
+/// A token that reaches the end of a window that more follows may not be
+/// whole, so it is put back and lexed again with the next window; so are
+/// an array, a dictionary and an inline image, which read on from the
+/// lexer. What is run is what the whole stream in one buffer would run,
+/// wherever the windows fall.
+fn process_feed(
+    doc: &Document,
+    feed: &mut dyn Feed,
+    proc: &mut dyn Processor,
+    want: usize,
+) -> Result<usize, String> {
+    let diag = doc.diagnostics();
+    let mut window = Window::new(feed, want);
     let mut csi = Csi::new(doc, proc);
-    let mut lx = Lexer::small(&data, 0, diag);
-    csi.process_stream(&mut lx)?;
-    csi.process_end()
+    loop {
+        window.fill()?;
+        csi.last = !window.more;
+        let mut lx = Lexer::small(&window.buf, 0, diag);
+        match csi.process_stream(&mut lx)? {
+            Lexed::End => break,
+            Lexed::More => {
+                let consumed = lx.pos();
+                window.consumed(consumed);
+            }
+        }
+    }
+    csi.process_end()?;
+    Ok(window.most)
+}
+
+/// Where a content stream's bytes come from, a piece at a time.
+trait Feed {
+    /// Adds the next bytes to `out`; false once there are no more.
+    fn read(&mut self, out: &mut Vec<u8>) -> Result<bool, String>;
+}
+
+/// The bytes decoded ahead of whoever lexes them: from the start of a
+/// token on, to about `want` bytes.
+struct Window<'f> {
+    feed: &'f mut dyn Feed,
+    buf: Vec<u8>,
+    /// Whether the feed may have more.
+    more: bool,
+    want: usize,
+    /// Whether the bytes dropped so far end inside a comment.
+    in_comment: bool,
+    /// The most bytes held at once.
+    most: usize,
+}
+
+impl<'f> Window<'f> {
+    fn new(feed: &'f mut dyn Feed, want: usize) -> Self {
+        Window {
+            feed,
+            buf: Vec::new(),
+            more: true,
+            want: want.max(1),
+            in_comment: false,
+            most: 0,
+        }
+    }
+
+    /// Reads until `want` bytes are held or the feed ends. White space and
+    /// comments before the first token are dropped as they come, as the
+    /// lexer skips them: however long, they are never held.
+    fn fill(&mut self) -> Result<(), String> {
+        self.skip_blank();
+        while self.more && self.buf.len() < self.want {
+            self.more = self.feed.read(&mut self.buf)?;
+            self.most = self.most.max(self.buf.len());
+            self.skip_blank();
+        }
+        Ok(())
+    }
+
+    fn skip_blank(&mut self) {
+        let mut at = 0;
+        loop {
+            if self.in_comment {
+                // A comment ends with its line.
+                match self.buf[at..]
+                    .iter()
+                    .position(|&b| b == b'\n' || b == b'\r')
+                {
+                    Some(end) => {
+                        at += end + 1;
+                        self.in_comment = false;
+                    }
+                    None => {
+                        at = self.buf.len();
+                        break;
+                    }
+                }
+            } else {
+                match self.buf.get(at) {
+                    Some(&b) if crate::lex::is_white(b) => at += 1,
+                    Some(b'%') => {
+                        at += 1;
+                        self.in_comment = true;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        if at > 0 {
+            self.buf.drain(..at);
+        }
+    }
+
+    /// The first `n` bytes are done with. None of them when a full window
+    /// does not hold the token at its start: the next is twice as long.
+    fn consumed(&mut self, n: usize) {
+        if n == 0 && self.buf.len() >= self.want {
+            self.want = self.buf.len().saturating_mul(2);
+        }
+        self.buf.drain(..n.min(self.buf.len()));
+    }
 }
 
 thread_local! {
@@ -517,96 +654,159 @@ pub fn skipping_unmarked<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// Whether `data` uses an operator that can show text, an image or a
-/// shading, or run anything else: text, XObjects, inline images, shadings,
-/// colors that can be patterns, graphics states (soft masks run forms),
-/// marked content (its /ActualText is text), and fonts, whose loading can
-/// repair the document. Lexed as the interpreter lexes, every keyword is
-/// seen, the ones inside arrays and dictionaries too.
-fn may_mark(data: &[u8], diag: &Diagnostics) -> bool {
-    let mut lx = Lexer::small(data, 0, diag);
+/// Whether the content `feed` gives uses an operator that can show text,
+/// an image or a shading, or run anything else: text, XObjects, inline
+/// images, shadings, colors that can be patterns, graphics states (soft
+/// masks run forms), marked content (its /ActualText is text), and fonts,
+/// whose loading can repair the document. Lexed as the interpreter lexes,
+/// a window at a time, every keyword is seen, the ones inside arrays and
+/// dictionaries too.
+fn may_mark(feed: &mut dyn Feed, diag: &Diagnostics, want: usize) -> Result<bool, String> {
+    let mut window = Window::new(feed, want);
     let mut buf = Vec::new();
-    // Each token reads at least a byte.
-    for _ in 0..=data.len() {
-        match lx.next_raw(&mut buf) {
-            RawToken::Eof | RawToken::EndStream => return false,
-            RawToken::Keyword => {
-                if matches!(
-                    cstr(&buf),
-                    b"Tj"
-                        | b"TJ"
-                        | b"'"
-                        | b"\""
-                        | b"Tf"
-                        | b"Do"
-                        | b"BI"
-                        | b"sh"
-                        | b"sc"
-                        | b"SC"
-                        | b"scn"
-                        | b"SCN"
-                        | b"gs"
-                        | b"BDC"
-                        | b"BMC"
-                        | b"DP"
-                        | b"MP"
-                        | b"d0"
-                        | b"d1"
-                ) {
-                    return true;
-                }
+    // What a token put back had reported, not to be reported again.
+    let mut reported = 0;
+    loop {
+        window.fill()?;
+        let last = !window.more;
+        let mut lx = Lexer::small(&window.buf, 0, diag);
+        let consumed = loop {
+            let start = lx.pos();
+            let before = diag::warned();
+            let tok = diag::swallowing(std::mem::take(&mut reported), || lx.next_raw(&mut buf));
+            if !last && lx.pos() >= window.buf.len() {
+                reported = diag::warned() - before;
+                break start;
             }
-            _ => {}
-        }
+            match tok {
+                RawToken::Eof | RawToken::EndStream => return Ok(false),
+                RawToken::Keyword => {
+                    if matches!(
+                        cstr(&buf),
+                        b"Tj"
+                            | b"TJ"
+                            | b"'"
+                            | b"\""
+                            | b"Tf"
+                            | b"Do"
+                            | b"BI"
+                            | b"sh"
+                            | b"sc"
+                            | b"SC"
+                            | b"scn"
+                            | b"SCN"
+                            | b"gs"
+                            | b"BDC"
+                            | b"BMC"
+                            | b"DP"
+                            | b"MP"
+                            | b"d0"
+                            | b"d1"
+                    ) {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+        };
+        window.consumed(consumed);
     }
-    true
 }
 
-/// `pdf_open_contents_stream`, read whole.
-fn contents_data(doc: &Document, contents: &Object) -> Result<Vec<u8>, String> {
-    let diag = doc.diagnostics();
-    match doc.resolve(contents) {
-        // pdf_open_object_array: each part by number, joined with spaces.
-        // A part that does not open is skipped; one whose reading fails
-        // ends the stream there.
-        Object::Array(parts) => {
-            let mut out = Vec::new();
-            for (i, part) in parts.iter().enumerate() {
-                let num = part.as_ref().map_or(0, |r| r.num);
-                let opened = match doc.object(num) {
-                    Some(Object::Stream(s)) => doc.content_stream_data(&s).map_err(|e| e.report()),
-                    _ => Err(report::format("object is not a stream")),
+/// `pdf_open_contents_stream`, read as it is needed: a stream, or an
+/// array of them, each read to its end before the next is opened.
+struct Contents<'d> {
+    doc: &'d Document,
+    from: From<'d>,
+}
+
+enum From<'d> {
+    /// One stream.
+    Stream(crate::document::ContentStream<'d>),
+    /// `pdf_open_object_array`: each part by number, joined with spaces. A
+    /// part that does not open is skipped; one whose reading fails ends
+    /// the stream there.
+    Parts {
+        parts: Arc<Vec<Object>>,
+        next: usize,
+        open: Option<crate::document::ContentStream<'d>>,
+    },
+    Nothing,
+}
+
+impl<'d> Contents<'d> {
+    fn open(doc: &'d Document, contents: &Object) -> Result<Self, String> {
+        let from = match doc.resolve(contents) {
+            Object::Array(parts) => From::Parts {
+                parts,
+                next: 0,
+                open: None,
+            },
+            Object::Stream(s) => From::Stream(doc.open_content_stream(&s).map_err(|e| e.report())?),
+            _ => {
+                let num = contents.as_ref().map_or(0, |r| r.num);
+                doc.diagnostics().warn(
+                    "content.not_stream",
+                    format!("content stream is not a stream ({num} 0 R)"),
+                );
+                From::Nothing
+            }
+        };
+        Ok(Contents { doc, from })
+    }
+}
+
+impl Feed for Contents<'_> {
+    fn read(&mut self, out: &mut Vec<u8>) -> Result<bool, String> {
+        let doc = self.doc;
+        let diag = doc.diagnostics();
+        match &mut self.from {
+            From::Nothing => Ok(false),
+            From::Stream(s) => s.read_piece(out).map_err(|e| e.report()),
+            From::Parts { parts, next, open } => {
+                let unloadable = |line: String, part: usize| {
+                    diag.warn("error.reported", line);
+                    diag.warn(
+                        "content.part_unloadable",
+                        format!("cannot load content stream part {}/{}", part, parts.len()),
+                    );
                 };
-                match opened {
-                    Ok((data, failed)) => {
-                        out.extend_from_slice(&data);
-                        if failed {
-                            return Ok(out);
+                loop {
+                    if let Some(part) = open {
+                        match part.read_piece(out) {
+                            Ok(true) => return Ok(true),
+                            Ok(false) => {
+                                let failed = part.had_error();
+                                *open = None;
+                                if failed {
+                                    *next = parts.len();
+                                    return Ok(false);
+                                }
+                                out.push(b' ');
+                            }
+                            Err(e) => {
+                                *open = None;
+                                unloadable(e.report(), *next);
+                            }
                         }
-                        out.push(b' ');
                     }
-                    Err(line) => {
-                        diag.warn("error.reported", line);
-                        diag.warn(
-                            "content.part_unloadable",
-                            format!("cannot load content stream part {}/{}", i + 1, parts.len()),
-                        );
+                    let Some(part) = parts.get(*next) else {
+                        return Ok(false);
+                    };
+                    *next += 1;
+                    let num = part.as_ref().map_or(0, |r| r.num);
+                    let opened = match doc.object(num) {
+                        Some(Object::Stream(s)) => {
+                            doc.open_content_stream(&s).map_err(|e| e.report())
+                        }
+                        _ => Err(report::format("object is not a stream")),
+                    };
+                    match opened {
+                        Ok(part) => *open = Some(part),
+                        Err(line) => unloadable(line, *next),
                     }
                 }
             }
-            Ok(out)
-        }
-        Object::Stream(s) => doc
-            .content_stream_data(&s)
-            .map(|(data, _)| data)
-            .map_err(|e| e.report()),
-        _ => {
-            let num = contents.as_ref().map_or(0, |r| r.num);
-            diag.warn(
-                "content.not_stream",
-                format!("content stream is not a stream ({num} 0 R)"),
-            );
-            Ok(Vec::new())
         }
     }
 }
@@ -624,6 +824,30 @@ struct Csi<'d, 'p> {
     string_len: usize,
     top: usize,
     stack: [f32; STACK_SIZE],
+    /// Whether the bytes being lexed run to the end of the stream; where
+    /// not, they are a window more follows ([`process_feed`]).
+    last: bool,
+    /// Inside a `TJ` array, and the syntax errors so far: kept here from
+    /// one window to the next.
+    in_text_array: bool,
+    syntax_errors: usize,
+    /// Where the token being handled starts, to go back to.
+    token_start: usize,
+    /// Set by an operator that could not read all it needs in a window.
+    need_more: bool,
+    /// How many diagnostics the token put back had reported, which it
+    /// does not report again.
+    reported: u64,
+}
+
+/// How lexing a run of bytes ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lexed {
+    /// At the end of the stream.
+    End,
+    /// At a token the bytes do not hold whole, where the lexer was left:
+    /// to be lexed again from there with more bytes.
+    More,
 }
 
 impl<'d, 'p> Csi<'d, 'p> {
@@ -640,7 +864,35 @@ impl<'d, 'p> Csi<'d, 'p> {
             string_len: 0,
             top: 0,
             stack: [0.0; STACK_SIZE],
+            last: true,
+            in_text_array: false,
+            syntax_errors: 0,
+            token_start: 0,
+            need_more: false,
+            reported: 0,
         }
+    }
+
+    /// `f`, which reads on from `lx`, done whole or not at all: None when
+    /// it reached the end of a window that more follows, where what it
+    /// read may have been cut short. The lexer is then back at `start`,
+    /// and nothing `f` reported is kept.
+    fn whole<'a, T>(
+        &mut self,
+        lx: &mut Lexer<'a>,
+        start: usize,
+        f: impl FnOnce(&mut Self, &mut Lexer<'a>) -> T,
+    ) -> Option<T> {
+        if self.last {
+            return Some(f(self, lx));
+        }
+        let (out, reported) = diag::capture(|| f(self, lx));
+        if lx.pos() >= lx.data().len() {
+            lx.seek(start);
+            return None;
+        }
+        self.diag().replay(reported);
+        Some(out)
     }
 
     fn diag(&self) -> &'d Diagnostics {
@@ -693,54 +945,72 @@ impl<'d, 'p> Csi<'d, 'p> {
         self.proc.op(op)
     }
 
-    /// `pdf_process_stream`.
-    fn process_stream(&mut self, lx: &mut Lexer) -> Result<(), String> {
-        self.clear_stack();
-        let mut syntax_errors = 0;
-        let mut in_text_array = false;
+    /// `pdf_process_stream`, over the stream whole or a window of it at a
+    /// time: called again with the bytes from where the lexer was left
+    /// for as long as it gives [`Lexed::More`].
+    fn process_stream(&mut self, lx: &mut Lexer) -> Result<Lexed, String> {
         loop {
-            let result = self.lex_ops(lx, &mut in_text_array);
+            let result = self.lex_ops(lx);
+            if matches!(result, Ok(Lexed::More)) {
+                // The operands so far wait for their operator.
+                return Ok(Lexed::More);
+            }
             self.clear_stack();
             match result {
-                Ok(()) => break,
+                Ok(_) => break,
                 Err(line) if recoverable(&line) => {
                     self.diag().warn("error.reported", line);
-                    syntax_errors += 1;
-                    if syntax_errors >= MAX_SYNTAX_ERRORS {
+                    self.syntax_errors += 1;
+                    if self.syntax_errors >= MAX_SYNTAX_ERRORS {
                         self.diag().warn(
                             "content.too_many_errors",
                             "too many syntax errors; ignoring rest of page",
                         );
                         break;
                     }
-                    in_text_array = false;
+                    self.in_text_array = false;
                 }
                 Err(line) => return Err(line),
             }
         }
-        if syntax_errors > 0 {
+        if self.syntax_errors > 0 {
             self.diag().warn(
                 "content.syntax_errors",
                 "encountered syntax errors; page may not be correct",
             );
         }
-        Ok(())
+        Ok(Lexed::End)
     }
 
     /// The inner loop of `pdf_process_stream`, until the end of the data
     /// (Ok) or an error.
-    fn lex_ops(&mut self, lx: &mut Lexer, in_text_array: &mut bool) -> Result<(), String> {
+    fn lex_ops(&mut self, lx: &mut Lexer) -> Result<Lexed, String> {
         // Names, strings and keywords are lexed into one buffer.
         let mut buf = Vec::new();
         loop {
-            let tok = lx.next_raw(&mut buf);
-            if *in_text_array {
+            let start = lx.pos();
+            let tok = if self.last && self.reported == 0 {
+                lx.next_raw(&mut buf)
+            } else {
+                let before = diag::warned();
+                let again = std::mem::take(&mut self.reported);
+                let tok = diag::swallowing(again, || lx.next_raw(&mut buf));
+                if !self.last && lx.pos() >= lx.data().len() {
+                    // It reached the end of a window: it may go on.
+                    self.reported = diag::warned() - before;
+                    lx.seek(start);
+                    return Ok(Lexed::More);
+                }
+                tok
+            };
+            self.token_start = start;
+            if self.in_text_array {
                 match tok {
-                    RawToken::CloseArray => *in_text_array = false,
+                    RawToken::CloseArray => self.in_text_array = false,
                     RawToken::Real(f) => self.push_text_item(Object::Real(f)),
                     RawToken::Int(i) => self.push_text_item(Object::Int(i)),
                     RawToken::String => self.push_text_item(Object::String(Arc::from(&buf[..]))),
-                    RawToken::Eof => return Ok(()),
+                    RawToken::Eof => return Ok(Lexed::End),
                     RawToken::Keyword if matches!(cstr(&buf), b"Tw" | b"Tc") => {
                         // A spacing operator inside a TJ array takes the
                         // number before it.
@@ -762,20 +1032,26 @@ impl<'d, 'p> Csi<'d, 'p> {
                 continue;
             }
             match tok {
-                RawToken::EndStream | RawToken::Eof => return Ok(()),
+                RawToken::EndStream | RawToken::Eof => return Ok(Lexed::End),
                 RawToken::OpenArray => {
                     self.obj = None;
                     if self.in_text {
-                        *in_text_array = true;
+                        self.in_text_array = true;
                         self.obj = Some(Object::Array(Arc::new(Vec::new())));
                     } else {
-                        let a = parse_array(lx, 0).map_err(|e| report::syntax(&e.0))?;
+                        let Some(a) = self.whole(lx, start, |_, lx| parse_array(lx, 0)) else {
+                            return Ok(Lexed::More);
+                        };
+                        let a = a.map_err(|e| report::syntax(&e.0))?;
                         self.obj = Some(Object::Array(Arc::new(a)));
                     }
                 }
                 RawToken::OpenDict => {
                     self.obj = None;
-                    let d = parse_dict(lx, 0).map_err(|e| report::syntax(&e.0))?;
+                    let Some(d) = self.whole(lx, start, |_, lx| parse_dict(lx, 0)) else {
+                        return Ok(Lexed::More);
+                    };
+                    let d = d.map_err(|e| report::syntax(&e.0))?;
                     self.obj = Some(Object::Dict(Arc::new(d)));
                 }
                 RawToken::Name => {
@@ -802,6 +1078,11 @@ impl<'d, 'p> Csi<'d, 'p> {
                         return Err(crate::interrupt::MESSAGE.to_string());
                     }
                     self.keyword(lx, cstr(&buf))?;
+                    if std::mem::take(&mut self.need_more) {
+                        // The operator is back at its start, its operands
+                        // still on the stack.
+                        return Ok(Lexed::More);
+                    }
                     self.clear_stack();
                 }
                 _ => return Err(report::syntax("syntax error in content stream")),
@@ -987,9 +1268,20 @@ impl<'d, 'p> Csi<'d, 'p> {
                 cmyk: self.s4(),
             }),
             b"BI" => {
-                let (dict, csname) = self.parse_inline_dict(lx)?;
-                let image = self.load_inline_image(lx, dict)?;
-                find_ei(lx)?;
+                // The dictionary, the data and the `EI` after it are read
+                // from the lexer's bytes: all of them, or none yet.
+                let start = self.token_start;
+                let read = self.whole(lx, start, |csi, lx| {
+                    let (dict, csname) = csi.parse_inline_dict(lx)?;
+                    let image = csi.load_inline_image(lx, dict)?;
+                    find_ei(lx)?;
+                    Ok::<_, String>((image, csname))
+                });
+                let Some(read) = read else {
+                    self.need_more = true;
+                    return Ok(());
+                };
+                let (image, csname) = read?;
                 self.emit(Op::InlineImage {
                     image: &image,
                     colorspace_name: (!csname.is_empty()).then_some(&csname[..]),
@@ -1596,6 +1888,184 @@ mod tests {
             .map(|d| d.message.clone())
             .collect();
         (log.0, diags)
+    }
+
+    /// A feed that hands `data` out `step` bytes at a time.
+    struct Slices<'a> {
+        data: &'a [u8],
+        step: usize,
+    }
+
+    impl Feed for Slices<'_> {
+        fn read(&mut self, out: &mut Vec<u8>) -> Result<bool, String> {
+            let (now, later) = self.data.split_at(self.step.min(self.data.len()));
+            out.extend_from_slice(now);
+            self.data = later;
+            Ok(!later.is_empty())
+        }
+    }
+
+    /// What `content` runs as and reports, read `step` bytes at a time
+    /// into windows of `want`, and the most bytes held at once.
+    fn windowed(content: &[u8], step: usize, want: usize) -> (Vec<String>, Vec<String>, usize) {
+        let file = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R/Size 2>>\n";
+        let doc = Document::open(file.to_vec()).unwrap_or_else(|e| panic!("{e:?}"));
+        let before = doc.diagnostics().snapshot().len();
+        let mut log = Log::default();
+        log.1.rstack.push(Object::Dict(Arc::new(Dict::new())));
+        let mut feed = Slices {
+            data: content,
+            step,
+        };
+        let most = process_feed(&doc, &mut feed, &mut log, want).unwrap_or_else(|e| panic!("{e}"));
+        let diags = doc.diagnostics().snapshot()[before..]
+            .iter()
+            .map(|d| format!("{}: {}", d.code, d.message))
+            .collect();
+        (log.0, diags, most)
+    }
+
+    /// Contents with everything that can straddle the end of a window.
+    fn straddlers() -> Vec<Vec<u8>> {
+        let long_name = format!("/{} BMC EMC 3 w", "N".repeat(300));
+        let long_string = format!("BT ({}) Tj ET", "s".repeat(700));
+        let many_errors = "1 2 ) ".repeat(120);
+        let mut binary = b"q BI /W 4 /H 3 /BPC 8 /CS /G ID ".to_vec();
+        binary.extend_from_slice(b"EI E\x00EI\nEI abc");
+        binary.extend_from_slice(b" EI Q 9 w");
+        let mut v: Vec<Vec<u8>> = [
+            &b""[..],
+            b"   \n\t ",
+            b"1 2 3 m 4 l 0.5 w 7 j q 1 0 0 1 5 6 cm Q",
+            b"-12.5 +3 .25 -.5e 1e3 123456789012 m 0.000001 -0 l h",
+            b"q q q 1 w",
+            b"BT [(a) 5 Tw -20 (b) 3 Tc] TJ (c) Tj T* (d) ' 1 2 (e) \" ET",
+            b"BT (a(b)c\\)d\\(e\\n\\101\\\n f) Tj <4142 43 4> Tj <4G41zz> Tj () Tj <> Tj ET",
+            b"[1 2 [3 (x)] /N] 0 d [] 3 d",
+            b"/Tag <</K 1 /A [1 2 (x)] /N <</M 2>> /S (a>>b)>> BDC EMC /T2 /P1 BDC EMC /T3 MP",
+            b"% a comment 1 w\n2 w%tail\r3 w % q q q",
+            b"1 w %never ends",
+            b"%only a comment",
+            b"1    \x00\x00\n\n\r\n\t   w\n\n\n\n2\n\n\n\nw",
+            b"BI /W 2 /H 2 /BPC 8 /CS /G ID abcd EI 5 w",
+            b"BI /W 2 /H 2 /BPC 8 /CS /G ID abcdEI 5 w",
+            b"BI /W 2 /H 1 /BPC 8 /CS /G /F /AHx ID 41 42> EI 5 w BI /W 1 /H 1 /IM true ID \x80 EI",
+            b"BI /W 2 /H 2 /BPC 8 /CS /G ID ab",
+            b"BI /W 2 /H 2",
+            b"BI /W 0 /H 2 /BPC 8 ID abcd EI 6 w",
+            b"1 w ) 2 w >> 3 w ] 4 w } 5 w nonsense 6 w",
+            b"1 w endstream 2 w",
+            b"1 0 0 1 5",
+            b"BT (unterminated",
+            b"BT <4142",
+            b"[1 2",
+            b"<</A 1 /B [",
+            b"BT [(a) 5",
+            b"/Name",
+            b"1 w /",
+        ]
+        .iter()
+        .map(|c| c.to_vec())
+        .collect();
+        v.extend([
+            long_name.into_bytes(),
+            long_string.into_bytes(),
+            many_errors.into_bytes(),
+            binary,
+        ]);
+        v
+    }
+
+    #[test]
+    fn content_runs_the_same_wherever_its_windows_end() {
+        for content in straddlers() {
+            let show = String::from_utf8_lossy(&content).into_owned();
+            // In one window: the stream as it was always read.
+            let (ops, diags, _) = windowed(&content, usize::MAX, usize::MAX);
+            assert_eq!(run(&content).0, ops, "{show}");
+            for step in [1, 2, 3, 5, 7, 16, 61] {
+                for want in [1, 2, 3, 4, 8, 13, 64] {
+                    let (o, d, _) = windowed(&content, step, want);
+                    assert_eq!(o, ops, "{show}: {step} bytes at a time, windows of {want}");
+                    assert_eq!(
+                        d, diags,
+                        "{show}: {step} bytes at a time, windows of {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_is_not_held_whole() {
+        // Megabytes of white space and comments around a few operators,
+        // 1000 bytes at a time: a few thousand bytes at once at most.
+        let mut content = b"1 w ".to_vec();
+        content.resize(content.len() + 3_000_000, b' ');
+        content.extend_from_slice(b"2 w %");
+        content.resize(content.len() + 3_000_000, b'c');
+        content.extend_from_slice(b"\n3 w\n");
+        for _ in 0..200_000 {
+            content.extend_from_slice(b"0 0 m 1 1 l S\n");
+        }
+        let (ops, diags, most) = windowed(&content, 1000, 4096);
+        assert_eq!(ops.len(), 3 + 3 * 200_000);
+        assert_eq!(
+            &ops[..3],
+            ["LineWidth(1.0)", "LineWidth(2.0)", "LineWidth(3.0)"]
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(most <= 4096 + 1000, "{most} bytes held");
+        // A token longer than a window is held, and no more than about it.
+        let string = format!("BT ({}) Tj ET 4 w", "s".repeat(200_000));
+        let (ops, _, most) = windowed(string.as_bytes(), 1000, 4096);
+        assert_eq!(ops.len(), 4);
+        assert!(ops[1].len() > 200_000 && ops[3] == "LineWidth(4.0)");
+        assert!((200_000..=420_000).contains(&most), "{most} bytes held");
+        // So is an inline image.
+        let mut image = b"BI /W 300 /H 300 /BPC 8 /CS /G ID ".to_vec();
+        image.resize(image.len() + 90_000, b'E');
+        image.extend_from_slice(b" EI 5 w");
+        let (ops, diags, most) = windowed(&image, 1000, 4096);
+        assert_eq!(ops.len(), 2);
+        assert!(ops[0].starts_with("BI 300x300") && ops[1] == "LineWidth(5.0)");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!((90_000..=190_000).contains(&most), "{most} bytes held");
+    }
+
+    #[test]
+    fn whether_content_can_mark_is_told_a_window_at_a_time() {
+        let mut contents = straddlers();
+        contents.extend([
+            b"0 0 1 1 re f 5 5 2 2 re f".to_vec(),
+            format!("0 0 1 1 re f {} 1 w (text) Tj", " ".repeat(5000)).into_bytes(),
+            format!(
+                "0 0 1 1 re f %{}\n/N {} gs",
+                "c".repeat(5000),
+                "\n".repeat(900)
+            )
+            .into_bytes(),
+            format!("/{} 1 w <4G41> 2 w [(Tj)] 0 d", "N".repeat(300)).into_bytes(),
+        ]);
+        for content in contents {
+            let show = String::from_utf8_lossy(&content).into_owned();
+            let told = |step: usize, want: usize| {
+                let diag = Diagnostics::new();
+                let mut feed = Slices {
+                    data: &content,
+                    step,
+                };
+                let marks = may_mark(&mut feed, &diag, want);
+                (marks, diag.snapshot())
+            };
+            let whole = told(usize::MAX, usize::MAX);
+            assert!(whole.0.is_ok(), "{show}");
+            for step in [1, 3, 7, 64, 1000] {
+                for want in [1, 4, 13, 256] {
+                    assert_eq!(told(step, want), whole, "{show}: {step}, {want}");
+                }
+            }
+        }
     }
 
     #[test]
