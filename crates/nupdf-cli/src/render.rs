@@ -50,6 +50,13 @@ pub fn parse_region(s: &str) -> Result<nupdf::geometry::Rect, String> {
     Ok(nupdf::geometry::Rect::new(x0, y0, x1, y1))
 }
 
+/// The zlib level pages are written as PNG at. MuPDF writes at zlib's
+/// default, 6, which took as long as drawing the pages did; at 3 the
+/// same pixels are written in a third of that time into files a seventh
+/// larger (DECISIONS D54). `images --extract` keeps MuPDF's level, as its
+/// files are compared with `mutool extract`'s.
+pub const PNG_LEVEL: i32 = 3;
+
 /// How to render: resolution, an optional region, the pixel budget and the
 /// threads pages run on.
 pub struct Settings {
@@ -139,7 +146,7 @@ fn page_entry(
                 Format::Png => r
                     .pix
                     .to_pixmap(Some(nupdf::colorspace::ColorSpace::Rgb))
-                    .png(),
+                    .png_at(PNG_LEVEL),
                 Format::Ppm => Ok(ppm(&r.pix)),
             };
             entry["width"] = r.pix.w.into();

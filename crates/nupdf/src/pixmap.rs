@@ -92,6 +92,13 @@ impl Pixmap {
     /// `fz_save_pixmap_as_png` for a gray, RGB or alpha-only pixmap at
     /// 96 dpi, without the iCCP chunk MuPDF adds for an ICC space.
     pub fn png(&self) -> Result<Vec<u8>, String> {
+        self.png_at(-1)
+    }
+
+    /// [`Pixmap::png`] with the image data deflated at zlib level `level`
+    /// (0 to 9, or -1 for zlib's default, which is MuPDF's): the same
+    /// pixels in a larger file, sooner, at a lower level.
+    pub fn png_at(&self, level: i32) -> Result<Vec<u8>, String> {
         let gray_or_rgb = |c: &ColorSpace| matches!(c.family(), Some(Family::Gray | Family::Rgb));
         if self.colorspace.as_ref().is_some_and(|c| !gray_or_rgb(c)) {
             return Err("argument error: pixmap must be grayscale or rgb to write as png".into());
@@ -126,7 +133,8 @@ impl Pixmap {
                 raw.extend_from_slice(row);
             }
         }
-        let idat = crate::deflate::compress(&raw, -1).ok_or("library error: compression error")?;
+        let idat =
+            crate::deflate::compress(&raw, level).ok_or("library error: compression error")?;
         let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
         let mut head = Vec::with_capacity(13);
         head.extend_from_slice(&(self.w as u32).to_be_bytes());
@@ -823,8 +831,12 @@ mod tests {
 
     /// The PNG's IHDR color type and its rows inflated.
     fn png_rows(p: &Pixmap) -> (u8, Vec<u8>) {
+        rows_of(&p.png().unwrap_or_else(|e| panic!("{e}")))
+    }
+
+    /// A PNG's colour type and its rows as stored, inflated.
+    fn rows_of(png: &[u8]) -> (u8, Vec<u8>) {
         use std::io::Read;
-        let png = p.png().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
         let color = png[8 + 8 + 9];
         let at = png
@@ -865,5 +877,40 @@ mod tests {
         );
         let cmyk = pix(Some(ColorSpace::Cmyk), false, &[1, 2, 3, 4]);
         assert!(cmyk.png().is_err());
+    }
+
+    #[test]
+    fn png_holds_the_same_pixels_at_every_level() {
+        // Rows that compress: runs, a ramp and noise.
+        let (w, h) = (97usize, 64usize);
+        let mut samples = Vec::with_capacity(w * h * 3);
+        let mut seed = 1u32;
+        for y in 0..h {
+            for x in 0..w {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                let noise = if y % 7 == 0 { (seed >> 16) as u8 } else { 255 };
+                samples.extend_from_slice(&[noise, (x * 2) as u8, if x < 40 { 0 } else { 255 }]);
+            }
+        }
+        let p = Pixmap {
+            w,
+            h,
+            ..pix(Some(ColorSpace::Rgb), false, &samples)
+        };
+        let default = p.png().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(p.png_at(-1).as_deref(), Ok(&default[..]));
+        assert_eq!(p.png_at(6).as_deref(), Ok(&default[..]));
+        let (color, rows) = rows_of(&default);
+        assert_eq!((color, rows.len()), (2, (w * 3 + 1) * h));
+        let mut sizes = Vec::new();
+        for level in [0, 1, 3, 9] {
+            let png = p.png_at(level).unwrap_or_else(|e| panic!("{level}: {e}"));
+            assert_eq!(rows_of(&png), (color, rows.clone()), "level {level}");
+            sizes.push(png.len());
+        }
+        // Stored is the largest; any level deflates these rows.
+        assert!(sizes[1..].iter().all(|&s| s < sizes[0]), "{sizes:?}");
+        assert!(p.png_at(10).is_err());
+        assert!(p.png_at(-2).is_err());
     }
 }

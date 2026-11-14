@@ -222,7 +222,7 @@ pub fn ocr(
             .and_then(|r| {
                 r.pix
                     .to_pixmap(Some(nupdf::colorspace::ColorSpace::Rgb))
-                    .png()
+                    .png_at(crate::render::PNG_LEVEL)
             });
         let png = match png {
             Ok(p) => p,

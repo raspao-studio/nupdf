@@ -2168,7 +2168,7 @@ fn previews(doc: &Document, plan: &redact::Plan, dir: &Path, dpi: f32) -> Vec<se
         match rendered.and_then(|r| {
             r.pix
                 .to_pixmap(Some(nupdf::colorspace::ColorSpace::Rgb))
-                .png()
+                .png_at(render::PNG_LEVEL)
         }) {
             Ok(png) => match write_file(&path, &png) {
                 Ok(()) => entry["file"] = path.display().to_string().into(),

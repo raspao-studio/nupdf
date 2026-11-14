@@ -2091,6 +2091,90 @@ fn pages_that_depend_on_the_pages_before_them_are_drawn_in_order() {
     assert!(!inked(&alone[0]));
 }
 
+/// The data of a PNG's IDAT chunks inflated: its rows, each after a
+/// filter byte. nupdf inflates it, as a stream of a PDF made for it.
+fn png_rows(png: &[u8]) -> Vec<u8> {
+    assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    let (mut at, mut idat) = (8, Vec::new());
+    while at + 8 <= png.len() {
+        let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        if &png[at + 4..at + 8] == b"IDAT" {
+            idat.extend_from_slice(&png[at + 8..at + 8 + len]);
+        }
+        at += 12 + len;
+    }
+    let mut pdf = format!(
+        "%PDF-1.4\n1 0 obj\n<</Filter/FlateDecode/Length {}>>\nstream\n",
+        idat.len()
+    )
+    .into_bytes();
+    pdf.extend_from_slice(&idat);
+    pdf.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<</Root 1 0 R>>\n");
+    let doc = nupdf::Document::open(pdf).unwrap();
+    // No rows where the stream is not one: the caller counts them.
+    match doc.object(1) {
+        Some(nupdf::Object::Stream(stream)) => {
+            doc.stream_data(&stream).map_err(|e| e.report()).unwrap()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn render_writes_the_same_pixels_as_png_and_as_ppm() {
+    let input = smoke("stext.pdf");
+    let (png_dir, ppm_dir) = (scratch("render-png-pixels"), scratch("render-ppm-pixels"));
+    for (dir, format) in [(&png_dir, "png"), (&ppm_dir, "ppm")] {
+        let run = nupdf(&[
+            "render",
+            input.to_str().unwrap(),
+            "-o",
+            dir.to_str().unwrap(),
+            "--format",
+            format,
+            "--dpi",
+            "150",
+        ]);
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+    for page in ["page-0001", "page-0002"] {
+        let ppm = std::fs::read(ppm_dir.join(format!("{page}.ppm"))).unwrap();
+        // "P6\n<w> <h>\n255\n", then the pixels.
+        let header: Vec<&[u8]> = ppm.splitn(4, |&b| b == b'\n').collect();
+        let size: Vec<usize> = std::str::from_utf8(header[1])
+            .unwrap()
+            .split(' ')
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let (w, h, pixels) = (size[0], size[1], header[3]);
+        assert_eq!(pixels.len(), w * h * 3);
+        let png = std::fs::read(png_dir.join(format!("{page}.png"))).unwrap();
+        assert_eq!(
+            &png[16..24],
+            &[(w as u32).to_be_bytes(), (h as u32).to_be_bytes()].concat()[..]
+        );
+        // 8 bits, RGB, and every row unfiltered.
+        assert_eq!(&png[24..26], &[8, 2]);
+        let rows = png_rows(&png);
+        assert_eq!(rows.len(), (w * 3 + 1) * h);
+        for (row, want) in rows.chunks(w * 3 + 1).zip(pixels.chunks(w * 3)) {
+            assert_eq!(row[0], 0);
+            assert!(&row[1..] == want, "{page}");
+        }
+        // Text on white deflates to a fraction of its pixels.
+        assert!(
+            png.len() * 10 < pixels.len(),
+            "{} of {}",
+            png.len(),
+            pixels.len()
+        );
+    }
+}
+
 #[test]
 fn render_region_and_pixel_budget() {
     let input = smoke("stext.pdf");

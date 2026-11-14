@@ -636,3 +636,27 @@ Measured on the 30 long documents (3,414 pages), no `--threads`, best of two run
 | `info` | 0.96 s | 0.49 s |
 | `render --format ppm` | 9.16 s | 5.47 s |
 | `render` | 16.88 s | 7.22 s |
+
+## D54. Rendered pages are written as PNG at zlib level 3
+
+*2026-11-14*
+
+`render` wrote its PNGs as `fz_save_pixmap_as_png` does, deflated at zlib's default level, 6. On the 30 long documents that was 7.5 s of the 16.8 s `render` took on one thread: nearly as long as drawing the pages (9.2 s). It now deflates at level 3, as do `redact --preview` and the page images `ocr` hands to Tesseract.
+
+- **The pixels are the same**; only the file is not. A page's PNG holds the rows its PPM does (the tests inflate one and compare), and `render`'s PNGs already differed from `mutool draw`'s by the iCCP chunk nupdf does not write, so no check compared the files.
+- **Level 3** of zlib's levels, measured on the long tier's 3,414 pages on one thread:
+
+  | Level | Encoding | Files |
+  |---|---|---|
+  | 6 (before) | 7.5 s | 115.4 MB |
+  | 4 | 5.5 s | 119.1 MB |
+  | 3 | 2.8 s | 132.2 MB |
+  | 2 | 2.2 s | 135.6 MB |
+  | 1 | 2.2 s | 140.7 MB |
+
+  Levels 1 to 3 are zlib's fast matcher and 4 up its lazy one, which is where the time goes; 3 gives the smallest files of the fast three for a seventh more bytes than level 6. An agent pays for an image by its pixels, not its bytes.
+- **Still nupdf's own deflate** (`deflate.rs`, the port of zlib's that `clean -z` needs to match MuPDF's bytes), not a faster library's: the port gives the same bytes on every machine, which a library that picks its matcher by the processor's instructions need not.
+- **`images --extract` keeps level 6** (`Pixmap::png`): its files are compared with `mutool extract`'s.
+
+With D53's threads, `render` on the long tier goes from 16.8 s to 6.4 s; `long-020.pdf`, 100 pages that draw in 6 ms, from 171 ms to 57 ms on one thread and 17 ms unasked.
+
