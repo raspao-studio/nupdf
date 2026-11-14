@@ -175,11 +175,20 @@ fn prepare(n: usize, page: Result<StextPage, String>, f: &Fields, args: &Args) -
                     }
                 }
                 Format::Json | Format::Jsonl => {
-                    let v = block_value(b, &format!("p{n}.b{}", k + 1), f);
-                    if args.pretty {
-                        Piece::Value(v)
-                    } else {
-                        serde_json::value::to_raw_value(&v).map_or(Piece::Value(v), Piece::Raw)
+                    let block = BlockOut {
+                        block: b,
+                        id: format!("p{n}.b{}", k + 1),
+                        f,
+                    };
+                    // Laid out again, a block is written from its value;
+                    // else it is written once, here, and kept as written.
+                    let raw = match args.pretty {
+                        true => None,
+                        false => serde_json::value::to_raw_value(&block).ok(),
+                    };
+                    match raw {
+                        Some(raw) => Piece::Raw(raw),
+                        None => serde_json::to_value(&block).map_or(Piece::None, Piece::Value),
                     }
                 }
             };
@@ -257,25 +266,19 @@ fn number(v: f32) -> Value {
     }
 }
 
-fn rect(r: Rect) -> Value {
-    json!([number(r.x0), number(r.y0), number(r.x1), number(r.y1)])
+fn rect(r: Rect) -> [Value; 4] {
+    [r.x0, r.y0, r.x1, r.y1].map(number)
 }
 
-fn point(p: Point) -> Value {
-    json!([number(p.x), number(p.y)])
+fn point(p: Point) -> [Value; 2] {
+    [p.x, p.y].map(number)
 }
 
-fn quad(q: Quad) -> Value {
-    json!([
-        number(q.ul.x),
-        number(q.ul.y),
-        number(q.ur.x),
-        number(q.ur.y),
-        number(q.ll.x),
-        number(q.ll.y),
-        number(q.lr.x),
-        number(q.lr.y)
-    ])
+fn quad(q: Quad) -> [Value; 8] {
+    [
+        q.ul.x, q.ul.y, q.ur.x, q.ur.y, q.ll.x, q.ll.y, q.lr.x, q.lr.y,
+    ]
+    .map(number)
 }
 
 /// `#rrggbb`, with the alpha after when it is not opaque.
@@ -325,117 +328,163 @@ fn parse_cursor(c: &str, doc_id: &str) -> Result<(usize, usize), String> {
     Ok((page, block))
 }
 
-fn span_value(line: &StextLine, span: &Span, id: &str, f: &Fields) -> Value {
-    let mut m = Map::new();
-    m.insert("id".into(), id.into());
-    if f.has("text") {
-        m.insert(
-            "text".into(),
-            ex::chars_text(&line.chars[span.start..span.end]).into(),
-        );
+/// A sequence written from an iterator that is made when it is written.
+struct Each<F>(F);
+
+impl<F, I> Serialize for Each<F>
+where
+    F: Fn() -> I,
+    I: Iterator,
+    I::Item: Serialize,
+{
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq((self.0)())
     }
-    if f.has("font") {
-        m.insert(
-            "font".into(),
-            String::from_utf8_lossy(&span.style.font)
-                .into_owned()
-                .into(),
-        );
-    }
-    if f.has("size") {
-        m.insert("size".into(), number(span.style.size));
-    }
-    if f.has("bold") {
-        m.insert("bold".into(), span.style.bold.into());
-    }
-    if f.has("italic") {
-        m.insert("italic".into(), span.style.italic.into());
-    }
-    if f.has("color") {
-        m.insert("color".into(), color(span.style.argb).into());
-    }
-    if f.has("bbox") {
-        m.insert("bbox".into(), rect(span.bbox));
-    }
-    if f.has("chars") {
-        let chars: Vec<Value> = line.chars[span.start..span.end]
-            .iter()
-            .map(|c| json!([stext::rune_char(c.c).to_string(), quad(c.quad)]))
-            .collect();
-        m.insert("chars".into(), chars.into());
-    }
-    Value::Object(m)
 }
 
-fn line_value(line: &StextLine, id: &str, f: &Fields) -> Value {
-    let mut m = Map::new();
-    m.insert("id".into(), id.into());
-    if f.has("bbox") {
-        m.insert("bbox".into(), rect(line.bbox));
-    }
-    if f.has("wmode") {
-        m.insert("wmode".into(), line.wmode.into());
-    }
-    if f.has("dir") {
-        m.insert("dir".into(), point(line.dir));
-    }
-    if f.depth == 2 && f.has("text") {
-        m.insert("text".into(), ex::chars_text(&line.chars).into());
-    }
-    if f.depth >= 3 {
-        let spans: Vec<Value> = ex::spans(line)
-            .iter()
-            .enumerate()
-            .map(|(i, s)| span_value(line, s, &format!("{id}.s{}", i + 1), f))
-            .collect();
-        m.insert("spans".into(), spans.into());
-    }
-    Value::Object(m)
+/// A span as it is written. The blocks, lines and spans of a page are
+/// written straight into the page's JSON, never built as values first: a
+/// block can hold every line of a page, and a line as values is some
+/// 3.6 KB.
+struct SpanOut<'a> {
+    line: &'a StextLine,
+    span: &'a Span,
+    id: String,
+    f: &'a Fields,
 }
 
-fn block_value(block: &Block, id: &str, f: &Fields) -> Value {
-    let mut m = Map::new();
-    m.insert("id".into(), id.into());
-    let (kind, bbox) = match block {
-        Block::Text(t) => ("text", t.bbox),
-        Block::Image(i) => ("image", i.bbox),
-        Block::Vector(v) => ("vector", v.bbox),
-        Block::Struct(s) => ("struct", s.bbox),
-        Block::Grid(g) => ("grid", g.bbox),
-    };
-    if f.has("type") {
-        m.insert("type".into(), kind.into());
+impl Serialize for SpanOut<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let (line, span, f) = (self.line, self.span, self.f);
+        let chars = &line.chars[span.start..span.end];
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("id", &self.id)?;
+        if f.has("text") {
+            m.serialize_entry("text", &ex::chars_text(chars))?;
+        }
+        if f.has("font") {
+            m.serialize_entry("font", &String::from_utf8_lossy(&span.style.font))?;
+        }
+        if f.has("size") {
+            m.serialize_entry("size", &number(span.style.size))?;
+        }
+        if f.has("bold") {
+            m.serialize_entry("bold", &span.style.bold)?;
+        }
+        if f.has("italic") {
+            m.serialize_entry("italic", &span.style.italic)?;
+        }
+        if f.has("color") {
+            m.serialize_entry("color", &color(span.style.argb))?;
+        }
+        if f.has("bbox") {
+            m.serialize_entry("bbox", &rect(span.bbox))?;
+        }
+        if f.has("chars") {
+            let each = || {
+                chars
+                    .iter()
+                    .map(|c| (stext::rune_char(c.c).to_string(), quad(c.quad)))
+            };
+            m.serialize_entry("chars", &Each(each))?;
+        }
+        m.end()
     }
-    if f.has("bbox") {
-        m.insert("bbox".into(), rect(bbox));
+}
+
+struct LineOut<'a> {
+    line: &'a StextLine,
+    id: String,
+    f: &'a Fields,
+}
+
+impl Serialize for LineOut<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let (line, id, f) = (self.line, &self.id, self.f);
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("id", id)?;
+        if f.has("bbox") {
+            m.serialize_entry("bbox", &rect(line.bbox))?;
+        }
+        if f.has("wmode") {
+            m.serialize_entry("wmode", &line.wmode)?;
+        }
+        if f.has("dir") {
+            m.serialize_entry("dir", &point(line.dir))?;
+        }
+        if f.depth == 2 && f.has("text") {
+            m.serialize_entry("text", &ex::chars_text(&line.chars))?;
+        }
+        if f.depth >= 3 {
+            let spans = ex::spans(line);
+            let each = || {
+                spans.iter().enumerate().map(|(i, span)| SpanOut {
+                    line,
+                    span,
+                    id: format!("{id}.s{}", i + 1),
+                    f,
+                })
+            };
+            m.serialize_entry("spans", &Each(each))?;
+        }
+        m.end()
     }
-    if let Block::Struct(s) = block {
+}
+
+struct BlockOut<'a> {
+    block: &'a Block,
+    id: String,
+    f: &'a Fields,
+}
+
+impl Serialize for BlockOut<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let (block, id, f) = (self.block, &self.id, self.f);
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("id", id)?;
+        let (kind, bbox) = match block {
+            Block::Text(t) => ("text", t.bbox),
+            Block::Image(i) => ("image", i.bbox),
+            Block::Vector(v) => ("vector", v.bbox),
+            Block::Struct(s) => ("struct", s.bbox),
+            Block::Grid(g) => ("grid", g.bbox),
+        };
         if f.has("type") {
-            m.insert("standard".into(), s.standard.into());
+            m.serialize_entry("type", kind)?;
         }
-        let blocks: Vec<Value> = s
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(i, b)| block_value(b, &format!("{id}.b{}", i + 1), f))
-            .collect();
-        m.insert("blocks".into(), blocks.into());
+        if f.has("bbox") {
+            m.serialize_entry("bbox", &rect(bbox))?;
+        }
+        if let Block::Struct(st) = block {
+            if f.has("type") {
+                m.serialize_entry("standard", st.standard)?;
+            }
+            let each = || {
+                st.blocks.iter().enumerate().map(|(i, block)| BlockOut {
+                    block,
+                    id: format!("{id}.b{}", i + 1),
+                    f,
+                })
+            };
+            m.serialize_entry("blocks", &Each(each))?;
+        }
+        if let Block::Text(t) = block {
+            if f.depth == 1 && f.has("text") {
+                m.serialize_entry("text", &ex::block_text(t))?;
+            }
+            if f.depth >= 2 {
+                let each = || {
+                    t.lines.iter().enumerate().map(|(i, line)| LineOut {
+                        line,
+                        id: format!("{id}.l{}", i + 1),
+                        f,
+                    })
+                };
+                m.serialize_entry("lines", &Each(each))?;
+            }
+        }
+        m.end()
     }
-    if let Block::Text(t) = block {
-        if f.depth == 1 && f.has("text") {
-            m.insert("text".into(), ex::block_text(t).into());
-        }
-        if f.depth >= 2 {
-            let lines: Vec<Value> = t
-                .lines
-                .iter()
-                .enumerate()
-                .map(|(i, l)| line_value(l, &format!("{id}.l{}", i + 1), f))
-                .collect();
-            m.insert("lines".into(), lines.into());
-        }
-    }
-    Value::Object(m)
 }
 
 /// The text of blocks, as `fz_print_stext_page_as_text` writes them.
@@ -676,7 +725,7 @@ fn walk(
                     head.insert("page".into(), n.into());
                 }
                 if fields.has("bbox") {
-                    head.insert("bbox".into(), rect(page.mediabox));
+                    head.insert("bbox".into(), rect(page.mediabox).to_vec().into());
                 }
                 let mut blocks = None;
                 if fields.depth == 0 {
