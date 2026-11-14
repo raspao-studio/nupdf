@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[path = "support/schema_check.rs"]
 mod schema_check;
@@ -2321,6 +2321,11 @@ fn heavy_pdf(name: &str, ops: usize) -> PathBuf {
     for i in 0..ops {
         content.extend_from_slice(format!("{} 0 m 100 {} l S\n", i % 97, i % 89).as_bytes());
     }
+    content_pdf(name, &content)
+}
+
+/// A one-page file whose page has `content`.
+fn content_pdf(name: &str, content: &[u8]) -> PathBuf {
     let objects = [
         "<</Type/Catalog/Pages 2 0 R>>".to_string(),
         "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
@@ -2334,7 +2339,7 @@ fn heavy_pdf(name: &str, ops: usize) -> PathBuf {
     }
     offsets.push(out.len());
     out.extend_from_slice(format!("4 0 obj\n<</Length {}>>\nstream\n", content.len()).as_bytes());
-    out.extend_from_slice(&content);
+    out.extend_from_slice(content);
     out.extend_from_slice(b"\nendstream\nendobj\n");
     let xref = out.len();
     out.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
@@ -2614,6 +2619,94 @@ fn a_command_out_of_time_writes_nothing() {
             .status
             .success()
     );
+}
+
+#[test]
+fn a_report_written_as_it_is_made_is_not_written_out_of_time() {
+    let heavy = heavy_pdf("timeout-streamed.pdf", 2_000);
+    let heavy = heavy.to_str().unwrap();
+    for command in ["objects", "operators", "trace"] {
+        // Its time is up before it starts, and it has no page to notice on.
+        let out = nupdf(&["--timeout", "0", command, heavy]);
+        assert_eq!(out.status.code(), Some(5), "{command}");
+        assert!(out.stdout.is_empty(), "{command} wrote under a timeout");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["code"], "limit.timeout");
+        // With time to spare it writes what it writes without a timeout.
+        let timed = nupdf(&["--timeout", "600", command, heavy]);
+        assert!(timed.status.success(), "{command}");
+        assert_eq!(timed.stdout, nupdf(&[command, heavy]).stdout, "{command}");
+    }
+}
+
+#[test]
+fn operators_and_trace_report_each_page_between_schema_and_diagnostics() {
+    let file = heavy_pdf("streamed-report.pdf", 500);
+    let file = file.to_str().unwrap();
+    for (command, rows, per_op) in [("operators", "ops", 3), ("trace", "events", 1)] {
+        let out = nupdf(&[command, file]);
+        assert!(out.status.success());
+        let text = String::from_utf8(out.stdout).unwrap();
+        let schema = format!("{{\"schema\":\"nupdf.{command}/v1\",\"doc_id\":\"");
+        assert!(text.starts_with(&schema), "{command}: {}", &text[..60]);
+        assert!(text.ends_with(",\"diagnostics\":[]}\n"), "{command}");
+        let report: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(report["page_count"], 1);
+        let page = &report["pages"][0];
+        assert!(page.get("error").is_none());
+        let made = page[rows].as_array().unwrap();
+        // `trace` has the page's default colour spaces before its strokes.
+        assert_eq!(made.len(), 500 * per_op + usize::from(command == "trace"));
+        let pretty: Value =
+            serde_json::from_slice(&nupdf(&[command, file, "--pretty"]).stdout).unwrap();
+        assert_eq!(pretty, report, "{command} --pretty");
+    }
+    let report = run_json(&["operators", file]);
+    assert_eq!(
+        report["pages"][0]["ops"].as_array().unwrap()[..3],
+        [
+            json!(["m", 0.0, 0.0]),
+            json!(["l", 100.0, 0.0]),
+            json!(["S"])
+        ]
+    );
+    let report = run_json(&["trace", file]);
+    assert_eq!(report["pages"][0]["events"][1][0], "stroke_path");
+    assert_eq!(
+        report["pages"][0]["events"][1][1],
+        json!([["m", 0.0, 0.0], ["l", 100.0, 0.0]])
+    );
+}
+
+#[test]
+fn a_page_that_fails_reports_its_error_after_what_ran() {
+    let keys =
+        |page: &Value| -> Vec<String> { page.as_object().unwrap().keys().cloned().collect() };
+    // A run that ends in an error has what ran, then the error.
+    let cycle = smoke("pages-parent-cycle.pdf");
+    let report = run_json(&["trace", cycle.to_str().unwrap()]);
+    let page = &report["pages"][0];
+    assert_eq!(keys(page), ["events", "error"]);
+    assert_eq!(page["events"], json!([]));
+    assert_eq!(page["error"], "cycle in parent chain");
+    assert_eq!(report["diagnostics"][0]["code"], "page.parent_cycle");
+    // A page that cannot be loaded is its error alone.
+    let report = run_json(&["operators", cycle.to_str().unwrap()]);
+    assert_eq!(
+        report["pages"],
+        json!([{ "error": "cycle in parent chain" }])
+    );
+    let short = smoke("pages-count-too-high.pdf");
+    for (command, rows) in [("operators", "ops"), ("trace", "events")] {
+        let report = run_json(&[command, short.to_str().unwrap()]);
+        assert_eq!(report["page_count"], 3);
+        let pages = report["pages"].as_array().unwrap();
+        assert_eq!(keys(&pages[0]), [rows]);
+        for (page, n) in pages[1..].iter().zip(2..) {
+            let error = format!("cannot find page {n} in page tree");
+            assert_eq!(*page, json!({ "error": error }), "{command}");
+        }
+    }
 }
 
 fn lines(out: &[u8]) -> Vec<Value> {

@@ -18,6 +18,7 @@ mod objects;
 mod ocr;
 mod redact;
 mod render;
+mod rows;
 mod schemas;
 mod search;
 mod stext;
@@ -1087,16 +1088,23 @@ fn run(cli: Cli) -> ExitCode {
                 objects::streams(&doc, *images),
             )
         }),
-        Command::Operators { file, no_resources } => open(file).map(|(doc, facts)| {
-            report(
-                "nupdf.operators/v1",
-                &facts,
-                &doc,
-                objects::operators(&doc, *no_resources),
-            )
-        }),
-        Command::Trace { file } => open(file)
-            .map(|(doc, facts)| report("nupdf.trace/v1", &facts, &doc, trace::trace(&doc))),
+        Command::Operators { file, no_resources } => match open(file) {
+            Ok((doc, facts)) => {
+                let body = objects::Operators {
+                    doc: &doc,
+                    bare: *no_resources,
+                };
+                return stream_report("nupdf.operators/v1", &doc, &facts, &body, cli.pretty);
+            }
+            Err(failure) => Err(failure),
+        },
+        Command::Trace { file } => match open(file) {
+            Ok((doc, facts)) => {
+                let body = trace::Trace::new(&doc);
+                return stream_report("nupdf.trace/v1", &doc, &facts, &body, cli.pretty);
+            }
+            Err(failure) => Err(failure),
+        },
         Command::Extract {
             file,
             format,
@@ -1949,8 +1957,68 @@ fn stream_objects(doc: &Document, facts: &FileFacts, pretty: bool) -> ExitCode {
             map.end()
         }
     }
-    emit(&mut standard_output(), &Report { facts, doc }, pretty);
+    emit_streamed(&Report { facts, doc }, pretty);
     ExitCode::SUCCESS
+}
+
+/// Writes a report that is made while it is written, with `body`'s
+/// entries between its schema and its diagnostics.
+fn stream_report(
+    schema: &'static str,
+    doc: &Document,
+    facts: &FileFacts,
+    body: &impl rows::Body,
+    pretty: bool,
+) -> ExitCode {
+    struct Report<'a, B> {
+        schema: &'static str,
+        facts: &'a FileFacts,
+        doc: &'a Document,
+        body: &'a B,
+    }
+    impl<B: rows::Body> Serialize for Report<'_, B> {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = s.serialize_map(None)?;
+            map.serialize_entry("schema", self.schema)?;
+            map.serialize_entry("doc_id", &self.facts.doc_id)?;
+            self.body.serialize_into(&mut map)?;
+            // Last, so it includes what making the body reported.
+            map.serialize_entry("diagnostics", &diagnostics(self.doc))?;
+            map.end()
+        }
+    }
+    let report = Report {
+        schema,
+        facts,
+        doc,
+        body,
+    };
+    emit_streamed(&report, pretty);
+    ExitCode::SUCCESS
+}
+
+/// [`emit`] to standard output for a report that is made while it is
+/// written. Under `--timeout` the report is held until it is whole, since
+/// a command out of time writes nothing: then it takes the report's bytes
+/// in memory, where without a deadline it takes none.
+fn emit_streamed(value: &impl Serialize, pretty: bool) {
+    let deadline = nupdf::interrupt::current();
+    // Kept by whoever runs the call, who drops it if the call is stopped.
+    let kept = capture::writer(capture::Stream::Out);
+    match (deadline, kept) {
+        (Some(deadline), None) => {
+            let mut held = Vec::new();
+            emit(&mut held, value, pretty);
+            if deadline.reason().is_none() {
+                let mut out = standard_output();
+                let _ = out.write_all(&held);
+                let _ = out.flush();
+            }
+        }
+        (_, Some(mut out)) => emit(&mut out, value, pretty),
+        (None, None) => emit(&mut standard_output(), value, pretty),
+    }
 }
 
 /// Writes what `extract` gave in its format.

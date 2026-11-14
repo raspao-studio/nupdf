@@ -4,6 +4,8 @@
 //! The `trace` command: each page's device calls, as MuPDF's script glue
 //! hands them to a script device (oracle/js/trace.js).
 
+use std::cell::{Cell, RefCell};
+
 use nupdf::Document;
 use nupdf::colorspace::ColorSpace;
 use nupdf::content::Store;
@@ -14,53 +16,118 @@ use nupdf::image::Image;
 use nupdf::path::{Path, StrokeState, Walker};
 use nupdf::shade::Shade;
 use nupdf::text::{Text, language_to_string};
-use serde_json::{Map, Value, json};
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use serde_json::{Value, json};
+
+use crate::rows::{Fill, Rows, Sink};
 
 /// Each page's calls, with its error if the run failed.
-pub fn trace(doc: &Document) -> Value {
-    let mut out = Map::new();
-    let count = doc.page_count();
-    out.insert(
-        "page_count".into(),
-        count.as_ref().map_or(Value::Null, |n| json!(n)),
-    );
-    let mut pages = Vec::new();
-    let mut store = Store::default();
-    for index in 0..count.unwrap_or(0) {
-        let page = match doc.page(index) {
-            Ok(p) => p,
+///
+/// The report is written while the pages run ([`Rows`]): what it holds of
+/// a page at any moment is one call.
+pub struct Trace<'a> {
+    doc: &'a Document,
+    /// What the pages before left loaded, for the next.
+    store: RefCell<Store>,
+}
+
+impl<'a> Trace<'a> {
+    pub fn new(doc: &'a Document) -> Self {
+        Trace {
+            doc,
+            store: RefCell::default(),
+        }
+    }
+}
+
+impl crate::rows::Body for Trace<'_> {
+    fn serialize_into<M: SerializeMap>(&self, map: &mut M) -> Result<(), M::Error> {
+        let count = self.doc.page_count();
+        map.serialize_entry("page_count", &count.as_ref().ok())?;
+        let pages = TracePages {
+            of: self,
+            count: count.unwrap_or(0),
+        };
+        map.serialize_entry("pages", &pages)
+    }
+}
+
+struct TracePages<'a> {
+    of: &'a Trace<'a>,
+    count: i32,
+}
+
+impl Serialize for TracePages<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(None)?;
+        for index in 0..self.count {
+            seq.serialize_element(&TracePage { of: self.of, index })?;
+        }
+        seq.end()
+    }
+}
+
+struct TracePage<'a> {
+    of: &'a Trace<'a>,
+    index: i32,
+}
+
+impl Serialize for TracePage<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let doc = self.of.doc;
+        let mut map = s.serialize_map(None)?;
+        let page = match doc.page(self.index) {
+            Ok(p) if doc.resolve(&p).as_dict().is_some() => p,
+            Ok(_) => {
+                map.serialize_entry("error", "page object is not a dictionary")?;
+                return map.end();
+            }
             Err(e) => {
-                pages.push(json!({ "error": e.0 }));
-                continue;
+                map.serialize_entry("error", &e.0)?;
+                return map.end();
             }
         };
-        if doc.resolve(&page).as_dict().is_none() {
-            pages.push(json!({ "error": "page object is not a dictionary" }));
-            continue;
+        let error = Cell::new(None);
+        let events = Rows::new(Run {
+            of: self.of,
+            page: &page,
+            error: &error,
+        });
+        map.serialize_entry("events", &events)?;
+        if let Some(line) = error.take() {
+            map.serialize_entry("error", nupdf::diag::report::strip(&line))?;
         }
-        let mut dev = Recorder {
-            doc,
-            events: Vec::new(),
-        };
-        let run = nupdf::run::run_page_contents(doc, &page, &mut dev, store);
-        store = run.store;
-        let mut entry = json!({ "events": dev.events });
-        if let Some(line) = run.error {
-            entry["error"] = json!(nupdf::diag::report::strip(&line));
-        }
-        pages.push(entry);
+        map.end()
     }
-    out.insert("pages".into(), Value::Array(pages));
-    Value::Object(out)
+}
+
+/// A page's run, recording into the sink it is given.
+struct Run<'a> {
+    of: &'a Trace<'a>,
+    page: &'a nupdf::Object,
+    /// The error that ended the run, as a report line.
+    error: &'a Cell<Option<String>>,
+}
+
+impl Fill for Run<'_> {
+    fn fill<K: Sink>(self, sink: &mut K) {
+        let doc = self.of.doc;
+        let mut dev = Recorder { doc, sink };
+        let store = self.of.store.take();
+        let run = nupdf::run::run_page_contents(doc, self.page, &mut dev, store);
+        self.of.store.replace(run.store);
+        self.error.set(run.error);
+    }
 }
 
 /// Records calls as oracle/js/trace.js prints them: one array per call,
 /// its name then its arguments. Tiles are not recorded: the script
 /// glue's tile callback breaks the script engine, so the oracle leaves it
 /// out and MuPDF draws each pattern cell's content instead.
-struct Recorder<'a> {
+struct Recorder<'a, K> {
     doc: &'a Document,
-    events: Vec<Value>,
+    /// Takes each call as it is recorded.
+    sink: &'a mut K,
 }
 
 fn number(v: f32) -> Value {
@@ -133,28 +200,52 @@ fn stroke(s: &StrokeState) -> Value {
     ])
 }
 
-/// The path as `Path.walk` reports it.
-fn path(p: &Path) -> Value {
-    struct Collect(Vec<Value>);
-    impl Walker for Collect {
-        fn move_to(&mut self, x: f32, y: f32) {
-            self.0.push(json!(["m", number(x), number(y)]));
+/// The path as `Path.walk` reports it, written a segment at a time: a
+/// path can have as many segments as its page has operators.
+struct PathRows<'a>(&'a Path);
+
+fn path(p: &Path) -> PathRows<'_> {
+    PathRows(p)
+}
+
+impl Serialize for PathRows<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        struct Write<Q: SerializeSeq> {
+            seq: Q,
+            failed: Option<Q::Error>,
         }
-        fn line_to(&mut self, x: f32, y: f32) {
-            self.0.push(json!(["l", number(x), number(y)]));
+        impl<Q: SerializeSeq> Write<Q> {
+            fn push(&mut self, segment: impl Serialize) {
+                if self.failed.is_none() {
+                    self.failed = self.seq.serialize_element(&segment).err();
+                }
+            }
         }
-        fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) {
-            let mut v = vec![json!("c")];
-            v.extend([x1, y1, x2, y2, x3, y3].map(number));
-            self.0.push(Value::Array(v));
+        impl<Q: SerializeSeq> Walker for Write<Q> {
+            fn move_to(&mut self, x: f32, y: f32) {
+                self.push(("m", number(x), number(y)));
+            }
+            fn line_to(&mut self, x: f32, y: f32) {
+                self.push(("l", number(x), number(y)));
+            }
+            fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) {
+                let [x1, y1, x2, y2, x3, y3] = [x1, y1, x2, y2, x3, y3].map(number);
+                self.push(("c", x1, y1, x2, y2, x3, y3));
+            }
+            fn close_path(&mut self) {
+                self.push(("h",));
+            }
         }
-        fn close_path(&mut self) {
-            self.0.push(json!(["h"]));
+        let mut to = Write {
+            seq: s.serialize_seq(None)?,
+            failed: None,
+        };
+        self.0.walk(&mut to);
+        match to.failed {
+            Some(e) => Err(e),
+            None => to.seq.end(),
         }
     }
-    let mut c = Collect(Vec::new());
-    p.walk(&mut c);
-    Value::Array(c.0)
 }
 
 /// An image as trace.js describes it.
@@ -209,37 +300,47 @@ pub(crate) fn script_str(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
 /// Text as the script walks it: per span, the font's name, the matrix
 /// without its translation, the writing mode, bidi level, markup
 /// direction and language, then each glyph's id, Unicode and position.
-fn text(t: &Text) -> Value {
-    Value::Array(
-        t.spans
-            .iter()
-            .map(|span| {
-                let glyphs: Vec<Value> = span
-                    .items
-                    .iter()
-                    .map(|g| json!([g.gid, g.ucs, number(g.x), number(g.y)]))
-                    .collect();
-                json!([
-                    script_string(&span.font.name),
-                    numbers(&[span.trm.a, span.trm.b, span.trm.c, span.trm.d]),
-                    span.wmode,
-                    span.bidi_level,
-                    span.markup_dir,
-                    language_to_string(span.language),
-                    glyphs
-                ])
-            })
-            .collect(),
-    )
+/// Written a glyph at a time: one text object can hold every glyph of a
+/// page.
+struct TextRows<'a>(&'a Text);
+
+fn text(t: &Text) -> TextRows<'_> {
+    TextRows(t)
 }
 
-impl Recorder<'_> {
-    fn push(&mut self, v: Value) {
-        self.events.push(v);
+impl Serialize for TextRows<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        struct Glyphs<'a>(&'a [nupdf::text::TextItem]);
+        impl Serialize for Glyphs<'_> {
+            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_seq(
+                    self.0
+                        .iter()
+                        .map(|g| (g.gid, g.ucs, number(g.x), number(g.y))),
+                )
+            }
+        }
+        s.collect_seq(self.0.spans.iter().map(|span| {
+            (
+                script_string(&span.font.name),
+                numbers(&[span.trm.a, span.trm.b, span.trm.c, span.trm.d]),
+                span.wmode,
+                span.bidi_level,
+                span.markup_dir,
+                language_to_string(span.language),
+                Glyphs(&span.items),
+            )
+        }))
     }
 }
 
-impl Device for Recorder<'_> {
+impl<K: Sink> Recorder<'_, K> {
+    fn push(&mut self, call: impl Serialize) {
+        self.sink.push(call);
+    }
+}
+
+impl<K: Sink> Device for Recorder<'_, K> {
     fn fill_path(
         &mut self,
         p: &Path,
@@ -250,7 +351,7 @@ impl Device for Recorder<'_> {
         alpha: f32,
         pr: ColorParams,
     ) {
-        self.push(json!([
+        self.push((
             "fill_path",
             path(p),
             even_odd,
@@ -258,8 +359,8 @@ impl Device for Recorder<'_> {
             colorspace(Some(cs)),
             color(Some(cs), c),
             number(alpha),
-            params(pr)
-        ]));
+            params(pr),
+        ));
     }
 
     fn stroke_path(
@@ -272,7 +373,7 @@ impl Device for Recorder<'_> {
         alpha: f32,
         pr: ColorParams,
     ) {
-        self.push(json!([
+        self.push((
             "stroke_path",
             path(p),
             stroke(s),
@@ -280,16 +381,16 @@ impl Device for Recorder<'_> {
             colorspace(Some(cs)),
             color(Some(cs), c),
             number(alpha),
-            params(pr)
-        ]));
+            params(pr),
+        ));
     }
 
     fn clip_path(&mut self, p: &Path, even_odd: bool, ctm: Matrix, _scissor: Rect) {
-        self.push(json!(["clip_path", path(p), even_odd, matrix(ctm)]));
+        self.push(("clip_path", path(p), even_odd, matrix(ctm)));
     }
 
     fn clip_stroke_path(&mut self, p: &Path, s: &StrokeState, ctm: Matrix, _scissor: Rect) {
-        self.push(json!(["clip_stroke_path", path(p), stroke(s), matrix(ctm)]));
+        self.push(("clip_stroke_path", path(p), stroke(s), matrix(ctm)));
     }
 
     fn fill_shade(&mut self, shade: &Shade, ctm: Matrix, alpha: f32, pr: ColorParams) {
@@ -345,15 +446,15 @@ impl Device for Recorder<'_> {
         alpha: f32,
         pr: ColorParams,
     ) {
-        self.push(json!([
+        self.push((
             "fill_text",
             text(t),
             matrix(ctm),
             colorspace(Some(cs)),
             color(Some(cs), c),
             number(alpha),
-            params(pr)
-        ]));
+            params(pr),
+        ));
     }
 
     fn stroke_text(
@@ -366,7 +467,7 @@ impl Device for Recorder<'_> {
         alpha: f32,
         pr: ColorParams,
     ) {
-        self.push(json!([
+        self.push((
             "stroke_text",
             text(t),
             stroke(s),
@@ -374,20 +475,20 @@ impl Device for Recorder<'_> {
             colorspace(Some(cs)),
             color(Some(cs), c),
             number(alpha),
-            params(pr)
-        ]));
+            params(pr),
+        ));
     }
 
     fn clip_text(&mut self, t: &Text, ctm: Matrix, _scissor: Rect) {
-        self.push(json!(["clip_text", text(t), matrix(ctm)]));
+        self.push(("clip_text", text(t), matrix(ctm)));
     }
 
     fn clip_stroke_text(&mut self, t: &Text, s: &StrokeState, ctm: Matrix, _scissor: Rect) {
-        self.push(json!(["clip_stroke_text", text(t), stroke(s), matrix(ctm)]));
+        self.push(("clip_stroke_text", text(t), stroke(s), matrix(ctm)));
     }
 
     fn ignore_text(&mut self, t: &Text, ctm: Matrix) {
-        self.push(json!(["ignore_text", text(t), matrix(ctm)]));
+        self.push(("ignore_text", text(t), matrix(ctm)));
     }
 
     fn pop_clip(&mut self) {
@@ -493,6 +594,19 @@ impl Device for Recorder<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// The report's entries as a value.
+    fn report(doc: &Document) -> Value {
+        struct Whole<'a>(Trace<'a>);
+        impl Serialize for Whole<'_> {
+            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                let mut map = s.serialize_map(None)?;
+                crate::rows::Body::serialize_into(&self.0, &mut map)?;
+                map.end()
+            }
+        }
+        serde_json::to_value(Whole(Trace::new(doc))).unwrap_or_else(|e| panic!("{e}"))
+    }
+
     use super::*;
 
     #[test]
@@ -516,7 +630,7 @@ mod tests {
 trailer<</Root 1 0 R/Size 4>>\n"[..],
         )
         .unwrap_or_else(|e| panic!("{e:?}"));
-        let out = trace(&doc);
+        let out = report(&doc);
         assert_eq!(
             out["pages"][0]["events"],
             json!([[

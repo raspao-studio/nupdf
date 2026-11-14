@@ -8,6 +8,8 @@ use nupdf::{Document, Object};
 use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Map, Value, json};
 
+use crate::rows::Rows;
+
 /// The `objects` report body, serialized as it is written: each object is
 /// loaded, encoded and written in turn, so memory does not grow with the
 /// size of the report.
@@ -239,58 +241,109 @@ fn hex(bytes: &[u8]) -> String {
 /// Each page's operators, as MuPDF's interpreter hands them to a
 /// processor, in oracle/js/operators.js's format. With `bare`, each page
 /// is processed with empty resources and only its content streams count.
-pub fn operators(doc: &Document, bare: bool) -> Value {
-    let mut out = Map::new();
-    let count = doc.page_count();
-    out.insert(
-        "page_count".into(),
-        count.as_ref().map_or(Value::Null, |n| json!(n)),
-    );
-    let mut pages = Vec::new();
-    for index in 0..count.unwrap_or(0) {
-        let entry = doc.page(index).map_err(|e| e.0).and_then(|page| {
-            let Some(dict) = doc.resolve(&page).as_dict().cloned() else {
-                return Err("page object is not a dictionary".to_string());
-            };
-            let resources = if bare {
-                Some(Object::Dict(std::sync::Arc::new(nupdf::Dict::new())))
-            } else {
-                doc.inherited(&page, b"Resources").map_err(|e| e.0)?
-            };
-            // Loading the page looks up /Group/S for transparency, which
-            // loads what it refers to.
-            let _ = doc.dict_get(&doc.dict_get(&page, b"Group"), b"S");
-            let contents = dict
-                .get(b"Contents")
-                .filter(|c| !matches!(c, Object::Null))
-                .cloned();
-            let mut rec = Recorder {
-                doc,
-                ops: Vec::new(),
-                in_extgstate: false,
-                state: Default::default(),
-            };
-            let result = nupdf::content::process_contents(
-                doc,
-                resources.as_ref(),
-                contents.as_ref(),
-                &mut rec,
-            );
-            let mut entry = json!({ "ops": rec.ops });
-            if let Err(line) = result {
-                entry["error"] = json!(nupdf::diag::report::strip(&line));
-                // The processor was never closed (PDFPage.process).
-                doc.diagnostics().warn(
-                    "content.processor_unclosed",
-                    "dropping unclosed PDF processor",
-                );
-            }
-            Ok(entry)
-        });
-        pages.push(entry.unwrap_or_else(|e| json!({ "error": e })));
+///
+/// The report is written while the pages are processed ([`Rows`]): what it
+/// holds of a page at any moment is one operator.
+pub struct Operators<'a> {
+    pub doc: &'a Document,
+    pub bare: bool,
+}
+
+impl crate::rows::Body for Operators<'_> {
+    fn serialize_into<M: SerializeMap>(&self, map: &mut M) -> Result<(), M::Error> {
+        let count = self.doc.page_count();
+        map.serialize_entry("page_count", &count.as_ref().ok())?;
+        let pages = OperatorPages {
+            of: self,
+            count: count.unwrap_or(0),
+        };
+        map.serialize_entry("pages", &pages)
     }
-    out.insert("pages".into(), Value::Array(pages));
-    Value::Object(out)
+}
+
+struct OperatorPages<'a> {
+    of: &'a Operators<'a>,
+    count: i32,
+}
+
+impl Serialize for OperatorPages<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(None)?;
+        for index in 0..self.count {
+            seq.serialize_element(&OperatorPage { of: self.of, index })?;
+        }
+        seq.end()
+    }
+}
+
+struct OperatorPage<'a> {
+    of: &'a Operators<'a>,
+    index: i32,
+}
+
+impl OperatorPage<'_> {
+    /// The page's resources and contents, as loading the page finds them.
+    fn load(&self) -> Result<(Option<Object>, Option<Object>), String> {
+        let doc = self.of.doc;
+        let page = doc.page(self.index).map_err(|e| e.0)?;
+        let Some(dict) = doc.resolve(&page).as_dict().cloned() else {
+            return Err("page object is not a dictionary".to_string());
+        };
+        let resources = if self.of.bare {
+            Some(Object::Dict(std::sync::Arc::new(nupdf::Dict::new())))
+        } else {
+            doc.inherited(&page, b"Resources").map_err(|e| e.0)?
+        };
+        // Loading the page looks up /Group/S for transparency, which
+        // loads what it refers to.
+        let _ = doc.dict_get(&doc.dict_get(&page, b"Group"), b"S");
+        let contents = dict
+            .get(b"Contents")
+            .filter(|c| !matches!(c, Object::Null))
+            .cloned();
+        Ok((resources, contents))
+    }
+}
+
+impl Serialize for OperatorPage<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let doc = self.of.doc;
+        let mut map = s.serialize_map(None)?;
+        match self.load() {
+            Err(e) => map.serialize_entry("error", &e)?,
+            Ok((resources, contents)) => {
+                let error = std::cell::Cell::new(None);
+                let ops = Rows::new(|sink: &mut dyn FnMut(Value)| {
+                    let mut rec = Recorder {
+                        doc,
+                        sink,
+                        in_extgstate: false,
+                        state: Default::default(),
+                    };
+                    let result = nupdf::content::process_contents(
+                        doc,
+                        resources.as_ref(),
+                        contents.as_ref(),
+                        &mut rec,
+                    );
+                    if let Err(line) = result {
+                        error.set(Some(nupdf::diag::report::strip(&line).to_string()));
+                        // The processor was never closed (PDFPage.process).
+                        doc.diagnostics().warn(
+                            "content.processor_unclosed",
+                            "dropping unclosed PDF processor",
+                        );
+                    }
+                });
+                map.serialize_entry("ops", &ops)?;
+                if let Some(e) = error.take() {
+                    map.serialize_entry("error", &e)?;
+                }
+            }
+        }
+        map.end()
+    }
 }
 
 /// Records operators the way MuPDF's script processor reports them: one
@@ -309,7 +362,8 @@ pub fn operators(doc: &Document, bare: bool) -> Value {
 ///   engine reads that as UTF-8 (`script_text`).
 struct Recorder<'a> {
     doc: &'a Document,
-    ops: Vec<Value>,
+    /// Takes each operator as it is recorded.
+    sink: &'a mut dyn FnMut(Value),
     in_extgstate: bool,
     state: nupdf::content::ProcState,
 }
@@ -570,7 +624,7 @@ impl nupdf::content::Processor for Recorder<'_> {
             Op::BeginCompatibility => vec![json!("BX")],
             Op::EndCompatibility => vec![json!("EX")],
         };
-        self.ops.push(Value::Array(entry));
+        (self.sink)(Value::Array(entry));
         Ok(())
     }
 }
