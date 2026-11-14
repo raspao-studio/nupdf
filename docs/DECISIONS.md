@@ -618,9 +618,11 @@ D37 made threads something to ask for. Nothing asks: the guide does not name `--
 - **32 pages**, counting the pages asked for. On 54 standard-tier files of 2 to 10,000 pages, threads made no difference that could be measured below 40 pages (5 to 7 ms a call either way) and took 1.8x to 3.4x off the files from 43 pages up that have text to read.
 - **Eight threads at most.** `extract` on `long-017.pdf`: 240 ms on one thread, 107 on four, 80 on eight, 71 on sixteen.
 - **A budget keeps the pages one after another.** `extract` with `--max-chars` or `--max-items`, and `search` with `--max-items`, stop at the page that fills the budget; threads would have run a window of 64 pages by then. With a budget, threads are for whoever asks.
-- **`render` takes no bands unasked.** Bands can change pixels by a few levels (D37's note on `--threads`); pages at once cannot, so without `--threads` the pixels are those of one thread.
+- **`render` takes no bands unasked.** Bands can change pixels by a few levels (D37's note on `--threads`), so without `--threads` pages are drawn at once, each whole.
+- **`render` draws pages at once only where they do not depend on each other.** A Type 3 font without /Resources borrows those in use where it is first loaded and stays loaded, so MuPDF draws page 90 of `long-017.pdf` one way after page 89 and another way alone, and nupdf matches it both ways. Threads take pages as they come free, so which page loads such a font first, and with it the pixels, changed from run to run: with `--threads`, before this decision too. `render` now looks through the document first (`parallel::pages_draw_apart`: every object, in a copy opened afresh, a few milliseconds) and, where a Type 3 font without resources of its own has a glyph that names one, draws the pages one after another, whatever `--threads` says. All 3,413 pages of the long tier then come out the same without `--threads`, with 3 and with 8, twice over, and the same as on one thread; 2 of the 30 documents are drawn in order. Text does not depend on what a glyph draws, so the other commands need no such look.
 - **`batch` shares the processors among its jobs**: a command run by `batch --jobs J` takes a J-th of them, so J files at once do not start eight threads each.
 - **What changes in a report**: for a document of 32 pages or more read without `--threads`, the diagnostics come sorted and once each, as they always have with `--threads`. Nothing else: the text, the ids and the pixels are those of one thread, which the tests hold the commands to.
+- **Left to do**: `long-017.pdf`, drawn in order, is 2.4 s of the 5.5 s the long tier's rendering now takes. Loading such fonts in page order first, then drawing on threads, would free it.
 
 Measured on the 30 long documents (3,414 pages), no `--threads`, best of two runs, `main` at `04256e7` against this change on an Apple M5 Max with other work on it:
 
@@ -632,5 +634,5 @@ Measured on the 30 long documents (3,414 pages), no `--threads`, best of two run
 | `stext` | 1.72 s | 0.63 s |
 | `tables` | 2.33 s | 1.21 s |
 | `info` | 0.96 s | 0.49 s |
-| `render --format ppm` | 9.95 s | 3.89 s |
-| `render` | 17.36 s | 4.59 s |
+| `render --format ppm` | 9.16 s | 5.47 s |
+| `render` | 16.88 s | 7.22 s |

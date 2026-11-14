@@ -2003,6 +2003,95 @@ fn a_long_document_reads_the_same_with_and_without_threads_asked_for() {
 }
 
 #[test]
+fn pages_that_depend_on_the_pages_before_them_are_drawn_in_order() {
+    // A Type 3 font without resources of its own draws what /X is where
+    // the font is first used: on page 1 a black square, on the other 23
+    // pages nothing. Drawn in order, as MuPDF draws them, every page has
+    // the square; a page that loaded the font itself would be blank.
+    let pages = 24;
+    let mut objects = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        format!(
+            "<</Type/Pages/Count {pages}/Kids[{}]>>",
+            (0..pages).map(|i| format!("{} 0 R ", 8 + i)).collect::<String>()
+        ),
+        "<</Type/Font/Subtype/Type3/FontMatrix[1 0 0 1 0 0]/FontBBox[0 0 1 1]/FirstChar 65/LastChar 65\
+         /Widths[1]/Encoding<</Type/Encoding/Differences[65/a]>>/CharProcs<</a 4 0 R>>>>"
+            .to_string(),
+        "<</Length 15>>\nstream\n1 0 d0 /X Do   \nendstream".to_string(),
+        "<</Type/XObject/Subtype/Form/BBox[0 0 1 1]/Length 12>>\nstream\n0 0 1 1 re f\nendstream"
+            .to_string(),
+        "<</Type/XObject/Subtype/Form/BBox[0 0 1 1]/Length 0>>\nstream\n\nendstream".to_string(),
+        "<</Length 36>>\nstream\nBT /F 20 Tf 10 10 Td (A) Tj ET      \nendstream".to_string(),
+    ];
+    for i in 0..pages {
+        let x = if i == 0 { 5 } else { 6 };
+        objects.push(format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 40 40]/Contents 7 0 R\
+             /Resources<</Font<</F 3 0 R>>/XObject<</X {x} 0 R>>>>>>"
+        ));
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    let file = scratch("type3-borrowed.pdf");
+    std::fs::write(&file, out).unwrap();
+    let dir = scratch("type3-borrowed-render");
+    let draw = |name: &str, extra: &[&str]| {
+        let to = dir.join(name);
+        let args = [
+            &["render", file.to_str().unwrap(), "-o", to.to_str().unwrap()][..],
+            &["--format", "ppm"],
+            extra,
+        ]
+        .concat();
+        let run = nupdf(&args);
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        (1..=pages)
+            .filter_map(|n| std::fs::read(to.join(format!("page-{n:04}.ppm"))).ok())
+            .collect::<Vec<_>>()
+    };
+    let in_order = draw("one", &["--threads", "1"]);
+    assert_eq!(in_order.len(), pages);
+    // The square is there, on the first page and on the last.
+    let inked = |page: &[u8]| page[page.len() - 40 * 40 * 3..].iter().any(|&v| v < 128);
+    assert!(inked(&in_order[0]) && inked(&in_order[pages - 1]));
+    assert!(in_order.iter().all(|p| p == &in_order[0]));
+    for round in 0..3 {
+        assert!(draw("unasked", &[]) == in_order, "unasked, round {round}");
+        assert!(
+            draw("eight", &["--threads", "8"]) == in_order,
+            "8 threads, round {round}"
+        );
+    }
+    // The last page alone loads the font itself, and is blank, as in MuPDF.
+    let alone = draw("alone", &["--pages", "N"]);
+    assert_eq!(alone.len(), 1);
+    assert!(!inked(&alone[0]));
+}
+
+#[test]
 fn render_region_and_pixel_budget() {
     let input = smoke("stext.pdf");
     let dir = scratch("render-region");

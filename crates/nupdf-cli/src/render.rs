@@ -93,6 +93,14 @@ pub fn render(
         ),
         None => (1, crate::threads_unasked().min(pages.len().max(1))),
     };
+    // Pages go to threads as they come free, so where what a page draws
+    // depends on the pages before it, they go one after another, as
+    // MuPDF draws them.
+    let pages_threads = if pages_threads > 1 && !nupdf::parallel::pages_draw_apart(doc) {
+        1
+    } else {
+        pages_threads
+    };
     let job =
         |i: usize, doc: &Document, page: &Result<nupdf::Object, String>, store| -> (Value, _) {
             let (rendered, store) = match page {

@@ -443,7 +443,8 @@ enum Command {
         /// over split a page into bands. A page drawn in bands can differ
         /// by a few levels where strokes and shadings cross a band's edge,
         /// as MuPDF's bands do. Without it, pages at once on up to eight
-        /// threads and no bands: the pixels of one thread.
+        /// threads and no bands: the pixels of one thread. Pages that
+        /// depend on the pages before them are drawn in order either way.
         #[arg(long)]
         threads: Option<usize>,
         /// Convert colors by MuPDF's formulas instead of its ICC profiles,
