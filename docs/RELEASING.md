@@ -33,7 +33,7 @@ Packaging the two crates together is the only way to check `nupdf-cli` before `n
 ## The first release only
 
 1. Make the repository public: GitHub, the repository's Settings, General, Danger Zone, Change visibility.
-2. Turn on GitHub Pages: Settings, Pages, Source: GitHub Actions. The next push to `main` that touches the docs publishes the site at https://raspao-studio.github.io/nupdf/ (or run the Docs workflow by hand).
+2. Turn on GitHub Pages: Settings, Pages, Source: GitHub Actions. Set its custom domain to nupdf.dev. The next push to `main` that touches the site or the docs publishes the landing page at https://nupdf.dev/ and the docs at https://nupdf.dev/docs/ (or run the Docs workflow by hand).
 3. Turn on private vulnerability reporting: Settings, Security, Private vulnerability reporting. [SECURITY](../SECURITY.md) sends reports there.
 4. Apply to OSS-Fuzz with the files in `oss-fuzz/` (its README says how).
 

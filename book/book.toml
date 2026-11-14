@@ -1,4 +1,4 @@
-# The docs site: https://raspao-studio.github.io/nupdf/
+# The docs site: https://nupdf.dev/docs/
 # Pages under src/docs, src/eval and src/SECURITY.md only include the
 # repository's own files, laid out as in the repository so that their
 # relative links resolve in the book too. Build: mdbook build book
@@ -11,7 +11,7 @@ language = "en"
 
 [output.html]
 git-repository-url = "https://github.com/raspao-studio/nupdf"
-site-url = "/nupdf/"
+site-url = "/docs/"
 default-theme = "light"
 preferred-dark-theme = "navy"
 additional-css = ["css/tokyo-night.css"]
