@@ -10,7 +10,7 @@
 
 use crate::document::Document;
 use crate::graft::GraftMap;
-use crate::link::{create_link, is_external_link, load_links, resolve_link_page};
+use crate::link::{create_links, is_external_link, load_links, resolve_link_page};
 use crate::outline::{OutlineItem, OutlineIter};
 
 /// Outline levels copied before giving up; MuPDF recurses without a
@@ -105,12 +105,11 @@ impl<'a> Merger<'a> {
         };
         let last = self.dst.page_count().map_err(|e| e.0)? - 1;
         let dst_page = self.dst.page(last).map_err(|e| e.0)?;
-        for link in links {
-            if is_external_link(&link.uri) {
-                create_link(self.dst, &dst_page, link.rect, &link.uri)?;
-            }
-        }
-        Ok(())
+        let external = links
+            .iter()
+            .filter(|link| is_external_link(&link.uri))
+            .map(|link| (link.rect, link.uri.as_str()));
+        create_links(self.dst, &dst_page, external)
     }
 }
 
