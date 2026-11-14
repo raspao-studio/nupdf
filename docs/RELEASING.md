@@ -65,7 +65,9 @@ git tag -a v0.1.0 -m "nupdf 0.1.0"
 git push origin v0.1.0
 ```
 
-Then make a GitHub release from the tag, with the CHANGELOG entry as its notes.
+Pushing the tag starts the `release` workflow, which builds the `nupdf` binary for Linux (x86-64 and ARM, each for glibc 2.35 or newer and as a static musl binary), macOS (Apple silicon and Intel) and Windows (x86-64), runs each on a file where the runner can, and attaches the archives and their SHA-256 checksums to a draft GitHub release for the tag. It fails if the tag is not the workspace's version.
+
+Then open that draft, replace its notes with the CHANGELOG entry, check the seven archives are there, and publish it. If a release for the tag already exists, the workflow adds the archives to it instead.
 
 ## After
 

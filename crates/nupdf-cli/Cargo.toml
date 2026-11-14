@@ -12,6 +12,15 @@ readme = "../../README.md"
 keywords = ["pdf", "cli", "mcp", "agents", "redaction"]
 categories = ["command-line-utilities", "parser-implementations"]
 
+# Where `cargo binstall nupdf-cli` finds the archives the release workflow builds.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/nupdf-{ version }-{ target }{ archive-suffix }"
+bin-dir = "nupdf-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[bin]]
 name = "nupdf"
 path = "src/main.rs"
