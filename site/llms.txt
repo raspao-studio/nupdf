@@ -1,0 +1,57 @@
+# nupdf
+
+> nupdf is an open-source PDF engine for AI agents, written in Rust. One binary reads, searches, renders, edits and redacts PDFs, and answers every command with a versioned JSON report. It runs as a command-line tool, as an MCP server, or as a Rust library.
+
+Source: https://github.com/raspao-studio/nupdf (AGPL-3.0-or-later, derived from MuPDF by Artifex Software, Inc.)
+Docs: https://nupdf.dev/docs/
+
+## Install
+
+    cargo install --locked nupdf-cli
+
+The binary is `nupdf`. It needs Rust 1.92 or newer. `ocr` also needs Tesseract on PATH.
+
+As an MCP server (one tool per command):
+
+    claude mcp add nupdf -- nupdf mcp
+
+As a Claude Code skill:
+
+    mkdir -p ~/.claude/skills/nupdf && nupdf guide --skill > ~/.claude/skills/nupdf/SKILL.md
+
+## How to use it
+
+Run `nupdf guide` once: it describes every command on one page. Start a file with `info`. Inputs are never modified: commands that write need `-o <path>` and support `--dry-run`.
+
+    nupdf info report.pdf                         # triage: pages, text layer, scans, forms, signatures, what to run next
+    nupdf extract report.pdf --format markdown    # the text, as Markdown (also json, jsonl, text, layout)
+    nupdf extract report.pdf --pages 1-3 --max-chars 8000
+    nupdf search contract.pdf "terminat" --options ignore-case
+    nupdf render report.pdf -o pages --pages 1-3 --dpi 72
+    nupdf redact statement.pdf -o clean.pdf --preset email --preset phone
+    nupdf verify clean.pdf --preset email --preset phone
+
+Other commands: tables, fonts, images, annots, forms, signatures, outline, links, labels, attachments, merge, split, pages, meta, clean, flatten, sanitize, encrypt, decrypt, ocr, diff, batch, schema. `nupdf --help` lists them and `nupdf <command> --help` gives the options.
+
+## Reading the result
+
+- stdout is one JSON object with `schema` (for example `nupdf.extract/v1`), `doc_id` and `diagnostics`. Add `--pretty` to indent it.
+- Errors are JSON on stderr: `{"schema":"nupdf.error/v1","error":{"code","message","hint"?}}`.
+- Exit codes: 0 success, 1 internal error, 2 usage error, 3 input error (unreadable, not a PDF, wrong password), 4 verification failed, 5 limit exceeded.
+- Large outputs stop at a whole block with `"truncated": true` and a `next_cursor`; pass it to `--cursor` to continue.
+- Pages are 1-based. Selections: `1-3,7`, `N` for the last page, `5-N`, `N-1` for reverse order.
+- Content ids: `p3` (page), `p3.b2` (block), `p3.b2.l4` (line), `p3.b2.l4.s1` (span), `p3.b2.l4.s1:5-12` (characters). Search returns them and `redact --id` accepts them.
+- Coordinates are points, origin at the top left, y down.
+- Encrypted files: pass `--password`.
+
+## When another tool is the better choice
+
+- A short document that is mostly charts or scanned pages: let a vision model read the page images.
+- Reading order and tables that need a layout model: nupdf's are MuPDF's heuristics.
+
+## Docs
+
+- [Results](https://github.com/raspao-studio/nupdf/blob/main/docs/RESULTS.md): parity with MuPDF, safety, speed, the agent eval, and where nupdf falls short
+- [Agent interface](https://github.com/raspao-studio/nupdf/blob/main/docs/AGENT-INTERFACE.md): the JSON contract, addressing and the redaction contract
+- [Benchmarks](https://github.com/raspao-studio/nupdf/blob/main/docs/BENCHMARKS.md)
+- [Threat model](https://github.com/raspao-studio/nupdf/blob/main/docs/THREAT-MODEL.md)

@@ -51,3 +51,7 @@ The fonts in [crates/nupdf/fonts/urw](crates/nupdf/fonts/urw) are the URW++ base
 ## UCDN
 
 The bidi classes in [crates/nupdf/src/tables.rs](crates/nupdf/src/tables.rs) are generated from MuPDF's copy of UCDN's Unicode database (source/fitz/ucdn_db.h, Unicode 16.0.0). UCDN is Copyright (C) 2012 Grigori Goronzy and is used under the ISC license: permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies. The data comes from the Unicode Character Database, Copyright (C) 1991-2024 Unicode, Inc., under the Unicode License.
+
+## The website's sample page
+
+[site/demo/page.png](site/demo/page.png) and [site/demo/page.json](site/demo/page.json) are page 15 of *Free Culture* by Lawrence Lessig (2004), drawn by MuPDF and read by nupdf, for the demonstration on the landing page. The book is licensed under the Creative Commons Attribution-NonCommercial 1.0 licence (<https://creativecommons.org/licenses/by-nc/1.0/>), which covers these two files; they are not under nupdf's licence.
