@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A PDF MCP server for AI agents | nupdf</title>
+<meta name="description" content="nupdf is a PDF MCP server: one tool per command to read, search, render, edit and redact PDFs, with structured results. One line to add it to Claude Code.">
+<link rel="canonical" href="https://nupdf.dev/mcp/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="article">
+<meta property="og:title" content="A PDF MCP server for AI agents | nupdf">
+<meta property="og:description" content="nupdf is a PDF MCP server: one tool per command to read, search, render, edit and redact PDFs, with structured results. One line to add it to Claude Code.">
+<meta property="og:url" content="https://nupdf.dev/mcp/">
+<meta property="og:image" content="https://nupdf.dev/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="color-scheme" content="light dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <a class="logo" href="/">nupdf</a>
+  <nav aria-label="Links">
+    <a href="https://nupdf.dev/docs/">Docs</a>
+    <a href="https://github.com/raspao-studio/nupdf">GitHub</a>
+    <a href="https://crates.io/crates/nupdf-cli">crates.io</a>
+  </nav>
+</header>
+
+<main class="page">
+  <div class="crumbs"><a href="/">nupdf</a> / mcp</div>
+  <h1>A PDF MCP server for AI agents.</h1>
+  <p class="lede">One tool for each thing an agent does with a PDF: read it, search it, change it, redact it. Add it to Claude Code in one line.</p>
+  <div class="body">
+    <p>An MCP server gives an agent tools it can call without writing code. nupdf's is the same binary as its command line: every command is one tool, and every result is the command's JSON report.</p>
+
+    <h2>Add it</h2>
+<pre class="code">$ cargo install --locked nupdf-cli
+$ claude mcp add nupdf -- nupdf mcp</pre>
+    <p>For a whole project, check in a <code>.mcp.json</code>. Other MCP clients take the same command and arguments.</p>
+<pre class="code">{
+  "mcpServers": {
+    "nupdf": { "command": "nupdf", "args": ["mcp"] }
+  }
+}</pre>
+
+    <h2>What the agent gets</h2>
+    <ul>
+      <li><b>One tool per command.</b> <code>info</code>, <code>extract</code>, <code>search</code>, <code>tables</code>, <code>render</code>, <code>forms</code>, <code>merge</code>, <code>split</code>, <code>redact</code>, <code>verify</code>, <code>diff</code> and the rest, each taking one file or many.</li>
+      <li><b>Structured results.</b> Each call returns the report as text and as <code>structuredContent</code>. A failure is a tool error carrying nupdf's error report, with a stable code.</li>
+      <li><b>An address for every span of text.</b> Search returns ids like <code>p3.b2.l4.s1:5-12</code>, and other tools accept them.</li>
+      <li><b>Budgets.</b> <code>max_chars</code> stops at a whole block and returns a cursor to continue from.</li>
+      <li><b>Limits.</b> Every call is bounded: 300 seconds and 8 MB of report by default. A cancelled call stops.</li>
+      <li><b>It keeps serving.</b> A panic on one file is caught and reported; the server does not die with it.</li>
+    </ul>
+
+    <h2>How it did in the agent eval</h2>
+    <p>Thirty graded tasks, five runs each, one small-model agent a run, each allowed its own tool only. The three MCP servers in it are nupdf's, PDF Oxide's and pymupdf4llm-mcp.</p>
+    <div class="eval">
+      <div class="row head"><span>How the agent handled the PDFs</span><span>Runs passed</span><span class="n"></span><span class="n">Tokens</span><span class="n t">Time</span></div>
+      <div class="row us"><span>nupdf, over MCP</span><div class="track"><div class="bar" style="--v:150;--max:150"></div></div><span class="n">150 / 150</span><span class="n">8,988</span><span class="n t">13 s</span></div><div class="row"><span>PDF Oxide's MCP server</span><div class="track"><div class="bar" style="--v:79;--max:105"></div></div><span class="n">79 / 105</span><span class="n">15,436</span><span class="n t">20 s</span></div><div class="row"><span>pymupdf4llm-mcp</span><div class="track"><div class="bar" style="--v:38;--max:105"></div></div><span class="n">38 / 105</span><span class="n">4,617</span><span class="n t">23 s</span></div>
+    </div>
+    <p class="cap">Tokens and wall time are medians over passed runs. The two other servers cannot write a PDF, so they skip the tasks that need one. <a href="https://github.com/raspao-studio/nupdf/blob/main/eval/REPORT.md">Tasks, graders and every run</a></p>
+
+    <h2>Prefer a skill?</h2>
+    <p>The same commands work as a Claude Code skill, where the agent runs the CLI from its shell.</p>
+<pre class="code">$ mkdir -p ~/.claude/skills/nupdf
+$ nupdf guide --skill > ~/.claude/skills/nupdf/SKILL.md</pre>
+    <p>In the eval, agents running the CLI from a shell solved as many tasks as those using the server, and used more tokens: a median 14,578 a task against 8,988.</p>
+  </div>
+  <div class="next">
+    <a href="/">The overview</a><a href="/redact/">Redaction</a><a href="/compare/">Compared with other tools</a><a href="https://nupdf.dev/docs/">Read the docs</a>
+  </div>
+</main>
+
+<div class="foot">
+  <span>Open source, AGPL-3.0. Derived from MuPDF by Artifex Software, Inc.</span>
+  <div><a href="https://nupdf.dev/docs/">Docs</a><a href="https://github.com/raspao-studio/nupdf">GitHub</a><a href="https://crates.io/crates/nupdf-cli">crates.io</a><a href="/llms.txt">llms.txt</a></div>
+</div>
+
+</div>
+</body>
+</html>

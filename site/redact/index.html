@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Redact a PDF and verify nothing is left | nupdf</title>
+<meta name="description" content="nupdf redact removes text, images and hidden copies from a PDF, rewrites the file, then searches its own output in ten places. If anything is left it writes no file.">
+<link rel="canonical" href="https://nupdf.dev/redact/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Redact a PDF and verify nothing is left | nupdf">
+<meta property="og:description" content="nupdf redact removes text, images and hidden copies from a PDF, rewrites the file, then searches its own output in ten places. If anything is left it writes no file.">
+<meta property="og:url" content="https://nupdf.dev/redact/">
+<meta property="og:image" content="https://nupdf.dev/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="color-scheme" content="light dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <a class="logo" href="/">nupdf</a>
+  <nav aria-label="Links">
+    <a href="https://nupdf.dev/docs/">Docs</a>
+    <a href="https://github.com/raspao-studio/nupdf">GitHub</a>
+    <a href="https://crates.io/crates/nupdf-cli">crates.io</a>
+  </nav>
+</header>
+
+<main class="page">
+  <div class="crumbs"><a href="/">nupdf</a> / redact</div>
+  <h1>Redact a PDF, and prove nothing is left.</h1>
+  <p class="lede">A black box over text is not redaction. nupdf removes the content, then reads its own output back before it lets the file exist.</p>
+  <div class="body">
+    <p>Most PDF libraries can remove the text under a box. That is not the same as the secret being gone: it can also sit in the metadata, a bookmark, a form field, an attachment, or the copy of the file from before it was edited. <code>nupdf redact</code> goes after those, rewrites the file, then searches what it wrote.</p>
+
+    <h2>Use it</h2>
+<pre class="code">$ nupdf redact statement.pdf -o clean.pdf --text "ACME-4471" --preset email --preset phone
+$ nupdf verify clean.pdf --text "ACME-4471" --preset email --preset phone</pre>
+    <ul>
+      <li><b>Targets:</b> <code>--text</code>, <code>--regex</code>, <code>--preset</code> (such as <code>email</code> and <code>phone</code>), <code>--region</code>, <code>--id</code> for a content id, or <code>--hits</code> with a search report of the same file.</li>
+      <li><b>A plan first:</b> <code>--dry-run</code> reports what would be removed and writes nothing; with <code>--preview DIR</code> it draws each page with the areas shaded.</li>
+      <li><b>Black boxes only if you ask:</b> <code>--boxes</code>. By default the text is removed and nothing is drawn over it.</li>
+    </ul>
+
+    <h2>What it removes</h2>
+    <ul>
+      <li>The text, image pixels and line art under each target, as MuPDF's redaction does.</li>
+      <li>Text no viewer shows: invisible text, text outside its clip, and layers that are switched off.</li>
+      <li>The same words in the metadata, outline titles, named destinations, form values, annotations, structure text, JavaScript and attachments.</li>
+      <li>Earlier revisions. The output is always a full rewrite, so the file from before the edit is not left inside it.</li>
+    </ul>
+
+    <h2>What it checks afterwards</h2>
+    <p>Before the output is kept, nupdf opens it and looks for every target again in ten places: page text, structure, annotations, metadata, the outline, embedded files, hidden content, images, the file's history and JavaScript. The report says how many hits each target had before and after.</p>
+    <p><b>If anything is still there, it exits 4 and writes no file.</b> <code>nupdf verify</code> runs the same check on any PDF, including one another tool redacted.</p>
+
+    <h2>How it has been tested</h2>
+    <ul>
+      <li>On a suite of files built to leak, one hiding place each, and on a public redaction benchmark: no leaks, as judged three ways, by <code>nupdf verify</code>, by MuPDF's text extraction and by pdftotext.</li>
+      <li>Files seeded to leak are caught by <code>verify</code>.</li>
+      <li>The text left after redaction matches MuPDF's own redaction on 5,052 of 5,066 files, 99.72%.</li>
+    </ul>
+    <p class="cap">What nupdf promises about redaction, and what it does not, is in the <a href="https://github.com/raspao-studio/nupdf/blob/main/docs/THREAT-MODEL.md">threat model</a>. The numbers are from <a href="https://github.com/raspao-studio/nupdf/blob/main/docs/RESULTS.md">RESULTS</a>.</p>
+  </div>
+  <div class="next">
+    <a href="/">The overview</a><a href="/mcp/">The MCP server</a><a href="/compare/">Compared with other tools</a><a href="https://nupdf.dev/docs/">Read the docs</a>
+  </div>
+</main>
+
+<div class="foot">
+  <span>Open source, AGPL-3.0. Derived from MuPDF by Artifex Software, Inc.</span>
+  <div><a href="https://nupdf.dev/docs/">Docs</a><a href="https://github.com/raspao-studio/nupdf">GitHub</a><a href="https://crates.io/crates/nupdf-cli">crates.io</a><a href="/llms.txt">llms.txt</a></div>
+</div>
+
+</div>
+</body>
+</html>

@@ -125,3 +125,46 @@ test("the address the page opens on is a real hit, split into its five parts", (
 test("every character of every span has a left edge, and one more for the right", () => {
   for (const line of page.lines) for (const s of line.spans) assert.equal(s.x.length, [...s.text].length + 1, s.id);
 });
+
+const PAGES = ["mcp", "redact", "compare"];
+const inner = Object.fromEntries(PAGES.map((p) => [p, read(`${p}/index.html`)]));
+
+for (const [name, page] of Object.entries(inner)) {
+  test(`/${name}/ has its address, the shared stylesheet and links that lead somewhere`, () => {
+    assert.ok(page.includes(`<link rel="canonical" href="https://nupdf.dev/${name}/">`));
+    assert.ok(page.includes('<link rel="stylesheet" href="/style.css">') && read("style.css").includes(".page h1"));
+    for (const [, to] of page.matchAll(/href="\/(\w+)\/"/g)) assert.ok(PAGES.includes(to), to);
+    assert.ok(read("sitemap.xml").includes(`https://nupdf.dev/${name}/`) && llms.includes(`https://nupdf.dev/${name}/`));
+    assert.ok(html.includes(`href="/${name}/"`), "the landing page links to it");
+  });
+
+  test(`/${name}/ gives the agent eval as the results document has it`, () => {
+    const rows = [...page.matchAll(/--v:(\d+);--max:(\d+)"><\/div><\/div><span class="n">(\d+) \/ (\d+)<\/span><span class="n">([\d,]+)<\/span><span class="n t">(\d+) s</g)];
+    assert.equal(rows.length, { mcp: 3, redact: 0, compare: 8 }[name]);
+    for (const [, v, max, passed, total, tokens, secs] of rows) {
+      assert.deepEqual([v, max], [passed, total]);
+      assert.match(results, new RegExp(`\\| ${passed} / ${total} \\| ${tokens} \\| ${secs} s \\|`));
+    }
+  });
+}
+
+test("the comparison page carries the landing page's two speed tables unchanged", () => {
+  for (const id of ["one-call", "long-document"]) {
+    const cut = (s) => s.slice(s.indexOf(`id="${id}"`), s.indexOf("\n  </div>\n", s.indexOf(`id="${id}"`)));
+    assert.equal(cut(inner.compare), cut(html), id);
+  }
+});
+
+test("the redaction page's figures and options are the docs'", () => {
+  assert.ok(inner.redact.includes("5,052 of 5,066 files, 99.72%") && results.includes("5,052 of 5,066") && results.includes("99.72%"));
+  for (const flag of ["--text", "--regex", "--preset", "--region", "--id", "--hits", "--dry-run", "--preview", "--boxes"]) {
+    assert.ok(inner.redact.includes(flag) && iface.includes("`" + flag), flag);
+  }
+  assert.ok(readme.includes("nupdf redact statement.pdf -o clean.pdf --preset email --preset phone"));
+});
+
+test("the MCP page's commands and limits are the docs'", () => {
+  for (const s of ["claude mcp add nupdf -- nupdf mcp", "nupdf guide --skill > ~/.claude/skills/nupdf/SKILL.md"]) assert.ok(inner.mcp.includes(s.replace(">", "&gt;")) || inner.mcp.includes(s), s);
+  assert.ok(inner.mcp.includes("300 seconds and 8 MB") && iface.includes("`--call-timeout` (300 s)") && iface.includes("`--max-output-bytes` (8 MB)"));
+  assert.ok(inner.mcp.includes("structuredContent") && iface.includes("structuredContent"));
+});

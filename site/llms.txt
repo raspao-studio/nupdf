@@ -49,6 +49,12 @@ Other commands: tables, fonts, images, annots, forms, signatures, outline, links
 - A short document that is mostly charts or scanned pages: let a vision model read the page images.
 - Reading order and tables that need a layout model: nupdf's are MuPDF's heuristics.
 
+## More on this site
+
+- [The MCP server](https://nupdf.dev/mcp/): adding nupdf to an agent, and what each tool returns
+- [Redaction](https://nupdf.dev/redact/): what `redact` removes and what `verify` checks
+- [Compared with other tools](https://nupdf.dev/compare/): an agent eval and speed against PyMuPDF, pypdf, PDFium, Poppler and PDF Oxide, and when to pick each
+
 ## Docs
 
 - [Results](https://github.com/raspao-studio/nupdf/blob/main/docs/RESULTS.md): parity with MuPDF, safety, speed, the agent eval, and where nupdf falls short
