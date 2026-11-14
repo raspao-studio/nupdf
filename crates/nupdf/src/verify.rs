@@ -138,7 +138,7 @@ fn page_text(doc: &Document, index: i32, opts: &str) -> Option<crate::stext::Ste
 fn count_hits(page: &crate::stext::StextPage, needles: &[(String, u32)]) -> Vec<usize> {
     needles
         .iter()
-        .map(|(n, o)| crate::search::search_page(page, n, *o).map_or(0, |h| h.len()))
+        .map(|(n, o)| crate::search::count_page(page, n, *o).unwrap_or(0))
         .collect()
 }
 
@@ -159,10 +159,12 @@ pub fn verify(doc: &Document, t: &Targets) -> Verification {
     let count = doc.page_count().unwrap_or(0);
     let mut hits_after = vec![0usize; t.needles.len()];
     for i in 0..count {
-        let Some(all) = page_text(doc, i, "clip=no,all-layers") else {
+        // One page's text at a time: each is dropped before the next.
+        let Some(with_hidden) =
+            page_text(doc, i, "clip=no,all-layers").map(|all| count_hits(&all, &t.needles))
+        else {
             continue;
         };
-        let with_hidden = count_hits(&all, &t.needles);
         if with_hidden.iter().all(|&n| n == 0) {
             continue;
         }
