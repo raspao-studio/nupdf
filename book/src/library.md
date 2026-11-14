@@ -1,6 +1,6 @@
 # As a library
 
-The engine is the `nupdf` crate; the CLI is a thin layer over it. Add it to a project's `Cargo.toml`, from crates.io once 0.1.0 is published:
+The engine is the `nupdf` crate; the CLI is a thin layer over it. Add it to a project's `Cargo.toml`, from crates.io:
 
 ```toml
 [dependencies]

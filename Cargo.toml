@@ -5,7 +5,7 @@ exclude = ["bench/engines"]
 default-members = ["crates/nupdf", "crates/nupdf-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.92"
 license = "AGPL-3.0-or-later"
@@ -14,7 +14,7 @@ authors = ["hum <hello@byhum.dev>"]
 homepage = "https://nupdf.dev/"
 
 [workspace.dependencies]
-nupdf = { path = "crates/nupdf", version = "0.1.0" }
+nupdf = { path = "crates/nupdf", version = "0.1.1" }
 anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
