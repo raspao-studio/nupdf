@@ -681,5 +681,9 @@ Checked by running content through every window size: 33 contents built to strad
 | `flate-bomb.pdf`, `extract` | 521 MB | 7 MB | 5 MB |
 | `many-ops.pdf`, `extract` | 305 MB | 238 MB | 237 MB |
 
-Still held whole: a content stream that a command rewrites (`redact`, `sanitize`, `clean -c`), and any stream `show --data` or `streams` is asked to decode, each within `--max-decoded-bytes`.
+What is still read whole, and why:
+
+- **A stream a command is asked to decode**: `streams`, `show --data` and `clean -d` read it as MuPDF's `fz_read_best` does, up to its "compression bomb detected" and `--max-decoded-bytes`: 444 MB on `flate-bomb.pdf` before the bomb is called.
+- **Not the commands that rewrite content.** `redact`, `sanitize`, `clean -c` and `clean -s` read a page's contents through the same windows; what they hold is the content they write. On `flate-bomb.pdf` each stays under 60 MB.
+- **What a page of ten million operators is turned into** is another matter than its stream: on `many-ops.pdf`, a 100 KB file, `extract` holds 238 MB as MuPDF does, but `redact` 2.6 GB, `verify` 1.4 GB, `operators` 5 GB and `trace` 10.8 GB, which build their reports as trees in memory where `mutool trace` writes as it goes. That is not fixed here.
 
