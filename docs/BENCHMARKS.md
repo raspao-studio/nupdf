@@ -1,6 +1,6 @@
 # Benchmarks
 
-Speed of nupdf against MuPDF, the reference, and PDF Oxide ([oxide.fyi](https://oxide.fyi), the `pdf_oxide` crates). How the runs work is in [TESTING](TESTING.md#benchmarks); earlier runs are [at the end](#earlier-runs). The raw data for this page is in `bench/results/2026-11-13-main-ca67177/`.
+Speed of nupdf against MuPDF, the reference, and PDF Oxide ([oxide.fyi](https://oxide.fyi), the `pdf_oxide` crates). How the runs work is in [TESTING](TESTING.md#benchmarks); earlier runs are [at the end](#earlier-runs). The raw data for this page is in `bench/results/2026-11-13-main-ca67177/` and `bench/results/2026-11-14-calls/`.
 
 ## Against MuPDF and PDF Oxide, main at ca67177, 2026-11-13
 
@@ -165,6 +165,66 @@ The bench also times Python in process, against nupdf's process time less its st
 - In the engines comparison, nupdf renders with ICC on, its CLI's default; PDF Oxide's ICC is qcms, its default. nupdf has no speed-first text mode, so its `text-fast` row is its `text` run again.
 - In the per-call comparison PDF Oxide's PNGs are RGBA. The CLI has no tables, annotations, signatures or page-box commands, and no speed-first text option.
 - The machine was not idle: the standard tier's engine totals are about twice the earlier run's (below) on both sides, for the same work, so compare ratios, not milliseconds, across runs. One-off spikes move single files; medians and geometric means damp them but do not remove them.
+
+## One call, and a long document: the text, eleven ways, 2026-11-14
+
+What an agent pays to get a file's text, against every tool it might use instead. Each tool is asked for the text of every page on stdout, as a process of its own: start-up and imports are in the time. The raw data is in `bench/results/2026-11-14-calls/`; the website's two speed tables are these.
+
+```bash
+cargo install --locked --root target/oxide-cli pdf_oxide_cli@0.3.78
+python3 bench/calls/run.py --set typical --runs 5 --corpus ~/.cache/nupdf/corpus --nupdf target/release/nupdf --mutool MUTOOL --oxide target/oxide-cli/bin/pdf-oxide --python VENV/bin/python --out OUT/typical
+python3 bench/calls/run.py --set long --runs 5 --limit 300 ...   --out OUT/long
+python3 bench/calls/summary.py OUT/typical --mutool MUTOOL
+```
+
+- **Machine**: Apple M5 Max, macOS 27.2.1, with a load average of 2 to 3 for most of the run (about 12 as the `typical` set began). One Apple silicon Mac is the only machine this has run on.
+- **Versions**: nupdf 0.1.0 (`main` at `7a964d8`), MuPDF 1.28.6, Poppler 26.04.0, PDF Oxide 0.3.78 (its CLI and its Python bindings), and on Python 3.12.11: PyMuPDF 2.1, pypdfium2 5.15.2 (PDFium 8149), pypdf 7.0.1, pdfplumber 0.11.10, pdfminer.six 20260107.
+- **Files**: `typical` is an evenly spaced 200 of the standard tier's 5,142 files; `long` is the 30 long documents.
+- **Calls**: `nupdf extract --format text` (and with `--threads 8`), `mutool draw -q -F txt`, `pdftotext FILE -`, `pdf-oxide text`, and for each Python library a one-line script run with `python -c`. Each call runs five times; a call's time is the median. `mutool` exits 1 when a page had an error and still writes the rest, which counts as done.
+- **Speed and text are judged apart.** Times are over the files every tool completed (187 of 200, and 17 of 30 with 1,777 pages), so no tool is timed on a set of its own. A file's text is gradable when MuPDF's and PDFium's words for it agree (token F1 of 0.9 or more, through their Python bindings), and a call's text is right when its words match PDFium's (F1 of 0.8 or more). PDFium is the judge because nupdf follows MuPDF.
+
+**One call** (`typical`):
+
+| Tool | Median call | Fastest of 5, median | Processor time, median | Peak memory, median | Done | Right text |
+|---|---|---|---|---|---|---|
+| nupdf | 10.8 ms | 6.2 ms | 0 ms | 6.5 MB | 199 / 200 | 162 / 162 |
+| PDF Oxide, `pdf-oxide` CLI | 11.9 ms | 10.7 ms | 0 ms | 10.8 MB | 196 / 200 | 157 / 162 |
+| MuPDF, `mutool` | 11.9 ms | 10.7 ms | 0 ms | 5.6 MB | 191 / 200 | 161 / 162 |
+| Poppler, `pdftotext` | 23.4 ms | 21.1 ms | 0 ms | 10.4 MB | 194 / 200 | 160 / 162 |
+| PDF Oxide, Python bindings | 46.3 ms | 42.4 ms | 20 ms | 30.3 MB | 196 / 200 | 157 / 162 |
+| pypdf | 83.8 ms | 78.6 ms | 50 ms | 37.7 MB | 190 / 200 | 156 / 162 |
+| PDFium, through pypdfium2 | 84.2 ms | 79.1 ms | 40 ms | 40.5 MB | 194 / 200 | 162 / 162 |
+| pdfminer.six | 84.6 ms | 78.8 ms | 50 ms | 35.6 MB | 192 / 200 | 151 / 162 |
+| MuPDF, through PyMuPDF | 84.7 ms | 79.3 ms | 50 ms | 55.6 MB | 197 / 200 | 162 / 162 |
+| pdfplumber | 84.8 ms | 78.9 ms | 50 ms | 36.3 MB | 192 / 200 | 155 / 162 |
+
+**A long document** (`long`):
+
+| Tool | Pages a second | Total | Processor time, total | Peak memory, median | Peak memory, most | Done | Right text |
+|---|---|---|---|---|---|---|---|
+| nupdf, 8 threads | 2,729 | 0.65 s | 0.95 s | 32.0 MB | 203 MB | 30 / 30 | 14 / 14 |
+| nupdf | 1,568 | 1.13 s | 0.63 s | 13.0 MB | 158 MB | 30 / 30 | 14 / 14 |
+| Poppler, `pdftotext` | 1,072 | 1.66 s | 1.16 s | 13.5 MB | 76 MB | 30 / 30 | 13 / 14 |
+| PDFium, through pypdfium2 | 757 | 2.35 s | 1.68 s | 52.1 MB | 237 MB | 30 / 30 | 14 / 14 |
+| MuPDF, `mutool` | 498 | 3.57 s | 2.97 s | 10.0 MB | 83 MB | 30 / 30 | 14 / 14 |
+| PDF Oxide, `pdf-oxide` CLI | 342 | 5.20 s | 4.70 s | 29.1 MB | 230 MB | 30 / 30 | 14 / 14 |
+| PDF Oxide, Python bindings | 318 | 5.60 s | 4.82 s | 47.5 MB | 255 MB | 30 / 30 | 14 / 14 |
+| MuPDF, through PyMuPDF | 305 | 5.82 s | 5.11 s | 59.3 MB | 109 MB | 30 / 30 | 14 / 14 |
+| pypdf | 188 | 9.43 s | 8.78 s | 44.7 MB | 195 MB | 21 / 30 | 10 / 14 |
+| pdfminer.six | 105 | 16.94 s | 16.22 s | 42.6 MB | 142 MB | 23 / 30 | 11 / 14 |
+| pdfplumber | 69 | 25.68 s | 24.98 s | 84.1 MB | 622 MB | 20 / 30 | 3 / 14 |
+
+- **One call**: the three native tools are within about 10% of each other, which is within what a rerun moves them by. Anything started from Python takes about 85 ms, most of it the interpreter and the import.
+- **Long documents**: nupdf leads on one thread and on eight. It is not quicker on every document: `pdftotext` was quicker on 8 of the 30, `pdf-oxide` on 4 and `mutool` on 2.
+- **Memory**: `mutool` uses the least in both sets.
+- **PDF Oxide's two rows** differ by start-up alone: about 12 ms a call from its CLI against 46 ms from Python, and nearly the same pages a second on long documents.
+
+### Caveats
+
+- Wall times moved between reruns on this machine: an earlier pass gave nupdf 4.9 ms and `mutool` 6.0 ms a call on the same files. The order and the ratios held; the milliseconds are approximate.
+- Three Python libraries fail 7 to 10 of the long documents. Some of pypdf's failures are a missing optional dependency here (Brotli), not pypdf's own limit.
+- "Right text" compares words, not order or layout.
+- The harness must not hold the tools' output: an earlier version did, grew, and every later spawn then cost 180 to 280 ms. `run.py` sends each tool's output straight to a file.
 
 ## Earlier runs
 
