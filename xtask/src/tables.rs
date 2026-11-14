@@ -823,11 +823,19 @@ fn cmaps(dir: &Path) -> Result<Vec<u8>> {
         .filter(|p| p.extension().is_some_and(|e| e == "h"))
         .collect();
     names.sort();
-    let mut out = b"NCM1".to_vec();
+    let mut out = b"NCM2".to_vec();
     varint(&mut out, u32::try_from(names.len())?);
     for path in names {
         let text = std::fs::read_to_string(&path)?;
-        cmap(&text, &mut out).with_context(|| format!("in {}", path.display()))?;
+        let mut record = Vec::new();
+        cmap(&text, &mut record).with_context(|| format!("in {}", path.display()))?;
+        // The name, then how long the rest is, so that a reader can find
+        // one CMap without decoding the others.
+        let name = 1 + usize::from(*record.first().context("empty cmap")?);
+        let (name, rest) = record.split_at_checked(name).context("short cmap")?;
+        out.extend_from_slice(name);
+        varint(&mut out, u32::try_from(rest.len())?);
+        out.extend_from_slice(rest);
     }
     Ok(out)
 }

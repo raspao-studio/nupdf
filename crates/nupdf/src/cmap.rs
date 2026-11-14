@@ -613,127 +613,182 @@ pub fn parse(data: &[u8], doc: &Document) -> Result<Cmap, String> {
     Ok(cmap)
 }
 
-/// The predefined CMaps, decoded from the generated table once.
-fn builtin_table() -> &'static HashMap<String, Arc<Cmap>> {
-    static TABLE: OnceLock<HashMap<String, Arc<Cmap>>> = OnceLock::new();
-    TABLE.get_or_init(|| decode_builtin(include_bytes!("../data/cmaps.bin")).unwrap_or_default())
+/// The predefined CMaps: where each one's record lies in the generated
+/// table, and those decoded so far. A CMap is decoded when it is first
+/// asked for, with the CMaps it uses: decoding all of them costs
+/// milliseconds, and a document asks for one or two.
+struct Builtins<'a> {
+    slots: HashMap<String, Slot<'a>>,
 }
 
-fn decode_builtin(data: &[u8]) -> Option<HashMap<String, Arc<Cmap>>> {
-    struct R<'a>(&'a [u8]);
-    impl R<'_> {
-        fn byte(&mut self) -> Option<u8> {
-            let (&b, rest) = self.0.split_first()?;
-            self.0 = rest;
-            Some(b)
+struct Slot<'a> {
+    record: &'a [u8],
+    cmap: OnceLock<Option<Arc<Cmap>>>,
+}
+
+/// A reader of the generated table.
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn byte(&mut self) -> Option<u8> {
+        let (&b, rest) = self.0.split_first()?;
+        self.0 = rest;
+        Some(b)
+    }
+
+    fn varint(&mut self) -> Option<u32> {
+        let mut v: u32 = 0;
+        for shift in (0..35).step_by(7) {
+            let b = self.byte()?;
+            v |= u32::from(b & 0x7f) << shift;
+            if b & 0x80 == 0 {
+                return Some(v);
+            }
         }
-        fn varint(&mut self) -> Option<u32> {
-            let mut v: u32 = 0;
-            for shift in (0..35).step_by(7) {
-                let b = self.byte()?;
-                v |= u32::from(b & 0x7f) << shift;
-                if b & 0x80 == 0 {
-                    return Some(v);
+        None
+    }
+
+    fn bytes(&mut self, len: usize) -> Option<&'a [u8]> {
+        let (s, rest) = self.0.split_at_checked(len)?;
+        self.0 = rest;
+        Some(s)
+    }
+
+    fn short(&mut self) -> Option<String> {
+        let len = usize::from(self.byte()?);
+        Some(String::from_utf8_lossy(self.bytes(len)?).into_owned())
+    }
+}
+
+impl<'a> Builtins<'a> {
+    /// The table's records by name, none of them decoded. A table that
+    /// is cut short or is not one has no CMaps.
+    fn new(data: &'a [u8]) -> Builtins<'a> {
+        Builtins {
+            slots: Self::index(data).unwrap_or_default(),
+        }
+    }
+
+    fn index(data: &'a [u8]) -> Option<HashMap<String, Slot<'a>>> {
+        let mut r = Reader(data.strip_prefix(b"NCM2")?);
+        let count = r.varint()?;
+        let mut slots = HashMap::new();
+        for _ in 0..count {
+            let name = r.short()?;
+            let len = usize::try_from(r.varint()?).ok()?;
+            let record = r.bytes(len)?;
+            slots.insert(
+                name,
+                Slot {
+                    record,
+                    cmap: OnceLock::new(),
+                },
+            );
+        }
+        Some(slots)
+    }
+
+    fn get(&self, name: &str) -> Option<Arc<Cmap>> {
+        self.load(name, 0)
+    }
+
+    /// `name`'s CMap, chained to its UseCMap as `pdf_load_system_cmap`
+    /// chains it, however deep the chain (UniGB-UTF16-V uses
+    /// UniGB-UTF16-H, which uses UniGB-X).
+    fn load(&self, name: &str, depth: usize) -> Option<Arc<Cmap>> {
+        let slot = self.slots.get(name)?;
+        if let Some(done) = slot.cmap.get() {
+            return done.clone();
+        }
+        let made = decode_record(name, slot.record).map(|mut cmap| {
+            if !cmap.usecmap_name.is_empty() && depth < MAX_USECMAP {
+                let parent = cmap.usecmap_name.clone();
+                if let Some(u) = self.load(&parent, depth + 1) {
+                    cmap.set_usecmap(u);
                 }
             }
-            None
-        }
-        fn short(&mut self) -> Option<String> {
-            let len = usize::from(self.byte()?);
-            let (s, rest) = self.0.split_at_checked(len)?;
-            self.0 = rest;
-            Some(String::from_utf8_lossy(s).into_owned())
-        }
+            Arc::new(cmap)
+        });
+        slot.cmap.get_or_init(|| made).clone()
     }
-    let mut r = R(data.strip_prefix(b"NCM1")?);
-    let count = r.varint()?;
-    let mut raw: Vec<Cmap> = Vec::new();
-    for _ in 0..count {
-        let mut cmap = Cmap::new();
-        cmap.name = r.short()?;
-        cmap.usecmap_name = r.short()?;
-        cmap.wmode = i32::from(r.byte()?);
-        let spaces = r.byte()?;
-        for _ in 0..spaces {
-            let n = usize::from(r.byte()?);
-            let low = r.varint()?;
-            let high = r.varint()?;
-            cmap.codespaces.push(Codespace { n, low, high });
-        }
-        let ranges = r.varint()?;
-        let mut prev = 0u32;
-        for _ in 0..ranges {
-            let low = prev.wrapping_add(r.varint()?);
-            let high = low.wrapping_add(r.varint()?);
-            let out = r.varint()?;
-            cmap.entries.insert(
-                low,
-                Entry {
-                    low,
-                    high,
-                    out,
-                    many: false,
-                },
-            );
-            prev = high;
-        }
-        let mranges = r.varint()?;
-        for _ in 0..mranges {
-            let low = r.varint()?;
-            let out = r.varint()?;
-            cmap.entries.insert(
-                low,
-                Entry {
-                    low,
-                    high: low,
-                    out,
-                    many: true,
-                },
-            );
-        }
-        let table = r.varint()?;
-        for _ in 0..table {
-            cmap.table.push(r.varint()? as i32);
-        }
-        raw.push(cmap);
+
+    #[cfg(test)]
+    fn decoded(&self) -> usize {
+        self.slots
+            .values()
+            .filter(|s| s.cmap.get().is_some())
+            .count()
     }
-    // Chain each to its UseCMap, as `pdf_load_system_cmap` does, however
-    // deep the chain (UniGB-UTF16-V uses UniGB-UTF16-H, which uses
-    // UniGB-X).
-    let by_name: HashMap<String, Cmap> = raw.into_iter().map(|c| (c.name.clone(), c)).collect();
-    let mut out: HashMap<String, Arc<Cmap>> = HashMap::new();
-    for name in by_name.keys() {
-        link(name, &by_name, &mut out, 0);
-    }
-    Some(out)
 }
 
-fn link(
-    name: &str,
-    by_name: &HashMap<String, Cmap>,
-    out: &mut HashMap<String, Arc<Cmap>>,
-    depth: usize,
-) -> Option<Arc<Cmap>> {
-    if let Some(done) = out.get(name) {
-        return Some(done.clone());
+fn builtins() -> &'static Builtins<'static> {
+    static TABLE: OnceLock<Builtins<'static>> = OnceLock::new();
+    TABLE.get_or_init(|| Builtins::new(include_bytes!("../data/cmaps.bin")))
+}
+
+/// One CMap's record: its UseCMap's name, writing mode, code spaces,
+/// ranges, one-to-many ranges and their table.
+fn decode_record(name: &str, record: &[u8]) -> Option<Cmap> {
+    let mut r = Reader(record);
+    let mut cmap = Cmap::new();
+    cmap.name = name.to_string();
+    cmap.usecmap_name = r.short()?;
+    cmap.wmode = i32::from(r.byte()?);
+    let spaces = r.byte()?;
+    for _ in 0..spaces {
+        let n = usize::from(r.byte()?);
+        let low = r.varint()?;
+        let high = r.varint()?;
+        cmap.codespaces.push(Codespace { n, low, high });
     }
-    let mut cmap = by_name.get(name)?.clone();
-    if !cmap.usecmap_name.is_empty() && depth < MAX_USECMAP {
-        let parent = cmap.usecmap_name.clone();
-        if let Some(u) = link(&parent, by_name, out, depth + 1) {
-            cmap.set_usecmap(u);
-        }
+    // Gathered first and put in the map at once: the ranges come sorted,
+    // and a map built from a sorted run costs a fraction of one built an
+    // entry at a time. A later entry still replaces an earlier one with
+    // the same start.
+    let ranges = r.varint()?;
+    let mut entries: Vec<(u32, Entry)> = Vec::new();
+    let mut prev = 0u32;
+    for _ in 0..ranges {
+        let low = prev.wrapping_add(r.varint()?);
+        let high = low.wrapping_add(r.varint()?);
+        let out = r.varint()?;
+        entries.push((
+            low,
+            Entry {
+                low,
+                high,
+                out,
+                many: false,
+            },
+        ));
+        prev = high;
     }
-    let cmap = Arc::new(cmap);
-    out.insert(name.to_string(), cmap.clone());
+    let mranges = r.varint()?;
+    for _ in 0..mranges {
+        let low = r.varint()?;
+        let out = r.varint()?;
+        entries.push((
+            low,
+            Entry {
+                low,
+                high: low,
+                out,
+                many: true,
+            },
+        ));
+    }
+    cmap.entries = entries.into_iter().collect();
+    let table = r.varint()?;
+    for _ in 0..table {
+        cmap.table.push(r.varint()? as i32);
+    }
     Some(cmap)
 }
 
 /// `pdf_load_system_cmap`.
 pub fn load_system(name: &[u8]) -> Result<Arc<Cmap>, String> {
     let name = String::from_utf8_lossy(name);
-    let table = builtin_table();
-    let cmap = table
+    let cmap = builtins()
         .get(name.as_ref())
         .ok_or_else(|| report::format(&format!("no builtin cmap file: {name}")))?;
     if !cmap.usecmap_name.is_empty() && cmap.usecmap.is_none() {
@@ -742,12 +797,12 @@ pub fn load_system(name: &[u8]) -> Result<Arc<Cmap>, String> {
             cmap.usecmap_name
         )));
     }
-    Ok(cmap.clone())
+    Ok(cmap)
 }
 
 /// `pdf_load_builtin_cmap` for a name MuPDF always has.
 pub fn builtin(name: &str) -> Option<Arc<Cmap>> {
-    builtin_table().get(name).cloned()
+    builtins().get(name)
 }
 
 /// `pdf_load_embedded_cmap`: a CMap stream, its /UseCMap followed.
@@ -1215,5 +1270,76 @@ mod tests {
         let ucs = load_system(b"Adobe-Japan1-UCS2").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(ucs.lookup(1), 0x20);
         assert!(load_system(b"Nope").is_err());
+    }
+
+    #[test]
+    fn a_predefined_cmap_is_decoded_alone_with_the_cmaps_it_uses() {
+        let all = Builtins::new(include_bytes!("../data/cmaps.bin"));
+        assert!(all.slots.len() > 50, "{}", all.slots.len());
+        assert_eq!(all.decoded(), 0);
+        let id = all
+            .get("Identity-H")
+            .unwrap_or_else(|| panic!("Identity-H"));
+        assert_eq!(id.lookup(0x1234), 0x1234);
+        assert_eq!(all.decoded(), 1);
+        // The same CMap the second time, not another decoding of it.
+        let again = all
+            .get("Identity-H")
+            .unwrap_or_else(|| panic!("Identity-H"));
+        assert!(Arc::ptr_eq(&id, &again));
+        // UniGB-UTF16-V uses UniGB-UTF16-H, which uses UniGB-X.
+        let v = all.get("UniGB-UTF16-V").unwrap_or_else(|| panic!("V"));
+        assert_eq!(all.decoded(), 4);
+        let h = v.usecmap.clone().unwrap_or_else(|| panic!("H"));
+        assert_eq!(h.name, "UniGB-UTF16-H");
+        assert_eq!(h.usecmap.as_ref().map(|x| x.name.as_str()), Some("UniGB-X"));
+        let direct = all.get("UniGB-UTF16-H").unwrap_or_else(|| panic!("H"));
+        assert!(Arc::ptr_eq(&h, &direct));
+        assert!(all.get("Nope").is_none());
+        assert_eq!(all.decoded(), 4);
+    }
+
+    #[test]
+    fn every_predefined_cmap_decodes_with_its_parent() {
+        let all = Builtins::new(include_bytes!("../data/cmaps.bin"));
+        for name in all.slots.keys() {
+            let c = all.get(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(&c.name, name);
+            assert_eq!(c.usecmap.is_some(), !c.usecmap_name.is_empty(), "{name}");
+        }
+        assert_eq!(all.decoded(), all.slots.len());
+    }
+
+    #[test]
+    fn a_damaged_table_of_predefined_cmaps_has_none_and_does_not_panic() {
+        let data: &[u8] = include_bytes!("../data/cmaps.bin");
+        assert!(Builtins::new(b"").slots.is_empty());
+        assert!(Builtins::new(b"NCM1").slots.is_empty());
+        assert!(Builtins::new(&data[..data.len() / 2]).slots.is_empty());
+        // A record cut short is no CMap.
+        let whole = Builtins::new(data);
+        let record = whole.slots.get("UniGB-UTF16-H").map(|s| s.record);
+        let record = record.unwrap_or_else(|| panic!("record"));
+        for cut in 0..record.len().min(64) {
+            let _ = decode_record("UniGB-UTF16-H", &record[..cut]);
+        }
+        assert!(decode_record("UniGB-UTF16-H", &record[..record.len() - 1]).is_none());
+        assert!(decode_record("UniGB-UTF16-H", record).is_some());
+    }
+
+    #[test]
+    fn a_chain_of_usecmaps_that_loops_ends() {
+        // Two records that use each other: name, length, then use-CMap,
+        // writing mode, no code spaces, ranges, one-to-many ranges, table.
+        let mut data = b"NCM2\x02".to_vec();
+        for (name, parent) in [("A", "B"), ("B", "A")] {
+            data.extend_from_slice(&[1, name.as_bytes()[0], 7, 1, parent.as_bytes()[0]]);
+            data.extend_from_slice(&[0, 0, 0, 0, 0]);
+        }
+        let all = Builtins::new(&data);
+        assert_eq!(all.slots.len(), 2);
+        let a = all.get("A").unwrap_or_else(|| panic!("A"));
+        assert_eq!(a.usecmap_name, "B");
+        assert_eq!(all.decoded(), 2);
     }
 }
