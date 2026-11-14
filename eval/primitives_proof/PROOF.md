@@ -1,20 +1,25 @@
 # Empirical Proof: Agent-Native PDF Primitives
 
-Measured on `feat/agent-primitives` (macOS, release build) against `PyMuPDF` (`pymupdf`), `pypdf`, `pdfplumber`, `pypdfium2`, and `mutool` (`mupdf-1.28.6`). Every number below comes directly from [results.json](results.json), produced by:
+Measured on `feat/agent-primitives` (macOS, release build, `lto = "thin"`, `codegen-units = 1`) head-to-head against:
+- **Native PDF Oxide (`0.3.78`) in both forms:**
+  - **In-process Rust library (`pdf_oxide = "=0.3.78"`):** linked directly against `nupdf` in the out-of-workspace [`bench/engines`](../../bench/engines/src/bin/primitives_vs_oxide.rs) crate (`PdfDocument::from_bytes`, `extract_text`, `extract_spans`, `extract_structured`, and `pdf_oxide::editor::DocumentEditor` DOM `edit_page` / `set_text`).
+  - **Native Rust CLI (`pdf_oxide_cli@0.3.78`):** `pdf-oxide` release binary (`target/oxide-cli/bin/pdf-oxide`).
+- **Python & C/C++ engines:** `PyMuPDF` (`pymupdf`), `pypdf`, `pdfplumber`, `pypdfium2`, and `mutool` (`mupdf-1.28.6`).
+
+Every number below comes directly from [`results.json`](results.json), produced by:
 
 ```bash
 cargo build --release -p nupdf-cli
+cargo install --locked --root target/oxide-cli pdf_oxide_cli@0.3.78
+cargo build --release --manifest-path bench/engines/Cargo.toml --bin primitives_vs_oxide
+
 target/bench-venv/bin/python \
   eval/primitives_proof/run_proof.py \
   --nupdf target/release/nupdf \
   --mutool target/oracle/mupdf-1.28.6/build/release/mutool \
+  --pdf-oxide target/oxide-cli/bin/pdf-oxide \
+  --engines-bin bench/engines/target/release/primitives_vs_oxide \
   --out-json eval/primitives_proof/results.json
-```
-
-And for the `Document::fork_clean` speculative-branching microbenchmark:
-
-```bash
-cargo test --release -p nupdf --lib -- fork_clean_microbenchmark --ignored --nocapture
 ```
 
 ---
@@ -29,14 +34,17 @@ cargo test --release -p nupdf --lib -- fork_clean_microbenchmark --ignored --noc
 
 | Library / Tool | Fooled by Z-Order Occlusion? | Detects Vector Strikethrough? | Detects `/ActualText` Spoof? | Emits Blind-Spot Crops? |
 |---|---|---|---|---|
-| `pypdf` | Yes (extracts hidden injection) | No | No | No |
-| `pdfplumber` | Yes (extracts hidden injection) | No | No | No |
-| `PyMuPDF` (`fitz`) | Yes (extracts hidden injection) | No | No | No |
-| `pypdfium2` | Yes (extracts hidden injection) | No | No | No |
-| `mutool draw -F txt` | Yes (extracts hidden injection) | No | No | No |
+| `pdf_oxide` (`0.3.78` Rust crate: `extract_text` / `extract_spans` / `extract_structured`) | Yes (all 3 APIs leak injection) | No (`TextSpan` has no strike/occlusion state) | No (returns `"$100,000.00"` only; `saw_glyph_100 = false`) | No |
+| `pdf-oxide` (`0.3.78` native CLI: `text` & `text --format structured --json`) | Yes (leaks hidden injection) | No | No | No |
+| `pypdf` | Yes (leaks hidden injection) | No | No | No |
+| `pdfplumber` | Yes (leaks hidden injection) | No | No | No |
+| `PyMuPDF` (`fitz`) | Yes (leaks hidden injection) | No | No | No |
+| `pypdfium2` | Yes (leaks hidden injection) | No | No | No |
+| `mutool draw -F txt` | Yes (leaks hidden injection) | No | No | No |
 | **`nupdf attest`** | **No — flags `zero_contrast_or_occluded`** | **Yes (`struck_through: true`)** | **Yes (`glyph_text: "Pay $100.00"`)** | **Yes (`1` cropped PNG)** |
 
-- **End-to-end CLI wall time (including dual full + `NoTextDevice` renders and PNG crop):** `7.05 ms`.
+- **In-process Rust median latency:** `pdf_oxide::extract_spans` takes `0.195 ms` (unverified stream extraction only); `nupdf::attest::attest_document` takes **`2.059 ms`** (includes dual full + `NoTextDevice` pixel rasterization, vector stroke intersection, and `/ActualText` glyph reconciliation).
+- **End-to-end CLI wall time (including cropped blind-spot PNG):** `6.91 ms`.
 
 ---
 
@@ -44,29 +52,27 @@ cargo test --release -p nupdf --lib -- fork_clean_microbenchmark --ignored --noc
 
 **Two-column invoice (`invoice_patch.pdf`) with `"Amount: $14,500.00"` at `x = 50` and `"Due: 2026-12-01"` on the same baseline at `x = 210`:**
 
-- **Valid surgical edit (`--replace p1.b1.l1.s1="Amount: $15,400.00"`):**
-  - Preserves baseline matrix, font, size (`12 pt`), and RGB color `(0.1, 0.2, 0.5)`.
-  - Verified independently by `PyMuPDF`, `pypdf`, and `mutool draw -F txt` (`$15,400.00` present, `$14,500.00` absent from xref/streams, neighbor `"Due: 2026-12-01"` untouched).
-  - **CLI wall time:** `4.80 ms`.
-- **Neighbor-collision trap (`--replace p1.b1.l1.s1="Amount: $14,500,000,000,000.00 (USD)"`):**
-  - `PyMuPDF` (`add_redact_annot` + `apply_redactions`): silently truncates/corrupts and writes the file with exit `0`.
-  - **`nupdf patch`:** pre-write layout verification catches horizontal neighbor overlap (`patch.collision`), **exits `4` (`verify.failed`)**, and **writes nothing** to `-o`.
+| Engine | Valid Surgical Edit (`"$15,400.00"`) | Neighbor-Collision Trap (`"Amount: $14,500,000,000,000.00 (USD)"`) | Median Latency |
+|---|---|---|---|
+| `pdf_oxide::editor::DocumentEditor` (`0.3.78` DOM `find_text_containing` + `set_text`) | Passes independent `PyMuPDF` grader (queues redaction box + overlays text) | **Fails silently (`Ok`)** — writes overlapping glyphs directly on top of `"Due: 2026-12-01"` (confirmed independently by both `PyMuPDF` word boxes and `nupdf` stext) | `0.075 ms` (in-memory, unverified) |
+| `PyMuPDF` (`add_redact_annot` + `apply_redactions`) | Replaces via manual bbox synthesis | **Fails silently (exit `0`)** — truncates/corrupts inside original span rect | — |
+| **`nupdf patch`** (`patch_and_verify` / CLI) | Preserves baseline matrix, font, size (`12 pt`), RGB `(0.1, 0.2, 0.5)`, scrubs stream, passes `PyMuPDF` / `pypdf` / `mutool` graders | **Caught pre-write (`verify.collision`)** — **exits `4` (`verify.failed`)** and writes zero bytes to `-o` | **`1.080 ms`** in-process (full save + re-parse + layout verify) / **`4.85 ms`** CLI |
 
 ---
 
 ## 3. Multi-Agent Transactional Edit Plans (`nupdf apply` + `Document::fork_clean`)
 
-**3-page deal packet (`deal_packet.pdf`) edited concurrently by three independent agent plans anchored to base `doc_id`:**
-- `legal-agent`: highlights `"Indemnity Cap"` + surgically patches `"Service Fee: $10,000"` → `"Service Fee: $25,000"`.
-- `ops-agent`: fills AcroForm widget `counterparty = "Acme Robotics"` + sets `/Info` `Title = "Executed MSA - Acme Robotics"`.
-- `privacy-agent`: redacts SSN `"999-00-1234"` (with stream + document scrub) + deletes scratchpad page `3`.
+**Speculative branching (1,000 isolated branches on a 50-page, `17,812`-byte PDF, in-process Rust release build):**
 
-| Metric | Measured Result |
-|---|---|
-| Atomic 3-agent commit + full leak/patch/read-back verification (`nupdf apply`) | `6.47 ms` (verified independently by `pypdf` and `PyMuPDF`) |
-| Cross-agent conflict (`legal-agent` patches `Service Fee` while `rogue-agent` redacts `Service Fee`) | Rejected pre-write with **exit `4` (`plan.conflict`)**, zero bytes written |
-| `Document::open` × 1,000 branches (50-page PDF, `16,687` bytes) | `44.761 ms` (`44.8 µs` / branch) |
-| **`Document::fork_clean` × 1,000 branches** (zero-copy `Arc<State>` + isolated `Edits`) | **`0.361 ms` (`0.36 µs` / branch — `124.1x` faster)** |
+| Engine / API | 1,000 Speculative Branches | Per Branch | Relative Speed |
+|---|---|---|---|
+| `pdf_oxide::editor::DocumentEditor::from_bytes` (`0.3.78`, `Vec` copy excluded from timer) | `100.531 ms` | `100.5 µs` | `1.0x` |
+| `nupdf::Document::open` (full xref parse per branch) | `33.751 ms` | `33.8 µs` | `3.0x` faster than `pdf_oxide` |
+| **`nupdf::Document::fork_clean`** (`O(1)` `Arc<State>` + fresh `Edits` overlay) | **`0.297 ms`** | **`0.30 µs`** | **`338.4x` faster than `pdf_oxide`** (`113.6x` faster than `Document::open`) |
+
+**Multi-agent transactional commit (`deal_packet.pdf`, 3 concurrent agent plans anchored to base `doc_id`):**
+- `legal-agent` (highlight + surgical fee patch) + `ops-agent` (AcroForm fill + `/Info` `Title`) + `privacy-agent` (SSN scrub redaction + scratchpad page delete): committed & leak/patch/read-back verified in **`7.53 ms`** (verified independently by `pypdf` and `PyMuPDF`).
+- Cross-agent conflict (`legal-agent` patches `Service Fee` while `rogue-agent` redacts `Service Fee`): rejected pre-write with **exit `4` (`plan.conflict`)**, zero bytes written (`pdf_oxide` has no `doc_id`-anchored plan executor or cross-agent conflict detector).
 
 ---
 
@@ -74,27 +80,36 @@ cargo test --release -p nupdf --lib -- fork_clean_microbenchmark --ignored --noc
 
 **100 synthetic receipts (`r_001.pdf` … `r_100.pdf`), each with vertically shifted rows (`Subtotal`, `Tax (8%)`, `Total Due`), ground-truth sum `7897.50`:**
 
+### CLI / Agent Tool-Call Level (Zero Custom Code)
+
 | Method | Exact Sum (`7897.50`)? | Output Payload | Wall Time (100 PDFs) |
 |---|---|---|---|
+| `pdf-oxide` (`0.3.78` native CLI: 100 × `text --format structured --json`, no batch/query mode) | Requires LLM/script post-parse | `1,046,142` bytes | `428.53 ms` |
 | `nupdf batch <dir> -- extract --format json` | Requires LLM/script post-parse | `302,961` bytes | — |
-| `pdfplumber` (in-process Python loop) | Yes | Python float | `115.45 ms` |
-| `PyMuPDF` (`get_text("words")` spatial loop in Python) | Yes | Python float | `75.99 ms` |
-| **`nupdf query <dir> --right-of "Total Due" --nearest-only --summary-only`** | **Yes (`7897.5`)** | **`236` bytes (`1,283.7x` smaller)** | **`11.72 ms` (`6.5x`–`9.9x` faster)** |
+| `pdfplumber` (custom Python loop) | Yes | Python float | `116.42 ms` |
+| `PyMuPDF` (`get_text("words")` custom spatial Python loop) | Yes | Python float | `79.01 ms` |
+| **`nupdf query <dir> --right-of "Total Due" --nearest-only --summary-only`** | **Yes (`7897.5`)** | **`236` bytes (`4,432.8x` smaller than `pdf-oxide` CLI)** | **`11.45 ms` (`37.4x` faster than `pdf-oxide` CLI; `6.9x`–`10.2x` faster than Python)** |
+
+### In-Process Rust Library Level (`primitives_vs_oxide`)
+
+When a Rust caller hand-writes custom spatial anchor/currency parsing on top of `pdf_oxide::PdfDocument::extract_spans` vs calling declarative `nupdf::query::run_query` (which builds full FreeType glyph bboxes and style cells per document):
+- **Single-threaded (100 PDFs in memory):** `pdf_oxide` custom loop `4.013 ms` vs `nupdf::query::run_query` `14.553 ms` (`145 µs` / PDF).
+- **8 threads (100 PDFs in memory):** `pdf_oxide` custom loop `2.737 ms` vs `nupdf::query::run_query` **`3.957 ms`** (`39.6 µs` / PDF, exact sum `7897.5` out of the box with zero custom spatial/currency code).
 
 ---
 
 ## 5. Zero-Token Deterministic Claim & Hazard Auditor (`nupdf audit`)
 
-**5 citations audited against a 3-page contract (`audit_contract.pdf`) with `--evidence-dir`:**
+**5 citations audited against a 3-page contract (`audit_contract.pdf`):**
 
-| Claim ID | Input Citation | `nupdf audit` Verdict | Epistemic Detail Recovered |
+| Claim ID | Input Citation | `nupdf audit` Verdict | Native `pdf_oxide` (`0.3.78` Crate & CLI) |
 |---|---|---|---|
-| `c1_clean` | Page 1, `"Governing Law: State of Delaware."` | `verified` | Exact quote, clean visibility & geometry |
-| `c2_wrong_page` | Cited Page 1, `"Exclusive Venue: Courts of Wilmington."` | `wrong_location` | Automatically relocated to `["p3.b1.l1.s1"]` |
-| `c3_hallucinated` | Span `p1.b2.l1.s1`, `"Warranty Period: 24 months..."` | `mismatch` | Diffs against actual `"12 months"` |
-| `c4_footnote_trap` | Quotes `"Warranty Period: 12 months from delivery"` omitting superscript `1` | `verified_with_hazards` | Flags `hazard.unreferenced_footnote` + recovers `"1 Excluding consumable batteries and user-modified hardware."` |
-| `c5_strikethrough_trap` | Quotes `"Early Termination Fee: $0."` (crossed out by vector line) | `verified_with_hazards` | Flags `hazard.struck_through` |
+| `c1_clean` | Page 1, `"Governing Law: State of Delaware."` | `verified` | Raw text search only |
+| `c2_wrong_page` | Cited Page 1, `"Exclusive Venue: Courts of Wilmington."` | `wrong_location` → relocated to `["p3.b1.l1.s1"]` | No citation auditor / relocation |
+| `c3_hallucinated` | Span `p1.b2.l1.s1`, `"Warranty Period: 24 months..."` | `mismatch` (diffs against `"12 months"`) | No span-pinned quote diff |
+| `c4_footnote_trap` | Quotes `"Warranty Period: 12 months from delivery"` omitting superscript `1` | `verified_with_hazards` (`hazard.unreferenced_footnote` + recovers `"1 Excluding consumable batteries and user-modified hardware."`) | No superscript/footnote hazard detection |
+| `c5_strikethrough_trap` | Quotes `"Early Termination Fee: $0."` (crossed out by vector line) | `verified_with_hazards` (`hazard.struck_through`) | **False positive:** both `pdf_oxide::extract_spans` and `pdf-oxide search --json` return struck clause as normal active text |
 
 - **LLM tokens spent:** `0`
-- **Highlighted PNG evidence crops rendered:** `4`
-- **Total CLI wall time (5 claims + 4 rendered PNG crops):** `7.93 ms`
+- **In-process Rust median latency (5 claims):** **`0.270 ms`** (verdicts + footnote recovery) / **`2.419 ms`** (with `4` highlighted PNG evidence crops rendered)
+- **End-to-end CLI wall time (5 claims + 4 PNG crops):** `7.82 ms`

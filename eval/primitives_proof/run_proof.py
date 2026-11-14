@@ -107,7 +107,9 @@ def make_attest_trap_pdf(path: Path) -> None:
     doc.close()
 
 
-def exp1_attest(nupdf: str, mutool: str | None, work: Path) -> dict:
+def exp1_attest(
+    nupdf: str, mutool: str | None, pdf_oxide_cli: str | None, work: Path
+) -> dict:
     pdf_path = work / "attest_traps.pdf"
     crops_dir = work / "attest_crops"
     make_attest_trap_pdf(pdf_path)
@@ -160,6 +162,22 @@ def exp1_attest(nupdf: str, mutool: str | None, work: Path) -> dict:
         _, m_out, _, _ = run_cmd([mutool, "draw", "-F", "txt", str(pdf_path)])
         mutool_leaks_occluded = "SYSTEM OVERRIDE" in m_out
 
+    # 5b. Native pdf-oxide CLI (Rust binary, pdf_oxide_cli 0.3.78)
+    oxide_cli_leaks_occluded = None
+    oxide_cli_flags_strikethrough = None
+    oxide_cli_flags_spoof = None
+    if pdf_oxide_cli and Path(pdf_oxide_cli).exists():
+        _, ox_txt, _, _ = run_cmd([pdf_oxide_cli, "text", str(pdf_path)])
+        _, ox_struct, _, _ = run_cmd(
+            [pdf_oxide_cli, "text", "--format", "structured", "--json", str(pdf_path)]
+        )
+        oxide_cli_leaks_occluded = (
+            "SYSTEM OVERRIDE" in ox_txt or "SYSTEM OVERRIDE" in ox_struct
+        )
+        # Structured JSON has RegionRole + TextSpan (no strikethrough or pixel-occlusion field, no glyph_text vs ActualText diff)
+        oxide_cli_flags_strikethrough = "struck_through" in ox_struct
+        oxide_cli_flags_spoof = "glyph_text" in ox_struct
+
     # 6. nupdf attest
     rc, out, err, ms = run_cmd(
         [nupdf, "attest", str(pdf_path), "--crops-dir", str(crops_dir)], check=True
@@ -200,16 +218,19 @@ def exp1_attest(nupdf: str, mutool: str | None, work: Path) -> dict:
             "PyMuPDF": fitz_leaks_occluded,
             "pypdfium2": pdfium_leaks_occluded,
             "mutool": mutool_leaks_occluded,
+            "pdf-oxide (native CLI)": oxide_cli_leaks_occluded,
         },
         "rivals_detected_vector_strikethrough": {
             "pypdf": pypdf_flags_strikethrough,
             "pdfplumber": pl_flags_strikethrough,
             "PyMuPDF": fitz_flags_strikethrough,
+            "pdf-oxide (native CLI)": oxide_cli_flags_strikethrough,
         },
         "rivals_detected_actualtext_spoof": {
             "pypdf": pypdf_flags_spoof,
             "pdfplumber": pl_flags_spoof,
             "PyMuPDF": fitz_flags_spoof,
+            "pdf-oxide (native CLI)": oxide_cli_flags_spoof,
         },
         "nupdf_attest": {
             "detected_vector_strikethrough": struck,
@@ -474,7 +495,9 @@ def exp3_multi_agent_apply(nupdf: str, work: Path) -> dict:
     }
 
 
-def exp4_spatial_query_100_receipts(nupdf: str, work: Path) -> dict:
+def exp4_spatial_query_100_receipts(
+    nupdf: str, pdf_oxide_cli: str | None, work: Path
+) -> dict:
     receipts_dir = work / "receipts_100"
     receipts_dir.mkdir(parents=True, exist_ok=True)
     expected_sum = 0.0
@@ -552,6 +575,22 @@ def exp4_spatial_query_100_receipts(nupdf: str, work: Path) -> dict:
                 fitz_sum += float(right[0][4].lstrip("$").replace(",", ""))
     fitz_ms = (time.perf_counter() - t0) * 1000.0
 
+    # 4. Native pdf-oxide CLI across all 100 receipts (no directory/batch or spatial query mode;
+    #    an agent with a shell must call `pdf-oxide text --format structured --json` per file)
+    oxide_cli_ms = None
+    oxide_cli_bytes = None
+    if pdf_oxide_cli and Path(pdf_oxide_cli).exists():
+        t0 = time.perf_counter()
+        total_b = 0
+        for f in sorted(receipts_dir.glob("*.pdf")):
+            _, ox_out, _, _ = run_cmd(
+                [pdf_oxide_cli, "text", "--format", "structured", "--json", str(f)],
+                check=True,
+            )
+            total_b += len(ox_out.encode("utf-8"))
+        oxide_cli_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        oxide_cli_bytes = total_b
+
     return {
         "receipt_count": 100,
         "expected_sum": expected_sum,
@@ -559,18 +598,27 @@ def exp4_spatial_query_100_receipts(nupdf: str, work: Path) -> dict:
         "exact_match": abs(got_sum - expected_sum) < 0.01,
         "output_bytes": {
             "nupdf_batch_extract_json": baseline_bytes,
+            "pdf_oxide_cli_structured_json": oxide_cli_bytes,
             "nupdf_query_summary": query_bytes,
-            "token_reduction_ratio": round(baseline_bytes / max(query_bytes, 1), 1),
+            "token_reduction_vs_batch_extract": round(
+                baseline_bytes / max(query_bytes, 1), 1
+            ),
+            "token_reduction_vs_pdf_oxide_cli": (
+                round(oxide_cli_bytes / max(query_bytes, 1), 1)
+                if oxide_cli_bytes is not None
+                else None
+            ),
         },
         "wall_time_ms": {
             "nupdf_query_cli": round(q_ms, 2),
+            "pdf_oxide_native_cli_100_calls": oxide_cli_ms,
             "pymupdf_in_python": round(fitz_ms, 2),
             "pdfplumber_in_python": round(pl_ms, 2),
         },
     }
 
 
-def exp5_audit_claims(nupdf: str, work: Path) -> dict:
+def exp5_audit_claims(nupdf: str, pdf_oxide_cli: str | None, work: Path) -> dict:
     pdf_path = work / "audit_contract.pdf"
     evidence_dir = work / "audit_evidence"
     doc = fitz.open()
@@ -661,6 +709,13 @@ def exp5_audit_claims(nupdf: str, work: Path) -> dict:
     evidence_pngs = list(evidence_dir.glob("*.png"))
     assert len(evidence_pngs) >= 3, f"expected evidence PNGs, got {evidence_pngs}"
 
+    oxide_cli_treats_struck_as_active = None
+    if pdf_oxide_cli and Path(pdf_oxide_cli).exists():
+        _, ox_search, _, _ = run_cmd(
+            [pdf_oxide_cli, "search", "--json", str(pdf_path), "Early Termination Fee: $0."]
+        )
+        oxide_cli_treats_struck_as_active = "Early Termination Fee" in ox_search
+
     return {
         "audit_5_claims_ms": round(ms, 2),
         "llm_tokens_spent": 0,
@@ -668,6 +723,7 @@ def exp5_audit_claims(nupdf: str, work: Path) -> dict:
         "footnote_recovered": by_id["c4_footnote_trap"].get("footnote_text"),
         "relocated_wrong_page_to": by_id["c2_wrong_page"]["found_elsewhere"],
         "evidence_cards_rendered": len(evidence_pngs),
+        "pdf_oxide_cli_returns_struck_clause_as_active_hit": oxide_cli_treats_struck_as_active,
     }
 
 
@@ -675,18 +731,54 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--nupdf", required=True, help="Path to built nupdf binary")
     ap.add_argument("--mutool", default=None, help="Optional path to mutool binary")
+    ap.add_argument(
+        "--pdf-oxide", default=None, help="Optional path to native pdf-oxide CLI binary"
+    )
+    ap.add_argument(
+        "--engines-bin",
+        default=None,
+        help="Optional path to native Rust primitives_vs_oxide binary",
+    )
     ap.add_argument("--out-json", default=None, help="Where to write JSON results")
     args = ap.parse_args()
 
     work = Path(tempfile.mkdtemp(prefix="nupdf_primitives_proof_"))
     try:
-        results = {
-            "exp1_attest": exp1_attest(args.nupdf, args.mutool, work),
+        results: dict = {
+            "exp1_attest": exp1_attest(args.nupdf, args.mutool, args.pdf_oxide, work),
             "exp2_patch": exp2_patch(args.nupdf, args.mutool, work),
             "exp3_multi_agent_apply": exp3_multi_agent_apply(args.nupdf, work),
-            "exp4_spatial_query_100_receipts": exp4_spatial_query_100_receipts(args.nupdf, work),
-            "exp5_audit_claims": exp5_audit_claims(args.nupdf, work),
+            "exp4_spatial_query_100_receipts": exp4_spatial_query_100_receipts(
+                args.nupdf, args.pdf_oxide, work
+            ),
+            "exp5_audit_claims": exp5_audit_claims(args.nupdf, args.pdf_oxide, work),
         }
+        if args.engines_bin and Path(args.engines_bin).exists():
+            _, eng_out, _, _ = run_cmd([args.engines_bin, str(work)], check=True)
+            eng_json = json.loads(eng_out)
+            assert eng_json["exp1_attest"]["nupdf_detected_all_4_traps"] is True
+            assert eng_json["exp2_patch"]["nupdf_caught_collision"] is True
+            # Independently grade pdf_oxide DocumentEditor's patched PDFs with PyMuPDF!
+            ox_ok = work / "oxide_patched_ok.pdf"
+            if ox_ok.exists():
+                d_ok = fitz.open(str(ox_ok))
+                ox_txt = d_ok[0].get_text()
+                d_ok.close()
+                eng_json["exp2_patch"]["pymupdf_grader_on_oxide_valid_patch"] = {
+                    "has_new_15400": "$15,400.00" in ox_txt,
+                    "removed_old_14500": "$14,500.00" not in ox_txt,
+                    "kept_neighbor_due_date": "Due: 2026-12-01" in ox_txt,
+                }
+            ox_col = work / "oxide_patched_collision.pdf"
+            if ox_col.exists():
+                d_col = fitz.open(str(ox_col))
+                words_col = d_col[0].get_text("words")
+                d_col.close()
+                amt_x1 = max((w[2] for w in words_col if "14,500,000" in w[4] or "(USD)" in w[4]), default=0.0)
+                due_x0 = min((w[0] for w in words_col if "Due:" in w[4]), default=9999.0)
+                eng_json["exp2_patch"]["pymupdf_grader_confirms_oxide_overlap"] = amt_x1 > due_x0 + 2.0
+            results["native_rust_engines_vs_pdf_oxide"] = eng_json
+
         if args.out_json:
             Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
             Path(args.out_json).write_text(json.dumps(results, indent=2) + "\n")
