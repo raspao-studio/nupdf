@@ -551,6 +551,48 @@ fn process_feed(
     Ok(window.most)
 }
 
+/// `data` run through `proc` as a content stream that comes `step` bytes
+/// at a time and is decoded `want` bytes ahead, with `resources`: what
+/// [`process_contents`] runs for a stream of those bytes, whatever the two
+/// sizes. For tests and the fuzzer, which hold it to that.
+#[doc(hidden)]
+pub fn process_in_windows(
+    doc: &Document,
+    resources: Option<&Object>,
+    data: &[u8],
+    step: usize,
+    want: usize,
+    proc: &mut dyn Processor,
+) -> Result<usize, String> {
+    if let Some(res) = resources {
+        proc.state().rstack.push(res.clone());
+    }
+    let mut feed = Slices {
+        data,
+        step: step.max(1),
+    };
+    let out = process_feed(doc, &mut feed, proc, want);
+    if resources.is_some() {
+        proc.state().rstack.pop();
+    }
+    out
+}
+
+/// A feed that hands `data` out `step` bytes at a time.
+struct Slices<'a> {
+    data: &'a [u8],
+    step: usize,
+}
+
+impl Feed for Slices<'_> {
+    fn read(&mut self, out: &mut Vec<u8>) -> Result<bool, String> {
+        let (now, later) = self.data.split_at(self.step.min(self.data.len()));
+        out.extend_from_slice(now);
+        self.data = later;
+        Ok(!later.is_empty())
+    }
+}
+
 /// Where a content stream's bytes come from, a piece at a time.
 trait Feed {
     /// Adds the next bytes to `out`; false once there are no more.
@@ -1890,21 +1932,6 @@ mod tests {
         (log.0, diags)
     }
 
-    /// A feed that hands `data` out `step` bytes at a time.
-    struct Slices<'a> {
-        data: &'a [u8],
-        step: usize,
-    }
-
-    impl Feed for Slices<'_> {
-        fn read(&mut self, out: &mut Vec<u8>) -> Result<bool, String> {
-            let (now, later) = self.data.split_at(self.step.min(self.data.len()));
-            out.extend_from_slice(now);
-            self.data = later;
-            Ok(!later.is_empty())
-        }
-    }
-
     /// What `content` runs as and reports, read `step` bytes at a time
     /// into windows of `want`, and the most bytes held at once.
     fn windowed(content: &[u8], step: usize, want: usize) -> (Vec<String>, Vec<String>, usize) {
@@ -1912,12 +1939,9 @@ mod tests {
         let doc = Document::open(file.to_vec()).unwrap_or_else(|e| panic!("{e:?}"));
         let before = doc.diagnostics().snapshot().len();
         let mut log = Log::default();
-        log.1.rstack.push(Object::Dict(Arc::new(Dict::new())));
-        let mut feed = Slices {
-            data: content,
-            step,
-        };
-        let most = process_feed(&doc, &mut feed, &mut log, want).unwrap_or_else(|e| panic!("{e}"));
+        let res = Object::Dict(Arc::new(Dict::new()));
+        let most = process_in_windows(&doc, Some(&res), content, step, want, &mut log)
+            .unwrap_or_else(|e| panic!("{e}"));
         let diags = doc.diagnostics().snapshot()[before..]
             .iter()
             .map(|d| format!("{}: {}", d.code, d.message))
