@@ -946,11 +946,23 @@ pub fn verify(
             if matches!(again.xref_entry(num).kind, Kind::InFile | Kind::InStream) {
                 objects += 1;
                 let catalog = root == Some(num);
-                if !same_read(
-                    as_read(original, num, decoded, catalog),
-                    as_read(&again, num, decoded, catalog),
-                    decoded,
-                ) {
+                let same = match (original.load_object(num), again.load_object(num)) {
+                    (Ok(Some(Object::Stream(a))), Ok(Some(Object::Stream(b))))
+                        if decoded && kept_as_written(original, &a, &again, &b) =>
+                    {
+                        let show = |d: &Dict| {
+                            let dict = Object::Dict(Arc::new(stream_dict(d, decoded)));
+                            print::to_string(&dict, Options::default())
+                        };
+                        show(&a.dict) == show(&b.dict)
+                    }
+                    _ => same_read(
+                        as_read(original, num, decoded, catalog),
+                        as_read(&again, num, decoded, catalog),
+                        decoded,
+                    ),
+                };
+                if !same {
                     mismatched.push(num);
                 }
             }
@@ -1064,14 +1076,15 @@ impl<'a> Walk<'a> {
         }
         match (&a, &b) {
             (Object::Stream(sa), Object::Stream(sb)) => {
-                let (ra, rb) = (
-                    content(self.original, sa, self.decoded),
-                    content(self.again, sb, self.decoded),
-                );
-                let same_data = match (ra, rb) {
-                    (Ok(x), Ok(y)) => same_content(&x, &y, &sb.dict, self.decoded),
-                    _ => false,
-                };
+                let same_data = (self.decoded
+                    && kept_as_written(self.original, sa, self.again, sb))
+                    || match (
+                        content(self.original, sa, self.decoded),
+                        content(self.again, sb, self.decoded),
+                    ) {
+                        (Ok(x), Ok(y)) => same_content(&x, &y, &sb.dict, self.decoded),
+                        _ => false,
+                    };
                 same_data
                     && self.same_dict(
                         &stream_dict(&sa.dict, self.decoded),
@@ -1161,6 +1174,79 @@ fn content(doc: &Document, s: &Stream, decoded: bool) -> Result<Vec<u8>, String>
         doc.stream_data(s).map_err(|e| e.report())
     } else {
         doc.raw_stream_data(s).map(std::borrow::Cow::into_owned)
+    }
+}
+
+/// Whether the writer left a stream as it was: the same filters and
+/// parameters, and the same data under them, which then decodes to the
+/// same thing without being decoded. Most of a document's bytes are such
+/// streams (its images, above all), and decoding each twice was most of
+/// what a save with a stream option took.
+fn kept_as_written(original: &Document, a: &Stream, again: &Document, b: &Stream) -> bool {
+    same_encoding(&a.dict, &b.dict)
+        && match (original.raw_stream_data(a), again.raw_stream_data(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        }
+}
+
+/// Whether two stream dictionaries give the same filters with the same
+/// parameters, written out in the dictionaries themselves. An array of
+/// one filter is the same as the filter alone, which is how the writer
+/// leaves it.
+fn same_encoding(a: &Dict, b: &Dict) -> bool {
+    match (encoding(a), encoding(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// A stream's filters in order, each with its parameters as written (""
+/// for none), or None where they cannot be told from the dictionary
+/// alone: a reference among them can lead to different objects in two
+/// documents (the writer edits a filter array it reaches through one), a
+/// /Crypt filter decrypts by the object's number, and where /Filter and
+/// /DecodeParms do not go together a reader decides what applies.
+fn encoding(d: &Dict) -> Option<Vec<(Vec<u8>, String)>> {
+    fn outright(o: &Object, depth: usize) -> bool {
+        match o {
+            _ if depth > 8 => false,
+            Object::Ref(_) | Object::Stream(_) => false,
+            Object::Array(items) => items.iter().all(|i| outright(i, depth + 1)),
+            Object::Dict(d) => d.iter().all(|(_, v)| outright(v, depth + 1)),
+            _ => true,
+        }
+    }
+    let parms = |o: Option<&Object>| match o {
+        None | Some(Object::Null) => Some(String::new()),
+        Some(o @ Object::Dict(_)) if outright(o, 0) => {
+            Some(print::to_string(o, Options::default()))
+        }
+        Some(_) => None,
+    };
+    let name = |o: &Object| match o {
+        Object::Name(n) if &n[..] != b"Crypt" => Some(n.to_vec()),
+        _ => None,
+    };
+    match (d.get(b"Filter"), d.get(b"DecodeParms")) {
+        (None, None) => Some(Vec::new()),
+        (None, Some(_)) => None,
+        (Some(f @ Object::Name(_)), p) if !matches!(p, Some(Object::Array(_))) => {
+            Some(vec![(name(f)?, parms(p)?)])
+        }
+        (Some(Object::Array(filters)), None | Some(Object::Null)) => filters
+            .iter()
+            .map(|f| Some((name(f)?, String::new())))
+            .collect(),
+        (Some(Object::Array(filters)), Some(Object::Array(each)))
+            if filters.len() == each.len() =>
+        {
+            let pairs = filters.iter().zip(each.iter());
+            pairs
+                .map(|(f, p)| Some((name(f)?, parms(Some(p))?)))
+                .collect()
+        }
+        _ => None,
     }
 }
 
@@ -2232,6 +2318,150 @@ trailer\n<</Size 2>>\nstartxref\n34\n%%EOF\n",
         let (_, rows) = stream_of(&out, 6);
         assert_eq!(rows.len(), 10 * 40);
         assert_eq!(rows[9] & 0x07, 0x07);
+    }
+
+    /// A document with an unfiltered content stream (4), a deflated
+    /// stream holding `payload` (5) and one whose filters are in an array
+    /// of their own (6, 7).
+    fn kept_streams(payload: &[u8]) -> Vec<u8> {
+        let deflated = crate::deflate::compress(payload, -1).unwrap_or_default();
+        crate::testutil::pdf_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R/Extra[5 0 R 6 0 R]>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 10 10]/Contents 4 0 R>>".to_vec(),
+            crate::testutil::stream("", b"0 0 m 5 5 l S"),
+            crate::testutil::stream("/Filter/FlateDecode", &deflated),
+            crate::testutil::stream("/Filter 7 0 R", &deflated),
+            b"[/FlateDecode]".to_vec(),
+        ])
+    }
+
+    #[test]
+    fn streams_kept_as_written_are_compared_without_decoding() {
+        // Stream 5 decodes to more than the limit, so it cannot be compared
+        // decoded; it is written as it was, which its bytes show.
+        let limits = crate::Limits {
+            max_decoded_bytes: 4096,
+            ..Default::default()
+        };
+        let deflated = crate::deflate::compress(&[b'x'; 100_000], -1).unwrap_or_default();
+        let bytes = crate::testutil::pdf_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R/Extra 5 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 10 10]/Contents 4 0 R>>".to_vec(),
+            crate::testutil::stream("", b"0 0 m 5 5 l S"),
+            crate::testutil::stream("/Filter/FlateDecode", &deflated),
+        ]);
+        let doc = Document::open_with(bytes, limits).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(doc.stream_data(&stream_at(&doc, 5)).is_err());
+        for level in [0, 1, 2, 4] {
+            let options = streams(WriteOptions {
+                compress: true,
+                garbage: level,
+                ..Default::default()
+            });
+            let out = save(&doc, &options).unwrap_or_default();
+            if level < 2 {
+                // The content stream was deflated, the other left alone.
+                assert!(stream_of(&out, 4).0.contains("/Filter/FlateDecode"));
+            }
+            let v = verify(&doc, &out, None, &options);
+            assert!(v.verified(), "-g {level}: {v:?}");
+            assert_eq!(v.objects, 5);
+        }
+    }
+
+    fn stream_at(doc: &Document, num: i32) -> Arc<Stream> {
+        match doc.load_object(num) {
+            Ok(Some(Object::Stream(s))) => s,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stream_changed_under_the_same_filter_is_found() {
+        let doc = open(&kept_streams(b"what was there"));
+        let other = kept_streams(b"what is not");
+        for level in [0, 1] {
+            let options = streams(WriteOptions {
+                compress: true,
+                garbage: level,
+                ..Default::default()
+            });
+            let v = verify(&doc, &other, None, &options);
+            assert_eq!(v.mismatched, [5, 6], "-g {level}");
+            let same = verify(&doc, &kept_streams(b"what was there"), None, &options);
+            assert!(same.verified(), "-g {level}: {same:?}");
+        }
+    }
+
+    #[test]
+    fn only_filters_written_in_the_dictionary_say_a_stream_was_kept() {
+        let dict = |text: &str| {
+            let doc = crate::testutil::doc_of(&["<</Type/Catalog>>", text]);
+            match doc.load_object(2) {
+                Ok(Some(Object::Dict(d))) => (*d).clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let same = |a: &str, b: &str| same_encoding(&dict(a), &dict(b));
+        assert!(same("<</Length 3>>", "<</Length 9/Type/XObject>>"));
+        assert!(same("<</Filter/DCTDecode>>", "<</Filter/DCTDecode>>"));
+        assert!(same(
+            "<</Filter[/ASCII85Decode/FlateDecode]/DecodeParms[null<</Predictor 12/Columns 4>>]>>",
+            "<</DecodeParms[null<</Predictor 12/Columns 4>>]/Filter[/ASCII85Decode/FlateDecode]>>"
+        ));
+        // The writer unpacks an array of one filter.
+        assert!(same(
+            "<</Filter[/RunLengthDecode]>>",
+            "<</Filter/RunLengthDecode>>"
+        ));
+        assert!(same(
+            "<</Filter[/FlateDecode]/DecodeParms[<</Predictor 12>>]>>",
+            "<</Filter/FlateDecode/DecodeParms<</Predictor 12>>>>"
+        ));
+        assert!(same(
+            "<</Filter[/LZWDecode]/DecodeParms[null]>>",
+            "<</Filter/LZWDecode>>"
+        ));
+        assert!(!same("<</Filter/DCTDecode>>", "<</Filter/FlateDecode>>"));
+        assert!(!same("<</Filter/FlateDecode>>", "<<>>"));
+        assert!(!same(
+            "<</Filter[/A85/FlateDecode]>>",
+            "<</Filter[/FlateDecode/A85]>>"
+        ));
+        assert!(!same(
+            "<</Filter/FlateDecode/DecodeParms<</Predictor 12>>>>",
+            "<</Filter/FlateDecode/DecodeParms<</Predictor 2>>>>"
+        ));
+        assert!(!same(
+            "<</Filter/FlateDecode/DecodeParms<</Predictor 12>>>>",
+            "<</Filter/FlateDecode>>"
+        ));
+        // A reference may lead elsewhere in the other document, and a
+        // /Crypt filter decrypts by the object's number.
+        assert!(!same("<</Filter 3 0 R>>", "<</Filter 3 0 R>>"));
+        assert!(!same("<</Filter[3 0 R]>>", "<</Filter[3 0 R]>>"));
+        assert!(!same(
+            "<</Filter/JBIG2Decode/DecodeParms<</JBIG2Globals 3 0 R>>>>",
+            "<</Filter/JBIG2Decode/DecodeParms<</JBIG2Globals 3 0 R>>>>"
+        ));
+        assert!(!same(
+            "<</Filter[/Crypt/FlateDecode]>>",
+            "<</Filter[/Crypt/FlateDecode]>>"
+        ));
+        // Where the two do not go together, a reader decides what applies:
+        // MuPDF drops the parameters of the first of these.
+        let odd = "<</Filter/FlateDecode/DecodeParms[<</Predictor 12>>]>>";
+        assert!(!same(odd, odd));
+        assert!(!same(
+            "<</Filter[/FlateDecode]/DecodeParms<</Predictor 12>>>>",
+            "<</Filter[/FlateDecode]/DecodeParms<</Predictor 12>>>>"
+        ));
+        assert!(!same(
+            "<</DecodeParms<</Predictor 12>>>>",
+            "<</DecodeParms<</Predictor 12>>>>"
+        ));
     }
 
     #[test]
