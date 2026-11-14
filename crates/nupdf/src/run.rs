@@ -1437,6 +1437,9 @@ impl<'a> Run<'a> {
                 self.show_space(ws);
             }
         }
+        if self.dev.text_as_shown() {
+            self.flush_text()?;
+        }
         Ok(())
     }
 

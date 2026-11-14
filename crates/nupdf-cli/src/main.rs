@@ -944,7 +944,11 @@ fn run(cli: Cli) -> ExitCode {
         Command::Info { file } => open(file).and_then(|opened| {
             // On a copy of its own, so that drawing the pages to look at
             // them adds nothing to what `info` says of the file.
-            let text = Document::open(opened.0.data().to_vec())
+            // The copy shares the file's bytes, and works within the
+            // same limits.
+            let text = opened
+                .0
+                .reopen()
                 .map(|copy| {
                     if let Some(pw) = password {
                         let _ = copy.authenticate(pw);
