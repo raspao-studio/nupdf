@@ -58,18 +58,20 @@ cargo publish -p nupdf-cli
 Tag the release and push the tag:
 
 ```bash
-git tag -a v0.1.0 -m "nupdf 0.1.0"
+git tag -a v0.1.1 -m "nupdf 0.1.1"
 ```
 
 ```bash
-git push origin v0.1.0
+git push origin v0.1.1
 ```
 
 Pushing the tag starts the `release` workflow, which builds the `nupdf` binary for Linux (x86-64 and ARM, each for glibc 2.35 or newer and as a static musl binary), macOS (Apple silicon and Intel) and Windows (x86-64), runs each on a file where the runner can, and attaches the archives and their SHA-256 checksums to a draft GitHub release for the tag. It builds the same seven binaries as Python wheels (`crates/nupdf-cli/pyproject.toml`), installs each where the runner can, and attaches those too. It fails if the tag is not the workspace's version.
 
 Then open that draft, replace its notes with the CHANGELOG entry, check the seven archives, seven wheels and eight npm packages (`.tgz`) are there, and publish it. Publishing it starts the `publish` workflow, which sends the wheels to PyPI as `nupdf-cli` (the name `nupdf` there belongs to another project), so that `pip install nupdf-cli` and `uvx nupdf-cli` give the `nupdf` command. PyPI accepts them without a token because the project there names this repository, the `publish.yml` workflow and the `pypi` environment as a trusted publisher; that is set up once, at https://pypi.org/manage/account/publishing/. A version on PyPI cannot be replaced, only yanked.
 
-The same workflow sends the npm packages: `nupdf`, a small launcher, and one `@nupdf/...` package per platform carrying the binary, of which npm installs the one that matches the machine (`npm/`; `node --test npm/test.mjs` checks them against a built binary). So `npx nupdf` and `npm install -g nupdf` give the command. npm trusts the workflow per package, and only once the package exists, so the first release is published by hand: download the eight `.tgz` files from the release, `npm login`, and `npm publish FILE --access public` for each, `nupdf-VERSION.tgz` last. Then, in each package's settings on npmjs.com, add a trusted publisher: GitHub Actions, `raspao-studio/nupdf`, workflow `publish.yml`, environment `npm`. A version on npm cannot be replaced either. If a release for the tag already exists, the workflow adds the archives to it instead.
+The same workflow sends the npm packages: `nupdf`, a small launcher, and one `@nupdf/...` package per platform carrying the binary, of which npm installs the one that matches the machine (`npm/`; `node --test npm/test.mjs` checks them against a built binary). So `npx nupdf` and `npm install -g nupdf` give the command. npm trusts the workflow per package, and only once the package exists, so the first release is published by hand: download the eight `.tgz` files from the release, `npm login`, and `npm publish FILE --access public` for each, `nupdf-VERSION.tgz` last. Then, in each package's settings on npmjs.com, add a trusted publisher: GitHub Actions, `raspao-studio/nupdf`, workflow `publish.yml`, environment `npm`. A version on npm cannot be replaced either.
+
+If a release for the tag already exists, the release workflow adds its files to it instead of making a draft.
 
 ## After
 
