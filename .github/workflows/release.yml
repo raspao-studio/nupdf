@@ -22,6 +22,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The workspace keeps line tables in release builds, for profiling. What is
+  # shipped goes without them and without symbols, as the wheels already
+  # do, which makes the Linux binaries much smaller.
+  CARGO_PROFILE_RELEASE_STRIP: symbols
 
 jobs:
   build:
