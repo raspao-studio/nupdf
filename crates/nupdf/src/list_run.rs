@@ -23,6 +23,7 @@ const STACK_SIZE: usize = 96;
 fn own_rect(cmd: &Cmd) -> Option<Rect> {
     Some(match cmd {
         Cmd::FillPath(p, _, m, _) => p.bound(None, *m),
+        Cmd::Drawn(r) => *r,
         Cmd::StrokePath(p, s, m, _) => p.bound(Some(s), *m),
         Cmd::ClipPath(p, _, m, r) => p.bound(None, *m).intersect(*r),
         Cmd::ClipStrokePath(p, s, m, r) => p.bound(Some(s), *m).intersect(*r),
@@ -163,6 +164,7 @@ pub fn replay(list: &DisplayList, dev: &mut dyn Device) {
             // Zero-area paths and text (spaces) pass.
             Cmd::FillPath(..)
             | Cmd::StrokePath(..)
+            | Cmd::Drawn(_)
             | Cmd::FillText(..)
             | Cmd::StrokeText(..)
             | Cmd::ClipText(..)
@@ -219,6 +221,8 @@ pub fn replay(list: &DisplayList, dev: &mut dyn Device) {
             Cmd::ClipText(t, m, _) => dev.clip_text(t, *m, rect),
             Cmd::ClipStrokeText(t, s, m, _) => dev.clip_stroke_text(t, s, *m, rect),
             Cmd::IgnoreText(t, m) => dev.ignore_text(t, *m),
+            // The device this was kept for reads no drawn path.
+            Cmd::Drawn(_) => {}
             Cmd::PopClip => dev.pop_clip(),
             Cmd::BeginMask(_, l, cs, bc, cp) => dev.begin_mask(rect, *l, cs.as_ref(), bc, *cp),
             Cmd::EndMask(f) => dev.end_mask(f.as_ref()),
@@ -256,7 +260,7 @@ mod tests {
     use crate::draw::testkit::{pdf_of, stream};
     use crate::geometry::Matrix;
     use crate::page_run::Parts;
-    use crate::path::Path;
+    use crate::path::{Path, StrokeState};
 
     /// Each clip's scissor and each fill, as they arrive.
     #[derive(Default)]
@@ -334,6 +338,183 @@ mod tests {
                 "fill 30 30 40 40",
             ]
         );
+    }
+
+    /// What a device that reads clips and not paths is told: each clip's,
+    /// mask's, group's and tile's rectangle, and each end.
+    #[derive(Default)]
+    struct Clips(Vec<String>);
+
+    impl Clips {
+        fn rect(&mut self, what: &str, r: Rect) {
+            self.0
+                .push(format!("{what} {} {} {} {}", r.x0, r.y0, r.x1, r.y1));
+        }
+    }
+
+    impl Device for Clips {
+        fn clip_path(&mut self, _: &Path, _: bool, _: Matrix, s: Rect) {
+            self.rect("clip", s);
+        }
+        fn clip_stroke_path(&mut self, _: &Path, _: &StrokeState, _: Matrix, s: Rect) {
+            self.rect("clip-stroke", s);
+        }
+        fn pop_clip(&mut self) {
+            self.0.push("pop".into());
+        }
+        fn begin_mask(
+            &mut self,
+            r: Rect,
+            _: bool,
+            _: Option<&ColorSpace>,
+            _: &[f32],
+            _: ColorParams,
+        ) {
+            self.rect("mask", r);
+        }
+        fn end_mask(&mut self, _: Option<&crate::function::Function>) {
+            self.0.push("end-mask".into());
+        }
+        fn begin_group(
+            &mut self,
+            r: Rect,
+            _: Option<&ColorSpace>,
+            _: bool,
+            _: bool,
+            _: u8,
+            _: f32,
+        ) {
+            self.rect("group", r);
+        }
+        fn end_group(&mut self) {
+            self.0.push("end-group".into());
+        }
+        fn begin_tile(&mut self, r: Rect, _: Rect, _: f32, _: f32, _: Matrix, _: i32) -> bool {
+            self.rect("tile", r);
+            false
+        }
+        fn end_tile(&mut self) {
+            self.0.push("end-tile".into());
+        }
+        fn begin_layer(&mut self, _: &[u8]) {
+            self.0.push("layer".into());
+        }
+    }
+
+    /// The same calls into a list that keeps every path and into one that
+    /// keeps drawn paths as rectangles.
+    fn both(calls: impl Fn(&mut DisplayList)) -> (DisplayList, DisplayList) {
+        let mut whole = DisplayList::default();
+        let mut rects = DisplayList {
+            drawn_as_rects: true,
+            ..DisplayList::default()
+        };
+        calls(&mut whole);
+        calls(&mut rects);
+        (whole, rects)
+    }
+
+    fn clips_of(list: &DisplayList) -> Vec<String> {
+        let mut clips = Clips::default();
+        replay(list, &mut clips);
+        clips.0
+    }
+
+    #[test]
+    fn a_run_of_drawn_paths_is_kept_as_one_rectangle() {
+        let id = Matrix::IDENTITY;
+        let gray = ColorSpace::Gray;
+        let cp = ColorParams::default();
+        let stroke = StrokeState::default();
+        let (whole, rects) = both(|list| {
+            list.clip_path(&square(0.0, 0.0, 500.0, 500.0), false, id, Rect::INFINITE);
+            for i in 0..1000u16 {
+                let at = f32::from(i % 97);
+                let p = square(at, at + 1.0, at + 3.0, at + 9.0);
+                if i % 3 == 0 {
+                    list.stroke_path(&p, &stroke, id, &gray, &[0.0], 1.0, cp);
+                } else {
+                    list.fill_path(&p, false, id, &gray, &[0.0], 1.0, cp);
+                }
+            }
+            list.pop_clip();
+        });
+        assert_eq!(whole.cmds.len(), 1002);
+        assert_eq!(rects.cmds.len(), 3);
+        // The clip is narrowed to the same box either way.
+        let narrowed = clips_of(&whole);
+        assert_eq!(narrowed.len(), 2);
+        assert!(narrowed[0].starts_with("clip ") && narrowed[0] != "clip 0 0 500 500");
+        assert_eq!(clips_of(&rects), narrowed);
+    }
+
+    #[test]
+    fn paths_kept_as_rectangles_leave_every_clip_as_it_was() {
+        // Sequences of every call that opens, closes or fills a clip,
+        // balanced or not, with paths that are empty, tiny, huge and
+        // not-a-number among them: a device that reads no path is told
+        // the same with the paths kept or not.
+        let id = Matrix::IDENTITY;
+        let gray = ColorSpace::Gray;
+        let cp = ColorParams::default();
+        let stroke = StrokeState::default();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut drawn = 0;
+        for round in 0..400 {
+            let calls: Vec<(u64, [f32; 4])> = (0..40 + round % 60)
+                .map(|_| {
+                    let mut at = || match next(12) {
+                        0 => f32::NAN,
+                        1 => f32::INFINITY,
+                        2 => -1e30,
+                        _ => next(400) as f32 - 100.0,
+                    };
+                    let (x, y) = (at(), at());
+                    let size = [0.0, 0.5, 40.0, 1e9][next(4) as usize];
+                    (next(16), [x, y, x + size, y + size])
+                })
+                .collect();
+            let (whole, rects) = both(|list| {
+                for &(what, [x0, y0, x1, y1]) in &calls {
+                    let p = match what % 5 {
+                        0 => Path::new(),
+                        _ => square(x0, y0, x1, y1),
+                    };
+                    let area = Rect::new(x0, y0, x1, y1);
+                    match what {
+                        0..=4 => list.fill_path(&p, false, id, &gray, &[0.0], 1.0, cp),
+                        5 | 6 => list.stroke_path(&p, &stroke, id, &gray, &[0.0], 1.0, cp),
+                        7 | 8 => list.clip_path(&p, false, id, Rect::INFINITE),
+                        9 => list.clip_stroke_path(&p, &stroke, id, area),
+                        10 | 11 => list.pop_clip(),
+                        12 => list.begin_group(area, None, false, false, 0, 1.0),
+                        13 => list.end_group(),
+                        14 => {
+                            list.begin_mask(area, false, None, &[], cp);
+                            list.end_mask(None);
+                        }
+                        _ => {
+                            if x0 > 100.0 {
+                                list.begin_tile(area, area, 10.0, 10.0, id, 0);
+                            } else if y0 > 100.0 {
+                                list.end_tile();
+                            } else {
+                                list.begin_layer(b"L");
+                            }
+                        }
+                    }
+                }
+            });
+            drawn += whole.cmds.len() - rects.cmds.len();
+            assert_eq!(clips_of(&rects), clips_of(&whole), "round {round}");
+        }
+        assert!(drawn > 2000, "{drawn} paths joined make no test");
     }
 
     #[test]

@@ -1971,7 +1971,12 @@ pub fn extract_page_parts(
     } else {
         // mutool draw keeps the page in a display list and plays it into
         // the stext device, culled as the list culls it.
-        let mut list = crate::draw::list::DisplayList::default();
+        // The device reads the paths drawn only for vectors: without
+        // them the list keeps a path's rectangle and not the path.
+        let mut list = crate::draw::list::DisplayList {
+            drawn_as_rects: opts.flags & flags::COLLECT_VECTORS == 0,
+            ..Default::default()
+        };
         let run = crate::page_run::run_page_parts(
             doc,
             page,
