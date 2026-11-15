@@ -480,7 +480,8 @@ pub fn execute_plans(
     let mut redact_texts: Vec<String> = Vec::new();
     let mut redact_regexes: Vec<String> = Vec::new();
     let mut redact_needles: Vec<(String, u32)> = Vec::new();
-    let mut annot_deletes: Vec<(usize, Option<String>, i32, String)> = Vec::new();
+    let mut annot_deletes: Vec<(usize, Option<String>, i32, String, crate::object::Object)> =
+        Vec::new();
     let mut fills: Vec<(usize, Option<String>, fill::Edit)> = Vec::new();
     let mut meta_sets: Vec<(usize, Option<String>, String, String)> = Vec::new();
     let mut meta_strip = false;
@@ -591,7 +592,7 @@ pub fn execute_plans(
                     .ok_or_else(bad)?
                     .parse()
                     .map_err(|_| bad())?;
-                let _a_num: usize = a_s
+                let a_num: usize = a_s
                     .strip_prefix('a')
                     .ok_or_else(bad)?
                     .parse()
@@ -599,7 +600,28 @@ pub fn execute_plans(
                 if p_num < 1 || p_num > page_count {
                     return Err(bad());
                 }
-                annot_deletes.push((item.global_idx, item.agent.clone(), p_num - 1, id.clone()));
+                // By the base's listing, as `annots --delete` resolves its
+                // ids: an earlier delete must not renumber a later one.
+                let page_obj = base_doc.page(p_num - 1).map_err(|e| PlanError {
+                    code: "input.page_tree",
+                    is_conflict_or_verify: false,
+                    message: e.0,
+                })?;
+                let annot = a_num
+                    .checked_sub(1)
+                    .and_then(|i| annot::page_annots(base_doc, &page_obj).0.get(i).cloned())
+                    .ok_or_else(|| PlanError {
+                        code: "input.target_not_found",
+                        is_conflict_or_verify: false,
+                        message: format!("no annotation {id}"),
+                    })?;
+                annot_deletes.push((
+                    item.global_idx,
+                    item.agent.clone(),
+                    p_num - 1,
+                    id.clone(),
+                    annot,
+                ));
             }
             PlanOp::Fill { field, value } => {
                 fills.push((
@@ -957,28 +979,26 @@ pub fn execute_plans(
     let mut highlights_added = 0usize;
     if !annot_deletes.is_empty() || !highlights_resolved.is_empty() {
         let mut editor = Editor::new(&work);
-        for (_, _, p_idx, id_str) in &annot_deletes {
-            let page_obj = work.page(*p_idx).map_err(|e| PlanError {
-                code: "input.page_tree",
+        for (_, _, p_idx, id_str, target_annot) in &annot_deletes {
+            editor.load_page(*p_idx).map_err(|e| PlanError {
+                code: "input.annots",
                 is_conflict_or_verify: false,
-                message: e.0,
+                message: e,
             })?;
-            let (list, _) = annot::page_annots(&work, &page_obj);
-            let a_idx: usize = id_str
-                .split('.')
-                .nth(1)
-                .and_then(|s| s.strip_prefix('a'))
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            if let Some(target_annot) = a_idx.checked_sub(1).and_then(|i| list.get(i)) {
-                editor.load_page(*p_idx).map_err(|e| PlanError {
-                    code: "input.annots",
-                    is_conflict_or_verify: false,
-                    message: e,
-                })?;
-                if editor.delete(*p_idx, target_annot).unwrap_or(false) {
-                    annotations_deleted += 1;
-                }
+            if editor.delete(*p_idx, target_annot).map_err(|e| PlanError {
+                code: "input.annots",
+                is_conflict_or_verify: false,
+                message: e,
+            })? {
+                annotations_deleted += 1;
+            } else {
+                // As `annots --delete`: see Editor::delete.
+                work.diagnostics().warn(
+                    "annot.not_deleted",
+                    format!(
+                        "{id_str} is not deleted: MuPDF does not find a direct annotation without an appearance"
+                    ),
+                );
             }
         }
         for (_, _, p_idx, _, pts, note) in &highlights_resolved {
@@ -1424,6 +1444,60 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, "usage.bad_plan");
         assert!(!err.is_conflict_or_verify);
+    }
+
+    fn highlights_doc() -> Document {
+        let annot = |n: &str| {
+            format!(
+                "<</Type/Annot/Subtype/Highlight/Rect[72 700 200 714]/QuadPoints[72 714 200 714 72 700 200 700]/Contents({n})>>"
+            )
+            .into_bytes()
+        };
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R/Annots[5 0 R 6 0 R 7 0 R]>>"
+            )
+            .into_bytes(),
+            stream("", b"BT /F1 12 Tf 72 704 Td (Highlighted words) Tj ET"),
+            annot("first"),
+            annot("second"),
+            annot("third"),
+        ])
+    }
+
+    fn annot_contents(bytes: &[u8]) -> Vec<String> {
+        let out = Document::open(bytes.to_vec()).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        annot::page_annots(&out, &page)
+            .0
+            .iter()
+            .map(|a| annot::contents(&out, a))
+            .collect()
+    }
+
+    #[test]
+    fn annotation_deletes_resolve_by_the_base_listing() {
+        let base = highlights_doc();
+        let (bytes, exec) = run(
+            &base,
+            &[r#"[{"op":"annot_delete","id":"p1.a1"},{"op":"annot_delete","id":"p1.a2"}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.annotations_deleted, 2);
+        assert_eq!(annot_contents(&bytes), vec!["third".to_string()]);
+    }
+
+    #[test]
+    fn an_annotation_delete_that_names_nothing_is_an_error() {
+        let base = highlights_doc();
+        let err = run(
+            &base,
+            &[r#"[{"op":"annot_delete","id":"p1.a1"},{"op":"annot_delete","id":"p1.a9"}]"#],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "input.target_not_found");
     }
 
     #[test]
