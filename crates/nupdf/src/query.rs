@@ -1170,9 +1170,32 @@ fn find_anchors(
     let needle_lower = needle_trimmed.to_lowercase();
     let mut anchors: Vec<AnchorOccurrence> = Vec::new();
 
+    // A content id names its spans: a span, or every span of a line or block.
+    if is_content_id(needle_trimmed) {
+        let prefix = format!("{needle_trimmed}.");
+        for cell in cells {
+            if cell.id == needle_trimmed
+                || cell.base_span_id == needle_trimmed
+                || cell.base_span_id.starts_with(&prefix)
+            {
+                anchors.push(AnchorOccurrence {
+                    id: cell.id.clone(),
+                    bbox: cell.bbox,
+                    size: cell.size,
+                    line_key: cell.line_key,
+                    char_start: cell.char_start,
+                    char_end: cell.char_end,
+                    inline_remainder: None,
+                });
+            }
+        }
+        return anchors;
+    }
+
+    let needle_chars: Vec<char> = needle_lower.chars().collect();
     for cell in cells {
-        let cell_lower = cell.text.to_lowercase();
-        let Some(byte_pos) = cell_lower.find(&needle_lower) else {
+        let cell_lower: Vec<char> = cell.text.to_lowercase().chars().collect();
+        let Some(byte_pos) = find_word(&cell_lower, &needle_chars) else {
             continue;
         };
 
@@ -1204,6 +1227,42 @@ fn find_anchors(
     }
 
     anchors
+}
+
+/// Where `needle` first stands in `hay` as whole words: an alphanumeric
+/// at its start or end does not run on into the text around it, so
+/// "Total" is not found in "Subtotal".
+fn find_word(hay: &[char], needle: &[char]) -> Option<usize> {
+    let (first, last) = (needle.first()?, needle.last()?);
+    if hay.len() < needle.len() {
+        return None;
+    }
+    (0..=hay.len() - needle.len()).find(|&pos| {
+        let end = pos + needle.len();
+        hay.get(pos..end) == Some(needle)
+            && !(first.is_alphanumeric()
+                && pos > 0
+                && hay.get(pos - 1).is_some_and(|c| c.is_alphanumeric()))
+            && !(last.is_alphanumeric() && hay.get(end).is_some_and(|c| c.is_alphanumeric()))
+    })
+}
+
+/// Whether `s` is a content id: `p3`, `p3.b2`, `p3.b2.l4` or `p3.b2.l4.s1`.
+fn is_content_id(s: &str) -> bool {
+    let mut parts = s.split('.');
+    let numbered = |part: Option<&str>, prefix: char| {
+        part.and_then(|p| p.strip_prefix(prefix))
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if !numbered(parts.next(), 'p') {
+        return false;
+    }
+    let rest: Vec<&str> = parts.collect();
+    rest.len() <= 3
+        && rest
+            .iter()
+            .zip(['b', 'l', 's'])
+            .all(|(p, c)| numbered(Some(p), c))
 }
 
 fn try_split_inline_anchor(
@@ -1239,9 +1298,7 @@ fn try_split_inline_anchor(
         return None;
     }
 
-    let match_idx = line_lower
-        .windows(needle_chars.len())
-        .position(|w| w == needle_chars.as_slice())?;
+    let match_idx = find_word(&line_lower, &needle_chars)?;
     let anc_rel_end = match_idx + needle_chars.len();
 
     let mut rem_rel_start = anc_rel_end;
@@ -1383,10 +1440,7 @@ fn walk_lines_for_anchors(
                     if line_chars_lower.len() < needle_chars.len() {
                         continue;
                     }
-                    if let Some(pos) = line_chars_lower
-                        .windows(needle_chars.len())
-                        .position(|w| w == needle_chars)
-                    {
+                    if let Some(pos) = find_word(&line_chars_lower, needle_chars) {
                         let end = pos + needle_chars.len();
                         if let Some(bbox) = chars_bbox(&line.chars[pos..end]) {
                             let size = line.chars[pos].size;
@@ -1652,6 +1706,47 @@ mod tests {
         assert_eq!(res_all.match_count, 2);
         assert_eq!(res_all.matches[0].text, "$108.50");
         assert_eq!(res_all.matches[1].text, "USD");
+    }
+
+    #[test]
+    fn an_anchor_matches_whole_words_or_a_content_id() {
+        let content =
+            b"BT /F2 12 Tf 50 700 Td (Subtotal) Tj ET BT /F1 12 Tf 200 700 Td ($100.00) Tj ET \
+            BT /F2 12 Tf 50 680 Td (Total) Tj ET BT /F1 12 Tf 200 680 Td ($108.50) Tj ET";
+        let doc = page_doc(content, FONT_RESOURCES, &[]);
+        let right_of = |anchor: &str| {
+            let spec = QuerySpec {
+                right_of: Some(anchor.to_owned()),
+                ..QuerySpec::default()
+            };
+            run_query(&doc, &spec).unwrap_or_else(|e| panic!("{e}"))
+        };
+        let res = right_of("Total");
+        assert_eq!(res.aggregation.values, vec![108.5], "{:?}", res.matches);
+        let res = right_of("Subtotal");
+        assert_eq!(res.aggregation.values, vec![100.0], "{:?}", res.matches);
+
+        let total_id = right_of("Total").matches[0]
+            .anchor_id
+            .clone()
+            .unwrap_or_else(|| panic!("an anchor id"));
+        let res = right_of(&total_id);
+        assert_eq!(
+            res.aggregation.values,
+            vec![108.5],
+            "{total_id}: {:?}",
+            res.matches
+        );
+    }
+
+    #[test]
+    fn content_ids_are_told_from_text() {
+        for id in ["p1", "p1.b2", "p3.b2.l4", "p3.b2.l4.s1"] {
+            assert!(is_content_id(id), "{id}");
+        }
+        for text in ["Total", "p", "p1.b", "p1.x2", "p1.b2.l4.s1.c1", "pages"] {
+            assert!(!is_content_id(text), "{text}");
+        }
     }
 
     #[test]
