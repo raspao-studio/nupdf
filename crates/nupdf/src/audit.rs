@@ -2471,6 +2471,32 @@ mod tests {
     }
 
     #[test]
+    fn a_content_id_whose_text_cuts_a_number_does_not_verify() {
+        // The slice's own text is exactly the quote, and the span ends
+        // where a bold "5" goes on; the digits next to the target count.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Total 125 units, fee 12) Tj /F2 12 Tf (5) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for (quote, id) in [
+            ("Total 12", "p1.b1.l1.s1:0-8"),
+            ("25 units", "p1.b1.l1.s1:7-15"),
+            ("fee 12", "p1.b1.l1.s1"),
+        ] {
+            assert_ne!(
+                audit_one(&doc, None, Some(id), quote).0,
+                AuditStatus::Verified,
+                "{quote:?} at {id:?}"
+            );
+        }
+        assert_eq!(
+            audit_one(&doc, None, Some("p1.b1.l1.s1:0-9"), "Total 125").0,
+            AuditStatus::Verified
+        );
+    }
+
+    #[test]
     fn a_quote_ending_in_punctuation_before_the_numbers_next_digit_does_not_verify() {
         // The digit after the full stop or comma is in the same size on the
         // same baseline: the number goes on, so the quote names another one.
