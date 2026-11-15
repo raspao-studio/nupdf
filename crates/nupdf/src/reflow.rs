@@ -89,6 +89,11 @@ pub struct AppliedReflow {
     pub wrapped_lines: Vec<WrappedLine>,
     /// Number of downstream annotations shifted vertically on the page.
     pub shifted_annotations: usize,
+    /// The page-space x-range `[x0, x1]` within which what lies below the
+    /// block moved by [`Self::delta_y`]: its column, when another sits beside
+    /// it; `None` when everything below moved. Not part of any report.
+    #[serde(skip)]
+    pub shifted_band: Option<[f32; 2]>,
     /// PostScript/Base-14/CJK font name used to draw the reflowed paragraph.
     pub font_used: String,
     /// Whether a substitute font was used instead of an already-present unsubsetted Base-14 font.
@@ -354,7 +359,10 @@ fn infer_column_geometry(
     let left_x = tb.bbox.x0;
 
     let mut side_right_limit: Option<f32> = None;
-    let mut has_left_side_block = false;
+    // The nearest edges of the columns beside the block, which the band of
+    // what a reflow moves must stop short of.
+    let mut right_neighbour_x0: Option<f32> = None;
+    let mut left_neighbour_x1: Option<f32> = None;
     let mut same_col_right_max: Option<f32> = None;
 
     for (idx, block) in stext_page.blocks.iter().enumerate() {
@@ -371,8 +379,11 @@ fn infer_column_geometry(
         if vert_overlap && other.bbox.x0 > tb.bbox.x1 + 6.0 {
             let candidate = other.bbox.x0 - 8.0;
             side_right_limit = Some(side_right_limit.map_or(candidate, |cur| cur.min(candidate)));
+            right_neighbour_x0 =
+                Some(right_neighbour_x0.map_or(other.bbox.x0, |cur| cur.min(other.bbox.x0)));
         } else if vert_overlap && other.bbox.x1 < tb.bbox.x0 - 6.0 {
-            has_left_side_block = true;
+            left_neighbour_x1 =
+                Some(left_neighbour_x1.map_or(other.bbox.x1, |cur| cur.max(other.bbox.x1)));
         }
     }
 
@@ -425,8 +436,12 @@ fn infer_column_geometry(
     };
     let width = raw_width.clamp(min_w, hard_max_w);
 
-    let col_band = if side_right_limit.is_some() || has_left_side_block {
-        Some((left_x - 12.0, left_x + width + 12.0))
+    let col_band = if right_neighbour_x0.is_some() || left_neighbour_x1.is_some() {
+        let x0 = left_neighbour_x1.map_or(left_x - 12.0, |n| (left_x - 12.0).max(n + 1.0));
+        let x1 = right_neighbour_x0.map_or(left_x + width + 12.0, |n| {
+            (left_x + width + 12.0).min(n - 1.0)
+        });
+        Some((x0, x1))
     } else {
         None
     };
@@ -895,6 +910,7 @@ fn execute_single_block_reflow(
     doc_font_cache: &mut HashMap<FontKey, i32>,
     shared_tounicode: &mut Option<i32>,
 ) -> Result<AppliedReflow, PatchError> {
+    let col_band = target.col_band;
     let font_size = if target.style.size > 0.0 {
         target.style.size
     } else {
@@ -1215,6 +1231,7 @@ fn execute_single_block_reflow(
         lines_after: wrapped_lines.len(),
         wrapped_lines,
         shifted_annotations,
+        shifted_band: col_band.map(|(x0, x1)| [x0, x1]),
         font_used,
         fallback_font,
     })
@@ -2262,5 +2279,70 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(missing.code, "input.target_not_found");
+    }
+
+    /// Two columns: a short paragraph at x=72 with a note beside it at
+    /// x=420, and below them a total in the left column and a fee in the
+    /// right one.
+    fn two_column_doc() -> Document {
+        let content = b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (Payment is due within thirty days.) Tj ET \
+            BT /F1 12 Tf 1 0 0 1 420 712 Tm (Notes) Tj ET \
+            BT /F1 12 Tf 1 0 0 1 72 600 Tm (Total:) Tj ET \
+            BT /F1 12 Tf 1 0 0 1 200 600 Tm ($9.00) Tj ET \
+            BT /F1 12 Tf 1 0 0 1 420 612 Tm (Fee 5) Tj ET";
+        page_doc(content, "/Font<</F1 5 0 R>>", &[HELVETICA.to_vec()])
+    }
+
+    #[test]
+    fn a_reflow_moves_only_its_own_column_and_says_which() {
+        let doc = two_column_doc();
+        let before = extract_blocks(&doc, 0);
+        let line_of = |blocks: &[(String, Rect, Vec<String>)], text: &str| {
+            blocks
+                .iter()
+                .find(|(_, _, ls)| ls.iter().any(|l| l == text))
+                .map(|(_, r, _)| *r)
+        };
+        let fee = line_of(&before, "Fee 5").unwrap();
+        let total = line_of(&before, "Total: $9.00").or_else(|| line_of(&before, "Total:"));
+        let total = total.unwrap();
+        let block = before
+            .iter()
+            .position(|(_, _, ls)| ls.iter().any(|l| l.starts_with("Payment")))
+            .unwrap()
+            + 1;
+
+        let work = doc.fork_clean();
+        let long = "Payment is due within thirty days of the invoice date. ".repeat(4);
+        let applied = apply_reflow(
+            &work,
+            &[PatchSpec {
+                target_id: format!("p1.b{block}"),
+                new_text: long.trim().into(),
+            }],
+            &PatchOptions::default(),
+        )
+        .unwrap();
+        let dy = applied[0].delta_y;
+        assert!(dy > 20.0, "{dy}");
+        // The band moved is the left column's, short of the note beside it.
+        let [x0, x1] = applied[0].shifted_band.unwrap();
+        assert!(x0 <= 72.0 && x1 > total.x1 && x1 < 420.0, "{x0}..{x1}");
+
+        let bytes = crate::write::save(&work, &WriteOptions::default()).unwrap();
+        let after = extract_blocks(&Document::open(bytes).unwrap(), 0);
+        // The fee keeps every glyph where it was; the total moved down.
+        let fee_after = line_of(&after, "Fee 5").unwrap_or_else(|| panic!("{after:?}"));
+        assert!(
+            (fee_after.y0 - fee.y0).abs() < 0.5,
+            "{fee:?} -> {fee_after:?}"
+        );
+        let total_after = line_of(&after, "Total: $9.00")
+            .or_else(|| line_of(&after, "Total:"))
+            .unwrap();
+        assert!(
+            (total_after.y0 - (total.y0 + dy)).abs() < 0.5,
+            "{total:?} -> {total_after:?}, {dy}"
+        );
     }
 }
