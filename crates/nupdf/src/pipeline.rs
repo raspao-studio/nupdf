@@ -383,10 +383,16 @@ pub fn run_pipeline_with_password(
     let mut mutated = false;
     let mut output_bytes: Option<Vec<u8>> = None;
     let mut vars: HashMap<String, String> = HashMap::new();
-    // Maps pre-patch content IDs to their post-patch extracted span IDs on the
-    // current working document so `Query -> Patch -> Audit` works even when
-    // appending a patch stream shifts `stext` block numbering.
-    let mut patched_id_remap: HashMap<String, String> = HashMap::new();
+    // Maps pre-patch content IDs to where their replacement text was written,
+    // so `Query -> Patch -> Audit` finds the replacement even when appending a
+    // patch stream shifts `stext` block numbering.
+    let mut patched_id_remap: HashMap<String, SpanAnchor> = HashMap::new();
+    // What each span ID bound by a query addressed, so a later step that uses
+    // it after a mutation finds that text again or fails instead of reaching
+    // whatever span has the number now.
+    let mut bound_ids: HashMap<String, SpanAnchor> = HashMap::new();
+    // Mutations so far: an anchor made at the current generation is current.
+    let mut generation = 0usize;
     let mut step_results: Vec<PipelineStepResult> = Vec::with_capacity(spec.steps.len());
 
     for (step_index, step) in spec.steps.iter().enumerate() {
@@ -549,6 +555,18 @@ pub fn run_pipeline_with_password(
                 );
                 if let Some(m) = qres.matches.first() {
                     let base_span = m.id.split(':').next().unwrap_or(&m.id).to_string();
+                    if let Some(text) = span_text_at(&working_doc, &base_span) {
+                        bound_ids.insert(
+                            base_span.clone(),
+                            SpanAnchor {
+                                id: base_span.clone(),
+                                page: m.page,
+                                text,
+                                bbox: m.bbox,
+                                generation,
+                            },
+                        );
+                    }
                     bind_step_var(
                         &mut vars,
                         id.as_deref(),
@@ -655,6 +673,14 @@ pub fn run_pipeline_with_password(
                 let mut patch_specs = Vec::with_capacity(replacements.len());
                 for item in replacements {
                     let raw_target = interpolate_str(&item.target_id, &vars, step_index)?;
+                    let raw_target = resolve_bound_id(
+                        &working_doc,
+                        &raw_target,
+                        &bound_ids,
+                        None,
+                        generation,
+                        step_index,
+                    )?;
                     let raw_new_text = interpolate_str(&item.new_text, &vars, step_index)?;
                     let (resolved_target, resolved_text) = if reflow.unwrap_or(false)
                         || crate::reflow::is_block_target_id(&raw_target)
@@ -716,22 +742,25 @@ pub fn run_pipeline_with_password(
                 let next_doc = reopen_step_output(&bytes, &working_doc, password, step_index)?;
                 let next_doc_id = DocId::of(&bytes).to_string();
 
+                generation += 1;
                 // Update `patched_id_remap` for each applied patch so downstream `Audit`
                 // steps citing the original `target_id` locate the replacement span cleanly.
+                let mut first_new_id = None;
                 for ap in &result.patches {
-                    if let Some(nb) = ap.new_bbox
-                        && let Some(new_span_id) =
-                            locate_span_at_bbox(&next_doc, ap.page, &ap.new_text, nb)
-                    {
-                        patched_id_remap.insert(ap.id.clone(), new_span_id.clone());
-                        bind_step_var(
-                            &mut vars,
-                            id.as_deref(),
-                            &positional_key,
-                            "first_new_id",
-                            new_span_id,
-                        );
+                    if let Some(anchor) = replacement_anchor(&next_doc, ap, generation) {
+                        first_new_id.get_or_insert_with(|| anchor.id.clone());
+                        bound_ids.insert(anchor.id.clone(), anchor.clone());
+                        patched_id_remap.insert(ap.id.clone(), anchor);
                     }
+                }
+                if let Some(new_id) = first_new_id {
+                    bind_step_var(
+                        &mut vars,
+                        id.as_deref(),
+                        &positional_key,
+                        "first_new_id",
+                        new_id,
+                    );
                 }
 
                 working_doc = next_doc;
@@ -840,7 +869,27 @@ pub fn run_pipeline_with_password(
                 plans,
                 incremental,
             } => {
-                let resolved_plans = interpolate_plans(plans, &vars, &working_doc_id, step_index)?;
+                let mut resolved_plans =
+                    interpolate_plans(plans, &vars, &working_doc_id, step_index)?;
+                for plan in &mut resolved_plans {
+                    for op in &mut plan.ops {
+                        let target = match op {
+                            PlanOp::Patch { id, .. } => Some(id),
+                            PlanOp::Highlight { id, .. } | PlanOp::Redact { id, .. } => id.as_mut(),
+                            _ => None,
+                        };
+                        if let Some(target) = target {
+                            *target = resolve_bound_id(
+                                &working_doc,
+                                target,
+                                &bound_ids,
+                                None,
+                                generation,
+                                step_index,
+                            )?;
+                        }
+                    }
+                }
                 let mut step_write = write_opts.clone();
                 if let Some(inc) = incremental {
                     step_write.incremental = *inc;
@@ -885,13 +934,11 @@ pub fn run_pipeline_with_password(
                 let next_doc = reopen_step_output(&bytes, &working_doc, password, step_index)?;
                 let next_doc_id = DocId::of(&bytes).to_string();
 
-                patched_id_remap.clear();
+                generation += 1;
                 for ap in &exec.patches {
-                    if let Some(nb) = ap.new_bbox
-                        && let Some(new_span_id) =
-                            locate_span_at_bbox(&next_doc, ap.page, &ap.new_text, nb)
-                    {
-                        patched_id_remap.insert(ap.id.clone(), new_span_id);
+                    if let Some(anchor) = replacement_anchor(&next_doc, ap, generation) {
+                        bound_ids.insert(anchor.id.clone(), anchor.clone());
+                        patched_id_remap.insert(ap.id.clone(), anchor);
                     }
                 }
 
@@ -1010,13 +1057,14 @@ pub fn run_pipeline_with_password(
                     };
                     let mut cited_id = interpolate_opt(c.id.as_deref(), &vars, step_index)?;
                     if let Some(ref cid) = cited_id {
-                        let base = cid.split(':').next().unwrap_or(cid);
-                        if let Some(remapped) = patched_id_remap
-                            .get(cid)
-                            .or_else(|| patched_id_remap.get(base))
-                        {
-                            cited_id = Some(remapped.clone());
-                        }
+                        cited_id = Some(resolve_bound_id(
+                            &working_doc,
+                            cid,
+                            &bound_ids,
+                            Some(&patched_id_remap),
+                            generation,
+                            step_index,
+                        )?);
                     }
                     let quote = interpolate_str(&c.quote, &vars, step_index)?;
                     resolved_claims.push(ClaimInput {
@@ -1096,6 +1144,106 @@ pub fn run_pipeline_with_password(
         steps: step_results,
         output_bytes,
     })
+}
+
+/// Where a span's text was when a step bound its ID.
+#[derive(Debug, Clone)]
+struct SpanAnchor {
+    /// The span ID at `generation`.
+    id: String,
+    /// 1-based.
+    page: i32,
+    text: String,
+    bbox: [f32; 4],
+    generation: usize,
+}
+
+/// The anchor of a patch's replacement text on the document it produced.
+fn replacement_anchor(doc: &Document, ap: &AppliedPatch, generation: usize) -> Option<SpanAnchor> {
+    let bbox = ap.new_bbox?;
+    let id = locate_span_at_bbox(doc, ap.page, &ap.new_text, bbox)?;
+    let text = span_text_at(doc, &id)?;
+    Some(SpanAnchor {
+        id,
+        page: ap.page,
+        text,
+        bbox,
+        generation,
+    })
+}
+
+/// The ID that addresses, on `doc`, what `raw` addressed when it was bound.
+///
+/// IDs bound by a query or a patch before the latest mutation are checked:
+/// unchanged text keeps the ID, moved text gets its new ID, and text that is
+/// gone fails with `pipeline.stale_id`. With `patched`, an ID a patch
+/// replaced resolves to its replacement (what an audit of the patch cites).
+/// IDs no step bound are used as given.
+fn resolve_bound_id(
+    doc: &Document,
+    raw: &str,
+    bound: &HashMap<String, SpanAnchor>,
+    patched: Option<&HashMap<String, SpanAnchor>>,
+    generation: usize,
+    step_index: usize,
+) -> Result<String, PipelineError> {
+    let (base, suffix) = match raw.find(':') {
+        Some(i) => (&raw[..i], &raw[i..]),
+        None => (raw, ""),
+    };
+    let stale = || PipelineError {
+        code: "pipeline.stale_id",
+        step_index: Some(step_index),
+        message: format!(
+            "content id {raw:?} was bound before the document changed, and the text it addressed is no longer there; query it again"
+        ),
+    };
+    let relocate = |a: &SpanAnchor| -> Option<String> {
+        if a.generation == generation {
+            return Some(a.id.clone());
+        }
+        if span_text_at(doc, &a.id).as_deref() == Some(a.text.as_str()) {
+            return Some(a.id.clone());
+        }
+        let id = locate_span_at_bbox(doc, a.page, &a.text, a.bbox)?;
+        (span_text_at(doc, &id).as_deref() == Some(a.text.as_str())).then_some(id)
+    };
+    if let Some(a) = patched.and_then(|m| m.get(raw).or_else(|| m.get(base))) {
+        return relocate(a).ok_or_else(stale);
+    }
+    match bound.get(base) {
+        Some(a) => relocate(a)
+            .map(|id| format!("{id}{suffix}"))
+            .ok_or_else(stale),
+        None => Ok(raw.to_string()),
+    }
+}
+
+/// The text of span `pN.bB.lL.sS` on `doc`, if it names one.
+fn span_text_at(doc: &Document, span_id: &str) -> Option<String> {
+    let mut parts = span_id.split('.');
+    let mut num = |prefix: char| -> Option<usize> {
+        parts
+            .next()?
+            .strip_prefix(prefix)?
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n >= 1)
+    };
+    let (p, b, l, sp) = (num('p')?, num('b')?, num('l')?, num('s')?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let page_obj = doc.page(i32::try_from(p - 1).ok()?).ok()?;
+    let (stext_res, _) =
+        stext::extract_page(doc, &page_obj, StextOptions::default(), Store::default());
+    let stext_page = stext_res.ok()?;
+    let Some(Block::Text(tb)) = stext_page.blocks.get(b - 1) else {
+        return None;
+    };
+    let line = tb.lines.get(l - 1)?;
+    let span = extract::spans(line).into_iter().nth(sp - 1)?;
+    Some(extract::chars_text(line.chars.get(span.start..span.end)?))
 }
 
 /// Opens a step's output as the next working document, with `password` when
@@ -1561,11 +1709,13 @@ fn locate_span_at_bbox(
         target_bbox[3],
     );
 
-    let refs: Vec<&Block> = stext_page.blocks.iter().collect();
-    let text_blocks = extract::text_blocks(&refs);
     let mut best: Option<(f32, String)> = None;
 
-    for (bi, tb) in text_blocks.iter().enumerate() {
+    // Numbered over all blocks, as query and patch number them.
+    for (bi, block) in stext_page.blocks.iter().enumerate() {
+        let Block::Text(tb) = block else {
+            continue;
+        };
         for (li, line) in tb.lines.iter().enumerate() {
             for (si, span) in extract::spans(line).into_iter().enumerate() {
                 let slice = line.chars.get(span.start..span.end).unwrap_or(&[]);
@@ -1702,6 +1852,114 @@ mod tests {
         .unwrap();
         assert_eq!(verify_q.matches[0].text, "$24,900");
         assert_eq!(verify_q.aggregation.sum, Some(24900.0));
+    }
+
+    fn page_text(doc: &Document) -> String {
+        let page = doc.page(0).unwrap();
+        let (res, _) = stext::extract_page(doc, &page, StextOptions::default(), Store::default());
+        let refs: Vec<&Block> = res.as_ref().unwrap().blocks.iter().collect();
+        extract::text_blocks(&refs)
+            .iter()
+            .flat_map(|tb| tb.lines.iter())
+            .map(|l| extract::chars_text(&l.chars))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn ids_bound_before_a_patch_still_address_their_text_after_it() {
+        let content = b"BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Invoice Total:) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 220 700 Tm ($14,500) Tj ET \
+            BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 650 Tm (Tax:) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 220 650 Tm ($1,200) Tj ET";
+        let doc = page_doc(
+            content,
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), HELVETICA_BOLD.to_vec()],
+        );
+        let spec = parse_pipeline_spec(
+            r#"{"steps": [
+                {"id": "q1", "op": "query", "right_of": "Invoice Total:", "nearest_only": true},
+                {"id": "q2", "op": "query", "right_of": "Tax:", "nearest_only": true},
+                {"id": "p1", "op": "patch", "replacements": [{"target_id": "${q1.first_id}", "new_text": "$24,900"}]},
+                {"id": "p2", "op": "patch", "replacements": [{"target_id": "${q2.first_id}", "new_text": "$2,400"}]},
+                {"id": "a1", "op": "audit", "claims": [
+                    {"claim_id": "total", "id": "${q1.first_id}", "page": 1, "quote": "$24,900"},
+                    {"claim_id": "tax", "id": "${q2.first_id}", "page": 1, "quote": "$2,400"}
+                ]}
+            ]}"#,
+        )
+        .unwrap();
+        let outcome = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap();
+        let out = Document::open(outcome.output_bytes.clone().unwrap()).unwrap();
+        let text = page_text(&out);
+        assert!(
+            text.contains("$24,900") && text.contains("$2,400"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("$14,500") && !text.contains("$1,200"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Invoice Total:") && text.contains("Tax:"),
+            "{text}"
+        );
+        match &outcome.steps[4].data {
+            StepOutput::Audit(au) => assert!(au.all_verified, "{au:?}"),
+            other => panic!("expected Audit output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bound_id_whose_text_is_gone_fails_loudly() {
+        let content = b"BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Invoice Total:) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 220 700 Tm ($14,500) Tj ET";
+        let doc = page_doc(
+            content,
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), HELVETICA_BOLD.to_vec()],
+        );
+        // q1's span is replaced by p1; patching it again by its old id must
+        // not land on whatever now has that number.
+        let spec = parse_pipeline_spec(
+            r#"{"steps": [
+                {"id": "q1", "op": "query", "right_of": "Invoice Total:", "nearest_only": true},
+                {"id": "q0", "op": "query", "pattern": "Invoice"},
+                {"id": "p1", "op": "patch", "replacements": [{"target_id": "${q0.first_id}", "new_text": "Amount Due:"}]},
+                {"id": "p2", "op": "patch", "replacements": [{"target_id": "${q0.first_id}", "new_text": "Balance:"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let err = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap_err();
+        assert_eq!(err.code, "pipeline.stale_id", "{err:?}");
+        assert_eq!(err.step_index, Some(3));
+    }
+
+    #[test]
+    fn first_new_id_is_the_first_replacement() {
+        let content = b"BT /F1 14 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Alpha) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 72 650 Tm (Bravo) Tj ET";
+        let doc = page_doc(content, "/Font<</F1 5 0 R>>", &[HELVETICA.to_vec()]);
+        let spec = parse_pipeline_spec(
+            r#"{"steps": [
+                {"id": "qa", "op": "query", "pattern": "Alpha"},
+                {"id": "qb", "op": "query", "pattern": "Bravo"},
+                {"id": "p1", "op": "patch", "replacements": [
+                    {"target_id": "${qa.first_id}", "new_text": "Ahoy"},
+                    {"target_id": "${qb.first_id}", "new_text": "Boat"}
+                ]},
+                {"id": "a1", "op": "audit", "claims": [
+                    {"claim_id": "first", "id": "${p1.first_new_id}", "page": 1, "quote": "Ahoy"}
+                ]}
+            ]}"#,
+        )
+        .unwrap();
+        let outcome = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap();
+        match &outcome.steps[3].data {
+            StepOutput::Audit(au) => assert!(au.all_verified, "{au:?}"),
+            other => panic!("expected Audit output, got {other:?}"),
+        }
     }
 
     #[test]
