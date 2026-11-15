@@ -922,6 +922,8 @@ pub fn flat_forms_cmd(
 fn map_flat_form_error(e: flat_form::FlatFormError) -> Failure {
     let exit = if e.code.starts_with("usage.") {
         Exit::Usage
+    } else if e.code.starts_with("limit.") {
+        Exit::Limit
     } else if e.code.starts_with("verify.") {
         Exit::Verify
     } else {

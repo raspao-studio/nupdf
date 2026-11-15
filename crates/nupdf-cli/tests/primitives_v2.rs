@@ -678,3 +678,70 @@ fn an_unsigned_page_nested_too_deep_to_fingerprint_raises_nothing() {
     ]);
     assert_eq!(rep["aborted"], Value::Null, "{rep}");
 }
+
+#[test]
+fn flat_forms_on_a_page_past_its_work_budget_is_a_limit_not_a_bad_input() {
+    // A comb row packed so that every cell start looks at every other cell:
+    // detection gives the page up at its work budget.
+    let mut content = String::from("0 0 0 RG 1 w\n");
+    let step = 0.85_f32;
+    for (lo, x0s, ws, ys) in [(true, 24, 3, 2), (false, 3, 18, 5)] {
+        for a in 0..x0s {
+            for b in 0..ws {
+                for c in 0..ys {
+                    for d in 0..24 {
+                        let (x0, w) = if lo {
+                            let w = 8.0 + step * a as f32;
+                            (108.0 - w + step * b as f32, w)
+                        } else {
+                            (109.5 + step * a as f32, 13.0 + step * b as f32)
+                        };
+                        let y0 = if lo { 398.5 } else { 402.1 } + step * c as f32;
+                        let h = 10.0 + step * d as f32;
+                        content += &format!("{x0} {} {w} {h} re S\n", 792.0 - y0 - h);
+                    }
+                }
+            }
+        }
+    }
+    let stream = format!("<</Length {}>>\nstream\n{content}endstream", content.len());
+    let file = scratch("flat-over-budget.pdf");
+    std::fs::write(
+        &file,
+        pdf_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R>>",
+            &stream,
+        ]),
+    )
+    .unwrap();
+    let f = file.to_str().unwrap();
+
+    // Listing fields reports none for the page and says why.
+    let rep = report_of(&["flat-forms", f]);
+    assert_eq!(rep["fields"].as_array().unwrap().len(), 0, "{rep}");
+    let codes: Vec<&str> = rep["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["code"].as_str())
+        .collect();
+    assert!(codes.contains(&"limit.flat_form_work"), "{rep}");
+
+    // Filling or promoting is refused as a limit (exit 5), with nothing written.
+    for args in [vec!["--set", "name=Ada"], vec!["--promote"]] {
+        let out_path = scratch("flat-over-budget-out.pdf");
+        let _ = std::fs::remove_file(&out_path);
+        let mut full = vec!["flat-forms", f];
+        full.extend(&args);
+        full.extend(["-o", out_path.to_str().unwrap()]);
+        let out = nupdf(&full);
+        assert_eq!(out.status.code(), Some(5), "{args:?}");
+        let err: Value = serde_json::from_slice(&out.stderr)
+            .or_else(|_| serde_json::from_slice(&out.stdout))
+            .unwrap();
+        assert_eq!(err["error"]["code"], "limit.flat_form_work", "{err}");
+        assert!(!out_path.exists());
+    }
+}
