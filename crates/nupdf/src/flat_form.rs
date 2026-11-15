@@ -4043,4 +4043,107 @@ mod tests {
             eprintln!("{n} parts: {fields} fields in {took:?}");
         }
     }
+
+    /// A one-page document `size` points square with Helvetica as `/F1`.
+    fn square_page(size: f32, content: &str) -> Document {
+        let font = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>";
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!("<</Type/Page/Parent 2 0 R/MediaBox[0 0 {size} {size}]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>").into_bytes(),
+            stream("", content.as_bytes()),
+            font.to_vec(),
+        ])
+    }
+
+    /// A one-page letter document with Helvetica as `/F1`.
+    fn letter_page(content: &str) -> Document {
+        page_doc(content.as_bytes(), HELV_RESOURCES, &[])
+    }
+
+    /// Thousands of comb-sized cells packed into one row band, every one
+    /// starting within a few points of where the others end, none of the
+    /// same width: each is a row start that looks at all the others.
+    fn packed_row_page() -> Document {
+        let mut s = String::from("0 0 0 RG 1 w\n");
+        let step = 0.85;
+        // Starts in band 100 (device y0 398.5..399.4), the cells they look
+        // at in band 101 (402.1..405.5), too far down to join. PDF y is
+        // 792 - y0 - h.
+        for (lo, x0s, ws, ys) in [(true, 24, 3, 2), (false, 3, 18, 5)] {
+            for a in 0..x0s {
+                for b in 0..ws {
+                    for c in 0..ys {
+                        for d in 0..24 {
+                            let (x0, w) = if lo {
+                                // Starts ending at x 108..111.4.
+                                let w = 8.0 + step * a as f32;
+                                (108.0 - w + step * b as f32, w)
+                            } else {
+                                (109.5 + step * a as f32, 13.0 + step * b as f32)
+                            };
+                            let y0 = if lo { 398.5 } else { 402.1 } + step * c as f32;
+                            let h = 10.0 + step * d as f32;
+                            s += &format!("{x0} {} {w} {h} re S\n", 792.0 - y0 - h);
+                        }
+                    }
+                }
+            }
+        }
+        letter_page(&s)
+    }
+
+    /// Checkboxes in the top left of a 2,000 pt page and long diagonal
+    /// strokes right of them, each too big for the grid's cells, or
+    /// strokes with an x that is not finite.
+    fn oversized_items_page(nonfinite: bool) -> Document {
+        let mut s = String::from("0 0 0 RG 1 w\n");
+        for i in 0..6_000 {
+            let (x, y) = (20.0 + 10.0 * (i % 80) as f32, 1230.0 + 10.0 * (i / 80) as f32);
+            s += &format!("{x} {y} 8 8 re S\n");
+        }
+        for i in 0..25_000 {
+            if nonfinite {
+                let y = 100 + i % 200;
+                s += &format!("q 1e38 0 0 1 0 0 cm -10 {y} m 10 {} l S Q\n", y + 2);
+            } else {
+                let d = (i % 50) as f32;
+                s += &format!("{} 0 m 2000 {} l S\n", 850.0 + d, 1200.0 - d);
+            }
+        }
+        square_page(2000.0, &s)
+    }
+
+    /// Ink in the left margin and thousands of large whiteouts over the
+    /// middle of the page, each too big for the grid's cells.
+    fn margin_whiteouts_page() -> Document {
+        let mut s = String::from("0 0 0 rg\n");
+        for i in 0..50_000 {
+            let x = 4.0 + (i % 10) as f32;
+            let y = 20.0 + (i / 10 % 700) as f32;
+            s += &format!("BT /F1 6 Tf {x} {y} Td (.) Tj ET\n");
+        }
+        s += "1 g\n";
+        for i in 0..12_000 {
+            let d = (i % 40) as f32 * 0.5;
+            s += &format!("{} {} {} 600 re f\n", 60.0 + d, 80.0 + d, 480.0 - d);
+        }
+        letter_page(&s)
+    }
+
+    /// `cargo test --release -p nupdf --lib flat_form_adversarial_timings -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a timing to read, not a check"]
+    fn flat_form_adversarial_timings() {
+        for (name, doc) in [
+            ("packed row", packed_row_page()),
+            ("oversized strokes", oversized_items_page(false)),
+            ("non-finite strokes", oversized_items_page(true)),
+            ("margin whiteouts", margin_whiteouts_page()),
+        ] {
+            let started = std::time::Instant::now();
+            let fields = detect_page_flat_forms(&doc, 0).unwrap();
+            eprintln!("{name}: {} fields in {:?}", fields.len(), started.elapsed());
+        }
+    }
 }
