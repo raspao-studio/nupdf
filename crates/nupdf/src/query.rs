@@ -333,26 +333,26 @@ fn strip_currency_affixes(s: &str) -> &str {
         });
         cur = cur.trim();
         for &code in CODES {
-            if cur.len() > code.len() {
-                if let Some(head) = cur.get(..code.len())
-                    && head.eq_ignore_ascii_case(code)
-                    && cur[code.len()..]
-                        .chars()
-                        .next()
-                        .is_some_and(|c| !c.is_ascii_alphabetic())
-                {
-                    cur = cur[code.len()..].trim();
-                }
-                let start = cur.len() - code.len();
-                if let Some(tail) = cur.get(start..)
-                    && tail.eq_ignore_ascii_case(code)
-                    && cur[..start]
-                        .chars()
-                        .next_back()
-                        .is_some_and(|c| !c.is_ascii_alphabetic())
-                {
-                    cur = cur[..start].trim();
-                }
+            // A code in front, then one behind: each checked against what
+            // is left, which the first may have made shorter than a code.
+            if let (Some(head), Some(rest)) = (cur.get(..code.len()), cur.get(code.len()..))
+                && head.eq_ignore_ascii_case(code)
+                && rest
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_ascii_alphabetic())
+            {
+                cur = rest.trim();
+            }
+            if let Some(start) = cur.len().checked_sub(code.len())
+                && let (Some(rest), Some(tail)) = (cur.get(..start), cur.get(start..))
+                && tail.eq_ignore_ascii_case(code)
+                && rest
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| !c.is_ascii_alphabetic())
+            {
+                cur = rest.trim();
             }
         }
         if cur == prev {
@@ -1588,6 +1588,18 @@ mod tests {
         assert_eq!(parse_number("12,34.50"), None);
         assert_eq!(parse_number("1.2.3"), None);
         assert_eq!(parse_number(&"9".repeat(300)), None);
+    }
+
+    #[test]
+    fn a_currency_code_longer_than_the_amount_it_prefixes_is_stripped() {
+        // After the code in front goes, what is left can be shorter than a
+        // code: the check for one behind must not reach past its start.
+        assert_eq!(parse_number("USD 45"), Some(45.0));
+        assert_eq!(parse_number("EUR 5"), Some(5.0));
+        assert_eq!(parse_number("US$ 5"), Some(5.0));
+        assert_eq!(parse_number("5 EUR"), Some(5.0));
+        assert_eq!(parse_number("USD 5 USD"), Some(5.0));
+        assert_eq!(parse_number("USD"), None);
     }
 
     #[test]
