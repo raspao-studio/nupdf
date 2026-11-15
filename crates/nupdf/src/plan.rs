@@ -859,7 +859,7 @@ pub fn execute_plans(
         is_conflict_or_verify: false,
         message: e.message,
     };
-    let (patch_targets, mut untouched_by_page) = if patch_specs.is_empty() {
+    let (patch_targets, untouched_by_page) = if patch_specs.is_empty() {
         (None, HashMap::new())
     } else {
         let resolved = patch::resolve_patches(base_doc, &patch_specs).map_err(patch_err)?;
@@ -1178,7 +1178,46 @@ pub fn execute_plans(
         sanitized_items = removed.len();
     }
 
-    // 7. Page rotations and selection/deletion (applied last; remap 1-based patched page numbers if rearranged!)
+    // Full rewrite with GC is forced whenever redaction ran so no unreferenced stream or history leaks!
+    let mut effective_write = write_opts.clone();
+    if !redactions_resolved.is_empty() {
+        effective_write.incremental = false;
+        effective_write.compress = true;
+    }
+    if !effective_write.incremental {
+        effective_write.garbage = effective_write.garbage.max(1);
+    }
+
+    // The checks read the pages as the edits left them, before the page
+    // ops: the targets' boxes and the spans around them are in the base
+    // pages' coordinates, which a rotation turns and a page dropped moves.
+    let redact_check = RedactCheck {
+        needles: redact_needles,
+        texts: redact_texts,
+        regexes: redact_regexes,
+    };
+    let has_page_ops = !page_rotations.is_empty() || page_kept.is_some();
+    let mut checked = None;
+    if verify_output && has_page_ops {
+        let mut snapshot_write = effective_write.clone();
+        snapshot_write.incremental = false;
+        snapshot_write.garbage = snapshot_write.garbage.max(1);
+        let snapshot = write::save(&work, &snapshot_write).map_err(|e| PlanError {
+            code: "input.write",
+            is_conflict_or_verify: false,
+            message: e.message,
+        })?;
+        checked = Some(run_checks(
+            &snapshot,
+            password,
+            &mut applied_patches,
+            &untouched_by_page,
+            patch_opts,
+            &redact_check,
+        )?);
+    }
+
+    // 7. Page rotations and selection/deletion (applied last; patched pages renumbered if rearranged)
     let mut last_rotated = None;
     for (deg, targets) in &page_rotations {
         edit::rotate_pages(&work, targets, *deg).map_err(|e| PlanError {
@@ -1196,14 +1235,6 @@ pub fn execute_plans(
             is_conflict_or_verify: false,
             message: crate::diag::report::strip(&e.0).to_string(),
         })?;
-        // `untouched_by_page` is keyed by 1-based page number!
-        let mut remapped_untouched: HashMap<i32, Vec<(String, Rect)>> = HashMap::new();
-        for (new_idx, &old_idx) in kept.iter().enumerate() {
-            if let Some(items) = untouched_by_page.get(&(old_idx + 1)) {
-                remapped_untouched.insert((new_idx + 1) as i32, items.clone());
-            }
-        }
-        untouched_by_page = remapped_untouched;
         for ap in &mut applied_patches {
             if let Some(pos) = kept.iter().position(|&old| old == ap.page - 1) {
                 ap.page = (pos + 1) as i32;
@@ -1212,69 +1243,24 @@ pub fn execute_plans(
         pages_kept_1based = Some(kept.iter().map(|i| i + 1).collect());
     }
 
-    // Full rewrite with GC is forced whenever redaction ran so no unreferenced stream or history leaks!
-    let mut effective_write = write_opts.clone();
-    if !redactions_resolved.is_empty() {
-        effective_write.incremental = false;
-        effective_write.compress = true;
-    }
-    if !effective_write.incremental {
-        effective_write.garbage = effective_write.garbage.max(1);
-    }
-
     let bytes = write::save(&work, &effective_write).map_err(|e| PlanError {
         code: "input.write",
         is_conflict_or_verify: false,
         message: e.message,
     })?;
 
-    let mut patch_verif = None;
-    let mut redact_verif = None;
-    let mut all_ok = true;
-
-    if verify_output {
-        if !applied_patches.is_empty() {
-            let pv = patch::verify_patched_bytes(
-                &bytes,
-                password,
-                &mut applied_patches,
-                &untouched_by_page,
-                patch_opts,
-            )
-            .map_err(|e| PlanError {
-                code: e.code,
-                is_conflict_or_verify: true,
-                message: e.message,
-            })?;
-            if !pv.verified {
-                all_ok = false;
-            }
-            patch_verif = Some(pv);
-        }
-        if !redact_needles.is_empty()
-            && let Ok(verify_matcher) = Matcher::new(&redact_texts, &redact_regexes, false)
-        {
-            let reopened = Document::open(bytes.clone()).map_err(|e| PlanError {
-                code: e.code,
-                is_conflict_or_verify: true,
-                message: e.message,
-            })?;
-            if let Some(pw) = password {
-                let _ = reopened.authenticate(pw);
-            }
-            let targets = Targets {
-                needles: redact_needles,
-                matcher: verify_matcher,
-                areas: Vec::new(),
-            };
-            let v: Verification = verify::verify(&reopened, &targets);
-            let ok = v.verified();
-            if !ok {
-                all_ok = false;
-            }
-            redact_verif = Some(ok);
-        }
+    if verify_output && checked.is_none() {
+        checked = Some(run_checks(
+            &bytes,
+            password,
+            &mut applied_patches,
+            &untouched_by_page,
+            patch_opts,
+            &redact_check,
+        )?);
     }
+    let (patch_verif, redact_verif) = checked.unwrap_or((None, None));
+    let all_ok = patch_verif.as_ref().is_none_or(|v| v.verified) && redact_verif != Some(false);
 
     Ok((
         bytes,
@@ -1296,6 +1282,56 @@ pub fn execute_plans(
             redact_verified: redact_verif,
         },
     ))
+}
+
+/// What the redactions must leave no trace of: their texts and patterns.
+struct RedactCheck {
+    needles: Vec<(String, u32)>,
+    texts: Vec<String>,
+    regexes: Vec<String>,
+}
+
+/// The patches' and the redactions' checks on `bytes`, a save of the plans'
+/// edits: the patch verification, and whether no redacted text is left.
+fn run_checks(
+    bytes: &[u8],
+    password: Option<&str>,
+    patches: &mut [AppliedPatch],
+    untouched: &HashMap<i32, Vec<(String, Rect)>>,
+    patch_opts: &PatchOptions,
+    redact: &RedactCheck,
+) -> Result<(Option<PatchVerification>, Option<bool>), PlanError> {
+    let mut patch_verif = None;
+    if !patches.is_empty() {
+        let pv = patch::verify_patched_bytes(bytes, password, patches, untouched, patch_opts)
+            .map_err(|e| PlanError {
+                code: e.code,
+                is_conflict_or_verify: true,
+                message: e.message,
+            })?;
+        patch_verif = Some(pv);
+    }
+    let mut redact_verif = None;
+    if !redact.needles.is_empty()
+        && let Ok(matcher) = Matcher::new(&redact.texts, &redact.regexes, false)
+    {
+        let reopened = Document::open(bytes.to_vec()).map_err(|e| PlanError {
+            code: e.code,
+            is_conflict_or_verify: true,
+            message: e.message,
+        })?;
+        if let Some(pw) = password {
+            let _ = reopened.authenticate(pw);
+        }
+        let targets = Targets {
+            needles: redact.needles.clone(),
+            matcher,
+            areas: Vec::new(),
+        };
+        let v: Verification = verify::verify(&reopened, &targets);
+        redact_verif = Some(v.verified());
+    }
+    Ok((patch_verif, redact_verif))
 }
 
 #[cfg(test)]
@@ -1638,6 +1674,59 @@ mod tests {
         assert!(text.contains("XX"), "{text}");
         assert!(!text.contains("Block three"), "{text}");
         assert!(text.contains("Block four"), "{text}");
+    }
+
+    /// A page whose first line has a neighbor close on its right, and a
+    /// second page.
+    fn rotation_fixture() -> Document {
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R>>"
+            )
+            .into_bytes(),
+            stream(
+                "",
+                b"BT /F1 12 Tf 72 720 Td ($50) Tj ET BT /F1 12 Tf 125 720 Td (RightColumn) Tj ET",
+            ),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 6 0 R>>"
+            )
+            .into_bytes(),
+            stream("", b"BT /F1 12 Tf 72 720 Td (Second page) Tj ET"),
+        ])
+    }
+
+    #[test]
+    fn page_ops_neither_hide_a_failing_patch_nor_fail_a_good_one() {
+        let base = rotation_fixture();
+        for pages in [
+            r#"{"op":"pages","rotate":90}"#,
+            r#"{"op":"pages","delete":"2"}"#,
+        ] {
+            let bad =
+                format!(r#"[{{"op":"patch","id":"p1.b1.l1.s1","text":"$50,000,000.00"}},{pages}]"#);
+            let (_, exec) = run(&base, &[&bad]).unwrap_or_else(|e| panic!("{e}"));
+            assert!(!exec.verified, "{pages}: {exec:?}");
+            let findings = &exec.patch_verification.as_ref().map(|v| v.findings.clone());
+            assert!(
+                findings
+                    .iter()
+                    .flatten()
+                    .any(|f| f.code == "verify.collision"),
+                "{pages}: {findings:?}"
+            );
+
+            let good = format!(r#"[{{"op":"patch","id":"p1.b1.l1.s1","text":"$75"}},{pages}]"#);
+            let (_, exec) = run(&base, &[&good]).unwrap_or_else(|e| panic!("{e}"));
+            assert!(exec.verified, "{pages}: {exec:?}");
+        }
+        let moved =
+            r#"[{"op":"patch","id":"p2.b1.l1.s1","text":"Page two"},{"op":"pages","delete":"1"}]"#;
+        let (_, exec) = run(&base, &[moved]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(exec.verified, "{exec:?}");
+        assert_eq!(exec.patches[0].page, 1);
     }
 
     #[test]
