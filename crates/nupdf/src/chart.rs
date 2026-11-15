@@ -1289,6 +1289,14 @@ fn parse_tick_number(raw: &str) -> Option<f64> {
         return None;
     }
 
+    // A single comma followed by one or two digits, with no dot, is a decimal
+    // comma (`1,5`, `0,25`); otherwise commas group thousands (`1,234`).
+    let decimal_comma = !s.contains('.')
+        && s.matches(',').count() == 1
+        && s.rsplit(',')
+            .next()
+            .is_some_and(|tail| (1..=2).contains(&tail.len()));
+
     let mut clean = String::with_capacity(s.len());
     let mut saw_dot = false;
     let mut saw_digit = false;
@@ -1296,6 +1304,9 @@ fn parse_tick_number(raw: &str) -> Option<f64> {
         if ch.is_ascii_digit() {
             clean.push(ch);
             saw_digit = true;
+        } else if ch == ',' && decimal_comma {
+            saw_dot = true;
+            clean.push('.');
         } else if ch == ',' {
             continue;
         } else if ch == '.' && !saw_dot {
@@ -3116,6 +3127,18 @@ fn polyline_dist_to_rect(pts: &[Point], r: Rect, center: Point) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tick_numbers_read_a_decimal_comma_and_thousands_commas() {
+        assert_eq!(parse_tick_number("1,5"), Some(1.5));
+        assert_eq!(parse_tick_number("0,25"), Some(0.25));
+        assert_eq!(parse_tick_number("-2,75 %"), Some(-2.75));
+        assert_eq!(parse_tick_number("1,234"), Some(1234.0));
+        assert_eq!(parse_tick_number("12,345,678"), Some(12_345_678.0));
+        assert_eq!(parse_tick_number("1,234.5"), Some(1234.5));
+        assert_eq!(parse_tick_number("$1,000"), Some(1000.0));
+        assert_eq!(parse_tick_number("2,5k"), Some(2500.0));
+    }
     use crate::testutil::{doc_bytes, page_doc, stream};
 
     const HELV_RESOURCES: &str =
