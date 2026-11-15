@@ -203,6 +203,19 @@ fn parse_and_validate_specs(specs: &[PatchSpec]) -> Result<Vec<TargetAddr>, Patc
     Ok(addrs)
 }
 
+/// For each spec, the first earlier one whose target overlaps its own (the
+/// same span, or a line and a span on it): two patches of one place.
+pub fn overlapping_targets(specs: &[PatchSpec]) -> Result<Vec<Option<usize>>, PatchError> {
+    let mut addrs: Vec<TargetAddr> = Vec::with_capacity(specs.len());
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let addr = TargetAddr::parse(&spec.target_id)?;
+        out.push(addrs.iter().position(|a| a.overlaps(addr)));
+        addrs.push(addr);
+    }
+    Ok(out)
+}
+
 /// Union of non-synthetic character boxes in `chars`, falling back to `fallback`
 /// if every character in the slice is synthetic.
 fn ink_bbox(chars: &[StextChar], fallback: Rect) -> Rect {

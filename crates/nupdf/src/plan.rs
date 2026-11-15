@@ -859,16 +859,39 @@ pub fn execute_plans(
         is_conflict_or_verify: false,
         message: e.message,
     };
+    // Two patches of one place are a conflict, found below, or one patch
+    // asked twice: the place is resolved once, for both.
+    let overlaps = patch::overlapping_targets(&patch_specs).map_err(patch_err)?;
     let (patch_targets, untouched_by_page) = if patch_specs.is_empty() {
         (None, HashMap::new())
     } else {
-        let resolved = patch::resolve_patches(base_doc, &patch_specs).map_err(patch_err)?;
-        for (slot, (page, bbox)) in patches_resolved.iter_mut().zip(resolved.targets()) {
-            slot.3 = page - 1;
-            slot.4 = bbox;
+        let firsts: Vec<PatchSpec> = patch_specs
+            .iter()
+            .zip(&overlaps)
+            .filter(|(_, o)| o.is_none())
+            .map(|(s, _)| s.clone())
+            .collect();
+        let resolved = patch::resolve_patches(base_doc, &firsts).map_err(patch_err)?;
+        let found = resolved.targets();
+        let mut first_slot: Vec<usize> = Vec::with_capacity(overlaps.len());
+        let mut next = 0usize;
+        for o in &overlaps {
+            let k = match o {
+                Some(earlier) => first_slot.get(*earlier).copied().unwrap_or(0),
+                None => {
+                    next += 1;
+                    next - 1
+                }
+            };
+            first_slot.push(k);
         }
-        let untouched =
-            patch::snapshot_untouched_spans(base_doc, &patch_specs).map_err(patch_err)?;
+        for (slot, &k) in patches_resolved.iter_mut().zip(&first_slot) {
+            if let Some(&(page, bbox)) = found.get(k) {
+                slot.3 = page - 1;
+                slot.4 = bbox;
+            }
+        }
+        let untouched = patch::snapshot_untouched_spans(base_doc, &firsts).map_err(patch_err)?;
         (Some(resolved), untouched)
     };
 
@@ -1013,6 +1036,12 @@ pub fn execute_plans(
                 redact_verified: None,
             },
         ));
+    }
+
+    // Two patches of one place that do not conflict (the same text) are
+    // still one place patched twice.
+    if overlaps.iter().any(Option::is_some) {
+        patch::resolve_patches(base_doc, &patch_specs).map_err(patch_err)?;
     }
 
     // Fork an isolated O(1) overlay branch sharing the base document's parsed State.
@@ -1727,6 +1756,23 @@ mod tests {
         let (_, exec) = run(&base, &[moved]).unwrap_or_else(|e| panic!("{e}"));
         assert!(exec.verified, "{exec:?}");
         assert_eq!(exec.patches[0].page, 1);
+    }
+
+    #[test]
+    fn two_patches_of_one_span_conflict_or_are_one_asked_twice() {
+        let base = multi_page_fixture();
+        let patch = |text: &str| {
+            format!(r#"{{"ops":[{{"op":"patch","id":"p1.b2.l1.s1","text":"{text}"}}]}}"#)
+        };
+        let (bytes, exec) =
+            run(&base, &[&patch("Fee: $1"), &patch("Fee: $2")]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(bytes.is_empty());
+        let codes: Vec<&str> = exec.conflicts.iter().map(|c| c.code.as_str()).collect();
+        assert_eq!(codes, vec!["conflict.overlapping_patch"]);
+
+        let twice = r#"[{"op":"patch","id":"p1.b2.l1.s1","text":"Fee: $1"},{"op":"patch","id":"p1.b2.l1","text":"Fee: $1"}]"#;
+        let err = run(&base, &[twice]).unwrap_err();
+        assert_eq!(err.code, "usage.duplicate_target");
     }
 
     #[test]
