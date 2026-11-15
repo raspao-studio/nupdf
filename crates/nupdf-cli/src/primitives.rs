@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 use super::commands::WriteArgs;
 use super::{
     Clean, Exit, Failure, FileFacts, diagnostics, emit, output_dir, report, save_verified,
-    signatures_kept, standard_output, write_atomically, write_file, write_verified,
+    standard_output, write_atomically, write_file, write_verified,
 };
 
 type OpenFn<'a> = &'a (dyn Fn(&Path) -> Result<(Document, FileFacts), Failure> + Sync);
@@ -257,22 +257,6 @@ pub fn patch_cmd(
         "verification": verification,
     });
     Ok(report("nupdf.patch/v1", facts, &work, body))
-}
-
-/// The report of an output a command made and checked itself: where it went,
-/// its id and hash, and whether the input's signatures still hold.
-fn output_summary(doc: &Document, bytes: &[u8], plan: &Clean<'_>) -> Value {
-    let hash = blake3::hash(bytes);
-    let mut output = json!({
-        "path": plan.output.map(|p| p.display().to_string()),
-        "doc_id": DocId::from_hash(&hash).to_string(),
-        "len": bytes.len(),
-        "blake3": hash.to_hex().to_string(),
-    });
-    if let Some(sigs) = signatures_kept(doc, bytes, plan) {
-        output["signatures"] = sigs;
-    }
-    output
 }
 
 fn map_patch_error(e: patch::PatchError) -> Failure {
@@ -851,21 +835,15 @@ pub fn flat_forms_cmd(
         return Err(input_failure_password());
     }
 
+    // Made on a fork, saved, read back as every writer's output is, then
+    // checked as fills or widgets, before anything is written.
     if promote {
-        let (bytes, rep) =
-            flat_form::promote_flat_forms_with_password(doc, &plan.options, password)
-                .map_err(map_flat_form_error)?;
-        if plan.apply
-            && let Some(path) = plan.output
-        {
-            write_atomically(path, &bytes).map_err(|e| {
-                input_err(
-                    "output.unwritable",
-                    format!("cannot write {}: {e}", path.display()),
-                )
-            })?;
-        }
-        let output = output_summary(doc, &bytes, &plan);
+        let staged = flat_form::stage_flat_promote(doc).map_err(map_flat_form_error)?;
+        let (bytes, written) = save_verified(&staged.work, &plan, None)?;
+        let rep = staged
+            .finish(&bytes, password)
+            .map_err(map_flat_form_error)?;
+        let (output, _) = write_verified(&staged.work, &plan, &bytes, written)?;
         let body = json!({
             "mode": "promote",
             "applied": plan.apply,
@@ -876,7 +854,7 @@ pub fn flat_forms_cmd(
             "verified": true,
             "output": output,
         });
-        return Ok(report("nupdf.flat_forms/v1", facts, doc, body));
+        return Ok(report("nupdf.flat_forms/v1", facts, &staged.work, body));
     }
 
     let mut ops = Vec::with_capacity(set.len() + check.len() + uncheck.len());
@@ -912,26 +890,11 @@ pub fn flat_forms_cmd(
         });
     }
 
-    let (bytes, fill_rep) =
-        flat_form::fill_flat_forms_with_password(doc, &ops, &plan.options, password)
-            .map_err(map_flat_form_error)?;
-    if plan.verify && !fill_rep.verified {
-        return Err(Failure {
-            exit: Exit::Verify,
-            code: "verify.failed",
-            message: "flat-form fill verification failed; nothing was written".into(),
-        });
-    }
-    if plan.apply
-        && let Some(path) = plan.output
-    {
-        write_atomically(path, &bytes).map_err(|e| {
-            input_err(
-                "output.unwritable",
-                format!("cannot write {}: {e}", path.display()),
-            )
-        })?;
-    }
+    let staged = flat_form::stage_flat_fill(doc, &ops).map_err(map_flat_form_error)?;
+    let (bytes, written) = save_verified(&staged.work, &plan, None)?;
+    let fill_rep = staged
+        .finish(&bytes, password)
+        .map_err(map_flat_form_error)?;
     // The fields as written: detected on the output, not the input.
     let filled = Document::open_with(bytes.clone(), doc.limits())
         .map_err(|e| input_err(e.code, e.message))?;
@@ -942,7 +905,7 @@ pub fn flat_forms_cmd(
     }
     let detected = flat_form::detect_flat_forms(&filled, pages)
         .map_err(|msg| input_err("input.page_tree", msg))?;
-    let output = output_summary(doc, &bytes, &plan);
+    let (output, _) = write_verified(&staged.work, &plan, &bytes, written)?;
     let body = json!({
         "mode": "fill",
         "applied": plan.apply,
@@ -953,7 +916,7 @@ pub fn flat_forms_cmd(
         "verified": fill_rep.verified,
         "output": output,
     });
-    Ok(report("nupdf.flat_forms/v1", facts, doc, body))
+    Ok(report("nupdf.flat_forms/v1", facts, &staged.work, body))
 }
 
 fn map_flat_form_error(e: flat_form::FlatFormError) -> Failure {
@@ -1102,11 +1065,17 @@ pub fn cloak_cmd(
         });
     }
 
-    let (bytes, vault, rep) =
-        cloak::cloak_document_with_password(doc, &targets, &plan.options, password)
-            .map_err(map_cloak_error)?;
+    // Rewritten on a fork, saved, read back as every writer's output is,
+    // then checked for leaks, before anything is written.
+    let staged = cloak::stage_cloak(doc, &targets, &plan.options).map_err(map_cloak_error)?;
+    let save_plan = Clean {
+        options: staged.write_options.clone(),
+        ..plan
+    };
+    let (bytes, written) = save_verified(&staged.work, &save_plan, None)?;
+    let (vault, rep) = staged.finish(&bytes, password).map_err(map_cloak_error)?;
 
-    if plan.apply {
+    if save_plan.apply {
         let vault_json = serde_json::to_vec_pretty(&vault).map_err(|e| Failure {
             exit: Exit::Internal,
             code: "internal.serialize",
@@ -1118,17 +1087,8 @@ pub fn cloak_cmd(
                 format!("cannot write vault {}: {e}", vault_path.display()),
             )
         })?;
-        if let Some(path) = plan.output {
-            write_atomically(path, &bytes).map_err(|e| {
-                input_err(
-                    "output.unwritable",
-                    format!("cannot write {}: {e}", path.display()),
-                )
-            })?;
-        }
     }
-
-    let output = output_summary(doc, &bytes, &plan);
+    let (output, _) = write_verified(&staged.work, &save_plan, &bytes, written)?;
     let body = json!({
         "applied": plan.apply,
         "vault_path": vault_path.display().to_string(),
@@ -1140,7 +1100,7 @@ pub fn cloak_cmd(
         "token_preview": rep.token_preview,
         "output": output,
     });
-    Ok(report("nupdf.cloak/v1", facts, doc, body))
+    Ok(report("nupdf.cloak/v1", facts, &staged.work, body))
 }
 
 /// `uncloak`: deterministic restoration of synthetic tokens in PDFs or UTF-8 text/JSON.
@@ -1215,18 +1175,14 @@ pub fn uncloak_cmd(
     if doc.needs_password() && password.is_none() {
         return Err(input_failure_password());
     }
-    let (bytes, rep) = cloak::uncloak_pdf(&doc, &vault, &plan.options).map_err(map_cloak_error)?;
-    if plan.apply
-        && let Some(path) = plan.output
-    {
-        write_atomically(path, &bytes).map_err(|e| {
-            input_err(
-                "output.unwritable",
-                format!("cannot write {}: {e}", path.display()),
-            )
-        })?;
-    }
-    let output = output_summary(&doc, &bytes, &plan);
+    let staged = cloak::stage_uncloak(&doc, &vault, &plan.options).map_err(map_cloak_error)?;
+    let save_plan = Clean {
+        options: staged.write_options.clone(),
+        ..plan
+    };
+    let (bytes, written) = save_verified(&staged.work, &save_plan, None)?;
+    let rep = staged.finish(&bytes);
+    let (output, _) = write_verified(&staged.work, &save_plan, &bytes, written)?;
     let body = json!({
         "mode": "pdf",
         "applied": plan.apply,
@@ -1237,7 +1193,7 @@ pub fn uncloak_cmd(
         "entities_restored": rep.entities_restored,
         "output": output,
     });
-    Ok(report("nupdf.uncloak/v1", &facts, &doc, body))
+    Ok(report("nupdf.uncloak/v1", &facts, &staged.work, body))
 }
 
 fn map_cloak_error(e: cloak::CloakError) -> Failure {
@@ -1302,28 +1258,30 @@ pub fn pipeline_cmd(
         incremental: write.incremental,
         ..nupdf::write::WriteOptions::default()
     };
-    let outcome = pipeline::run_pipeline_with_password(doc, &spec, &write_opts, password)
-        .map_err(map_pipeline_error)?;
+    let outcome =
+        pipeline::run_pipeline_with_password(doc, &spec, &write_opts, password).map_err(|e| {
+            let mut failure = map_pipeline_error(e);
+            // A step's incremental save the file cannot take, as every writer reports it.
+            if nupdf::write::save_error_code(&write_opts, &failure.message) == "usage.incremental" {
+                failure.exit = Exit::Usage;
+                failure.code = "usage.incremental";
+            }
+            failure
+        })?;
 
     let mut output_val = Value::Null;
     let mut applied = false;
+    let mut read_back: Option<Document> = None;
     // A gate abort writes nothing, like every other exit-4 path.
     if outcome.aborted.is_some() {
     } else if outcome.mutated {
         let plan: Clean<'_> = write.plan(write_opts, password)?;
         if let Some(ref bytes) = outcome.output_bytes {
-            if plan.apply
-                && let Some(path) = plan.output
-            {
-                write_atomically(path, bytes).map_err(|e| {
-                    input_err(
-                        "output.unwritable",
-                        format!("cannot write {}: {e}", path.display()),
-                    )
-                })?;
+            if plan.verify {
+                read_back = Some(read_back_output(doc, bytes, password)?);
             }
+            (output_val, _) = write_verified(doc, &plan, bytes, None)?;
             applied = plan.apply;
-            output_val = output_summary(doc, bytes, &plan);
         }
     } else if let Some(ref path) = write.output
         && !write.dry_run
@@ -1355,7 +1313,15 @@ pub fn pipeline_cmd(
         "steps": outcome.steps,
         "output": output_val,
     });
-    let out = report("nupdf.pipeline/v1", facts, doc, body);
+    let mut out = report("nupdf.pipeline/v1", facts, doc, body);
+    // What reading the output back raised: the steps' working copies stay
+    // inside the pipeline, and their output is the nearest look at them.
+    if let Some(checked) = &read_back
+        && let (Some(list), Value::Array(more)) =
+            (out["diagnostics"].as_array_mut(), diagnostics(checked))
+    {
+        list.extend(more);
+    }
     if let Some(ab) = aborted {
         emit(&mut standard_output(), &out, pretty);
         let code: &'static str = if ab.code == pipeline::GATE_ATTEST_HAZARD {
@@ -1370,6 +1336,46 @@ pub fn pipeline_cmd(
             code,
             message: ab.message,
         });
+    }
+    Ok(out)
+}
+
+/// The read-back of a pipeline's output, which comes as bytes with no
+/// document saved beside them to compare: it must open (with the password
+/// when locked) without a repair, load every object, and load every page.
+fn read_back_output(
+    doc: &Document,
+    bytes: &[u8],
+    password: Option<&str>,
+) -> Result<Document, Failure> {
+    let failed = |message: String| Failure {
+        exit: Exit::Verify,
+        code: "verify.failed",
+        message: format!("{message}; nothing was written"),
+    };
+    let out = Document::open_with(bytes.to_vec(), doc.limits())
+        .map_err(|e| failed(format!("the output does not open: {}", e.message)))?;
+    if out.needs_password() && !password.is_some_and(|p| out.authenticate(p).is_ok_and(|a| a != 0))
+    {
+        return Err(failed(
+            "the output does not open with the document's password".into(),
+        ));
+    }
+    nupdf::write::check_document(&out);
+    let count = out
+        .page_count()
+        .map_err(|e| failed(format!("the output's pages do not load: {}", e.0)))?;
+    for index in 0..count {
+        out.page(index).map_err(|e| {
+            failed(format!(
+                "page {} of the output does not load: {}",
+                index + 1,
+                e.0
+            ))
+        })?;
+    }
+    if out.repaired() {
+        return Err(failed("the output needs a repair to open".into()));
     }
     Ok(out)
 }

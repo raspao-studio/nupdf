@@ -889,6 +889,90 @@ impl Verification {
     pub fn verified(&self) -> bool {
         self.reopened && !self.repaired && self.mismatched.is_empty()
     }
+
+    /// Why the written document failed its self-check, naming at most ten
+    /// of the objects that read back differently (0 is the trailer).
+    pub fn failure(&self) -> String {
+        if !self.reopened {
+            return "the output does not open".into();
+        }
+        if self.repaired {
+            return "the output needs a repair to open".into();
+        }
+        const SHOWN: usize = 10;
+        let mut nums: Vec<String> = self
+            .mismatched
+            .iter()
+            .take(SHOWN)
+            .map(|&n| match n {
+                0 => "the trailer".to_string(),
+                n => n.to_string(),
+            })
+            .collect();
+        if self.mismatched.len() > SHOWN {
+            nums.push(format!("and {} more", self.mismatched.len() - SHOWN));
+        }
+        format!(
+            "{} of {} objects read back differently from the input: {}",
+            self.mismatched.len(),
+            self.objects,
+            nums.join(", ")
+        )
+    }
+}
+
+/// Why [`save_verified`] made no bytes: a stable dotted code and a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedSaveError {
+    /// `usage.incremental` for an incremental write the file cannot take,
+    /// `input.write` for any other failed save, `verify.failed` for an
+    /// output that does not read back as the document saved.
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for CheckedSaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for CheckedSaveError {}
+
+/// The code of a failed [`save`] with `options`: MuPDF's refusals of an
+/// incremental write are the caller's to fix, so `usage.incremental`.
+pub fn save_error_code(options: &WriteOptions, message: &str) -> &'static str {
+    if options.incremental && message.starts_with("Can't do incremental") {
+        "usage.incremental"
+    } else {
+        "input.write"
+    }
+}
+
+/// [`save`], then [`verify`] of the bytes against `doc`, as every command
+/// that writes checks its output: what a library function that saves an
+/// edit and hands back the bytes runs before returning them.
+pub fn save_verified(
+    doc: &Document,
+    options: &WriteOptions,
+    password: Option<&str>,
+) -> Result<Vec<u8>, CheckedSaveError> {
+    let bytes = save(doc, options).map_err(|e| {
+        let message =
+            crate::diag::report::strip(e.message.lines().last().unwrap_or_default()).to_string();
+        CheckedSaveError {
+            code: save_error_code(options, &message),
+            message,
+        }
+    })?;
+    let v = verify(doc, &bytes, password, options);
+    if !v.verified() {
+        return Err(CheckedSaveError {
+            code: "verify.failed",
+            message: v.failure(),
+        });
+    }
+    Ok(bytes)
 }
 
 /// Opens `written` (with `password`, as the original was) and compares it
@@ -1814,6 +1898,41 @@ trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n258\n%%EOF\n";
     }
 
     const VALID: &[u8] = include_bytes!("../../../corpus/smoke/minimal.pdf");
+
+    #[test]
+    fn a_checked_save_names_what_went_wrong() {
+        let doc = open(VALID);
+        crate::edit::set_metadata(&doc, "Title", "checked");
+        let bytes =
+            save_verified(&doc, &WriteOptions::default(), None).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(open(&bytes).metadata("Title").as_deref(), Some("checked"));
+
+        let repaired = open(b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n");
+        let refused = save_verified(&repaired, &incremental(), None).err();
+        assert_eq!(refused.map(|e| e.code), Some("usage.incremental"));
+        let objstms = WriteOptions {
+            objstms: true,
+            ..incremental()
+        };
+        assert_eq!(
+            save_verified(&doc, &objstms, None).err().map(|e| e.code),
+            Some("input.write")
+        );
+
+        // Read back without the password it was opened with, an encrypted
+        // output's strings and streams do not decrypt to the input's.
+        let bad = open(include_bytes!(
+            "../../../corpus/smoke/encrypted-user-password.pdf"
+        ));
+        assert!(bad.authenticate("user").is_ok_and(|a| a != 0));
+        let failed = save_verified(&bad, &WriteOptions::default(), None).err();
+        assert_eq!(
+            failed.as_ref().map(|e| e.code),
+            Some("verify.failed"),
+            "{failed:?}"
+        );
+        assert!(save_verified(&bad, &WriteOptions::default(), Some("user")).is_ok());
+    }
 
     #[test]
     fn an_incremental_save_appends_the_changes() {

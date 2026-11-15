@@ -1866,7 +1866,8 @@ const MAX_EXISTING_FIELDS: usize = 50_000;
 // ---------------------------------------------------------------------------
 
 /// Fills flat form fields on a clean `O(1)` fork of `doc`, serializes with
-/// `write_opts`, and verifies read-back on the reopened PDF bytes.
+/// `write_opts`, reads the output back as every writer does
+/// ([`write::save_verified`]), and verifies the fills on the reopened bytes.
 pub fn fill_flat_forms(
     doc: &Document,
     ops: &[FlatFillOp],
@@ -1883,6 +1884,53 @@ pub fn fill_flat_forms_with_password(
     write_opts: &WriteOptions,
     password: Option<&str>,
 ) -> Result<(Vec<u8>, FlatFillReport), FlatFormError> {
+    let staged = stage_flat_fill(doc, ops)?;
+    let bytes = write::save_verified(&staged.work, write_opts, password).map_err(save_error)?;
+    let report = staged.finish(&bytes, password)?;
+    Ok((bytes, report))
+}
+
+fn save_error(e: write::CheckedSaveError) -> FlatFormError {
+    FlatFormError {
+        code: e.code,
+        message: e.message,
+    }
+}
+
+/// Fills made on a fork of the input, for the caller to save (and read
+/// back) and hand the bytes to [`StagedFlatFill::finish`], which checks
+/// each fill on them.
+#[derive(Debug)]
+pub struct StagedFlatFill {
+    /// The fork the fills were made on: what to save, and whose
+    /// diagnostics to report.
+    pub work: Document,
+    applied: Vec<AppliedFlatFill>,
+}
+
+impl StagedFlatFill {
+    /// The fill report for `bytes`, a save of [`StagedFlatFill::work`],
+    /// once every fill reads back (with `password` when locked).
+    pub fn finish(
+        &self,
+        bytes: &[u8],
+        password: Option<&str>,
+    ) -> Result<FlatFillReport, FlatFormError> {
+        if !self.applied.is_empty() {
+            verify_filled_bytes(bytes, &self.applied, password)?;
+        }
+        Ok(FlatFillReport {
+            applied: self.applied.clone(),
+            verified: true,
+        })
+    }
+}
+
+/// The fills of [`fill_flat_forms`], with nothing saved yet.
+pub fn stage_flat_fill(
+    doc: &Document,
+    ops: &[FlatFillOp],
+) -> Result<StagedFlatFill, FlatFormError> {
     let fork = doc.fork_clean();
     let detected = detect_flat_forms(&fork, None).map_err(|message| FlatFormError {
         code: "input.detect_failed",
@@ -1890,17 +1938,10 @@ pub fn fill_flat_forms_with_password(
     })?;
 
     if ops.is_empty() {
-        let bytes = write::save(&fork, write_opts).map_err(|e| FlatFormError {
-            code: "input.write",
-            message: e.message,
-        })?;
-        return Ok((
-            bytes,
-            FlatFillReport {
-                applied: Vec::new(),
-                verified: true,
-            },
-        ));
+        return Ok(StagedFlatFill {
+            work: fork,
+            applied: Vec::new(),
+        });
     }
 
     // Resolve every `FlatFillOp` to a unique `FlatField` index.
@@ -2180,20 +2221,10 @@ pub fn fill_flat_forms_with_password(
         applied.push(item);
     }
 
-    let bytes = write::save(&fork, write_opts).map_err(|e| FlatFormError {
-        code: "input.write",
-        message: e.message,
-    })?;
-
-    verify_filled_bytes(&bytes, &applied, password)?;
-
-    Ok((
-        bytes,
-        FlatFillReport {
-            applied,
-            verified: true,
-        },
-    ))
+    Ok(StagedFlatFill {
+        work: fork,
+        applied,
+    })
 }
 
 fn resolve_target_field(fields: &[FlatField], target: &str) -> Result<usize, FlatFormError> {
@@ -2542,7 +2573,8 @@ fn verify_filled_bytes(
 
 /// Promotes all detected flat form fields in `doc` into real interactive PDF
 /// `/Widget` annotations registered in `/AcroForm`, serializes with `write_opts`,
-/// and verifies every promoted widget via [`crate::form`].
+/// reads the output back as every writer does ([`write::save_verified`]), and
+/// verifies every promoted widget via [`crate::form`].
 pub fn promote_flat_forms(
     doc: &Document,
     write_opts: &WriteOptions,
@@ -2557,6 +2589,41 @@ pub fn promote_flat_forms_with_password(
     write_opts: &WriteOptions,
     password: Option<&str>,
 ) -> Result<(Vec<u8>, FlatFormReport), FlatFormError> {
+    let staged = stage_flat_promote(doc)?;
+    let bytes = write::save_verified(&staged.work, write_opts, password).map_err(save_error)?;
+    let report = staged.finish(&bytes, password)?;
+    Ok((bytes, report))
+}
+
+/// A promotion made on a fork of the input, for the caller to save (and
+/// read back) and hand the bytes to [`StagedFlatPromote::finish`], which
+/// checks each widget on them.
+#[derive(Debug)]
+pub struct StagedFlatPromote {
+    /// The fork the widgets were added to: what to save, and whose
+    /// diagnostics to report.
+    pub work: Document,
+    report: FlatFormReport,
+}
+
+impl StagedFlatPromote {
+    /// The promotion's report for `bytes`, a save of
+    /// [`StagedFlatPromote::work`], once every widget reads back (with
+    /// `password` when locked).
+    pub fn finish(
+        &self,
+        bytes: &[u8],
+        password: Option<&str>,
+    ) -> Result<FlatFormReport, FlatFormError> {
+        if !self.report.fields.is_empty() {
+            verify_promoted_acroform(bytes, &self.report.fields, password)?;
+        }
+        Ok(self.report.clone())
+    }
+}
+
+/// The promotion of [`promote_flat_forms`], with nothing saved yet.
+pub fn stage_flat_promote(doc: &Document) -> Result<StagedFlatPromote, FlatFormError> {
     let fork = doc.fork_clean();
     let mut report = detect_flat_forms(&fork, None).map_err(|message| FlatFormError {
         code: "input.detect_failed",
@@ -2564,11 +2631,7 @@ pub fn promote_flat_forms_with_password(
     })?;
 
     if report.fields.is_empty() {
-        let bytes = write::save(&fork, write_opts).map_err(|e| FlatFormError {
-            code: "input.write",
-            message: e.message,
-        })?;
-        return Ok((bytes, report));
+        return Ok(StagedFlatPromote { work: fork, report });
     }
 
     rename_clear_of_existing_fields(&fork, &mut report.fields);
@@ -2680,14 +2743,7 @@ pub fn promote_flat_forms_with_password(
     install_acroform_catalog(&fork, &new_field_refs, helv_num, zadb_num)?;
     report.promoted_widgets = new_field_refs.len();
 
-    let bytes = write::save(&fork, write_opts).map_err(|e| FlatFormError {
-        code: "input.write",
-        message: e.message,
-    })?;
-
-    verify_promoted_acroform(&bytes, &report.fields, password)?;
-
-    Ok((bytes, report))
+    Ok(StagedFlatPromote { work: fork, report })
 }
 
 fn build_checkbox_ap_dict(doc: &Document, w: f32, h: f32) -> Object {
@@ -3004,6 +3060,44 @@ mod tests {
             stream("", page),
             font.to_vec(),
         ])
+    }
+
+    #[test]
+    fn fill_and_promote_read_their_output_back_as_every_writer_does() {
+        let doc = three_signature_pages();
+        let ops = [FlatFillOp::SetText {
+            target: "signature".to_string(),
+            value: "Grace Hopper".to_string(),
+        }];
+        let refused = WriteOptions {
+            incremental: true,
+            garbage: 1,
+            ..WriteOptions::default()
+        };
+        let e = fill_flat_forms(&doc, &ops, &refused).unwrap_err();
+        assert_eq!(e.code, "usage.incremental", "{e}");
+        let e = promote_flat_forms(&doc, &refused).unwrap_err();
+        assert_eq!(e.code, "usage.incremental", "{e}");
+        let incremental = WriteOptions {
+            incremental: true,
+            ..WriteOptions::default()
+        };
+        let (bytes, rep) = fill_flat_forms(&doc, &ops, &incremental).unwrap();
+        assert!(rep.verified);
+        assert!(bytes.starts_with(doc.data()), "an incremental fill appends");
+
+        // A locked output read back without its password is not the
+        // document saved.
+        let locked = Document::open(
+            include_bytes!("../../../corpus/smoke/encrypted-user-password.pdf").to_vec(),
+        )
+        .unwrap();
+        assert!(locked.authenticate("user").is_ok_and(|a| a != 0));
+        let e = fill_flat_forms(&locked, &[], &WriteOptions::default()).unwrap_err();
+        assert_eq!(e.code, "verify.failed", "{e}");
+        let e = promote_flat_forms(&locked, &WriteOptions::default()).unwrap_err();
+        assert_eq!(e.code, "verify.failed", "{e}");
+        promote_flat_forms_with_password(&locked, &WriteOptions::default(), Some("user")).unwrap();
     }
 
     #[test]

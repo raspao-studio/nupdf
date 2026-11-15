@@ -33,6 +33,8 @@ New reports, at v1: `annots`, `annots-edit`, `attachments`, `fill`, `flatten`, `
 
 New reports, at v1: `apply`, `attest`, `audit`, `patch`, `query` (DECISIONS D59), and `chart`, `cloak`, `flat_forms`, `history`, `pipeline`, `uncloak` (DECISIONS D60).
 
+`cloak`, `uncloak` (PDF), `flat_forms` (fill, promote) and `pipeline` read their output back as every writer does, so they can now fail with `verify.failed` (exit 4), refuse an incremental write as `usage.incremental` (exit 2; `cloak` and `uncloak` always, as they garbage collect), and report a failed save as `input.unloadable_object` (`cloak` and `uncloak` said `pdf.write_failed`). `cloak`, `uncloak` and `flat_forms` report the warnings raised while editing, not only those raised opening the input; `pipeline` adds those raised reading its output back.
+
 ## v0
 
 Reports before the schemas were frozen, while their shapes could still change.

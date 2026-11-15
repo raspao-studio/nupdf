@@ -2853,7 +2853,7 @@ fn save_verified(
             let message = nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
                 .to_string();
             // MuPDF's refusals of an incremental write are argument errors.
-            if plan.options.incremental && message.starts_with("Can't do incremental") {
+            if nupdf::write::save_error_code(&plan.options, &message) == "usage.incremental" {
                 Failure {
                     exit: Exit::Usage,
                     code: "usage.incremental",
@@ -2875,7 +2875,7 @@ fn save_verified(
             Err(Failure {
                 exit: Exit::Verify,
                 code: "verify.failed",
-                message: verify_failure(&v),
+                message: v.failure(),
             })
         }
     });
@@ -2953,35 +2953,6 @@ fn signatures_kept(doc: &Document, bytes: &[u8], plan: &Clean) -> Option<serde_j
         })
         .collect();
     Some(list.into())
-}
-
-/// Why the written document failed its self-check.
-fn verify_failure(v: &nupdf::write::Verification) -> String {
-    if !v.reopened {
-        return "the output does not open".into();
-    }
-    if v.repaired {
-        return "the output needs a repair to open".into();
-    }
-    const SHOWN: usize = 10;
-    let mut nums: Vec<String> = v
-        .mismatched
-        .iter()
-        .take(SHOWN)
-        .map(|&n| match n {
-            0 => "the trailer".to_string(),
-            n => n.to_string(),
-        })
-        .collect();
-    if v.mismatched.len() > SHOWN {
-        nums.push(format!("and {} more", v.mismatched.len() - SHOWN));
-    }
-    format!(
-        "{} of {} objects read back differently from the input: {}",
-        v.mismatched.len(),
-        v.objects,
-        nums.join(", ")
-    )
 }
 
 /// Writes a file a command makes, unless the call was stopped: what it

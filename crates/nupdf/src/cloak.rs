@@ -1896,7 +1896,10 @@ fn verify_zero_secret_leaks(
 
 /// Cloaks all matching PII entities across `doc` with deterministic,
 /// format-preserving synthetic tokens, saves with full orphan garbage
-/// collection (`garbage: 4`), and verifies zero original secrets remain.
+/// collection (`garbage: 4`), reads the output back as every writer does
+/// ([`write::save_verified`]), and verifies zero original secrets remain.
+/// An incremental write is refused (`usage.incremental`): it would keep
+/// the secrets in the bytes it appends to.
 pub fn cloak_document(
     doc: &Document,
     targets: &[CloakTarget],
@@ -1906,77 +1909,160 @@ pub fn cloak_document(
 }
 
 /// [`cloak_document`] for a document opened with `password`, which the
-/// zero-leak check needs to read an output that stays encrypted.
+/// read-back and the zero-leak check need to read an output that stays
+/// encrypted.
 pub fn cloak_document_with_password(
     doc: &Document,
     targets: &[CloakTarget],
     write_opts: &WriteOptions,
     password: Option<&str>,
 ) -> Result<(Vec<u8>, CloakVault, CloakReport), CloakError> {
+    let staged = stage_cloak(doc, targets, write_opts)?;
+    let bytes =
+        write::save_verified(&staged.work, &staged.write_options, password).map_err(save_error)?;
+    let (vault, report) = staged.finish(&bytes, password)?;
+    Ok((bytes, vault, report))
+}
+
+fn save_error(e: write::CheckedSaveError) -> CloakError {
+    CloakError {
+        code: e.code,
+        message: e.message,
+    }
+}
+
+/// A cloak's rewrites made on a fork of the input, for the caller to save
+/// with [`StagedCloak::write_options`] (and read back) and hand the bytes
+/// to [`StagedCloak::finish`], which runs the zero-leak check.
+#[derive(Debug)]
+pub struct StagedCloak {
+    /// The fork the rewrites were made on: what to save, and whose
+    /// diagnostics to report.
+    pub work: Document,
+    /// The options asked for, with `garbage: 4` so no orphaned stream keeps
+    /// a secret.
+    pub write_options: WriteOptions,
+    session: CloakSession,
+    original_doc_id: String,
+}
+
+/// The rewrites of [`cloak_document`], with nothing saved yet.
+pub fn stage_cloak(
+    doc: &Document,
+    targets: &[CloakTarget],
+    write_opts: &WriteOptions,
+) -> Result<StagedCloak, CloakError> {
     let original_doc_id = DocId::of(doc.data()).to_string();
     let mut session = CloakSession::new(targets)?;
 
-    let work_doc = doc.fork_clean();
+    let work = doc.fork_clean();
     if !session.is_empty() {
-        promote_direct_page_annots(&work_doc);
-        rewrite_page_contents(&work_doc, &mut session)?;
-        let regenerated_widgets = rewrite_acroform_widgets(&work_doc, &mut session);
-        rewrite_metadata_and_objects(&work_doc, &regenerated_widgets, &mut session);
+        promote_direct_page_annots(&work);
+        rewrite_page_contents(&work, &mut session)?;
+        let regenerated_widgets = rewrite_acroform_widgets(&work, &mut session);
+        rewrite_metadata_and_objects(&work, &regenerated_widgets, &mut session);
     }
-
-    let mut save_opts = write_opts.clone();
-    save_opts.garbage = 4;
-    save_opts.incremental = false;
-
-    let saved_bytes = write::save(&work_doc, &save_opts).map_err(|e| CloakError {
-        code: "pdf.write_failed",
-        message: e.message,
-    })?;
-
-    let secrets_to_check = session.all_secrets_for_verification();
-    verify_zero_secret_leaks(&saved_bytes, &secrets_to_check, password)?;
-
-    let cloaked_doc_id = DocId::of(&saved_bytes).to_string();
-    let entries = session.entries;
-    let replacements: usize = entries.iter().map(|e| e.occurrences).sum();
-    let entities_cloaked = entries.len();
-    let token_preview: Vec<CloakPreview> = entries
-        .iter()
-        .map(|e| CloakPreview {
-            token: e.token.clone(),
-            category: e.category.clone(),
-            occurrences: e.occurrences,
-        })
-        .collect();
-
-    let vault = CloakVault {
-        schema: CLOAK_VAULT_SCHEMA.to_string(),
-        original_doc_id: original_doc_id.clone(),
-        cloaked_doc_id: cloaked_doc_id.clone(),
-        entries,
-    };
-
-    let report = CloakReport {
+    let mut write_options = write_opts.clone();
+    write_options.garbage = 4;
+    Ok(StagedCloak {
+        work,
+        write_options,
+        session,
         original_doc_id,
-        cloaked_doc_id,
-        replacements,
-        entities_cloaked,
-        verified_zero_leaks: true,
-        token_preview,
-    };
+    })
+}
 
-    Ok((saved_bytes, vault, report))
+impl StagedCloak {
+    /// The vault and report for `bytes`, a save of [`StagedCloak::work`],
+    /// once no secret is found in them (read with `password` when locked).
+    pub fn finish(
+        &self,
+        bytes: &[u8],
+        password: Option<&str>,
+    ) -> Result<(CloakVault, CloakReport), CloakError> {
+        let secrets_to_check = self.session.all_secrets_for_verification();
+        verify_zero_secret_leaks(bytes, &secrets_to_check, password)?;
+
+        let original_doc_id = self.original_doc_id.clone();
+        let cloaked_doc_id = DocId::of(bytes).to_string();
+        let entries = self.session.entries.clone();
+        let replacements: usize = entries.iter().map(|e| e.occurrences).sum();
+        let entities_cloaked = entries.len();
+        let token_preview: Vec<CloakPreview> = entries
+            .iter()
+            .map(|e| CloakPreview {
+                token: e.token.clone(),
+                category: e.category.clone(),
+                occurrences: e.occurrences,
+            })
+            .collect();
+
+        let vault = CloakVault {
+            schema: CLOAK_VAULT_SCHEMA.to_string(),
+            original_doc_id: original_doc_id.clone(),
+            cloaked_doc_id: cloaked_doc_id.clone(),
+            entries,
+        };
+        let report = CloakReport {
+            original_doc_id,
+            cloaked_doc_id,
+            replacements,
+            entities_cloaked,
+            verified_zero_leaks: true,
+            token_preview,
+        };
+        Ok((vault, report))
+    }
 }
 
 /// Reverses synthetic tokens back to original secrets across page content
 /// streams, AcroForm values (including new values filled by an agent while the
 /// PDF was cloaked), annotations, `/Info`, outlines, and XMP streams, saving
-/// with `garbage: 4`.
+/// with `garbage: 4` and reading the output back as every writer does.
 pub fn uncloak_pdf(
     cloaked_doc: &Document,
     vault: &CloakVault,
     write_opts: &WriteOptions,
 ) -> Result<(Vec<u8>, UncloakReport), CloakError> {
+    uncloak_pdf_with_password(cloaked_doc, vault, write_opts, None)
+}
+
+/// [`uncloak_pdf`] for a document opened with `password`, which the
+/// read-back needs when the output stays encrypted.
+pub fn uncloak_pdf_with_password(
+    cloaked_doc: &Document,
+    vault: &CloakVault,
+    write_opts: &WriteOptions,
+    password: Option<&str>,
+) -> Result<(Vec<u8>, UncloakReport), CloakError> {
+    let staged = stage_uncloak(cloaked_doc, vault, write_opts)?;
+    let bytes =
+        write::save_verified(&staged.work, &staged.write_options, password).map_err(save_error)?;
+    let report = staged.finish(&bytes);
+    Ok((bytes, report))
+}
+
+/// An uncloak's rewrites made on a fork of the cloaked document, for the
+/// caller to save with [`StagedUncloak::write_options`] and hand the bytes
+/// to [`StagedUncloak::finish`].
+#[derive(Debug)]
+pub struct StagedUncloak {
+    /// The fork the rewrites were made on: what to save, and whose
+    /// diagnostics to report.
+    pub work: Document,
+    /// The options asked for, with `garbage: 4`.
+    pub write_options: WriteOptions,
+    replacer: VaultReplacer,
+    original_doc_id: String,
+    input_doc_id: String,
+}
+
+/// The rewrites of [`uncloak_pdf`], with nothing saved yet.
+pub fn stage_uncloak(
+    cloaked_doc: &Document,
+    vault: &CloakVault,
+    write_opts: &WriteOptions,
+) -> Result<StagedUncloak, CloakError> {
     if vault.schema != CLOAK_VAULT_SCHEMA {
         return Err(CloakError {
             code: "input.bad_vault_schema",
@@ -1990,33 +2076,35 @@ pub fn uncloak_pdf(
     let input_doc_id = DocId::of(cloaked_doc.data()).to_string();
     let mut replacer = VaultReplacer::for_pdf(vault);
 
-    let work_doc = cloaked_doc.fork_clean();
+    let work = cloaked_doc.fork_clean();
     if !replacer.is_empty() {
-        promote_direct_page_annots(&work_doc);
-        rewrite_page_contents(&work_doc, &mut replacer)?;
-        let regenerated_widgets = rewrite_acroform_widgets(&work_doc, &mut replacer);
-        rewrite_metadata_and_objects(&work_doc, &regenerated_widgets, &mut replacer);
+        promote_direct_page_annots(&work);
+        rewrite_page_contents(&work, &mut replacer)?;
+        let regenerated_widgets = rewrite_acroform_widgets(&work, &mut replacer);
+        rewrite_metadata_and_objects(&work, &regenerated_widgets, &mut replacer);
     }
-
-    let mut save_opts = write_opts.clone();
-    save_opts.garbage = 4;
-    save_opts.incremental = false;
-
-    let restored_bytes = write::save(&work_doc, &save_opts).map_err(|e| CloakError {
-        code: "pdf.write_failed",
-        message: e.message,
-    })?;
-
-    let restored_doc_id = DocId::of(&restored_bytes).to_string();
-    let report = UncloakReport {
+    let mut write_options = write_opts.clone();
+    write_options.garbage = 4;
+    Ok(StagedUncloak {
+        work,
+        write_options,
+        replacer,
         original_doc_id: vault.original_doc_id.clone(),
-        cloaked_doc_id: input_doc_id,
-        restored_doc_id,
-        replacements: replacer.token_replacements,
-        entities_restored: replacer.hit_entries.len(),
-    };
+        input_doc_id,
+    })
+}
 
-    Ok((restored_bytes, report))
+impl StagedUncloak {
+    /// The report for `bytes`, a save of [`StagedUncloak::work`].
+    pub fn finish(&self, bytes: &[u8]) -> UncloakReport {
+        UncloakReport {
+            original_doc_id: self.original_doc_id.clone(),
+            cloaked_doc_id: self.input_doc_id.clone(),
+            restored_doc_id: DocId::of(bytes).to_string(),
+            replacements: self.replacer.token_replacements,
+            entities_restored: self.replacer.hit_entries.len(),
+        }
+    }
 }
 
 /// Reverses synthetic tokens back to original secrets in arbitrary text,
@@ -2589,6 +2677,51 @@ mod tests {
         assert_eq!(wrong.code, "verify.unreadable");
         let leak = verify_zero_secret_leaks(bytes, &secrets, Some("user")).unwrap_err();
         assert_eq!(leak.code, "verify.leak");
+    }
+
+    #[test]
+    fn cloak_and_uncloak_read_their_output_back_as_every_writer_does() {
+        let targets = [CloakTarget::Literal {
+            category: "WORD".into(),
+            secret: "Encrypted".into(),
+        }];
+        // An incremental write would keep the secrets in the bytes it
+        // appends to, and garbage collection cannot be incremental.
+        let doc = build_enterprise_pii_pdf();
+        let incremental = WriteOptions {
+            incremental: true,
+            ..WriteOptions::default()
+        };
+        let refused = cloak_document(&doc, &targets, &incremental).unwrap_err();
+        assert_eq!(refused.code, "usage.incremental", "{refused}");
+        let vault = CloakVault {
+            schema: CLOAK_VAULT_SCHEMA.into(),
+            original_doc_id: String::new(),
+            cloaked_doc_id: String::new(),
+            entries: Vec::new(),
+        };
+        let refused = uncloak_pdf(&doc, &vault, &incremental).unwrap_err();
+        assert_eq!(refused.code, "usage.incremental", "{refused}");
+
+        // A locked output read back without its password is not the
+        // document saved: the read-back fails before the leak check.
+        let locked = Document::open(
+            include_bytes!("../../../corpus/smoke/encrypted-user-password.pdf").to_vec(),
+        )
+        .unwrap();
+        assert!(locked.authenticate("user").is_ok_and(|a| a != 0));
+        let unread = cloak_document(&locked, &targets, &WriteOptions::default()).unwrap_err();
+        assert_eq!(unread.code, "verify.failed", "{unread}");
+        let unread = uncloak_pdf(&locked, &vault, &WriteOptions::default()).unwrap_err();
+        assert_eq!(unread.code, "verify.failed", "{unread}");
+        let (bytes, _, rep) =
+            cloak_document_with_password(&locked, &targets, &WriteOptions::default(), Some("user"))
+                .unwrap();
+        assert!(rep.verified_zero_leaks);
+        let reopened = Document::open(bytes).unwrap();
+        assert!(reopened.authenticate("user").is_ok_and(|a| a != 0));
+        uncloak_pdf_with_password(&reopened, &vault, &WriteOptions::default(), Some("user"))
+            .unwrap();
     }
 
     #[test]
