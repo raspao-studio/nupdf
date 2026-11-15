@@ -2157,12 +2157,9 @@ pub fn fill_flat_forms_with_password(
 
         stream_buf.extend_from_slice(b"Q\n");
 
-        let font_obj = if needs_font {
-            Some(*helv_obj_num.get_or_insert_with(|| add_helvetica_font_object(&fork)))
-        } else {
-            // Still ensure `/F_nupdf_ff` exists on every edited page as requested!
-            Some(*helv_obj_num.get_or_insert_with(|| add_helvetica_font_object(&fork)))
-        };
+        // Only text needs the font; a page with only checkmarks gets none.
+        let font_obj = needs_font
+            .then(|| *helv_obj_num.get_or_insert_with(|| add_helvetica_font_object(&fork)));
 
         append_content_layer_with_font(&fork, page_index, font_obj, stream_buf).map_err(
             |message| FlatFormError {
@@ -3007,6 +3004,25 @@ mod tests {
             stream("", page),
             font.to_vec(),
         ])
+    }
+
+    #[test]
+    fn checking_a_box_adds_no_font() {
+        let doc = flat_intake_form_doc();
+        let (bytes, _) = fill_flat_forms(
+            &doc,
+            &[FlatFillOp::SetCheck {
+                target: "domestic".to_string(),
+                checked: true,
+            }],
+            &WriteOptions::default(),
+        )
+        .unwrap();
+        let out = Document::open(bytes).unwrap();
+        let page = out.page(0).unwrap();
+        let res = out.inherited(&page, b"Resources").unwrap().unwrap();
+        let fonts = out.dict_get(&res, b"Font");
+        assert!(out.dict_get(&fonts, FLAT_FILL_FONT_RES) == Object::Null);
     }
 
     #[test]
