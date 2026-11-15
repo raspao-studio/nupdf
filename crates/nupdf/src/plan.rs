@@ -663,7 +663,16 @@ pub fn execute_plans(
                     ));
                 }
                 let search_pair = match (text, regex) {
-                    (Some(t), _) => {
+                    (Some(_), Some(_)) => {
+                        return Err(PlanError {
+                            code: "usage.bad_plan",
+                            is_conflict_or_verify: false,
+                            message:
+                                "redact takes `text` or `regex`, not both: stage two redact ops"
+                                    .into(),
+                        });
+                    }
+                    (Some(t), None) => {
                         redact_texts.push(t.clone());
                         Some((t.clone(), 0u32))
                     }
@@ -1387,6 +1396,34 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         assert!(!exec2.verified);
         assert_eq!(exec2.conflicts[0].code, "conflict.page_deleted");
+    }
+
+    fn run(base: &Document, plans: &[&str]) -> Result<(Vec<u8>, PlanExecution), PlanError> {
+        let plans: Vec<EditPlan> = plans
+            .iter()
+            .map(|p| parse_plan(p).unwrap_or_else(|e| panic!("{e}")))
+            .collect();
+        execute_plans(
+            base,
+            "b3:base",
+            &plans,
+            &WriteOptions::default(),
+            &PatchOptions::default(),
+            None,
+            true,
+        )
+    }
+
+    #[test]
+    fn a_redaction_with_both_text_and_regex_is_refused() {
+        let base = multi_page_fixture();
+        let err = run(
+            &base,
+            &[r#"[{"op":"redact","text":"Mutual","regex":"[0-9]{3}-[0-9]{2}-[0-9]{4}"}]"#],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "usage.bad_plan");
+        assert!(!err.is_conflict_or_verify);
     }
 
     #[test]
