@@ -20,6 +20,7 @@ use crate::attest::{self, AttestOptions, PageAttestation};
 use crate::audit::{self, AuditSummary, ClaimAudit, ClaimInput};
 use crate::chart::{self, ChartReport};
 use crate::content::Store;
+use crate::diag::Diagnostic;
 use crate::document::Document;
 use crate::extract;
 use crate::flat_form::{self, FlatFormReport};
@@ -306,6 +307,19 @@ pub struct PipelineOutcome {
     /// `ApplyPlan`) ran and verified cleanly; omitted from JSON serialization.
     #[serde(skip)]
     pub output_bytes: Option<Vec<u8>>,
+    /// The warnings raised on the document and on each step's working copy
+    /// of it, each once, in the order raised.
+    #[serde(skip)]
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Adds to `raised` the warnings of `doc` it does not hold yet.
+fn note_diagnostics(raised: &mut Vec<Diagnostic>, doc: &Document) {
+    for d in doc.diagnostics().snapshot() {
+        if !raised.contains(&d) {
+            raised.push(d);
+        }
+    }
 }
 
 /// Error returned when a pipeline spec is malformed or a step fails execution/verification.
@@ -379,6 +393,7 @@ pub fn run_pipeline_with_password(
 
     let initial_doc_id = DocId::of(doc.data()).to_string();
     let mut working_doc = doc.fork_clean();
+    let mut raised: Vec<Diagnostic> = Vec::new();
     let mut working_doc_id = initial_doc_id.clone();
     let mut mutated = false;
     let mut output_bytes: Option<Vec<u8>> = None;
@@ -520,6 +535,10 @@ pub fn run_pipeline_with_password(
                         aborted: Some(abort),
                         steps: step_results,
                         output_bytes,
+                        diagnostics: {
+                            note_diagnostics(&mut raised, &working_doc);
+                            raised
+                        },
                     });
                 }
             }
@@ -806,6 +825,7 @@ pub fn run_pipeline_with_password(
                     );
                 }
 
+                note_diagnostics(&mut raised, &working_doc);
                 working_doc = next_doc;
                 working_doc_id = next_doc_id;
                 mutated = true;
@@ -1002,6 +1022,7 @@ pub fn run_pipeline_with_password(
                     }
                 }
 
+                note_diagnostics(&mut raised, &working_doc);
                 working_doc = next_doc;
                 working_doc_id = next_doc_id;
                 mutated = true;
@@ -1102,6 +1123,10 @@ pub fn run_pipeline_with_password(
                         aborted: Some(abort),
                         steps: step_results,
                         output_bytes,
+                        diagnostics: {
+                            note_diagnostics(&mut raised, &working_doc);
+                            raised
+                        },
                     });
                 }
             }
@@ -1200,6 +1225,10 @@ pub fn run_pipeline_with_password(
         aborted: None,
         steps: step_results,
         output_bytes,
+        diagnostics: {
+            note_diagnostics(&mut raised, &working_doc);
+            raised
+        },
     })
 }
 

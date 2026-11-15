@@ -1314,13 +1314,24 @@ pub fn pipeline_cmd(
         "output": output_val,
     });
     let mut out = report("nupdf.pipeline/v1", facts, doc, body);
-    // What reading the output back raised: the steps' working copies stay
-    // inside the pipeline, and their output is the nearest look at them.
-    if let Some(checked) = &read_back
-        && let (Some(list), Value::Array(more)) =
-            (out["diagnostics"].as_array_mut(), diagnostics(checked))
-    {
-        list.extend(more);
+    // What the steps' working copies raised, and what reading the output
+    // back did, each once: the report's own list is the input document's.
+    if let Some(list) = out["diagnostics"].as_array_mut() {
+        let mut more: Vec<Value> = outcome
+            .diagnostics
+            .iter()
+            .map(|d| json!({ "code": d.code, "severity": "warning", "message": d.message }))
+            .collect();
+        if let Some(checked) = &read_back
+            && let Value::Array(read) = diagnostics(checked)
+        {
+            more.extend(read);
+        }
+        for d in more {
+            if !list.contains(&d) {
+                list.push(d);
+            }
+        }
     }
     if let Some(ab) = aborted {
         emit(&mut standard_output(), &out, pretty);

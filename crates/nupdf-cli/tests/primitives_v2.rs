@@ -418,3 +418,50 @@ fn cloak_and_uncloak_report_the_warnings_raised_while_rewriting() {
         assert!(codes.contains(&"stream.read_error"), "{args:?}: {rep}");
     }
 }
+
+#[test]
+fn pipeline_reports_the_warnings_its_steps_raise_while_editing() {
+    // The second content stream is not Flate data: only a step that rewrites
+    // the page's content reads it, on the pipeline's own copy of the document.
+    let stream = "BT /F1 12 Tf 20 200 Td (Secret word) Tj ET\n";
+    let file = scratch("v2-pipeline-bad-flate.pdf");
+    std::fs::write(
+        &file,
+        pdf_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents[4 0 R 6 0 R]/Resources<</Font<</F1 5 0 R>>>>>>",
+            &format!("<</Length {}>>\nstream\n{stream}endstream", stream.len()),
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+            "<</Length 16/Filter/FlateDecode>>\nstream\nxxxxgarbagexxxx\nendstream",
+        ]),
+    )
+    .unwrap();
+    let codes_of = |rep: &Value| -> Vec<String> {
+        rep["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["code"].as_str().map(String::from))
+            .collect()
+    };
+    let spec = r#"{"steps": [
+        {"id": "q", "op": "query", "pattern": "Secret"},
+        {"id": "p", "op": "patch", "replacements": [{"target_id": "${q.first_id}", "new_text": "Public word"}]}
+    ]}"#;
+    let rep = report_of(&[
+        "pipeline",
+        file.to_str().unwrap(),
+        "--inline",
+        spec,
+        "--dry-run",
+    ]);
+    assert_eq!(rep["mutated"], true, "{rep}");
+    let codes = codes_of(&rep);
+    assert!(codes.contains(&"stream.read_error".to_string()), "{rep}");
+    // Each warning is listed once, however many steps met it.
+    let mut once = codes.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!(once.len(), codes.len(), "{codes:?}");
+}
