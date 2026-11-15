@@ -43,8 +43,8 @@ target/bench-venv/bin/python \
 | `mutool draw -F txt` | Yes (leaks hidden injection) | No | No | No |
 | **`nupdf attest`** | **No — flags `zero_contrast_or_occluded`** | **Yes (`struck_through: true`)** | **Yes (`glyph_text: "Pay $100.00"`)** | **Yes (`1` cropped PNG)** |
 
-- **In-process Rust median latency:** `pdf_oxide::extract_spans` takes `0.195 ms` (unverified stream extraction only); `nupdf::attest::attest_document` takes **`2.059 ms`** (includes dual full + `NoTextDevice` pixel rasterization, vector stroke intersection, and `/ActualText` glyph reconciliation).
-- **End-to-end CLI wall time (including cropped blind-spot PNG):** `6.91 ms`.
+- **In-process Rust median latency:** `pdf_oxide::extract_spans` takes `0.083 ms` (unverified stream extraction only); `nupdf::attest::attest_document` takes **`1.375 ms`** (includes dual full + `NoTextDevice` pixel rasterization, vector stroke intersection, and `/ActualText` glyph reconciliation).
+- **End-to-end CLI wall time (including cropped blind-spot PNG):** `7.13 ms`.
 
 ---
 
@@ -54,9 +54,9 @@ target/bench-venv/bin/python \
 
 | Engine | Valid Surgical Edit (`"$15,400.00"`) | Neighbor-Collision Trap (`"Amount: $14,500,000,000,000.00 (USD)"`) | Median Latency |
 |---|---|---|---|
-| `pdf_oxide::editor::DocumentEditor` (`0.3.78` DOM `find_text_containing` + `set_text`) | Passes independent `PyMuPDF` grader (queues redaction box + overlays text) | **Fails silently (`Ok`)** — writes overlapping glyphs directly on top of `"Due: 2026-12-01"` (confirmed independently by both `PyMuPDF` word boxes and `nupdf` stext) | `0.075 ms` (in-memory, unverified) |
+| `pdf_oxide::editor::DocumentEditor` (`0.3.78` DOM `find_text_containing` + `set_text`) | Passes independent `PyMuPDF` grader (queues redaction box + overlays text) | **Fails silently (`Ok`)** — writes overlapping glyphs directly on top of `"Due: 2026-12-01"` (confirmed independently by both `PyMuPDF` word boxes and `nupdf` stext) | `0.072 ms` (in-memory, unverified) |
 | `PyMuPDF` (`add_redact_annot` + `apply_redactions`) | Replaces via manual bbox synthesis | **Fails silently (exit `0`)** — truncates/corrupts inside original span rect | — |
-| **`nupdf patch`** (`patch_and_verify` / CLI) | Preserves baseline matrix, font, size (`12 pt`), RGB `(0.1, 0.2, 0.5)`, scrubs stream, passes `PyMuPDF` / `pypdf` / `mutool` graders | **Caught pre-write (`verify.collision`)** — **exits `4` (`verify.failed`)** and writes zero bytes to `-o` | **`1.080 ms`** in-process (full save + re-parse + layout verify) / **`4.85 ms`** CLI |
+| **`nupdf patch`** (`patch_and_verify` / CLI) | Preserves baseline matrix, font, size (`12 pt`), RGB `(0.1, 0.2, 0.5)`, scrubs stream, passes `PyMuPDF` / `pypdf` / `mutool` graders | **Caught pre-write (`verify.collision`)** — **exits `4` (`verify.failed`)** and writes zero bytes to `-o` | **`0.993 ms`** in-process (full save + re-parse + layout verify) / **`5.09 ms`** CLI |
 
 ---
 
@@ -66,12 +66,12 @@ target/bench-venv/bin/python \
 
 | Engine / API | 1,000 Speculative Branches | Per Branch | Relative Speed |
 |---|---|---|---|
-| `pdf_oxide::editor::DocumentEditor::from_bytes` (`0.3.78`, `Vec` copy excluded from timer) | `100.531 ms` | `100.5 µs` | `1.0x` |
-| `nupdf::Document::open` (full xref parse per branch) | `33.751 ms` | `33.8 µs` | `3.0x` faster than `pdf_oxide` |
-| **`nupdf::Document::fork_clean`** (`O(1)` `Arc<State>` + fresh `Edits` overlay) | **`0.297 ms`** | **`0.30 µs`** | **`338.4x` faster than `pdf_oxide`** (`113.6x` faster than `Document::open`) |
+| `pdf_oxide::editor::DocumentEditor::from_bytes` (`0.3.78`, `Vec` copy excluded from timer) | `105.558 ms` | `105.6 µs` | `1.0x` |
+| `nupdf::Document::open` (full xref parse per branch) | `38.442 ms` | `38.4 µs` | `2.7x` faster than `pdf_oxide` |
+| **`nupdf::Document::fork_clean`** (`O(1)` `Arc<State>` + fresh `Edits` overlay) | **`0.313 ms`** | **`0.31 µs`** | **`337.2x` faster than `pdf_oxide`** (`122.8x` faster than `Document::open`) |
 
 **Multi-agent transactional commit (`deal_packet.pdf`, 3 concurrent agent plans anchored to base `doc_id`):**
-- `legal-agent` (highlight + surgical fee patch) + `ops-agent` (AcroForm fill + `/Info` `Title`) + `privacy-agent` (SSN scrub redaction + scratchpad page delete): committed & leak/patch/read-back verified in **`7.53 ms`** (verified independently by `pypdf` and `PyMuPDF`).
+- `legal-agent` (highlight + surgical fee patch) + `ops-agent` (AcroForm fill + `/Info` `Title`) + `privacy-agent` (SSN scrub redaction + scratchpad page delete): committed & leak/patch/read-back verified in **`9.13 ms`** (verified independently by `pypdf` and `PyMuPDF`).
 - Cross-agent conflict (`legal-agent` patches `Service Fee` while `rogue-agent` redacts `Service Fee`): rejected pre-write with **exit `4` (`plan.conflict`)**, zero bytes written (`pdf_oxide` has no `doc_id`-anchored plan executor or cross-agent conflict detector).
 
 ---
@@ -84,17 +84,17 @@ target/bench-venv/bin/python \
 
 | Method | Exact Sum (`7897.50`)? | Output Payload | Wall Time (100 PDFs) |
 |---|---|---|---|
-| `pdf-oxide` (`0.3.78` native CLI: 100 × `text --format structured --json`, no batch/query mode) | Requires LLM/script post-parse | `1,046,142` bytes | `428.53 ms` |
+| `pdf-oxide` (`0.3.78` native CLI: 100 × `text --format structured --json`, no batch/query mode) | Requires LLM/script post-parse | `1,046,142` bytes | `416.26 ms` |
 | `nupdf batch <dir> -- extract --format json` | Requires LLM/script post-parse | `302,961` bytes | — |
-| `pdfplumber` (custom Python loop) | Yes | Python float | `116.42 ms` |
-| `PyMuPDF` (`get_text("words")` custom spatial Python loop) | Yes | Python float | `79.01 ms` |
-| **`nupdf query <dir> --right-of "Total Due" --nearest-only --summary-only`** | **Yes (`7897.5`)** | **`236` bytes (`4,432.8x` smaller than `pdf-oxide` CLI)** | **`11.45 ms` (`37.4x` faster than `pdf-oxide` CLI; `6.9x`–`10.2x` faster than Python)** |
+| `pdfplumber` (custom Python loop) | Yes | Python float | `120.64 ms` |
+| `PyMuPDF` (`get_text("words")` custom spatial Python loop) | Yes | Python float | `87.85 ms` |
+| **`nupdf query <dir> --right-of "Total Due" --nearest-only --summary-only`** | **Yes (`7897.5`)** | **`236` bytes (`4,432.8x` smaller than `pdf-oxide` CLI)** | **`8.31 ms` (`50.1x` faster than `pdf-oxide` CLI; `10.6x`–`14.5x` faster than Python)** |
 
 ### In-Process Rust Library Level (`primitives_vs_oxide`)
 
 When a Rust caller hand-writes custom spatial anchor/currency parsing on top of `pdf_oxide::PdfDocument::extract_spans` vs calling declarative `nupdf::query::run_query` (which builds full FreeType glyph bboxes and style cells per document):
-- **Single-threaded (100 PDFs in memory):** `pdf_oxide` custom loop `4.013 ms` vs `nupdf::query::run_query` `14.553 ms` (`145 µs` / PDF).
-- **8 threads (100 PDFs in memory):** `pdf_oxide` custom loop `2.737 ms` vs `nupdf::query::run_query` **`3.957 ms`** (`39.6 µs` / PDF, exact sum `7897.5` out of the box with zero custom spatial/currency code).
+- **Single-threaded (100 PDFs in memory):** `pdf_oxide` custom loop `4.473 ms` vs `nupdf::query::run_query` `15.642 ms` (`156 µs` / PDF).
+- **8 threads (100 PDFs in memory):** `pdf_oxide` custom loop `2.146 ms` vs `nupdf::query::run_query` **`3.877 ms`** (`38.8 µs` / PDF, exact sum `7897.5` out of the box with zero custom spatial/currency code).
 
 ---
 
@@ -111,5 +111,5 @@ When a Rust caller hand-writes custom spatial anchor/currency parsing on top of 
 | `c5_strikethrough_trap` | Quotes `"Early Termination Fee: $0."` (crossed out by vector line) | `verified_with_hazards` (`hazard.struck_through`) | **False positive:** both `pdf_oxide::extract_spans` and `pdf-oxide search --json` return struck clause as normal active text |
 
 - **LLM tokens spent:** `0`
-- **In-process Rust median latency (5 claims):** **`0.270 ms`** (verdicts + footnote recovery) / **`2.419 ms`** (with `4` highlighted PNG evidence crops rendered)
-- **End-to-end CLI wall time (5 claims + 4 PNG crops):** `7.82 ms`
+- **In-process Rust median latency (5 claims):** **`0.311 ms`** (verdicts + footnote recovery) / **`2.596 ms`** (with `4` highlighted PNG evidence crops rendered)
+- **End-to-end CLI wall time (5 claims + 4 PNG crops):** `7.58 ms`
