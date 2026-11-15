@@ -161,14 +161,31 @@ pub struct FlatFillReport {
 /// Detects flat `"checkbox"`, `"comb"`, and `"underline"` form fields across
 /// `pages` (or all pages when `pages` is `None` or empty), skipping regions
 /// already covered by `/AcroForm` widgets.
+///
+/// A page whose detection needs more work than its part count allows
+/// (pages built against the indexes do) reports no fields, and a
+/// `limit.flat_form_work` warning naming it goes to `doc`'s diagnostics.
 pub fn detect_flat_forms(doc: &Document, pages: Option<&str>) -> Result<FlatFormReport, String> {
+    detect_flat_forms_tracked(doc, pages).map(|(report, _)| report)
+}
+
+/// [`detect_flat_forms`], with the 1-based pages whose detection ran out
+/// of work, listed or not: fill and promote refuse a document with any,
+/// since the names of later pages' fields depend on every earlier page.
+fn detect_flat_forms_tracked(
+    doc: &Document,
+    pages: Option<&str>,
+) -> Result<(FlatFormReport, Vec<i32>), String> {
     let page_count = doc.page_count().map_err(|e| e.0)?;
     if page_count <= 0 {
-        return Ok(FlatFormReport {
-            page_count: 0,
-            fields: Vec::new(),
-            promoted_widgets: 0,
-        });
+        return Ok((
+            FlatFormReport {
+                page_count: 0,
+                fields: Vec::new(),
+                promoted_widgets: 0,
+            },
+            Vec::new(),
+        ));
     }
 
     let raw_indices: Vec<i32> = match pages {
@@ -189,6 +206,7 @@ pub fn detect_flat_forms(doc: &Document, pages: Option<&str>) -> Result<FlatForm
     let mut store = Store::default();
     let mut all_fields = Vec::new();
     let mut name_counts: HashMap<String, usize> = HashMap::new();
+    let mut stopped = Vec::new();
 
     for index in 0..page_count {
         let listed = wanted.contains(&index);
@@ -207,39 +225,61 @@ pub fn detect_flat_forms(doc: &Document, pages: Option<&str>) -> Result<FlatForm
             detect_page_flat_forms_with_store(doc, index, &page_obj, store, &mut name_counts);
         store = next_store;
         match res {
-            Ok(fields) if listed => all_fields.extend(fields),
-            Ok(_) => {}
+            Ok(Some(fields)) if listed => all_fields.extend(fields),
+            Ok(Some(_)) => {}
+            Ok(None) => stopped.push(index.saturating_add(1)),
             Err(e) if listed => return Err(e),
             Err(_) => {}
         }
     }
 
-    Ok(FlatFormReport {
-        page_count,
-        fields: all_fields,
-        promoted_widgets: 0,
-    })
+    Ok((
+        FlatFormReport {
+            page_count,
+            fields: all_fields,
+            promoted_widgets: 0,
+        },
+        stopped,
+    ))
+}
+
+/// The error fill and promote give for a document where detection ran out
+/// of work on `stopped` pages.
+fn stopped_error(stopped: &[i32]) -> FlatFormError {
+    let pages: Vec<String> = stopped.iter().map(i32::to_string).collect();
+    FlatFormError {
+        code: "limit.flat_form_work",
+        message: format!(
+            "flat-form detection ran out of work on page(s) {}, so the document's fields are not all known; nothing was filled or promoted",
+            pages.join(", ")
+        ),
+    }
 }
 
 /// Detects flat form fields on a single 0-based `index` page. Names are
 /// de-duplicated within the page only; [`detect_flat_forms`] gives the names
-/// fill and promote use.
+/// fill and promote use. A page that runs out of work has no fields and
+/// raises `limit.flat_form_work`, as in [`detect_flat_forms`].
 pub fn detect_page_flat_forms(doc: &Document, index: i32) -> Result<Vec<FlatField>, String> {
     let page_obj = doc.page(index).map_err(|e| e.0)?;
     if doc.resolve(&page_obj).as_dict().is_none() {
         return Err(format!("page {} object is not a dictionary", index + 1));
     }
     let mut name_counts = HashMap::new();
-    detect_page_flat_forms_with_store(doc, index, &page_obj, Store::default(), &mut name_counts).0
+    detect_page_flat_forms_with_store(doc, index, &page_obj, Store::default(), &mut name_counts)
+        .0
+        .map(Option::unwrap_or_default)
 }
 
+/// A page's fields, or `None` when its detection ran out of work, which
+/// it reports as `limit.flat_form_work` on `doc`.
 fn detect_page_flat_forms_with_store(
     doc: &Document,
     index: i32,
     page_obj: &Object,
     mut store: Store,
     name_counts: &mut HashMap<String, usize>,
-) -> (Result<Vec<FlatField>, String>, Store) {
+) -> (Result<Option<Vec<FlatField>>, String>, Store) {
     let page_num = index.saturating_add(1);
     let (raw_box, page_ctm) = match doc.page_transform(page_obj) {
         Ok(pair) => pair,
@@ -247,6 +287,8 @@ fn detect_page_flat_forms_with_store(
     };
     let mediabox = raw_box.transform(page_ctm);
     let inv_ctm = page_ctm.invert();
+    let near = mediabox.expand(FAR_MARGIN);
+    let work = Work::new();
 
     // Collect existing `/AcroForm` widget rects in MuPDF page space so we skip them.
     let (_, widgets) = annot::page_annots(doc, page_obj);
@@ -255,14 +297,20 @@ fn detect_page_flat_forms_with_store(
         if let Some(r) = annot::rect(doc, w, page_ctm)
             && r.is_valid()
             && !r.is_empty()
+            && near_page(r, near)
         {
             widget_rects.push(r);
         }
     }
+    work.add_items(widget_rects.len());
 
-    let ((stext_res, collector, next_store), _) = diag::capture(|| {
+    let ((stext_res, parsed_text, collector, next_store), _) = diag::capture(|| {
         let (s_res, s1) = stext::extract_page(doc, page_obj, stext::Options::default(), store);
-        let mut fc = FlatCollector::new(Some(doc), mediabox);
+        let text = s_res.as_ref().ok().map(|p| extract_flat_text(p, near));
+        if let Some(t) = &text {
+            work.add_items(t.glyphs.len() + t.labels.len() + t.underscores.len());
+        }
+        let mut fc = FlatCollector::new(Some(doc), mediabox, &work);
         let run = page_run::run_page_parts(
             doc,
             page_obj,
@@ -272,16 +320,18 @@ fn detect_page_flat_forms_with_store(
             Matrix::IDENTITY,
             Parts::CONTENTS,
         );
-        (s_res, fc, run.store)
+        (s_res.map(|_| ()), text, fc, run.store)
     });
     store = next_store;
 
-    let stext_page = match stext_res {
-        Ok(p) => p,
-        Err(e) => return (Err(diag::report::strip(&e).to_string()), store),
-    };
-
-    let parsed_text = extract_flat_text(&stext_page);
+    if let Err(e) = stext_res {
+        return (Err(diag::report::strip(&e).to_string()), store);
+    }
+    let parsed_text = parsed_text.unwrap_or_else(|| FlatPageText {
+        labels: Vec::new(),
+        underscores: Vec::new(),
+        glyphs: Vec::new(),
+    });
     let raw_fields = synthesize_page_fields(
         page_num,
         mediabox,
@@ -290,6 +340,19 @@ fn detect_page_flat_forms_with_store(
         &parsed_text,
         &widget_rects,
     );
+    #[cfg(test)]
+    LAST_WORK.with(|w| w.set((work.0.used.get(), work.0.items.get())));
+    if work.exhausted() {
+        doc.diagnostics().warn(
+            "limit.flat_form_work",
+            format!(
+                "page {page_num}: flat-form detection needed more than {} units of work for its {} parts and stopped; no fields are reported for the page",
+                work.budget(),
+                work.0.items.get()
+            ),
+        );
+        return (Ok(None), store);
+    }
 
     let mut out = Vec::with_capacity(raw_fields.len());
     for (seq, mut f) in raw_fields.into_iter().enumerate() {
@@ -305,7 +368,7 @@ fn detect_page_flat_forms_with_store(
         out.push(f);
     }
 
-    (Ok(out), store)
+    (Ok(Some(out)), store)
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +439,12 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// The work and part count of the last page detected on this thread.
+    static LAST_WORK: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
 fn brute() -> bool {
     BRUTE.with(std::cell::Cell::get)
 }
@@ -385,25 +454,120 @@ fn brute() -> bool {
     false
 }
 
-/// Most grid cells one item is filed under; a bigger item, or one with a
-/// coordinate that is not finite, is returned by every query.
+/// How far past the page an item may lie and still be part of a field or
+/// its caption (a caption is looked for up to 96 pt from its field). An
+/// item further out, or with a coordinate that is not finite, is dropped
+/// before anything is indexed.
+const FAR_MARGIN: f32 = 128.0;
+
+/// Whether `r` is finite and within [`FAR_MARGIN`] of the page `near`
+/// (the page already expanded by it).
+fn near_page(r: Rect, near: Rect) -> bool {
+    [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite())
+        && r.x0.min(r.x1) <= near.x1
+        && r.x0.max(r.x1) >= near.x0
+        && r.y0.min(r.y1) <= near.y1
+        && r.y0.max(r.y1) >= near.y0
+}
+
+/// Units of work a page's detection may do for each part it collected
+/// (a stroked box, a line, a mark, a whiteout, a glyph, a caption, a
+/// widget), on top of [`WORK_BASE`]. A unit is a grid cell filed under or
+/// looked in, an item a query hands back, or a step of the comb-row scan.
+/// Busy generated pages use under 1/8 of it; a page that needs more is
+/// built against the indexes, and its detection stops with
+/// `limit.flat_form_work`.
+const WORK_PER_ITEM: u64 = 512;
+
+/// Units of work every page may do whatever its part count, so a page of
+/// a few large parts is never cut short.
+const WORK_BASE: u64 = 1 << 20;
+
+/// The work one page's detection has done, shared by its indexes. Once it
+/// passes the budget every query answers with nothing, so what is left of
+/// detection runs in time linear in the parts, and the page reports no
+/// fields (see [`detect_page_flat_forms`]).
+#[derive(Clone)]
+struct Work(std::rc::Rc<WorkState>);
+
+struct WorkState {
+    used: std::cell::Cell<u64>,
+    items: std::cell::Cell<u64>,
+    unbounded: bool,
+}
+
+impl Work {
+    fn new() -> Self {
+        Work(std::rc::Rc::new(WorkState {
+            used: std::cell::Cell::new(0),
+            items: std::cell::Cell::new(0),
+            // The scans the tests compare with do quadratic work on purpose.
+            unbounded: brute(),
+        }))
+    }
+
+    /// Counts `n` more parts towards the budget.
+    fn add_items(&self, n: usize) {
+        let items = &self.0.items;
+        items.set(items.get().saturating_add(n as u64));
+    }
+
+    fn spend(&self, n: usize) {
+        let used = &self.0.used;
+        used.set(used.get().saturating_add(n as u64));
+    }
+
+    fn budget(&self) -> u64 {
+        WORK_PER_ITEM
+            .saturating_mul(self.0.items.get())
+            .saturating_add(WORK_BASE)
+    }
+
+    fn exhausted(&self) -> bool {
+        !self.0.unbounded && self.0.used.get() > self.budget()
+    }
+}
+
+/// Most fine cells one item is filed under; a bigger one is filed under
+/// the coarse cells, [`COARSE`] fine cells a side, it touches.
 const MAX_GRID_SPAN: i64 = 1024;
+
+/// Fine cells a side of a coarse cell.
+const COARSE: i64 = 8;
+
+/// Cells `(x0, y0, x1, y1)`, inclusive.
+type Span = (i64, i64, i64, i64);
+
+fn span_cells((cx0, cy0, cx1, cy1): Span) -> i64 {
+    (cx1 - cx0 + 1).saturating_mul(cy1 - cy0 + 1)
+}
 
 /// Item numbers filed under the cells of a uniform grid their boxes touch,
 /// so what lies near a box is found without scanning every item. A query
 /// returns a superset of the items whose box meets its box, in item order;
 /// callers test their own predicate on each, so results are those of a scan.
+///
+/// Cell numbers are clamped to the page and [`FAR_MARGIN`] around it, a
+/// cell more: a box and a query that meet share a point, and the clamped
+/// cell of that point is in both clamped spans, so the superset holds for
+/// anything off the page too, and no span is bigger than the page's grid.
 struct Grid {
     cell: f32,
+    lo: (i64, i64),
+    hi: (i64, i64),
     cells: HashMap<(i64, i64), Vec<usize>>,
+    coarse: HashMap<(i64, i64), Vec<usize>>,
+    /// Items with a coordinate that is not finite, which every query
+    /// returns. Detection drops those before indexing.
     wide: Vec<usize>,
     len: usize,
     brute: bool,
+    work: Work,
 }
 
 impl Grid {
     /// Cells of 16 pt, or of 1/128 of the page on a page over 2048 pt.
-    fn new(mediabox: Rect) -> Self {
+    fn new(mediabox: Rect, work: &Work) -> Self {
         let size = (mediabox.x1 - mediabox.x0)
             .abs()
             .max((mediabox.y1 - mediabox.y0).abs());
@@ -412,66 +576,188 @@ impl Grid {
         } else {
             16.0
         };
+        let at = |v: f32| (v / cell).floor() as i64;
+        let near = mediabox.expand(FAR_MARGIN + cell);
+        let (lo, hi) = if [near.x0, near.y0, near.x1, near.y1]
+            .iter()
+            .all(|v| v.is_finite())
+            && near.is_valid()
+        {
+            ((at(near.x0), at(near.y0)), (at(near.x1), at(near.y1)))
+        } else {
+            ((0, 0), (0, 0))
+        };
         Grid {
             cell,
+            lo,
+            hi,
             cells: HashMap::new(),
+            coarse: HashMap::new(),
             wide: Vec::new(),
             len: 0,
             brute: brute(),
+            work: work.clone(),
         }
     }
 
-    /// The cells `r` touches, unless it has a coordinate that is not
-    /// finite or touches more than [`MAX_GRID_SPAN`].
-    fn span(&self, r: Rect) -> Option<(i64, i64, i64, i64)> {
+    fn col(&self, v: f32) -> i64 {
+        ((v / self.cell).floor() as i64).clamp(self.lo.0, self.hi.0)
+    }
+
+    fn row(&self, v: f32) -> i64 {
+        ((v / self.cell).floor() as i64).clamp(self.lo.1, self.hi.1)
+    }
+
+    /// The clamped fine cells `r` touches, unless it has a coordinate that
+    /// is not finite.
+    fn span(&self, r: Rect) -> Option<Span> {
         if ![r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()) {
             return None;
         }
-        let at = |v: f32| (v / self.cell).floor() as i64;
-        let (cx0, cx1) = (at(r.x0.min(r.x1)), at(r.x0.max(r.x1)));
-        let (cy0, cy1) = (at(r.y0.min(r.y1)), at(r.y0.max(r.y1)));
-        let cells = (cx1.saturating_sub(cx0).saturating_add(1))
-            .saturating_mul(cy1.saturating_sub(cy0).saturating_add(1));
-        (cells <= MAX_GRID_SPAN).then_some((cx0, cy0, cx1, cy1))
+        Some((
+            self.col(r.x0.min(r.x1)),
+            self.row(r.y0.min(r.y1)),
+            self.col(r.x0.max(r.x1)),
+            self.row(r.y0.max(r.y1)),
+        ))
+    }
+
+    fn file(&mut self, item: usize, key: (i64, i64), coarse: bool) {
+        let map = if coarse {
+            &mut self.coarse
+        } else {
+            &mut self.cells
+        };
+        let items = map.entry(key).or_default();
+        if items.last() != Some(&item) {
+            items.push(item);
+        }
     }
 
     fn insert(&mut self, item: usize, r: Rect) {
         self.len = self.len.max(item.saturating_add(1));
         match self.span(r) {
-            Some((cx0, cy0, cx1, cy1)) => {
-                for cy in cy0..=cy1 {
-                    for cx in cx0..=cx1 {
-                        self.cells.entry((cx, cy)).or_default().push(item);
-                    }
-                }
-            }
+            Some(sp) => self.insert_span(item, sp),
             None => self.wide.push(item),
         }
     }
 
-    /// The items whose box may meet `r`, in item order.
-    fn query(&self, r: Rect) -> Vec<usize> {
-        let span = if self.brute { None } else { self.span(r) };
-        let Some((cx0, cy0, cx1, cy1)) = span else {
-            return (0..self.len).collect();
+    fn insert_span(&mut self, item: usize, sp: Span) {
+        let (cx0, cy0, cx1, cy1) = sp;
+        let coarse = span_cells(sp) > MAX_GRID_SPAN;
+        let (cx0, cy0, cx1, cy1) = if coarse {
+            (
+                cx0.div_euclid(COARSE),
+                cy0.div_euclid(COARSE),
+                cx1.div_euclid(COARSE),
+                cy1.div_euclid(COARSE),
+            )
+        } else {
+            sp
         };
-        let mut out = self.wide.clone();
-        let cells = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
-        if cells as usize > self.cells.len() {
-            for ((cx, cy), items) in &self.cells {
+        self.work
+            .spend(span_cells((cx0, cy0, cx1, cy1)).max(0) as usize);
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                self.file(item, (cx, cy), coarse);
+            }
+        }
+    }
+
+    /// Files the segment `p0`-`p1` under the cells it passes through,
+    /// rather than every cell of its box, so a long diagonal stroke is not
+    /// near everything. Each column's cells are those of the segment's
+    /// extent over the column, half a point wider each way.
+    fn insert_segment(&mut self, item: usize, p0: Point, p1: Point) {
+        self.len = self.len.max(item.saturating_add(1));
+        let bbox = Rect::new(
+            p0.x.min(p1.x),
+            p0.y.min(p1.y),
+            p0.x.max(p1.x),
+            p0.y.max(p1.y),
+        );
+        let Some(sp) = self.span(bbox) else {
+            self.wide.push(item);
+            return;
+        };
+        let (cx0, _, cx1, _) = sp;
+        let dx = p1.x - p0.x;
+        if span_cells(sp) <= 4 || cx0 == cx1 || dx.abs() < 1e-3 {
+            self.insert_span(item, sp);
+            return;
+        }
+        let slope = (p1.y - p0.y) / dx;
+        let y_at = |x: f32| p0.y + (x - p0.x) * slope;
+        for cx in cx0..=cx1 {
+            let xa = if cx == cx0 {
+                bbox.x0
+            } else {
+                cx as f32 * self.cell - 0.5
+            };
+            let xb = if cx == cx1 {
+                bbox.x1
+            } else {
+                (cx + 1) as f32 * self.cell + 0.5
+            };
+            let (ya, yb) = (y_at(xa.max(bbox.x0)), y_at(xb.min(bbox.x1)));
+            let ry0 = self.row(ya.min(yb).max(bbox.y0) - 0.5);
+            let ry1 = self.row(ya.max(yb).min(bbox.y1) + 0.5);
+            self.work.spend((ry1 - ry0 + 1).max(0) as usize);
+            for cy in ry0..=ry1 {
+                self.file(item, (cx, cy), false);
+            }
+        }
+    }
+
+    /// Pushes onto `out` the items filed in `map` under the cells of `sp`,
+    /// looking at whichever is fewer, those cells or the filled ones.
+    fn gather(map: &HashMap<(i64, i64), Vec<usize>>, sp: Span, work: &Work, out: &mut Vec<usize>) {
+        let (cx0, cy0, cx1, cy1) = sp;
+        if span_cells(sp) as usize > map.len() {
+            work.spend(map.len());
+            for ((cx, cy), items) in map {
                 if (cx0..=cx1).contains(cx) && (cy0..=cy1).contains(cy) {
                     out.extend(items);
                 }
             }
         } else {
+            work.spend(span_cells(sp) as usize);
             for cy in cy0..=cy1 {
                 for cx in cx0..=cx1 {
-                    if let Some(items) = self.cells.get(&(cx, cy)) {
+                    if let Some(items) = map.get(&(cx, cy)) {
                         out.extend(items);
                     }
                 }
             }
         }
+    }
+
+    fn coarse_span((cx0, cy0, cx1, cy1): Span) -> Span {
+        (
+            cx0.div_euclid(COARSE),
+            cy0.div_euclid(COARSE),
+            cx1.div_euclid(COARSE),
+            cy1.div_euclid(COARSE),
+        )
+    }
+
+    /// The items whose box may meet `r`, in item order; none once the
+    /// page's work is spent.
+    fn query(&self, r: Rect) -> Vec<usize> {
+        if self.work.exhausted() {
+            return Vec::new();
+        }
+        let span = if self.brute { None } else { self.span(r) };
+        let Some(sp) = span else {
+            self.work.spend(self.len);
+            return (0..self.len).collect();
+        };
+        let mut out = self.wide.clone();
+        Self::gather(&self.cells, sp, &self.work, &mut out);
+        if !self.coarse.is_empty() {
+            Self::gather(&self.coarse, Self::coarse_span(sp), &self.work, &mut out);
+        }
+        self.work.spend(out.len());
         out.sort_unstable();
         out.dedup();
         out
@@ -479,24 +765,44 @@ impl Grid {
 
     /// Drops the items `keep` refuses from the cells `r` touches.
     fn prune(&mut self, r: Rect, keep: impl Fn(usize) -> bool) {
-        if let Some((cx0, cy0, cx1, cy1)) = self.span(r)
-            && ((cx1 - cx0 + 1) * (cy1 - cy0 + 1)) as usize <= self.cells.len()
-        {
-            for cy in cy0..=cy1 {
-                for cx in cx0..=cx1 {
-                    if let Some(items) = self.cells.get_mut(&(cx, cy)) {
-                        items.retain(|&i| keep(i));
-                        if items.is_empty() {
-                            self.cells.remove(&(cx, cy));
+        let Some(sp) = self.span(r) else {
+            self.work.spend(self.len);
+            for map in [&mut self.cells, &mut self.coarse] {
+                map.retain(|_, items| {
+                    items.retain(|&i| keep(i));
+                    !items.is_empty()
+                });
+            }
+            self.wide.retain(|&i| keep(i));
+            return;
+        };
+        for (map, (cx0, cy0, cx1, cy1)) in [
+            (&mut self.cells, sp),
+            (&mut self.coarse, Self::coarse_span(sp)),
+        ] {
+            let sp = (cx0, cy0, cx1, cy1);
+            if span_cells(sp) as usize <= map.len() {
+                for cy in cy0..=cy1 {
+                    for cx in cx0..=cx1 {
+                        if let Some(items) = map.get_mut(&(cx, cy)) {
+                            self.work.spend(items.len());
+                            items.retain(|&i| keep(i));
+                            if items.is_empty() {
+                                map.remove(&(cx, cy));
+                            }
                         }
                     }
                 }
+                self.work.spend(span_cells(sp) as usize);
+            } else {
+                self.work.spend(map.len());
+                map.retain(|(cx, cy), items| {
+                    if (cx0..=cx1).contains(cx) && (cy0..=cy1).contains(cy) {
+                        items.retain(|&i| keep(i));
+                    }
+                    !items.is_empty()
+                });
             }
-        } else {
-            self.cells.retain(|_, items| {
-                items.retain(|&i| keep(i));
-                !items.is_empty()
-            });
         }
         self.wide.retain(|&i| keep(i));
     }
@@ -514,15 +820,15 @@ struct RectIndex {
 }
 
 impl RectIndex {
-    fn new(mediabox: Rect) -> Self {
+    fn new(mediabox: Rect, work: &Work) -> Self {
         RectIndex {
             rects: Vec::new(),
-            grid: Grid::new(mediabox),
+            grid: Grid::new(mediabox, work),
         }
     }
 
-    fn of(mediabox: Rect, rects: &[Rect]) -> Self {
-        let mut index = Self::new(mediabox);
+    fn of(mediabox: Rect, work: &Work, rects: &[Rect]) -> Self {
+        let mut index = Self::new(mediabox, work);
         for &r in rects {
             index.push(r);
         }
@@ -552,6 +858,9 @@ impl RectIndex {
 struct FlatCollector<'d> {
     doc: Option<&'d Document>,
     mediabox: Rect,
+    /// The page and [`FAR_MARGIN`] around it: parts not in it are dropped.
+    near: Rect,
+    work: Work,
     stack: Vec<(Rect, ClipKind)>,
     overflow: usize,
     ops_seen: usize,
@@ -572,10 +881,12 @@ struct FlatCollector<'d> {
 }
 
 impl<'d> FlatCollector<'d> {
-    fn new(doc: Option<&'d Document>, mediabox: Rect) -> Self {
+    fn new(doc: Option<&'d Document>, mediabox: Rect, work: &Work) -> Self {
         Self {
             doc,
             mediabox,
+            near: mediabox.expand(FAR_MARGIN),
+            work: work.clone(),
             stack: Vec::new(),
             overflow: 0,
             ops_seen: 0,
@@ -585,7 +896,7 @@ impl<'d> FlatCollector<'d> {
             ink_marks: Vec::new(),
             ink_alive: Vec::new(),
             ink_live: 0,
-            ink_grid: Grid::new(mediabox),
+            ink_grid: Grid::new(mediabox, work),
             box_cells: HashMap::new(),
             whiteout_rects: Vec::new(),
         }
@@ -600,25 +911,48 @@ impl<'d> FlatCollector<'d> {
     }
 
     fn push_ink(&mut self, mark: InkMark) {
-        if self.ink_live >= MAX_COLLECTED {
+        if self.ink_live >= MAX_COLLECTED || !near_page(ink_box(&mark), self.near) {
             return;
         }
+        self.work.add_items(1);
         // Painted-over marks are dropped once they outnumber the rest.
         if self.ink_marks.len() >= 2 * MAX_COLLECTED {
             let live: Vec<InkMark> = self.live_ink().copied().collect();
             self.ink_marks.clear();
             self.ink_alive.clear();
             self.ink_live = 0;
-            self.ink_grid = Grid::new(self.mediabox);
+            self.ink_grid = Grid::new(self.mediabox, &self.work);
             for m in live {
-                self.push_ink(m);
+                self.file_ink(m);
             }
         }
+        self.file_ink(mark);
+    }
+
+    fn file_ink(&mut self, mark: InkMark) {
         self.ink_grid
             .insert(self.ink_marks.len(), point_box(ink_midpoint(&mark)));
         self.ink_marks.push(mark);
         self.ink_alive.push(true);
         self.ink_live += 1;
+    }
+
+    fn push_horiz(&mut self, line: HorizLine) {
+        if self.horiz_lines.len() < MAX_COLLECTED
+            && near_page(Rect::new(line.x0, line.y, line.x1, line.y), self.near)
+        {
+            self.work.add_items(1);
+            self.horiz_lines.push(line);
+        }
+    }
+
+    fn push_vert(&mut self, line: VertLine) {
+        if self.vert_lines.len() < MAX_COLLECTED
+            && near_page(Rect::new(line.x, line.y0, line.x, line.y1), self.near)
+        {
+            self.work.add_items(1);
+            self.vert_lines.push(line);
+        }
     }
 
     fn current_scissor(&self) -> Rect {
@@ -657,9 +991,10 @@ impl<'d> FlatCollector<'d> {
     }
 
     fn apply_whiteout(&mut self, white_rect: Rect) {
-        if self.is_page_backdrop(white_rect) {
+        if self.is_page_backdrop(white_rect) || !near_page(white_rect, self.near) {
             return;
         }
+        self.work.add_items(1);
         if self.whiteout_rects.len() < MAX_COLLECTED {
             self.whiteout_rects.push(white_rect);
         }
@@ -678,9 +1013,14 @@ impl<'d> FlatCollector<'d> {
     }
 
     fn add_stroked_box(&mut self, r: Rect) {
-        if self.stroked_boxes.len() >= MAX_COLLECTED || self.is_page_backdrop(r) {
+        if self.stroked_boxes.len() >= MAX_COLLECTED
+            || self.is_page_backdrop(r)
+            || !near_page(r, self.near)
+        {
             return;
         }
+        self.work.add_items(1);
+        self.work.spend(81);
         let near = |b: &StrokedBox| {
             (b.bbox.x0 - r.x0).abs() <= 0.8
                 && (b.bbox.y0 - r.y0).abs() <= 0.8
@@ -758,7 +1098,7 @@ impl<'d> FlatCollector<'d> {
             }) * path::max_expansion(ctm);
             for sub in walker.subpaths {
                 let r = sub.bounds.intersect(scissor);
-                if !r.is_valid() {
+                if !r.is_valid() || !near_page(sub.bounds, self.near) {
                     continue;
                 }
                 if let Some(axis_rect) = sub.axis_rect() {
@@ -776,19 +1116,14 @@ impl<'d> FlatCollector<'d> {
                     if dx <= 0.05 && dy <= 0.05 {
                         continue;
                     }
-                    if dy <= 1.0 && dx >= 3.0 && lw <= 3.5 && self.horiz_lines.len() < MAX_COLLECTED
-                    {
-                        self.horiz_lines.push(HorizLine {
+                    if dy <= 1.0 && dx >= 3.0 && lw <= 3.5 {
+                        self.push_horiz(HorizLine {
                             x0: a.x.min(b.x),
                             x1: a.x.max(b.x),
                             y: 0.5 * (a.y + b.y),
                         });
-                    } else if dx <= 1.0
-                        && dy >= 3.0
-                        && lw <= 3.5
-                        && self.vert_lines.len() < MAX_COLLECTED
-                    {
-                        self.vert_lines.push(VertLine {
+                    } else if dx <= 1.0 && dy >= 3.0 && lw <= 3.5 {
+                        self.push_vert(VertLine {
                             x: 0.5 * (a.x + b.x),
                             y0: a.y.min(b.y),
                             y1: a.y.max(b.y),
@@ -801,7 +1136,7 @@ impl<'d> FlatCollector<'d> {
             // Filled path.
             for sub in walker.subpaths {
                 let r = sub.bounds.intersect(scissor);
-                if !r.is_valid() || r.is_empty() {
+                if !r.is_valid() || r.is_empty() || !near_page(sub.bounds, self.near) {
                     continue;
                 }
                 if near_white {
@@ -820,7 +1155,7 @@ impl<'d> FlatCollector<'d> {
                     let ah = ar.y1 - ar.y0;
                     // Thin filled horizontal or vertical rules act just like stroked lines.
                     if ah <= 2.2 && aw >= 25.0 && self.horiz_lines.len() < MAX_COLLECTED {
-                        self.horiz_lines.push(HorizLine {
+                        self.push_horiz(HorizLine {
                             x0: ar.x0,
                             x1: ar.x1,
                             y: 0.5 * (ar.y0 + ar.y1),
@@ -828,7 +1163,7 @@ impl<'d> FlatCollector<'d> {
                         continue;
                     }
                     if aw <= 2.2 && ah >= 4.0 && self.vert_lines.len() < MAX_COLLECTED {
-                        self.vert_lines.push(VertLine {
+                        self.push_vert(VertLine {
                             x: 0.5 * (ar.x0 + ar.x1),
                             y0: ar.y0,
                             y1: ar.y1,
@@ -1177,7 +1512,9 @@ struct FlatPageText {
     glyphs: Vec<GlyphItem>,
 }
 
-fn extract_flat_text(stext_page: &StextPage) -> FlatPageText {
+/// The page's glyphs, captions and underscore runs, without those not
+/// [`near_page`] to `near`.
+fn extract_flat_text(stext_page: &StextPage, near: Rect) -> FlatPageText {
     let mut labels = Vec::new();
     let mut underscores = Vec::new();
     let mut glyphs = Vec::new();
@@ -1187,6 +1524,9 @@ fn extract_flat_text(stext_page: &StextPage) -> FlatPageText {
         &mut underscores,
         &mut glyphs,
     );
+    glyphs.retain(|g: &GlyphItem| near_page(point_box(Point::new(g.cx, g.cy)), near));
+    labels.retain(|l: &LabelSpan| near_page(l.bbox, near) && l.cy.is_finite());
+    underscores.retain(|u: &UnderscoreBlank| near_page(u.bbox, near));
     FlatPageText {
         labels,
         underscores,
@@ -1392,6 +1732,7 @@ struct PageIndex<'a> {
     ink_boxes: Grid,
     whiteouts: RectIndex,
     widgets: RectIndex,
+    work: Work,
 }
 
 impl<'a> PageIndex<'a> {
@@ -1401,18 +1742,19 @@ impl<'a> PageIndex<'a> {
         text: &'a FlatPageText,
         widget_rects: &[Rect],
     ) -> Self {
-        let mut glyphs = Grid::new(mediabox);
+        let work = &collector.work;
+        let mut glyphs = Grid::new(mediabox, work);
         for (i, g) in text.glyphs.iter().enumerate() {
             glyphs.insert(i, point_box(Point::new(g.cx, g.cy)));
         }
-        let mut labels = Grid::new(mediabox);
+        let mut labels = Grid::new(mediabox, work);
         for (i, sp) in text.labels.iter().enumerate() {
             labels.insert(i, label_box(sp));
         }
         let (mut vl_starts, mut vl_ends, mut vl_extents) = (
-            Grid::new(mediabox),
-            Grid::new(mediabox),
-            Grid::new(mediabox),
+            Grid::new(mediabox, work),
+            Grid::new(mediabox, work),
+            Grid::new(mediabox, work),
         );
         for (i, vl) in collector.vert_lines.iter().enumerate() {
             vl_starts.insert(i, point_box(Point::new(vl.x, vl.y0)));
@@ -1420,9 +1762,12 @@ impl<'a> PageIndex<'a> {
             vl_extents.insert(i, Rect::new(vl.x, vl.y0, vl.x, vl.y1));
         }
         let ink: Vec<InkMark> = collector.live_ink().copied().collect();
-        let mut ink_boxes = Grid::new(mediabox);
+        let mut ink_boxes = Grid::new(mediabox, work);
         for (i, m) in ink.iter().enumerate() {
-            ink_boxes.insert(i, ink_box(m));
+            match *m {
+                InkMark::Seg { p0, p1 } => ink_boxes.insert_segment(i, p0, p1),
+                InkMark::Box { bbox } => ink_boxes.insert(i, bbox),
+            }
         }
         PageIndex {
             text,
@@ -1433,8 +1778,9 @@ impl<'a> PageIndex<'a> {
             vl_extents,
             ink,
             ink_boxes,
-            whiteouts: RectIndex::of(mediabox, &collector.whiteout_rects),
-            widgets: RectIndex::of(mediabox, widget_rects),
+            whiteouts: RectIndex::of(mediabox, work, &collector.whiteout_rects),
+            widgets: RectIndex::of(mediabox, work, widget_rects),
+            work: work.clone(),
         }
     }
 
@@ -1494,8 +1840,9 @@ fn synthesize_page_fields(
 ) -> Vec<FlatField> {
     let mut fields: Vec<FlatField> = Vec::new();
     let mut used_boxes = vec![false; collector.stroked_boxes.len()];
-    let mut comb_regions = RectIndex::new(mediabox);
     let index = PageIndex::new(mediabox, collector, text, widget_rects);
+    let work = &index.work;
+    let mut comb_regions = RectIndex::new(mediabox, work);
     let widget_rects = &index.widgets;
 
     // -----------------------------------------------------------------------
@@ -1539,7 +1886,7 @@ fn synthesize_page_fields(
     }
     let mut visited_cand = vec![false; cell_cands.len()];
     for i in 0..cell_cands.len() {
-        if visited_cand[i] {
+        if visited_cand[i] || work.exhausted() {
             continue;
         }
         let (_, r0) = cell_cands[i];
@@ -1558,10 +1905,14 @@ fn synthesize_page_fields(
 
         for (lo, hi) in runs {
             let mut j = lo;
-            while j < hi {
+            while j < hi && !work.exhausted() {
+                work.spend(1);
                 let prev_x1 = row[row.len() - 1].2.x1;
                 if !brute() {
-                    j += cell_cands[j..hi].partition_point(|(_, r)| r.x0 - prev_x1 < -2.5);
+                    // Searched only when the next cell is too far left.
+                    if cell_cands[j].1.x0 - prev_x1 < -2.5 {
+                        j += cell_cands[j..hi].partition_point(|(_, r)| r.x0 - prev_x1 < -2.5);
+                    }
                     if j >= hi || cell_cands[j].1.x0 - prev_x1 > 3.5 {
                         break;
                     }
@@ -1787,7 +2138,7 @@ fn synthesize_page_fields(
     // -----------------------------------------------------------------------
     // 2. VECTOR CHECKBOXES: 5 <= w,h <= 18, |w - h| <= 3, not in a comb
     // -----------------------------------------------------------------------
-    let mut checkbox_rects = RectIndex::new(mediabox);
+    let mut checkbox_rects = RectIndex::new(mediabox, work);
     for (idx, sb) in collector.stroked_boxes.iter().enumerate() {
         if used_boxes[idx] {
             continue;
@@ -1836,7 +2187,7 @@ fn synthesize_page_fields(
     // 3. UNDERLINES: horizontal stroked rule (`>= 35 pt`) OR `>= 4` `'_'` run
     // -----------------------------------------------------------------------
     let page_w = (mediabox.x1 - mediabox.x0).max(1.0);
-    let mut underline_rects = RectIndex::new(mediabox);
+    let mut underline_rects = RectIndex::new(mediabox, work);
 
     for hl in &collector.horiz_lines {
         let w = hl.x1 - hl.x0;
@@ -2299,6 +2650,8 @@ const MAX_EXISTING_FIELDS: usize = 50_000;
 /// Fills flat form fields on a clean `O(1)` fork of `doc`, serializes with
 /// `write_opts`, reads the output back as every writer does
 /// ([`write::save_verified`]), and verifies the fills on the reopened bytes.
+/// Fails with `limit.flat_form_work` when detection ran out of work on any
+/// page, since the fields, and their names, are then not all known.
 pub fn fill_flat_forms(
     doc: &Document,
     ops: &[FlatFillOp],
@@ -2363,10 +2716,14 @@ pub fn stage_flat_fill(
     ops: &[FlatFillOp],
 ) -> Result<StagedFlatFill, FlatFormError> {
     let fork = doc.fork_clean();
-    let detected = detect_flat_forms(&fork, None).map_err(|message| FlatFormError {
-        code: "input.detect_failed",
-        message,
-    })?;
+    let (detected, stopped) =
+        detect_flat_forms_tracked(&fork, None).map_err(|message| FlatFormError {
+            code: "input.detect_failed",
+            message,
+        })?;
+    if !stopped.is_empty() {
+        return Err(stopped_error(&stopped));
+    }
 
     if ops.is_empty() {
         return Ok(StagedFlatFill {
@@ -2439,7 +2796,7 @@ pub fn stage_flat_fill(
             code: "input.page_tree",
             message,
         })?;
-        let page_text = extract_flat_text(&stext_page);
+        let page_text = extract_flat_text(&stext_page, mediabox.expand(FAR_MARGIN));
 
         let mut stream_buf = Vec::new();
         stream_buf.extend_from_slice(b"q\n");
@@ -2903,7 +3260,8 @@ fn verify_filled_bytes(
             code: "verify.readback",
             message,
         })?;
-        let page_text = extract_flat_text(&stext_page);
+        // What was written is read back wherever it landed.
+        let page_text = extract_flat_text(&stext_page, Rect::INFINITE);
         let redetected =
             detect_page_flat_forms(&reopened, page_index).map_err(|message| FlatFormError {
                 code: "verify.readback",
@@ -3005,7 +3363,8 @@ fn verify_filled_bytes(
 /// Promotes all detected flat form fields in `doc` into real interactive PDF
 /// `/Widget` annotations registered in `/AcroForm`, serializes with `write_opts`,
 /// reads the output back as every writer does ([`write::save_verified`]), and
-/// verifies every promoted widget via [`crate::form`].
+/// verifies every promoted widget via [`crate::form`]. Fails with
+/// `limit.flat_form_work` when detection ran out of work on any page.
 pub fn promote_flat_forms(
     doc: &Document,
     write_opts: &WriteOptions,
@@ -3056,10 +3415,14 @@ impl StagedFlatPromote {
 /// The promotion of [`promote_flat_forms`], with nothing saved yet.
 pub fn stage_flat_promote(doc: &Document) -> Result<StagedFlatPromote, FlatFormError> {
     let fork = doc.fork_clean();
-    let mut report = detect_flat_forms(&fork, None).map_err(|message| FlatFormError {
-        code: "input.detect_failed",
-        message,
-    })?;
+    let (mut report, stopped) =
+        detect_flat_forms_tracked(&fork, None).map_err(|message| FlatFormError {
+            code: "input.detect_failed",
+            message,
+        })?;
+    if !stopped.is_empty() {
+        return Err(stopped_error(&stopped));
+    }
 
     if report.fields.is_empty() {
         return Ok(StagedFlatPromote { work: fork, report });
@@ -3435,6 +3798,10 @@ mod tests {
     /// 4. Two vector checkboxes: `[ ] Domestic` (unchecked) and `[✓] Foreign` (pre-checked!)
     /// 5. Signature rule with caption underneath (`Authorized Signature`)
     fn flat_intake_form_doc() -> Document {
+        page_doc(flat_intake_content().as_bytes(), HELV_RESOURCES, &[])
+    }
+
+    fn flat_intake_content() -> String {
         let mut s = String::new();
         s += "0 0 0 rg 0 0 0 RG 1 w\n";
 
@@ -3466,8 +3833,7 @@ mod tests {
         // 5. Signature line at y_pdf = 500 with caption directly below (y_pdf = 488)
         s += "72 500 m 260 500 l S\n";
         s += "BT /F1 9 Tf 74 488 Td (Authorized Signature) Tj ET\n";
-
-        page_doc(s.as_bytes(), HELV_RESOURCES, &[])
+        s
     }
 
     /// Three pages, each with a `Signature:` underline.
@@ -4040,7 +4406,10 @@ mod tests {
     fn flat_form_busy_page_timings() {
         for n in [1_000, 4_000, 16_000] {
             let (took, fields) = time_busy_page(n);
-            eprintln!("{n} parts: {fields} fields in {took:?}");
+            let (used, items) = LAST_WORK.with(std::cell::Cell::get);
+            eprintln!(
+                "{n} parts: {fields} fields in {took:?}, {used} units of work for {items} parts"
+            );
         }
     }
 
@@ -4065,6 +4434,10 @@ mod tests {
     /// starting within a few points of where the others end, none of the
     /// same width: each is a row start that looks at all the others.
     fn packed_row_page() -> Document {
+        letter_page(&packed_row_content())
+    }
+
+    fn packed_row_content() -> String {
         let mut s = String::from("0 0 0 RG 1 w\n");
         let step = 0.85;
         // Starts in band 100 (device y0 398.5..399.4), the cells they look
@@ -4090,7 +4463,7 @@ mod tests {
                 }
             }
         }
-        letter_page(&s)
+        s
     }
 
     /// Checkboxes in the top left of a 2,000 pt page and long diagonal
@@ -4099,7 +4472,10 @@ mod tests {
     fn oversized_items_page(nonfinite: bool) -> Document {
         let mut s = String::from("0 0 0 RG 1 w\n");
         for i in 0..6_000 {
-            let (x, y) = (20.0 + 10.0 * (i % 80) as f32, 1230.0 + 10.0 * (i / 80) as f32);
+            let (x, y) = (
+                20.0 + 10.0 * (i % 80) as f32,
+                1230.0 + 10.0 * (i / 80) as f32,
+            );
             s += &format!("{x} {y} 8 8 re S\n");
         }
         for i in 0..25_000 {
@@ -4131,6 +4507,140 @@ mod tests {
         letter_page(&s)
     }
 
+    /// The work detection did on the last page, and its budget.
+    fn last_work() -> (u64, u64) {
+        let (used, items) = LAST_WORK.with(std::cell::Cell::get);
+        (used, WORK_PER_ITEM * items + WORK_BASE)
+    }
+
+    #[test]
+    fn a_comb_row_packed_against_the_row_scan_stops_and_says_so() {
+        let doc = packed_row_page();
+        let started = std::time::Instant::now();
+        let rep = detect_flat_forms(&doc, None).unwrap();
+        let took = started.elapsed();
+        assert!(rep.fields.is_empty(), "{:?}", rep.fields.first());
+        let (used, budget) = last_work();
+        // It stops once over the budget, a step or a query later.
+        assert!(
+            used > budget && used < budget + 100_000,
+            "{used} of {budget}"
+        );
+        let warned: Vec<_> = doc
+            .diagnostics()
+            .snapshot()
+            .into_iter()
+            .filter(|d| d.code == "limit.flat_form_work")
+            .collect();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(
+            warned[0].message.starts_with("page 1: "),
+            "{}",
+            warned[0].message
+        );
+        // Generous, for a debug build: the row scan took 1.2 s in a
+        // release build before it was bounded.
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        // The same on every run.
+        assert_eq!(detect_flat_forms(&doc, None).unwrap(), rep);
+    }
+
+    #[test]
+    fn a_page_that_ran_out_of_work_cannot_be_filled_or_promoted() {
+        let packed = packed_row_content();
+        let signature =
+            "0 0 0 RG 1 w BT /F1 11 Tf 72 702 Td (Signature:) Tj ET 140 700 m 330 700 l S";
+        let font = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>";
+        let page_obj = |c: u32| {
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents {c} 0 R/Resources<</Font<</F1 7 0 R>>>>>>"
+            )
+            .into_bytes()
+        };
+        let doc = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>".to_vec(),
+            page_obj(5),
+            page_obj(6),
+            stream("", packed.as_bytes()),
+            stream("", signature.as_bytes()),
+            font.to_vec(),
+        ]);
+
+        // Detection still reports the other page, listed alone or not.
+        for pages in [None, Some("2")] {
+            let rep = detect_flat_forms(&doc, pages).unwrap();
+            let names: Vec<_> = rep
+                .fields
+                .iter()
+                .map(|f| (f.page, f.name.as_str()))
+                .collect();
+            assert_eq!(names, [(2, "signature")]);
+        }
+        assert!(doc.diagnostics().has("limit.flat_form_work"));
+
+        let ops = [FlatFillOp::SetText {
+            target: "signature".to_string(),
+            value: "Grace Hopper".to_string(),
+        }];
+        let e = fill_flat_forms(&doc, &ops, &WriteOptions::default()).unwrap_err();
+        assert_eq!(e.code, "limit.flat_form_work", "{e}");
+        assert!(e.message.contains("page(s) 1,"), "{e}");
+        let e = promote_flat_forms(&doc, &WriteOptions::default()).unwrap_err();
+        assert_eq!(e.code, "limit.flat_form_work", "{e}");
+    }
+
+    #[test]
+    fn oversized_strokes_are_looked_at_only_where_they_pass() {
+        for nonfinite in [false, true] {
+            let doc = oversized_items_page(nonfinite);
+            let started = std::time::Instant::now();
+            let fields = detect_page_flat_forms(&doc, 0).unwrap();
+            let took = started.elapsed();
+            assert_eq!(fields.len(), 6_000);
+            assert!(fields.iter().all(|f| f.checked == Some(false)));
+            assert!(!doc.diagnostics().has("limit.flat_form_work"));
+            let (used, budget) = last_work();
+            // Each stroke is filed under the ~150 cells it crosses, and no
+            // checkbox looks at one: 754 ms in a release build before.
+            assert!(used < budget / 3, "{used} of {budget}");
+            assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        }
+    }
+
+    #[test]
+    fn large_whiteouts_do_not_each_look_at_the_ink_left_in_the_margins() {
+        let doc = margin_whiteouts_page();
+        let started = std::time::Instant::now();
+        detect_page_flat_forms(&doc, 0).unwrap();
+        let took = started.elapsed();
+        assert!(!doc.diagnostics().has("limit.flat_form_work"));
+        let (used, budget) = last_work();
+        // 649 ms in a release build before, every whiteout handed every mark.
+        assert!(used < budget / 20, "{used} of {budget}");
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    }
+
+    #[test]
+    fn parts_off_the_page_or_not_finite_are_ignored() {
+        let plain = detect_flat_forms(&flat_intake_form_doc(), None).unwrap();
+        let mut s = String::from("0 0 0 rg 0 0 0 RG 1 w\n");
+        // Strokes with an x that overflows, beside and across the fields.
+        s += "q 1e38 0 0 1 0 0 cm -10 640 m 10 642 l S -10 566 m 10 576 l S Q\n";
+        s += "q 1e38 0 0 1e38 0 0 cm 0 0 m 1 1 l S 0 0 1 1 re f Q\n";
+        // An underline, a caption and a comb far below and right of the page.
+        s += "72 -5000 m 300 -5000 l S BT /F1 11 Tf 8000 702 Td (Far:) Tj ET 8040 700 m 8300 700 l S\n";
+        for i in 0..9 {
+            s += &format!("{} -3000 16 18 re S\n", 120 + 16 * i);
+        }
+        // A whiteout and ink with coordinates that overflow.
+        s += "q 1 g 1e38 0 0 1e38 0 0 cm 0 0 10 10 re f Q\n";
+        let doc = letter_page(&(s + &flat_intake_content()));
+        let rep = detect_flat_forms(&doc, None).unwrap();
+        assert_eq!(rep.fields, plain.fields);
+        assert!(!doc.diagnostics().has("limit.flat_form_work"));
+    }
+
     /// `cargo test --release -p nupdf --lib flat_form_adversarial_timings -- --ignored --nocapture`
     #[test]
     #[ignore = "a timing to read, not a check"]
@@ -4143,7 +4653,17 @@ mod tests {
         ] {
             let started = std::time::Instant::now();
             let fields = detect_page_flat_forms(&doc, 0).unwrap();
-            eprintln!("{name}: {} fields in {:?}", fields.len(), started.elapsed());
+            let took = started.elapsed();
+            let (used, items) = LAST_WORK.with(std::cell::Cell::get);
+            eprintln!(
+                "{name}: {} fields in {took:?}, {used} units of work for {items} parts{}",
+                fields.len(),
+                if doc.diagnostics().has("limit.flat_form_work") {
+                    " (stopped)"
+                } else {
+                    ""
+                }
+            );
         }
     }
 }
