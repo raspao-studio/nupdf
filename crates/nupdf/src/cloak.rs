@@ -1586,13 +1586,24 @@ fn collect_text_stream_nums(doc: &Document) -> HashSet<i32> {
     text_streams
 }
 
-fn rewrite_name_tree<T: TextTransform>(doc: &Document, node: &Object, xform: &mut T, depth: usize) {
+fn rewrite_name_tree<T: TextTransform>(
+    doc: &Document,
+    node: &Object,
+    xform: &mut T,
+    visited: &mut HashSet<i32>,
+    depth: usize,
+) {
     if depth > 64 {
         return;
     }
     let Some(r) = node.as_ref() else {
         return;
     };
+    // Each node is rewritten once: a `/Kids` cycle or a node shared by several
+    // parents would otherwise be walked once per path to it.
+    if !visited.insert(r.num) {
+        return;
+    }
     let Object::Dict(d) = doc.resolve(node) else {
         return;
     };
@@ -1629,7 +1640,7 @@ fn rewrite_name_tree<T: TextTransform>(doc: &Document, node: &Object, xform: &mu
     }
     if let Some(Object::Array(kids)) = d.get(b"Kids").map(|k| doc.resolve(k)) {
         for k in kids.iter() {
-            rewrite_name_tree(doc, k, xform, depth + 1);
+            rewrite_name_tree(doc, k, xform, visited, depth + 1);
         }
     }
 }
@@ -1678,8 +1689,9 @@ fn rewrite_metadata_and_objects<T: TextTransform>(
     // 2. Catalog `/Names` trees and legacy `/Dests` keys.
     let root = trailer.get(b"Root").cloned().unwrap_or(Object::Null);
     if let Object::Dict(names) = doc.dict_get(&root, b"Names") {
+        let mut visited = HashSet::new();
         for (_, tree) in names.iter() {
-            rewrite_name_tree(doc, tree, xform, 0);
+            rewrite_name_tree(doc, tree, xform, &mut visited, 0);
         }
     }
     if let Some(dests) = doc
@@ -2453,6 +2465,34 @@ mod tests {
                 assert!(seen.insert(session.token_for(cat, &secret, &secret)));
             }
         }
+    }
+
+    #[test]
+    fn cyclic_name_tree_is_walked_once() {
+        let content = b"BT /F1 11 Tf 50 720 Td (Wire to ACCT-884210) Tj ET";
+        let objs = [
+            "<</Type/Catalog/Pages 2 0 R/Names<</Dests 5 0 R>>>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R\
+              /Resources<</Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>>>>>>>"
+                .to_string(),
+            stream_obj("", content),
+            // A node that lists itself twice and its child, which points back up.
+            "<</Kids[5 0 R 5 0 R 6 0 R]>>".to_string(),
+            "<</Kids[5 0 R 6 0 R]/Names[(ACCT-884210) [3 0 R /Fit]]>>".to_string(),
+        ];
+        let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+        let doc = crate::testutil::doc_of(&refs);
+        let targets = [CloakTarget::Regex {
+            category: "ACCT".to_string(),
+            pattern: r"ACCT-[0-9]{6}".to_string(),
+        }];
+        let (bytes, vault, report) =
+            cloak_document(&doc, &targets, &WriteOptions::default()).unwrap();
+        assert!(report.verified_zero_leaks);
+        let cloaked = Document::open(bytes).unwrap();
+        let (_, uncloaked) = uncloak_pdf(&cloaked, &vault, &WriteOptions::default()).unwrap();
+        assert_eq!(uncloaked.entities_restored, 1);
     }
 
     #[test]
