@@ -59,5 +59,8 @@ jobs:
               npm publish "$1" --access public
             fi
           }
-          for f in dist/nupdf-*-"$version".tgz; do publish "$f"; done
-          publish "dist/nupdf-$version.tgz"
+          launcher="dist/nupdf-cli-$version.tgz"
+          for f in dist/nupdf-*-"$version".tgz; do
+            if [ "$f" != "$launcher" ]; then publish "$f"; fi
+          done
+          publish "$launcher"

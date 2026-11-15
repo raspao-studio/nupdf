@@ -1,5 +1,5 @@
 {
-  "name": "nupdf",
+  "name": "nupdf-cli",
   "version": "0.0.0",
   "description": "A PDF engine for AI agents: read, search, render, edit and redact PDFs from one binary, as a command or an MCP server",
   "keywords": ["pdf", "cli", "mcp", "agents", "redaction"],

@@ -1,6 +1,7 @@
 // Writes the npm packages for a release: one per platform, each carrying that
-// platform's `nupdf` binary, and the main `nupdf` package that depends on them
-// all and runs the right one.
+// platform's `nupdf` binary, and the main `nupdf-cli` package that depends on
+// them all and runs the right one. (npm refuses the name `nupdf` as too close
+// to `jspdf` and `unpdf`.)
 //
 //   node npm/build.mjs --version 0.1.0 --out dist/npm \
 //     --binary aarch64-apple-darwin=target/aarch64-apple-darwin/release/nupdf ...
@@ -37,7 +38,7 @@ export function build({ version, out, binaries, allTargets = false }) {
     copyFileSync(binaries[p.target], join(dir, binary));
     chmodSync(join(dir, binary), 0o755);
     for (const f of ['LICENSE', 'NOTICE.md']) copyFileSync(join(root, f), join(dir, f));
-    writeFileSync(join(dir, 'README.md'), `The \`nupdf\` binary for ${p.target}. Install [nupdf](https://www.npmjs.com/package/nupdf), which picks the right one.\n`);
+    writeFileSync(join(dir, 'README.md'), `The \`nupdf\` binary for ${p.target}. Install [nupdf-cli](https://www.npmjs.com/package/nupdf-cli), which picks the right one.\n`);
     const manifest = {
       name: p.name,
       version,
