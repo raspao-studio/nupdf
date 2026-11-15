@@ -272,3 +272,22 @@ fn flat_forms_fill_reports_the_fields_as_filled() {
     let name = fields.iter().find(|f| f["name"] == "name").unwrap();
     assert_eq!(name["current_text"], "Ada Lovelace", "{rep}");
 }
+
+#[test]
+fn a_plan_refuses_a_block_id_that_patch_would_reflow() {
+    // A plan finds its targets on the base and checks them where they were;
+    // reflowing a block moves what is below it, so a plan does not take one.
+    let input = smoke("stext.pdf");
+    let out = nupdf(&[
+        "apply",
+        input.to_str().unwrap(),
+        "--inline",
+        r#"[{"op":"patch","id":"p1.b2","text":"Shorter"}]"#,
+        "--dry-run",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let err: Value = serde_json::from_slice(&out.stderr)
+        .or_else(|_| serde_json::from_slice(&out.stdout))
+        .unwrap();
+    assert_eq!(err["error"]["code"], "usage.block_target", "{err}");
+}
