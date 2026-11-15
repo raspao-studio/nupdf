@@ -921,7 +921,15 @@ pub fn flat_forms_cmd(
             )
         })?;
     }
-    let detected = flat_form::detect_flat_forms(doc, pages)
+    // The fields as written: detected on the output, not the input.
+    let filled = Document::open_with(bytes.clone(), doc.limits())
+        .map_err(|e| input_err(e.code, e.message))?;
+    if filled.needs_password()
+        && let Some(pw) = password
+    {
+        let _ = filled.authenticate(pw);
+    }
+    let detected = flat_form::detect_flat_forms(&filled, pages)
         .map_err(|msg| input_err("input.page_tree", msg))?;
     let output = output_summary(doc, &bytes, &plan);
     let body = json!({

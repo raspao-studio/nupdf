@@ -243,3 +243,32 @@ fn an_aborted_pipeline_writes_nothing() {
         assert!(rep["aborted"].is_object(), "{name}: {rep}");
     }
 }
+
+#[test]
+fn flat_forms_fill_reports_the_fields_as_filled() {
+    let file = scratch("flat-report.pdf");
+    std::fs::write(
+        &file,
+        page_pdf(concat!(
+            "BT /F1 11 Tf 20 240 Td (Name:) Tj ET\n",
+            "0 0 0 RG 1 w 65 238 m 220 238 l S\n",
+            "20 140 10 10 re S\n",
+            "BT /F1 10 Tf 36 141 Td (Agree) Tj ET\n",
+        )),
+    )
+    .unwrap();
+    let rep = report_of(&[
+        "flat-forms",
+        file.to_str().unwrap(),
+        "--set",
+        "name=Ada Lovelace",
+        "--check",
+        "agree",
+        "--dry-run",
+    ]);
+    let fields = rep["fields"].as_array().unwrap();
+    let agree = fields.iter().find(|f| f["name"] == "agree").unwrap();
+    assert_eq!(agree["checked"], true, "{rep}");
+    let name = fields.iter().find(|f| f["name"] == "name").unwrap();
+    assert_eq!(name["current_text"], "Ada Lovelace", "{rep}");
+}

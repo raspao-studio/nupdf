@@ -178,27 +178,40 @@ pub fn detect_flat_forms(doc: &Document, pages: Option<&str>) -> Result<FlatForm
         _ => (0..page_count).collect(),
     };
 
-    let mut seen = HashSet::new();
-    let mut indices = Vec::with_capacity(raw_indices.len());
-    for idx in raw_indices {
-        if idx >= 0 && idx < page_count && seen.insert(idx) {
-            indices.push(idx);
-        }
-    }
+    let wanted: HashSet<i32> = raw_indices
+        .into_iter()
+        .filter(|&idx| idx >= 0 && idx < page_count)
+        .collect();
 
+    // Names are de-duplicated over the whole document, in page order, so a
+    // field has the same name whichever pages were listed; fill and promote
+    // look fields up over all pages.
     let mut store = Store::default();
     let mut all_fields = Vec::new();
     let mut name_counts: HashMap<String, usize> = HashMap::new();
 
-    for index in indices {
-        let page_obj = doc.page(index).map_err(|e| e.0)?;
+    for index in 0..page_count {
+        let listed = wanted.contains(&index);
+        let page_obj = match doc.page(index) {
+            Ok(p) => p,
+            Err(e) if listed => return Err(e.0),
+            Err(_) => continue,
+        };
         if doc.resolve(&page_obj).as_dict().is_none() {
-            return Err(format!("page {} object is not a dictionary", index + 1));
+            if listed {
+                return Err(format!("page {} object is not a dictionary", index + 1));
+            }
+            continue;
         }
         let (res, next_store) =
             detect_page_flat_forms_with_store(doc, index, &page_obj, store, &mut name_counts);
         store = next_store;
-        all_fields.extend(res?);
+        match res {
+            Ok(fields) if listed => all_fields.extend(fields),
+            Ok(_) => {}
+            Err(e) if listed => return Err(e),
+            Err(_) => {}
+        }
     }
 
     Ok(FlatFormReport {
@@ -208,7 +221,9 @@ pub fn detect_flat_forms(doc: &Document, pages: Option<&str>) -> Result<FlatForm
     })
 }
 
-/// Detects flat form fields on a single 0-based `index` page.
+/// Detects flat form fields on a single 0-based `index` page. Names are
+/// de-duplicated within the page only; [`detect_flat_forms`] gives the names
+/// fill and promote use.
 pub fn detect_page_flat_forms(doc: &Document, index: i32) -> Result<Vec<FlatField>, String> {
     let page_obj = doc.page(index).map_err(|e| e.0)?;
     if doc.resolve(&page_obj).as_dict().is_none() {
@@ -1843,6 +1858,9 @@ fn derive_base_field_name(label: Option<&str>, kind: &str) -> String {
     }
 }
 
+/// Most top-level `/AcroForm /Fields` entries read when naming promoted fields.
+const MAX_EXISTING_FIELDS: usize = 50_000;
+
 // ---------------------------------------------------------------------------
 // 2. Verified Flat-Form Filling
 // ---------------------------------------------------------------------------
@@ -2556,6 +2574,8 @@ pub fn promote_flat_forms_with_password(
         return Ok((bytes, report));
     }
 
+    rename_clear_of_existing_fields(&fork, &mut report.fields);
+
     let helv_num = add_helvetica_font_object(&fork);
     let zadb_num = add_zapf_font_object(&fork);
 
@@ -2785,6 +2805,54 @@ fn install_acroform_catalog(
     Ok(())
 }
 
+/// Gives each field to promote a name no existing AcroForm field has (nor
+/// any top-level part of one), adding `_N` as detection does.
+fn rename_clear_of_existing_fields(doc: &Document, fields: &mut [FlatField]) {
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut add = |name: String| {
+        if let Some(top) = name.split('.').next() {
+            taken.insert(top.to_string());
+        }
+        taken.insert(name);
+    };
+    let page_count = doc.page_count().unwrap_or(0);
+    for index in 0..page_count {
+        let Ok(page_obj) = doc.page(index) else {
+            continue;
+        };
+        let (_, widgets) = annot::page_annots(doc, &page_obj);
+        for w in &widgets {
+            if let Ok(name) = form::name(doc, w) {
+                add(name);
+            }
+        }
+    }
+    let root = doc.trailer().get(b"Root").cloned().unwrap_or(Object::Null);
+    let acro = doc.dict_get(&root, b"AcroForm");
+    let top = doc.resolve(&doc.dict_get(&acro, b"Fields"));
+    for f in top
+        .as_array()
+        .unwrap_or(&[])
+        .iter()
+        .take(MAX_EXISTING_FIELDS)
+    {
+        if let Ok(name) = form::name(doc, f) {
+            add(name);
+        }
+    }
+    for field in fields.iter_mut() {
+        if taken.contains(&field.name) {
+            let base = field.name.clone();
+            let mut n = 2usize;
+            while taken.contains(&format!("{base}_{n}")) {
+                n += 1;
+            }
+            field.name = format!("{base}_{n}");
+        }
+        taken.insert(field.name.clone());
+    }
+}
+
 fn verify_promoted_acroform(
     bytes: &[u8],
     expected: &[FlatField],
@@ -2916,6 +2984,86 @@ mod tests {
         s += "BT /F1 9 Tf 74 488 Td (Authorized Signature) Tj ET\n";
 
         page_doc(s.as_bytes(), HELV_RESOURCES, &[])
+    }
+
+    /// Three pages, each with a `Signature:` underline.
+    fn three_signature_pages() -> Document {
+        let page = b"0 0 0 RG 1 w BT /F1 11 Tf 72 702 Td (Signature:) Tj ET 140 700 m 330 700 l S";
+        let font = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>";
+        let page_obj = |c: u32| {
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents {c} 0 R/Resources<</Font<</F1 9 0 R>>>>>>"
+            )
+            .into_bytes()
+        };
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R]/Count 3>>".to_vec(),
+            page_obj(6),
+            page_obj(7),
+            page_obj(8),
+            stream("", page),
+            stream("", page),
+            stream("", page),
+            font.to_vec(),
+        ])
+    }
+
+    #[test]
+    fn field_names_do_not_depend_on_the_pages_listed() {
+        let doc = three_signature_pages();
+        let all = detect_flat_forms(&doc, None).unwrap();
+        let names: Vec<&str> = all.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["signature", "signature_2", "signature_3"]);
+
+        let third = detect_flat_forms(&doc, Some("3")).unwrap();
+        assert_eq!(third.fields.len(), 1);
+        assert_eq!(third.fields[0].page, 3);
+        let name = third.fields[0].name.clone();
+        assert_eq!(name, "signature_3");
+
+        // The name read off `--pages 3` fills page 3's field.
+        let (_, rep) = fill_flat_forms(
+            &doc,
+            &[FlatFillOp::SetText {
+                target: name,
+                value: "Grace Hopper".to_string(),
+            }],
+            &WriteOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(rep.applied[0].page, 3);
+    }
+
+    #[test]
+    fn promoted_names_do_not_collide_with_existing_fields() {
+        // A real field already named `signature` lives on page 1, away from
+        // the flat underlines.
+        let page = b"0 0 0 RG 1 w BT /F1 11 Tf 72 702 Td (Signature:) Tj ET 140 700 m 330 700 l S";
+        let doc = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[6 0 R]>>>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>/Annots[6 0 R]>>".to_vec(),
+            stream("", page),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>".to_vec(),
+            b"<</Type/Annot/Subtype/Widget/FT/Tx/T(signature)/V(kept)/Rect[72 100 200 120]>>".to_vec(),
+        ]);
+        let (bytes, rep) = promote_flat_forms(&doc, &WriteOptions::default()).unwrap();
+        assert_eq!(rep.fields.len(), 1);
+        assert_ne!(rep.fields[0].name, "signature");
+
+        let out = Document::open(bytes).unwrap();
+        let page0 = out.page(0).unwrap();
+        let (_, widgets) = annot::page_annots(&out, &page0);
+        let mut names: Vec<String> = widgets
+            .iter()
+            .map(|w| form::name(&out, w).unwrap())
+            .collect();
+        names.sort();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "duplicate field names: {names:?}");
+        assert!(names.contains(&rep.fields[0].name));
     }
 
     #[test]
