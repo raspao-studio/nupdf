@@ -296,6 +296,12 @@ struct ResolvedTarget {
     actual_text: String,
     bbox: Option<Rect>,
     chars: Vec<IndexedChar>,
+    /// The text block around a line, span or slice (empty for a block or
+    /// a page, whose `chars` are their own context), so a match is checked
+    /// against the characters next to the target, and `chars` start at
+    /// `context[offset]`.
+    context: Vec<IndexedChar>,
+    offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -764,6 +770,8 @@ fn resolve_target(page: &StextPage, parsed: &ParsedContentId) -> Option<Resolved
             actual_text,
             bbox,
             chars,
+            context: Vec::new(),
+            offset: 0,
         });
     }
 
@@ -804,6 +812,8 @@ fn resolve_target(page: &StextPage, parsed: &ParsedContentId) -> Option<Resolved
             actual_text,
             bbox,
             chars,
+            context: Vec::new(),
+            offset: 0,
         });
     };
 
@@ -813,6 +823,9 @@ fn resolve_target(page: &StextPage, parsed: &ParsedContentId) -> Option<Resolved
     let line = tb.lines.get(l_idx)?;
     let line_id = format!("{block_prefix}.l{}", l_idx + 1);
     let spans = extract::spans(line);
+    let mut context = Vec::new();
+    collect_text_block_indexed(tb, &block_prefix, &mut context);
+    let line_offset: usize = tb.lines.iter().take(l_idx).map(|l| l.chars.len()).sum();
 
     let Some(s_idx) = parsed.span else {
         let mut chars = Vec::with_capacity(line.chars.len());
@@ -834,6 +847,8 @@ fn resolve_target(page: &StextPage, parsed: &ParsedContentId) -> Option<Resolved
             actual_text,
             bbox: Some(line.bbox),
             chars,
+            context,
+            offset: line_offset,
         });
     };
 
@@ -862,6 +877,8 @@ fn resolve_target(page: &StextPage, parsed: &ParsedContentId) -> Option<Resolved
             actual_text,
             bbox,
             chars,
+            context,
+            offset: line_offset + sp.start + a,
         });
     }
 
@@ -880,6 +897,8 @@ fn resolve_target(page: &StextPage, parsed: &ParsedContentId) -> Option<Resolved
         actual_text,
         bbox: Some(sp.bbox),
         chars,
+        context,
+        offset: line_offset + sp.start,
     })
 }
 
@@ -948,16 +967,30 @@ fn match_quote_in_target(target: &ResolvedTarget, page: i32, quote: &str) -> Opt
         return None;
     }
 
+    // A number is cut or not by the characters around the target too, so
+    // a match is checked in the target's context.
+    let (context, offset) = if target.context.is_empty() {
+        (&target.chars, 0)
+    } else {
+        (&target.context, target.offset)
+    };
+    let (norm_context, context_map) = normalize_indexed_chars(context);
+    let cuts_in_context = number_cut_in(&norm_context, context, &context_map);
+    let cuts = |r: std::ops::Range<usize>| {
+        let first = offset + *byte_to_char.get(r.start)?;
+        let last = offset + *byte_to_char.get(r.end.checked_sub(1)?)?;
+        let range = byte_range_of(&norm_context, &context_map, first, last)?;
+        Some(cuts_in_context(range))
+    };
+    // A match that cannot be placed in its context counts as cutting.
+    let cuts = |r: std::ops::Range<usize>| cuts(r).unwrap_or(true);
+
     let matched_byte_range = if norm_target == quote_norm {
-        Some(0..norm_target.len())
+        Some(0..norm_target.len()).filter(|r| !cuts(r.clone()))
     } else if matches!(target.granularity, TargetGranularity::Slice) {
         None
     } else {
-        find_clean_substring(
-            &norm_target,
-            &quote_norm,
-            number_goes_on_at(&target.chars, &byte_to_char, 0),
-        )
+        find_clean_substring(&norm_target, &quote_norm, 0, cuts)
     };
 
     let range = matched_byte_range?;
@@ -994,7 +1027,8 @@ fn find_quote_on_page(
         if let Some(range) = find_clean_substring(
             &norm_page,
             &quote_norm,
-            number_goes_on_at(&chars, &byte_to_char, 0),
+            0,
+            number_cut_in(&norm_page, &chars, &byte_to_char),
         ) && let (Some(&first_idx), Some(&last_idx)) = (
             byte_to_char.get(range.start),
             range.end.checked_sub(1).and_then(|e| byte_to_char.get(e)),
@@ -1014,7 +1048,7 @@ fn find_quote_on_page(
 
     // Fallback to MuPDF's page search (`search::search_page`) for soft-hyphen / diacritic edge cases.
     if let Ok(hits) = search::search_page(page, quote, search::options::EXACT)
-        && let Some(hit) = hits.iter().find(|h| !hit_cuts_a_number(page, h, quote))
+        && let Some(hit) = hits.iter().find(|h| !hit_cuts_a_number(page, h))
         && let Some((matched, span_id)) = matched_from_search_hit(page, page_num, hit)
     {
         return Some((matched, span_id));
@@ -1045,17 +1079,14 @@ fn search_document_elsewhere(
             continue;
         }
         let (norm_page, byte_to_char) = normalize_indexed_chars(&chars);
+        let cuts = number_cut_in(&norm_page, &chars, &byte_to_char);
         let mut search_from = 0usize;
         while search_from < norm_page.len() {
-            let Some(rel_range) = find_clean_substring(
-                &norm_page[search_from..],
-                &quote_norm,
-                number_goes_on_at(&chars, &byte_to_char, search_from),
-            ) else {
+            let Some(range) = find_clean_substring(&norm_page, &quote_norm, search_from, &cuts)
+            else {
                 break;
             };
-            let abs_start = search_from + rel_range.start;
-            let abs_end = search_from + rel_range.end;
+            let (abs_start, abs_end) = (range.start, range.end);
             if let (Some(&first_idx), Some(&last_idx)) = (
                 byte_to_char.get(abs_start),
                 abs_end.checked_sub(1).and_then(|e| byte_to_char.get(e)),
@@ -1075,10 +1106,7 @@ fn search_document_elsewhere(
         if found_ids.is_empty()
             && let Ok(hits) = search::search_page(stext_page, quote, search::options::EXACT)
         {
-            for hit in hits
-                .iter()
-                .filter(|h| !hit_cuts_a_number(stext_page, h, quote))
-            {
+            for hit in hits.iter().filter(|h| !hit_cuts_a_number(stext_page, h)) {
                 if let Some((_, cid)) = matched_from_search_hit(stext_page, p, hit)
                     && exclude_id.is_none_or(|ex| ex != cid)
                     && !found_ids.contains(&cid)
@@ -1092,28 +1120,31 @@ fn search_document_elsewhere(
     Ok(found_ids)
 }
 
-/// [`cuts_a_number`] for a hit of the page search: the characters on its
-/// first line before it and on its last line after it.
-fn hit_cuts_a_number(page: &StextPage, hit: &search::Hit, quote: &str) -> bool {
-    let line = |at: &search::Position| match page.blocks.get(at.block) {
-        Some(Block::Text(tb)) => tb.lines.get(at.line),
-        _ => None,
+/// [`number_cut_in`] for a hit of the page search, in the text blocks it
+/// covers.
+fn hit_cuts_a_number(page: &StextPage, hit: &search::Hit) -> bool {
+    let mut chars = Vec::new();
+    let (mut first, mut last) = (None, None);
+    let blocks = page.blocks.iter().enumerate();
+    for (bi, block) in blocks.take(hit.end.block + 1).skip(hit.begin.block) {
+        let Block::Text(tb) = block else {
+            continue;
+        };
+        let index = |pos: &search::Position| {
+            (pos.block == bi).then(|| {
+                let lines = tb.lines.iter().take(pos.line);
+                chars.len() + lines.map(|l| l.chars.len()).sum::<usize>() + pos.ch
+            })
+        };
+        first = first.or_else(|| index(&hit.begin));
+        last = last.or_else(|| index(&hit.end));
+        collect_text_block_indexed(tb, &format!("p.b{}", bi + 1), &mut chars);
+    }
+    let (Some(first), Some(last)) = (first, last) else {
+        return false;
     };
-    let before = line(&hit.begin)
-        .and_then(|l| l.chars.get(..hit.begin.ch))
-        .map(extract::chars_text)
-        .unwrap_or_default();
-    let end_line = line(&hit.end);
-    let after = end_line
-        .and_then(|l| l.chars.get(hit.end.ch + 1..))
-        .map(extract::chars_text)
-        .unwrap_or_default();
-    let quote = quote.trim();
-    cuts_a_number(&before, quote, &after)
-        || (ends_before_a_digit(quote, &after)
-            && end_line
-                .and_then(|l| l.chars.get(hit.end.ch..=hit.end.ch + 1))
-                .is_none_or(|pair| number_goes_on(&pair[0], &pair[1])))
+    let (norm, map) = normalize_indexed_chars(&chars);
+    byte_range_of(&norm, &map, first, last).is_some_and(number_cut_in(&norm, &chars, &map))
 }
 
 fn matched_from_search_hit(
@@ -1339,19 +1370,19 @@ fn push_normalized_char(ch: char, out: &mut String, prev_space: &mut bool) {
 /// do not match inside unrelated words while still allowing trailing superscript
 /// digits (`"capped at $1,000.1"` matching `"capped at $1,000."`).
 ///
-/// A match that ends in `.` or `,` right before a digit is kept only when
-/// `number_goes_on(end)` says the digit at byte `end` is not more of the
-/// number (a superscript footnote marker).
+/// The search starts at byte `from`, and a match is kept only when
+/// `cuts(range)` says it does not cut a number ([`number_cut_in`]).
 fn find_clean_substring(
     haystack: &str,
     needle: &str,
-    number_goes_on: impl Fn(usize) -> bool,
+    from: usize,
+    cuts: impl Fn(std::ops::Range<usize>) -> bool,
 ) -> Option<std::ops::Range<usize>> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    let mut from = 0usize;
-    while let Some(rel) = haystack[from..].find(needle) {
+    let mut from = from;
+    while let Some(rel) = haystack.get(from..)?.find(needle) {
         let start = from + rel;
         let end = start + needle.len();
 
@@ -1378,12 +1409,7 @@ fn find_clean_substring(
             }
         };
 
-        let after = &haystack[end..];
-        if left_ok
-            && right_ok
-            && !cuts_a_number(&haystack[..start], needle, after)
-            && !(ends_before_a_digit(needle, after) && number_goes_on(end))
-        {
+        if left_ok && right_ok && !cuts(start..end) {
             return Some(start..end);
         }
 
@@ -1401,6 +1427,29 @@ fn find_clean_substring(
 /// `.` or `,` before a digit ("rate 12." before "5", or "capped at
 /// $1,000." before a superscript footnote "1") is left to
 /// [`ends_before_a_digit`] and the page's geometry.
+///
+/// This is one of three checks [`number_cut_in`] makes, each on the
+/// characters straight before and after the match in the page's
+/// normalised text (a content id's target read in its text block). The
+/// second is that punctuation rule; the third, [`cuts_a_grouped_number`],
+/// takes digit groups set apart by a space no wider than a word space on
+/// one baseline in one size.
+///
+/// None of them looks across a line break: a line that ends in a number
+/// and a next line that starts with one are read as two numbers, so a
+/// grouped figure wrapped at a group ("1,234," or "1 234" then "567")
+/// verifies cut. Even the narrowest shape, a line ending in two or more
+/// comma groups and a comma before a line starting with exactly three
+/// digits, is also the shape of a list of figures ("84,000," then
+/// "105,000, 119,000"), which a refusal there would refuse.
+/// Also not checked: digit groups split by a space character set wider
+/// than a word space (the page's text keeps no-break, thin and narrow
+/// no-break spaces only as U+0020 and their width); whether the spaces
+/// earlier in a chain of groups are grouping spaces (only the one at the
+/// match's edge is measured); other digit separators (apostrophes, a `.`
+/// thousands mark); digits other than ASCII; and vertical writing
+/// (rotated lines are measured along their direction, but no test covers
+/// them).
 fn cuts_a_number(before: &str, needle: &str, after: &str) -> bool {
     let is_sep = |c: char| c == '.' || c == ',';
     let mut first = needle.chars();
@@ -1446,21 +1495,188 @@ fn number_goes_on(prev: &StextChar, next: &StextChar) -> bool {
     !is_superscript(next, prev.origin.y, prev.size)
 }
 
-/// [`number_goes_on`] for a byte offset (plus `base`) of a normalised text
-/// of `chars` whose bytes `map` to them: the character there and the one
-/// before it. Unknown characters count as going on.
-fn number_goes_on_at<'a>(
+/// Whether the match `range` of the normalised text `hay` of `chars`,
+/// whose bytes `map` to them, cuts a number short: [`cuts_a_number`],
+/// [`ends_before_a_digit`] unless the digit after is a superscript marker,
+/// or [`cuts_a_grouped_number`].
+fn number_cut_in<'a>(
+    hay: &'a str,
     chars: &'a [IndexedChar],
     map: &'a [usize],
-    base: usize,
-) -> impl Fn(usize) -> bool + 'a {
-    move |end| {
+) -> impl Fn(std::ops::Range<usize>) -> bool + 'a {
+    move |range| {
+        let (Some(before), Some(needle), Some(after)) = (
+            hay.get(..range.start),
+            hay.get(range.clone()),
+            hay.get(range.end..),
+        ) else {
+            return false;
+        };
         let at = |b: usize| map.get(b).and_then(|&i| chars.get(i));
-        match ((base + end).checked_sub(1).and_then(at), at(base + end)) {
-            (Some(prev), Some(next)) => number_goes_on(&prev.ch, &next.ch),
-            _ => true,
-        }
+        cuts_a_number(before, needle, after)
+            || (ends_before_a_digit(needle, after)
+                && match (range.end.checked_sub(1).and_then(at), at(range.end)) {
+                    (Some(prev), Some(next)) => number_goes_on(&prev.ch, &next.ch),
+                    _ => true,
+                })
+            || cuts_a_grouped_number(hay, range, |b| gap_at(chars, map, b))
     }
+}
+
+/// The bytes of a normalised text whose bytes `map` to characters, from
+/// the first character's own bytes (not a line break's space before it)
+/// to the end of the last's.
+fn byte_range_of(
+    hay: &str,
+    map: &[usize],
+    first: usize,
+    last: usize,
+) -> Option<std::ops::Range<usize>> {
+    let mut start = map.iter().position(|&i| i == first)?;
+    if hay.as_bytes().get(start) == Some(&b' ') && map.get(start + 1) == Some(&first) {
+        start += 1;
+    }
+    let end = map.iter().rposition(|&i| i == last)? + 1;
+    (start < end).then_some(start..end)
+}
+
+/// What the space at a byte of a normalised text is between the digits on
+/// either side of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    /// One that can group a number's digits: on one baseline, in one size,
+    /// no wider than a word space. The page's text has every space
+    /// character as U+0020 (MuPDF folds no-break, thin and narrow no-break
+    /// spaces into it), so only their width tells them apart.
+    Group,
+    /// Anything else: a table gutter, a jump to another line or block.
+    Other,
+}
+
+/// The widest gap, in ems of the text's size, read as a word space when
+/// no space character gives one: wider than a proportional font's space
+/// (a quarter to a third of an em) with room for justified lines, and
+/// narrower than a table's gutter, which is commonly an em or more.
+const WORD_SPACE_EMS: f32 = 0.4;
+
+/// [`Gap`] for the space at byte `b` of a normalised text of `chars`
+/// whose bytes `map` to them.
+fn gap_at(chars: &[IndexedChar], map: &[usize], b: usize) -> Gap {
+    let at = |b: usize| map.get(b).copied();
+    let (Some(p), Some(n)) = (b.checked_sub(1).and_then(at), at(b + 1)) else {
+        return Gap::Other;
+    };
+    let (Some(prev), Some(next), Some(between)) =
+        (chars.get(p), chars.get(n), chars.get(p + 1..=n))
+    else {
+        return Gap::Other;
+    };
+    let block = |c: &IndexedChar| c.span_id.split_once(".l").map(|(b, _)| b.to_owned());
+    let size = prev.ch.size;
+    if block(prev) != block(next)
+        || size.is_nan()
+        || size <= 0.0
+        || (next.ch.size - size).abs() > 0.02 * size
+    {
+        return Gap::Other;
+    }
+    // Distances in ems along and across the line `prev` is set on.
+    let q = prev.ch.quad;
+    let (dx, dy) = (q.lr.x - q.ll.x, q.lr.y - q.ll.y);
+    let advance = dx.hypot(dy);
+    let (ux, uy) = if advance > 0.0 {
+        (dx / advance, dy / advance)
+    } else {
+        (1.0, 0.0)
+    };
+    let (ox, oy) = (
+        next.ch.origin.x - prev.ch.origin.x,
+        next.ch.origin.y - prev.ch.origin.y,
+    );
+    let along = (ux * ox + uy * oy) / size;
+    let across = (-uy * ox + ux * oy) / size;
+    if between.iter().any(|c| c.line_break_before) {
+        return Gap::Other;
+    }
+    let space = between
+        .iter()
+        .find(|c| rune_char(c.ch.c) == ' ' && c.ch.flags & char_flags::SYNTHETIC == 0)
+        .map(|c| {
+            let q = c.ch.quad;
+            (q.lr.x - q.ll.x).hypot(q.lr.y - q.ll.y) / size
+        });
+    let widest = space.map_or(WORD_SPACE_EMS, |w| (1.25 * w).max(WORD_SPACE_EMS));
+    let gap = along - advance / size;
+    if across.abs() <= 0.1 && gap > -0.1 && gap <= widest {
+        Gap::Group
+    } else {
+        Gap::Other
+    }
+}
+
+/// Whether the match `range` of `hay` stops or starts at a boundary
+/// between digit groups of one number. `gap(b)` says what the space at
+/// byte `b` is.
+///
+/// Grouped by spaces ("12 500", "1 234 567,89"): the match ends in a
+/// digit and the page goes on with a [`Gap::Group`] space and exactly
+/// three digits, or it starts with exactly three digits after such a
+/// space, and the digits on the other side form groups (one to three
+/// digits, then groups of three): "2024 500" and "12 5000" are not one
+/// number.
+fn cuts_a_grouped_number(
+    hay: &str,
+    range: std::ops::Range<usize>,
+    gap: impl Fn(usize) -> Gap,
+) -> bool {
+    let b = hay.as_bytes();
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let is = |i: usize, c: u8| b.get(i) == Some(&c);
+    let three = |i: usize| (i..i + 3).all(digit) && !digit(i + 3);
+    let (s, e) = (range.start, range.end);
+    let Some(last) = e.checked_sub(1).filter(|&l| l >= s) else {
+        return false;
+    };
+    let ends_cut = digit(last)
+        && is(e, b' ')
+        && three(e + 1)
+        && digit_groups_end(b, e, b' ', 1)
+        && gap(e) == Gap::Group;
+    let starts_cut = s + 3 <= e
+        && three(s)
+        && s >= 2
+        && is(s - 1, b' ')
+        && digit(s - 2)
+        && digit_groups_end(b, s - 1, b' ', 1)
+        && gap(s - 1) == Gap::Group;
+    ends_cut || starts_cut
+}
+
+/// Whether the digits that end at byte `end` of `b` are a number grouped
+/// by `sep`, in at least `min` groups: one to three digits, then groups
+/// of exactly three. Past 64 groups the shape is taken as given.
+fn digit_groups_end(b: &[u8], end: usize, sep: u8, min: usize) -> bool {
+    let mut i = end;
+    for groups in 1..=64 {
+        let stop = i;
+        while i > 0 && stop - i < 4 && b.get(i - 1).is_some_and(u8::is_ascii_digit) {
+            i -= 1;
+        }
+        let len = stop - i;
+        if len == 0 || len > 3 {
+            return false;
+        }
+        let more =
+            i >= 2 && b.get(i - 1) == Some(&sep) && b.get(i - 2).is_some_and(u8::is_ascii_digit);
+        if !more {
+            return groups >= min;
+        }
+        if len != 3 {
+            return false;
+        }
+        i -= 1;
+    }
+    true
 }
 
 /// A superscript against text of `ref_size` on the baseline `ref_origin_y`:
@@ -2278,6 +2494,32 @@ mod tests {
     }
 
     #[test]
+    fn a_content_id_whose_text_cuts_a_number_does_not_verify() {
+        // The slice's own text is exactly the quote, and the span ends
+        // where a bold "5" goes on; the digits next to the target count.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Total 125 units, fee 12) Tj /F2 12 Tf (5) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for (quote, id) in [
+            ("Total 12", "p1.b1.l1.s1:0-8"),
+            ("25 units", "p1.b1.l1.s1:7-15"),
+            ("fee 12", "p1.b1.l1.s1"),
+        ] {
+            assert_ne!(
+                audit_one(&doc, None, Some(id), quote).0,
+                AuditStatus::Verified,
+                "{quote:?} at {id:?}"
+            );
+        }
+        assert_eq!(
+            audit_one(&doc, None, Some("p1.b1.l1.s1:0-9"), "Total 125").0,
+            AuditStatus::Verified
+        );
+    }
+
+    #[test]
     fn a_quote_ending_in_punctuation_before_the_numbers_next_digit_does_not_verify() {
         // The digit after the full stop or comma is in the same size on the
         // same baseline: the number goes on, so the quote names another one.
@@ -2330,6 +2572,267 @@ mod tests {
                     AuditStatus::Verified,
                     "{quote:?} at {id:?}"
                 );
+            }
+        }
+    }
+
+    /// The status and `found_elsewhere` of one claim of `quote`.
+    fn audit_one(
+        doc: &Document,
+        page: Option<i32>,
+        id: Option<&str>,
+        quote: &str,
+    ) -> (AuditStatus, Vec<String>) {
+        let claims = vec![ClaimInput {
+            id: id.map(str::to_owned),
+            page,
+            quote: quote.to_owned(),
+            ..ClaimInput::default()
+        }];
+        let summary =
+            audit_claims(doc, "b3:doc", &claims, false, 72.0).unwrap_or_else(|e| panic!("{e}"));
+        let item = &summary.results[0];
+        (item.status, item.found_elsewhere.clone())
+    }
+
+    /// A ToUnicode map reading codes 1 to 3 as U+00A0, U+2009 and U+202F.
+    const SPACES_CMAP: &[u8] = b"/CIDInit/ProcSet findresource begin 12 dict begin begincmap \
+        /CMapName/M def 1 begincodespacerange <00><FF> endcodespacerange \
+        3 beginbfchar <01><00A0> <02><2009> <03><202F> endbfchar endcmap CMapName \
+        currentdict /CMap defineresource pop end end";
+
+    /// A page in Helvetica through [`SPACES_CMAP`], as font `M`.
+    fn spaces_font_doc(content: &[u8]) -> Document {
+        page_doc(
+            content,
+            "/Font<</M<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>>>",
+            &[stream("", SPACES_CMAP)],
+        )
+    }
+
+    /// Whether every hit of the page search for `quote` on the first page
+    /// of `doc` cuts a number.
+    fn every_search_hit_cuts_a_number(doc: &Document, quote: &str) -> bool {
+        let page = stext::extract_page(
+            doc,
+            &doc.page(0).unwrap_or_else(|e| panic!("{}", e.0)),
+            Options::default(),
+            Store::default(),
+        )
+        .0
+        .unwrap_or_else(|e| panic!("{e}"));
+        let hits = search::search_page(&page, quote, search::options::EXACT)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!hits.is_empty(), "the search finds {quote:?}");
+        hits.iter().all(|h| hit_cuts_a_number(&page, h))
+    }
+
+    #[test]
+    fn a_quote_that_stops_at_a_digit_group_space_does_not_verify() {
+        // "12 500" is one amount however the group is spaced: a plain space
+        // (a word space wide), a no-break space, a thin space, a narrow
+        // no-break space, or a positioned gap with no space character.
+        // (WinAnsi's code 240 reads as a plain space, so the grouping
+        // spaces come through a ToUnicode map; the page's text folds them
+        // all into U+0020, set as wide as each glyph.)
+        let docs = [
+            (
+                "plain",
+                page_doc(
+                    b"BT /F1 12 Tf 50 700 Td (Total 12 500 units) Tj ET",
+                    FONT_RES,
+                    &[],
+                ),
+            ),
+            (
+                "no-break",
+                spaces_font_doc(b"BT /M 12 Tf 50 700 Td (Total 12\\001500 units) Tj ET"),
+            ),
+            (
+                "thin",
+                spaces_font_doc(b"BT /M 12 Tf 50 700 Td (Total 12\\002500 units) Tj ET"),
+            ),
+            (
+                "narrow no-break",
+                spaces_font_doc(b"BT /M 12 Tf 50 700 Td (Total 12\\003500 units) Tj ET"),
+            ),
+            (
+                "kerned",
+                page_doc(
+                    b"BT /F1 12 Tf 50 700 Td [(Total 12) -300 (500 units)] TJ ET",
+                    FONT_RES,
+                    &[],
+                ),
+            ),
+        ];
+        for (sep, doc) in &docs {
+            for cut in ["Total 12", "500 units", "Total 1", "00 units"] {
+                for id in [None, Some("p1.b1.l1"), Some("p1.b1")] {
+                    assert_ne!(
+                        audit_one(doc, Some(1), id, cut).0,
+                        AuditStatus::Verified,
+                        "{cut:?} at {id:?}, {sep}"
+                    );
+                }
+                assert!(every_search_hit_cuts_a_number(doc, cut), "{cut:?}, {sep}");
+            }
+            for whole in [
+                "Total 12 500 units",
+                "Total 12 500",
+                "12 500 units",
+                "12 500",
+            ] {
+                for id in [None, Some("p1.b1.l1"), Some("p1.b1")] {
+                    assert_eq!(
+                        audit_one(doc, Some(1), id, whole).0,
+                        AuditStatus::Verified,
+                        "{whole:?} at {id:?}, {sep}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_quote_that_stops_inside_a_chain_of_digit_groups_does_not_verify() {
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Sum 1 234 567 net, and 12 500,75 due) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for cut in [
+            "Sum 1 234",
+            "Sum 1",
+            "234 567 net",
+            "567 net",
+            "and 12",
+            "500,75 due",
+            "and 12 500",
+        ] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                assert_ne!(
+                    audit_one(&doc, Some(1), id, cut).0,
+                    AuditStatus::Verified,
+                    "{cut:?} at {id:?}"
+                );
+            }
+        }
+        // "12 500" before ",75" is cut by the decimal rule, not the groups'.
+        assert!(cuts_a_number("and ", "12 500", ",75 due"));
+        for whole in ["Sum 1 234 567 net", "1 234 567", "and 12 500,75 due"] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                assert_eq!(
+                    audit_one(&doc, Some(1), id, whole).0,
+                    AuditStatus::Verified,
+                    "{whole:?} at {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn digits_around_a_space_that_are_not_one_grouped_number_still_verify() {
+        // "2024 500" has a first group of four digits, "12 5000" a second
+        // of four; the next two lines put "12" and "500" in table columns,
+        // a gutter apart (a wide gap, and one past the next line's start).
+        // The last is a known miss: a no-break space set wider than a word
+        // space reads as a gap like any other, since the page's text does
+        // not keep which space character it was.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Year 2024 500 rows) Tj ET \
+            BT /F1 12 Tf 50 650 Td (Pack 12 5000 pcs) Tj ET \
+            BT /F1 12 Tf 50 600 Td (Cols 12) Tj ET BT /F1 12 Tf 98 600 Td (500 cells) Tj ET \
+            BT /F1 12 Tf 50 550 Td (Rows 12) Tj ET BT /F1 12 Tf 200 550 Td (500 cols) Tj ET \
+            BT /M 12 Tf 50 500 Td [(Wide 12\\001) -500 (500 sets)] TJ ET",
+            "/Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
+            /M<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>>>",
+            &[stream("", SPACES_CMAP)],
+        );
+        for quote in [
+            "Wide 12",
+            "Year 2024",
+            "Pack 12",
+            "5000 pcs",
+            "Cols 12",
+            "500 cells",
+            "Rows 12",
+            "500 cols",
+            "500 rows",
+        ] {
+            assert_eq!(
+                audit_one(&doc, Some(1), None, quote).0,
+                AuditStatus::Verified,
+                "{quote:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quote_that_cuts_a_grouped_number_is_not_found_elsewhere() {
+        let doc = two_page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Nothing here.) Tj ET",
+            b"BT /F1 12 Tf 50 700 Td (Total 12 500 units) Tj ET",
+        );
+        for cut in ["Total 12", "500 units"] {
+            assert_eq!(
+                audit_one(&doc, Some(1), None, cut),
+                (AuditStatus::NotFound, Vec::new()),
+                "{cut:?}"
+            );
+        }
+        assert_eq!(
+            audit_one(&doc, Some(1), None, "Total 12 500").0,
+            AuditStatus::WrongLocation
+        );
+    }
+
+    #[test]
+    fn two_numbers_on_two_lines_verify() {
+        // A line that ends in a number and a next line that starts with one
+        // are two numbers: a year and a count, a list's "102," and "103",
+        // a list of figures. No check looks across a line break, so a
+        // grouped figure wrapped after its comma ("1,234," then "567") is
+        // a known miss: it verifies cut.
+        let one_block: [(&[u8], &[&str]); 7] = [
+            (
+                b"BT /F1 12 Tf 50 700 Td (in 2020.) Tj 0 -14 Td (150 people came) Tj ET",
+                &["in 2020.", "in 2020", "150 people"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (rows 12) Tj 0 -14 Td (345 left) Tj ET",
+                &["rows 12", "345 left"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (sections 101, 102,) Tj 0 -14 Td (103 and 104) Tj ET",
+                &["sections 101, 102,", "sections 101, 102", "103 and"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (sizes of 84,000,) Tj 0 -14 Td (105,000 and 119,000) Tj ET",
+                &["sizes of 84,000,", "sizes of 84,000", "105,000 and"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (cost 1,250.) Tj 0 -14 Td (300 more) Tj ET",
+                &["cost 1,250.", "300 more"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (Sum 1 234) Tj 0 -14 Td (567 kg) Tj ET",
+                &["Sum 1 234", "567 kg"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (Paid 1,234,) Tj 0 -14 Td (567 dollars) Tj ET",
+                &["Paid 1,234,", "Paid 1,234", "567 dollars"],
+            ),
+        ];
+        for (content, quotes) in one_block {
+            let doc = page_doc(content, FONT_RES, &[]);
+            for &quote in quotes {
+                for id in [None, Some("p1.b1")] {
+                    assert_eq!(
+                        audit_one(&doc, Some(1), id, quote).0,
+                        AuditStatus::Verified,
+                        "{quote:?} at {id:?}"
+                    );
+                }
             }
         }
     }
