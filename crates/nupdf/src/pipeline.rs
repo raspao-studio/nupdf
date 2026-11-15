@@ -742,10 +742,15 @@ pub fn run_pipeline_with_password(
                         password,
                     )
                     .map(|(bytes, r)| {
-                        let moves: Vec<(i32, f32, f32)> = r
+                        let moves: Vec<Move> = r
                             .reflows
                             .iter()
-                            .map(|a| (a.page, a.old_bbox[3], a.delta_y))
+                            .map(|a| Move {
+                                page: a.page,
+                                below: a.old_bbox[3],
+                                delta_y: a.delta_y,
+                                band: a.shifted_band,
+                            })
                             .collect();
                         let result = patch::PatchResult {
                             patches: r.patches,
@@ -807,8 +812,8 @@ pub fn run_pipeline_with_password(
                 let next_doc = reopen_step_output(&bytes, &working_doc, password, step_index)?;
                 let next_doc_id = DocId::of(&bytes).to_string();
 
-                for &(page, below, delta_y) in &moves {
-                    spans.shift_below(page, below, delta_y);
+                for m in &moves {
+                    spans.shift_below(m);
                 }
                 generation += 1;
                 // Each patched binding learns where its replacement is, so an
@@ -1269,6 +1274,17 @@ const MAX_ANCHOR_POSITIONS: usize = 8;
 /// expects it and still be taken for the same span.
 const ANCHOR_TOLERANCE: f32 = 2.0;
 
+/// What a reflow moved: on `page` (1-based), what lies below `below`
+/// (page space, y down), by `delta_y`, within `band` (an x-range) when the
+/// reflowed block has a column beside it.
+#[derive(Debug, Clone, Copy)]
+struct Move {
+    page: i32,
+    below: f32,
+    delta_y: f32,
+    band: Option<[f32; 2]>,
+}
+
 /// Where a span's text was when a step bound its ID.
 #[derive(Debug, Clone)]
 struct SpanAnchor {
@@ -1340,22 +1356,25 @@ impl SpanBindings {
         }
     }
 
-    /// A reflow on `page` moved what lies below `below` (page space, y
-    /// down) by `delta_y`: anchors there may now be found that far down.
-    fn shift_below(&mut self, page: i32, below: f32, delta_y: f32) {
-        if delta_y == 0.0 || !delta_y.is_finite() {
+    /// A reflow moved what lies below its block, in its band: anchors there
+    /// may now be found that far down.
+    fn shift_below(&mut self, m: &Move) {
+        if m.delta_y == 0.0 || !m.delta_y.is_finite() {
             return;
         }
         let anchors = self
             .bindings
             .iter_mut()
             .flat_map(|b| std::iter::once(&mut b.anchor).chain(b.replacement.as_mut()));
-        for a in anchors.filter(|a| a.page == page) {
+        for a in anchors.filter(|a| a.page == m.page) {
+            // As the reflow tells what to move: below the block, and
+            // overlapping its band when it has one.
             let moved: Vec<[f32; 4]> = a
                 .positions
                 .iter()
-                .filter(|p| p[1] > below + 1.0)
-                .map(|p| [p[0], p[1] + delta_y, p[2], p[3] + delta_y])
+                .filter(|p| p[1] > m.below + 1.0)
+                .filter(|p| m.band.is_none_or(|[x0, x1]| p[2] >= x0 && p[0] <= x1))
+                .map(|p| [p[0], p[1] + m.delta_y, p[2], p[3] + m.delta_y])
                 .collect();
             for p in moved {
                 if a.positions.len() < MAX_ANCHOR_POSITIONS {
@@ -2411,6 +2430,99 @@ mod tests {
             after.matches[0].bbox[1] > 192.0 + 36.0,
             "{:?}",
             after.matches[0].bbox
+        );
+    }
+
+    /// Two columns: a paragraph at x=72 with a note beside it at x=420,
+    /// a total below in the left column and a fee below in the right one,
+    /// and `extra` drawn after them.
+    fn two_column_doc(extra: &str) -> Document {
+        let content = format!(
+            "BT /F1 12 Tf 1 0 0 1 72 700 Tm (Payment is due within thirty days.) Tj ET \
+             BT /F1 12 Tf 1 0 0 1 420 712 Tm (Notes) Tj ET \
+             BT /F2 12 Tf 1 0 0 1 72 600 Tm (Total:) Tj ET \
+             BT /F1 12 Tf 1 0 0 1 200 600 Tm ($9.00) Tj ET \
+             BT /F1 12 Tf 1 0 0 1 420 612 Tm (Fee 5) Tj ET {extra}"
+        );
+        page_doc(
+            content.as_bytes(),
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), HELVETICA_BOLD.to_vec()],
+        )
+    }
+
+    fn found_at(doc: &Document, pattern: &str) -> Vec<[f32; 4]> {
+        query::run_query(
+            doc,
+            &QuerySpec {
+                pattern: Some(pattern.to_string()),
+                ..QuerySpec::default()
+            },
+        )
+        .unwrap()
+        .matches
+        .iter()
+        .map(|m| m.bbox)
+        .collect()
+    }
+
+    #[test]
+    fn a_reflow_shift_reaches_only_the_anchors_in_the_column_it_moved() {
+        let long = "Payment is due within thirty days of the invoice date. ".repeat(4);
+        let long = long.trim();
+        // How far the reflow moves the left column.
+        let probe = two_column_doc("").fork_clean();
+        let moved = crate::reflow::apply_reflow(
+            &probe,
+            &[PatchSpec {
+                target_id: "p1.b1".to_string(),
+                new_text: long.to_string(),
+            }],
+            &PatchOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(moved[0].old_text, "Payment is due within thirty days.");
+        let dy = moved[0].delta_y;
+        assert!(dy > 20.0, "{dy}");
+
+        // A second fee in the right column, exactly as far below the first
+        // as the reflow moves the left column: the fee's anchor must not
+        // look for it there.
+        let doc = two_column_doc(&format!(
+            "BT /F1 12 Tf 1 0 0 1 420 {} Tm (Fee 5) Tj ET",
+            612.0 - dy
+        ));
+        let fees = found_at(&doc, "Fee 5");
+        assert_eq!(fees.len(), 2);
+        let total_before = found_at(&doc, r"\$9\.00")[0];
+        let spec = parse_pipeline_spec(&format!(
+            r#"{{"steps": [
+                {{"id": "q1", "op": "query", "right_of": "Total:", "nearest_only": true}},
+                {{"id": "qf", "op": "query", "pattern": "Fee 5"}},
+                {{"id": "qp", "op": "query", "pattern": "Payment is due"}},
+                {{"id": "p1", "op": "patch", "reflow": true, "replacements": [{{"target_id": "${{qp.first_span_id}}", "new_text": "{long}"}}]}},
+                {{"id": "p2", "op": "patch", "replacements": [{{"target_id": "${{qf.first_span_id}}", "new_text": "Fee 6"}}]}},
+                {{"id": "p3", "op": "patch", "replacements": [{{"target_id": "${{q1.first_id}}", "new_text": "$10.00"}}]}}
+            ]}}"#
+        ))
+        .unwrap();
+        let outcome =
+            run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap_or_else(|e| panic!("{e:?}"));
+        let out = Document::open(outcome.output_bytes.clone().unwrap()).unwrap();
+
+        // The right column's fee was patched where it was, its twin left.
+        let fee6 = found_at(&out, "Fee 6");
+        assert_eq!(fee6.len(), 1);
+        assert!((fee6[0][1] - fees[0][1]).abs() < 0.5, "{fee6:?} {fees:?}");
+        let fee5 = found_at(&out, "Fee 5");
+        assert_eq!(fee5.len(), 1);
+        assert!((fee5[0][1] - fees[1][1]).abs() < 0.5, "{fee5:?} {fees:?}");
+        // The left column's total was patched where the reflow moved it.
+        let total = found_at(&out, r"\$10\.00");
+        assert_eq!(total.len(), 1);
+        assert!(
+            (total[0][1] - (total_before[1] + dy)).abs() < 0.5,
+            "{total:?} {total_before:?} {dy}"
         );
     }
 
