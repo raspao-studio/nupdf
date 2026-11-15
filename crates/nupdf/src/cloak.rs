@@ -14,7 +14,7 @@
 //! [`uncloak_pdf`] and [`uncloak_text`] reverse synthetic tokens back to exact
 //! original values in agent-edited PDFs and agent text/JSON outputs.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -220,7 +220,8 @@ struct RawMatch {
 struct CloakSession {
     rules: Vec<CompiledRule>,
     literal_secrets: Vec<String>,
-    observed_raw_secrets: BTreeSet<String>,
+    /// Every secret spelling seen, with its category.
+    observed_raw_secrets: BTreeMap<String, String>,
     secret_to_entry: HashMap<String, usize>,
     used_tokens: HashSet<String>,
     category_counters: HashMap<String, usize>,
@@ -303,7 +304,7 @@ impl CloakSession {
         Ok(CloakSession {
             rules,
             literal_secrets,
-            observed_raw_secrets: BTreeSet::new(),
+            observed_raw_secrets: BTreeMap::new(),
             secret_to_entry: HashMap::new(),
             used_tokens: HashSet::new(),
             category_counters: HashMap::new(),
@@ -392,12 +393,14 @@ impl CloakSession {
     }
 
     fn token_for(&mut self, category: &str, canonical_secret: &str, raw_matched: &str) -> String {
+        let cat = sanitize_category(category);
         if !raw_matched.trim().is_empty() {
-            self.observed_raw_secrets.insert(raw_matched.to_string());
+            self.observed_raw_secrets
+                .insert(raw_matched.to_string(), cat.clone());
         }
         if !canonical_secret.trim().is_empty() {
             self.observed_raw_secrets
-                .insert(canonical_secret.to_string());
+                .insert(canonical_secret.to_string(), cat.clone());
         }
         if let Some(&idx) = self.secret_to_entry.get(canonical_secret)
             && let Some(entry) = self.entries.get_mut(idx)
@@ -406,7 +409,6 @@ impl CloakSession {
             return entry.token.clone();
         }
 
-        let cat = sanitize_category(category);
         let secret_char_len = canonical_secret.chars().count();
         // Every counter value formats to a distinct candidate, and each rejected
         // candidate equals a distinct literal, used token or the secret itself,
@@ -480,16 +482,21 @@ impl CloakSession {
         Some((out, matches.len()))
     }
 
-    fn all_secrets_for_verification(&self) -> Vec<String> {
-        let mut set: BTreeSet<String> = self.observed_raw_secrets.clone();
-        for lit in &self.literal_secrets {
-            if !lit.trim().is_empty() {
-                set.insert(lit.clone());
+    /// `(secret, category)` pairs to look for in the output.
+    fn all_secrets_for_verification(&self) -> Vec<(String, String)> {
+        let mut set: BTreeMap<String, String> = self.observed_raw_secrets.clone();
+        for rule in &self.rules {
+            if let Some(lit) = &rule.canonical_literal
+                && !lit.trim().is_empty()
+            {
+                set.entry(lit.clone())
+                    .or_insert_with(|| rule.category.clone());
             }
         }
         for entry in &self.entries {
             if !entry.secret.trim().is_empty() {
-                set.insert(entry.secret.clone());
+                set.entry(entry.secret.clone())
+                    .or_insert_with(|| entry.category.clone());
             }
         }
         // Exclude synthetic tokens themselves so format-preserving tokens never self-flag.
@@ -1770,10 +1777,20 @@ fn rewrite_metadata_and_objects<T: TextTransform>(
     }
 }
 
-fn verify_zero_secret_leaks(saved_bytes: &[u8], secrets: &[String]) -> Result<(), CloakError> {
-    if secrets.is_empty() {
+/// Fails with `verify.leak` when any secret survives in `saved_bytes`. The
+/// error names the class, page and category of what leaked, never the secret.
+fn verify_zero_secret_leaks(
+    saved_bytes: &[u8],
+    secrets_with_category: &[(String, String)],
+) -> Result<(), CloakError> {
+    if secrets_with_category.is_empty() {
         return Ok(());
     }
+    let secrets: Vec<String> = secrets_with_category
+        .iter()
+        .map(|(s, _)| s.clone())
+        .collect();
+    let secrets = secrets.as_slice();
     let reopened = Document::open(saved_bytes.to_vec()).map_err(|e| CloakError {
         code: "verify.reopen_failed",
         message: format!("failed to reopen cloaked PDF for leak check: {e}"),
@@ -1792,11 +1809,33 @@ fn verify_zero_secret_leaks(saved_bytes: &[u8], secrets: &[String]) -> Result<()
 
     let verdict = verify::verify(&reopened, &targets);
     if !verdict.verified() {
+        // `Finding::detail` quotes the needle, so it never reaches the message.
         let summary: Vec<String> = verdict
             .findings
             .iter()
             .take(3)
-            .map(|f| format!("{}: {}", f.class.name(), f.detail))
+            .map(|f| {
+                let categories: BTreeSet<&str> = secrets_with_category
+                    .iter()
+                    .filter(|(s, _)| {
+                        f.detail.contains(s.as_str()) || f.detail.contains(&format!("{s:?}"))
+                    })
+                    .map(|(_, c)| c.as_str())
+                    .collect();
+                let category = if categories.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    categories.into_iter().collect::<Vec<_>>().join(",")
+                };
+                let mut where_ = String::new();
+                if let Some(p) = f.page {
+                    where_.push_str(&format!(" on page {p}"));
+                }
+                if let Some(o) = f.object {
+                    where_.push_str(&format!(" in object {o}"));
+                }
+                format!("{}{where_} (category {category})", f.class.name())
+            })
             .collect();
         return Err(CloakError {
             code: "verify.leak",
@@ -1824,14 +1863,14 @@ fn verify_zero_secret_leaks(saved_bytes: &[u8], secrets: &[String]) -> Result<()
             stext::extract_page_parts(&reopened, &page_obj, stext_opts, store, Parts::ALL);
         store = next_store;
         if let Ok(full_page) = res {
-            for secret in secrets {
+            for (secret, category) in secrets_with_category {
                 let hits = crate::search::search_page(&full_page, secret, 0)
                     .map_or(0, |found| found.len());
                 if hits > 0 {
                     return Err(CloakError {
                         code: "verify.leak",
                         message: format!(
-                            "zero-leak verification failed: secret still rendered on page {}",
+                            "zero-leak verification failed: {hits} hit(s) of a {category} secret still rendered on page {}",
                             page_idx + 1
                         ),
                     });
@@ -2493,6 +2532,27 @@ mod tests {
         let cloaked = Document::open(bytes).unwrap();
         let (_, uncloaked) = uncloak_pdf(&cloaked, &vault, &WriteOptions::default()).unwrap();
         assert_eq!(uncloaked.entities_restored, 1);
+    }
+
+    #[test]
+    fn leak_error_names_the_category_but_not_the_secret() {
+        let content = b"BT /F1 11 Tf 50 720 Td (Wire to ACCT-884210) Tj ET";
+        let objs = [
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R\
+              /Resources<</Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>>>>>>>"
+                .to_string(),
+            stream_obj("", content),
+        ];
+        let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
+        let doc = crate::testutil::doc_of(&refs);
+        let secrets = [("ACCT-884210".to_string(), "ACCT".to_string())];
+        let err = verify_zero_secret_leaks(doc.data(), &secrets).unwrap_err();
+        assert_eq!(err.code, "verify.leak");
+        assert!(!err.to_string().contains("884210"), "{err}");
+        assert!(err.message.contains("ACCT"), "{err}");
+        assert!(err.message.contains("page 1"), "{err}");
     }
 
     #[test]
