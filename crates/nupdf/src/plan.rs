@@ -661,13 +661,21 @@ pub fn stage_plans(
                         None => (0..page_count).collect(),
                     };
                     for p_idx in target_pages {
-                        let page_obj = base_doc.page(p_idx).map_err(|e| PlanError {
-                            code: "input.page_tree",
-                            is_conflict_or_verify: false,
-                            message: e.0,
-                        })?;
-                        let sp = page_stext(base_doc, &page_obj, stext::Options::default())?;
-                        let hits = search::search_page(&sp, needle, 0).map_err(|e| PlanError {
+                        // Each page extracted once, for every op that reads it.
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            stext_cache.entry(p_idx)
+                        {
+                            let page_obj = base_doc.page(p_idx).map_err(|e| PlanError {
+                                code: "input.page_tree",
+                                is_conflict_or_verify: false,
+                                message: e.0,
+                            })?;
+                            e.insert(page_stext(base_doc, &page_obj, stext::Options::default())?);
+                        }
+                        let Some(sp) = stext_cache.get(&p_idx) else {
+                            continue;
+                        };
+                        let hits = search::search_page(sp, needle, 0).map_err(|e| PlanError {
                             code: "usage.bad_pattern",
                             is_conflict_or_verify: false,
                             message: e,
@@ -1982,6 +1990,17 @@ mod tests {
             .collect();
         assert!(!text.contains("Visible one"), "{text}");
         assert!(text.contains("Visible two"), "{text}");
+    }
+
+    #[test]
+    fn text_highlights_on_shared_pages_each_find_their_hits() {
+        let base = multi_page_fixture();
+        let (_, exec) = run(
+            &base,
+            &[r#"[{"op":"highlight","text":"Indemnity"},{"op":"highlight","text":"Fee","pages":"1"},{"op":"highlight","id":"p2.b1.l1.s1"},{"op":"highlight","text":"Tax"}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.highlights_added, 4);
     }
 
     #[test]
