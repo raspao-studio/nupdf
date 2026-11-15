@@ -465,3 +465,93 @@ fn pipeline_reports_the_warnings_its_steps_raise_while_editing() {
     once.dedup();
     assert_eq!(once.len(), codes.len(), "{codes:?}");
 }
+
+/// A one-page form with a reachable dictionary keyed by the empty name: the
+/// writer puts `/ 6 0 R` out as `/6 0 R`, which reads back as another key,
+/// so no save of it reads back as the document saved.
+fn reads_back_differently() -> Vec<u8> {
+    let content = concat!(
+        "BT /F1 11 Tf 20 240 Td (Name:) Tj ET\n",
+        "0 0 0 RG 1 w 65 238 m 220 238 l S\n",
+        "BT /F1 12 Tf 20 200 Td (Amount:) Tj ET\nBT /F1 12 Tf 90 200 Td ($100.00) Tj ET\n",
+    );
+    pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>/Lossy<</ 6 0 R>>>>",
+        &format!("<</Length {}>>\nstream\n{content}endstream", content.len()),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        "(target)",
+    ])
+}
+
+#[test]
+fn the_v2_writers_refuse_an_output_that_reads_back_differently() {
+    let file = scratch("v2-lossy.pdf");
+    std::fs::write(&file, reads_back_differently()).unwrap();
+    // `clean` refuses this file's output; so does `patch`.
+    let out = scratch("v2-lossy-out.pdf");
+    let clean = nupdf(&["clean", file.to_str().unwrap(), "-o", out.to_str().unwrap()]);
+    assert_eq!(clean.status.code(), Some(4));
+
+    let vault = scratch("v2-lossy-vault.json");
+    std::fs::write(
+        &vault,
+        serde_json::json!({
+            "schema": "nupdf.cloak.vault/v1",
+            "original_doc_id": "",
+            "cloaked_doc_id": "",
+            "entries": [{"token": "Amount", "secret": "Total", "category": "WORD", "occurrences": 1}],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let patch = serde_json::json!({
+        "steps": [
+            {"id": "q1", "op": "query", "right_of": "Amount:", "nearest_only": true},
+            {"id": "p1", "op": "patch", "replacements": [{"target_id": "${q1.first_id}", "new_text": "$250.00"}]}
+        ]
+    })
+    .to_string();
+    let plan = serde_json::json!({
+        "steps": [
+            {"id": "q1", "op": "query", "right_of": "Amount:", "nearest_only": true},
+            {"id": "r1", "op": "apply_plan", "plans": [
+                {"doc_id": "current", "ops": [{"op": "patch", "id": "${q1.first_id}", "text": "$250.00"}]}
+            ]}
+        ]
+    })
+    .to_string();
+    let cloak_vault = scratch("v2-lossy-cloak-vault.json");
+    for args in [
+        vec!["patch", "--replace", "p1.b2.l2.s1=$250.00"],
+        vec![
+            "cloak",
+            "--vault",
+            cloak_vault.to_str().unwrap(),
+            "--entity",
+            "WORD=Amount",
+        ],
+        vec!["uncloak", "--vault", vault.to_str().unwrap()],
+        vec!["flat-forms", "--set", "name=Ada"],
+        vec!["flat-forms", "--promote"],
+        vec!["pipeline", "--inline", &patch],
+        vec!["pipeline", "--inline", &plan],
+    ] {
+        let mut full = vec![args[0], file.to_str().unwrap()];
+        full.extend(&args[1..]);
+        full.extend(["-o", out.to_str().unwrap()]);
+        let run = nupdf(&full);
+        let err: Value = serde_json::from_slice(&run.stderr).unwrap_or_else(|_| {
+            panic!(
+                "{args:?}: exit {:?}, {}",
+                run.status.code(),
+                String::from_utf8_lossy(&run.stdout)
+            )
+        });
+        assert_eq!(err["error"]["code"], "verify.failed", "{args:?}: {err}");
+        assert_eq!(run.status.code(), Some(4), "{args:?}");
+        assert!(!out.exists(), "{args:?}: a refused write left an output");
+    }
+    assert!(!cloak_vault.exists(), "a refused cloak wrote its vault");
+}

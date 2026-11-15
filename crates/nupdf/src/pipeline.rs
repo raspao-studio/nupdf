@@ -789,6 +789,21 @@ pub fn run_pipeline_with_password(
                     });
                 }
 
+                // Read back against the fork it saved, as every writer's
+                // output is, with the options the patch saved it with.
+                let mut saved_with = step_write.clone();
+                if !saved_with.incremental {
+                    saved_with.garbage = saved_with.garbage.max(1);
+                }
+                let read_back = crate::write::verify(&branch, &bytes, password, &saved_with);
+                if !read_back.verified() {
+                    return Err(PipelineError {
+                        code: "verify.failed",
+                        step_index: Some(step_index),
+                        message: read_back.failure(),
+                    });
+                }
+
                 let next_doc = reopen_step_output(&bytes, &working_doc, password, step_index)?;
                 let next_doc_id = DocId::of(&bytes).to_string();
 
@@ -971,7 +986,12 @@ pub fn run_pipeline_with_password(
                     step_write.incremental = *inc;
                 }
 
-                let (bytes, exec) = plan::execute_plans(
+                let plan_error = |e: plan::PlanError| PipelineError {
+                    code: e.code,
+                    step_index: Some(step_index),
+                    message: e.message,
+                };
+                let mut staged = plan::stage_plans(
                     &working_doc,
                     &working_doc_id,
                     &resolved_plans,
@@ -980,11 +1000,20 @@ pub fn run_pipeline_with_password(
                     password,
                     true,
                 )
-                .map_err(|e| PipelineError {
-                    code: e.code,
-                    step_index: Some(step_index),
-                    message: e.message,
-                })?;
+                .map_err(plan_error)?;
+                // With conflicts nothing is saved; otherwise the save is read
+                // back against the fork it came from, as every writer's is.
+                let bytes = if staged.conflicts().is_empty() {
+                    crate::write::save_verified(&staged.work, &staged.write_options, password)
+                        .map_err(|e| PipelineError {
+                            code: e.code,
+                            step_index: Some(step_index),
+                            message: e.message,
+                        })?
+                } else {
+                    Vec::new()
+                };
+                let exec = staged.finish(&bytes).map_err(plan_error)?;
 
                 if !exec.conflicts.is_empty() {
                     let summary = exec
@@ -2281,6 +2310,31 @@ mod tests {
             "/Font<</F1 5 0 R/F2 6 0 R>>",
             &[HELVETICA.to_vec(), HELVETICA_BOLD.to_vec()],
         )
+    }
+
+    #[test]
+    fn a_step_whose_save_reads_back_differently_fails_it() {
+        // The empty name as a key, in the font the label keeps, is written
+        // so that it reads back as /1: each mutating step's save is compared
+        // with the fork it saved.
+        let content = b"BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 600 Tm (Tax:) Tj ET \
+            BT /F1 12 Tf 0 0 0 rg 1 0 0 1 220 600 Tm ($0.00) Tj ET";
+        let lossy_bold = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding/Lossy<</ 1 0 R>>>>";
+        let doc = page_doc(
+            content,
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), lossy_bold.to_vec()],
+        );
+        let query = r#"{"id": "q1", "op": "query", "right_of": "Tax:", "nearest_only": true}"#;
+        for step in [
+            r#"{"id": "p1", "op": "patch", "replacements": [{"target_id": "${q1.first_id}", "new_text": "$7.00"}]}"#,
+            r#"{"id": "r1", "op": "apply_plan", "plans": [{"doc_id": "current", "ops": [{"op": "patch", "id": "${q1.first_id}", "text": "$7.00"}]}]}"#,
+        ] {
+            let spec = parse_pipeline_spec(&format!(r#"{{"steps": [{query}, {step}]}}"#)).unwrap();
+            let err = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap_err();
+            assert_eq!(err.code, "verify.failed", "{step}: {err:?}");
+            assert_eq!(err.step_index, Some(1), "{step}");
+        }
     }
 
     #[test]

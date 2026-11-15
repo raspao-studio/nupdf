@@ -1352,8 +1352,10 @@ pub fn pipeline_cmd(
 }
 
 /// The read-back of a pipeline's output, which comes as bytes with no
-/// document saved beside them to compare: it must open (with the password
-/// when locked) without a repair, load every object, and load every page.
+/// document saved beside them to compare (each step's save was compared
+/// with the copy it saved inside the pipeline): it must open (with the
+/// password when locked) without a repair, load every object, and load
+/// every page.
 fn read_back_output(
     doc: &Document,
     bytes: &[u8],
