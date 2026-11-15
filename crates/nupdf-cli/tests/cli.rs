@@ -2452,7 +2452,11 @@ fn batch_files_stop_at_their_timeout() {
     let lines = lines(&out.stdout);
     assert_eq!(lines[0]["exit"], 5);
     assert_eq!(lines[0]["error"]["error"]["code"], "limit.timeout");
-    assert_eq!(lines[2]["failed"], 2);
+    // The small file may or may not finish in 50 ms, by the machine and
+    // the build; the summary counts whichever it was.
+    let failed = lines[..2].iter().filter(|l| l["exit"] != 0).count();
+    assert_eq!(lines[2]["failed"], failed);
+    assert_eq!(lines[2]["ok"], 2 - failed);
 }
 
 fn diff(a: &str, b: &str, extra: &[&str]) -> Value {

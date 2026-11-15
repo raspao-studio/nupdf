@@ -314,8 +314,7 @@ pub fn run(args: &Args) -> Result<Value, Failure> {
                 } else {
                     failed += 1;
                 }
-                let _ = writeln!(sink, "{line}");
-                let _ = sink.flush();
+                write_line(&mut sink, &line);
                 written += 1;
             }
         }
@@ -331,9 +330,51 @@ pub fn run(args: &Args) -> Result<Value, Failure> {
     }))
 }
 
+/// One file's line, handed to `sink` whole in one write and flushed, so
+/// that a reader following the output never has part of a line, and a
+/// file or pipe written straight to does not get a write for every token
+/// of the JSON. A closed pipe is not ours to report.
+fn write_line(sink: &mut dyn Write, line: &Value) {
+    let mut bytes = serde_json::to_vec(line).unwrap_or_default();
+    bytes.push(b'\n');
+    let _ = sink.write_all(&bytes);
+    let _ = sink.flush();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sink that keeps each write apart, as a file or a pipe gets them.
+    struct Writes(Vec<Vec<u8>>);
+
+    impl Write for Writes {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.push(data.to_vec());
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_line_reaches_the_output_whole_in_one_write() {
+        let line = json!({
+            "schema": "nupdf.batch.item/v1",
+            "file": "in/a b.pdf",
+            "exit": 0,
+            "report": {"pages": [{"id": "p1", "text": "caf\u{e9} \"x\"\n"}], "n": [1, 2.5, null]},
+        });
+        let mut sink = Writes(Vec::new());
+        write_line(&mut sink, &line);
+        write_line(&mut sink, &json!({"exit": 3}));
+        assert_eq!(sink.0.len(), 2, "one write a line");
+        assert_eq!(sink.0[0], format!("{line}\n").into_bytes());
+        assert_eq!(sink.0[1], b"{\"exit\":3}\n");
+        assert_eq!(sink.0[0].iter().filter(|&&b| b == b'\n').count(), 1);
+    }
 
     #[test]
     fn each_file_gets_its_line() {

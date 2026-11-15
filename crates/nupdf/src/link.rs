@@ -1086,11 +1086,28 @@ pub fn resolve_link_page(doc: &Document, uri: &str) -> Result<i32, String> {
 /// reference), over `bbox` in MuPDF's page space, leading to `uri`. An
 /// /Annots array of its own is copied into the page first.
 pub fn create_link(doc: &Document, page: &Object, bbox: Rect, uri: &str) -> Result<(), String> {
+    create_links(doc, page, [(bbox, uri)])
+}
+
+/// `pdf_create_link` for each of `links` in turn, with the objects and
+/// the page it leaves: the page's /Annots is read once and written once,
+/// where a call for each link would copy the array every time, which on
+/// a page of thousands of links is most of a merge. A link that cannot
+/// be made ends it there with that link's error, the links before it on
+/// the page. Without links the page is left as it is.
+pub fn create_links<'a>(
+    doc: &Document,
+    page: &Object,
+    links: impl IntoIterator<Item = (Rect, &'a str)>,
+) -> Result<(), String> {
+    let mut links = links.into_iter().peekable();
+    if links.peek().is_none() {
+        return Ok(());
+    }
     let Object::Ref(page_ref) = page else {
         return Err("cannot add a link to a page that is not an object".into());
     };
-    let ctm = doc.page_transform(page).map_err(|e| e.0)?.1;
-    let rect = bbox.transform(ctm.invert());
+    let inverse = doc.page_transform(page).map_err(|e| e.0)?.1.invert();
 
     let mut page_obj = doc.object(page_ref.num).ok_or("cannot find page object")?;
     let annots = match get(doc, &page_obj, b"Annots") {
@@ -1102,31 +1119,44 @@ pub fn create_link(doc: &Document, page: &Object, bbox: Rect, uri: &str) -> Resu
     };
     let mut annots = annots.unwrap_or_default();
 
-    let mut annot = Dict::new();
-    annot.put(b"Type", Object::name(b"Annot"));
-    annot.put(b"Subtype", Object::name(b"Link"));
-    annot.put(
-        b"Rect",
-        Object::Array(Arc::new(
-            [rect.x0, rect.y0, rect.x1, rect.y1]
-                .map(Object::Real)
-                .to_vec(),
-        )),
-    );
-    let mut bs = Dict::new();
-    bs.put(b"S", Object::name(b"S"));
-    bs.put(b"Type", Object::name(b"Border"));
-    bs.put(b"W", Object::Int(0));
-    annot.put(b"BS", Object::Dict(Arc::new(bs)));
-    annot.put(b"A", new_action_from_link(doc, uri)?);
-    let annot = new_object(doc, annot);
-    annots.push(annot);
+    let mut made = 0usize;
+    let mut failed = None;
+    for (bbox, uri) in links {
+        let rect = bbox.transform(inverse);
+        let mut annot = Dict::new();
+        annot.put(b"Type", Object::name(b"Annot"));
+        annot.put(b"Subtype", Object::name(b"Link"));
+        annot.put(
+            b"Rect",
+            Object::Array(Arc::new(
+                [rect.x0, rect.y0, rect.x1, rect.y1]
+                    .map(Object::Real)
+                    .to_vec(),
+            )),
+        );
+        let mut bs = Dict::new();
+        bs.put(b"S", Object::name(b"S"));
+        bs.put(b"Type", Object::name(b"Border"));
+        bs.put(b"W", Object::Int(0));
+        annot.put(b"BS", Object::Dict(Arc::new(bs)));
+        match new_action_from_link(doc, uri) {
+            Ok(action) => annot.put(b"A", action),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+        annots.push(new_object(doc, annot));
+        made += 1;
+    }
 
-    // The action may have made objects, but not changed the page.
-    let page_dict = dict_mut(&mut page_obj)?;
-    page_dict.put(b"Annots", Object::Array(Arc::new(annots)));
-    doc.alter_object(page_ref.num, page_obj);
-    Ok(())
+    // The actions may have made objects, but not changed the page.
+    if made > 0 {
+        let page_dict = dict_mut(&mut page_obj)?;
+        page_dict.put(b"Annots", Object::Array(Arc::new(annots)));
+        doc.alter_object(page_ref.num, page_obj);
+    }
+    failed.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -1550,5 +1580,91 @@ mod tests {
         assert!(text(3).ends_with(
             "/Annots[6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 17 0 R 18 0 R]>>"
         ));
+    }
+
+    /// Every object of `doc`, printed.
+    fn printed(doc: &Document) -> Vec<String> {
+        (1..doc.xref_len() as i32)
+            .map(|n| {
+                crate::print::to_string(
+                    &doc.resolve(&Object::Ref(ObjRef::new(n, 0))),
+                    crate::print::Options::default(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn links_created_together_are_those_created_one_at_a_time() {
+        // The page's /Annots is an object of its own, with a link in it
+        // already; the third URI cannot be made into a link.
+        let objects = [
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]/Rotate 90/Annots 5 0 R>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]>>",
+            "[6 0 R]",
+            "<</Type/Annot/Subtype/Link/Rect[0 0 1 1]/A<</S/URI/URI(http://first)>>>>",
+        ];
+        let page = Object::Ref(ObjRef::new(3, 0));
+        let rect = |i: usize| Rect::new(i as f32 * 10.0, 10.0, i as f32 * 10.0 + 5.0, 20.0);
+        for uris in [
+            &[
+                "http://a",
+                "file:dir/b.pdf#page=2",
+                "#page=2&view=Fit",
+                "mailto:c@d",
+            ][..],
+            &["http://a", "#page=2", "bogus", "http://never"][..],
+            &["bogus", "http://never"][..],
+            &[][..],
+        ] {
+            let one = crate::testutil::doc_of(&objects);
+            let mut first_error = Ok(());
+            for (i, uri) in uris.iter().enumerate() {
+                first_error = create_link(&one, &page, rect(i), uri);
+                if first_error.is_err() {
+                    break;
+                }
+            }
+            let together = crate::testutil::doc_of(&objects);
+            let links = uris.iter().enumerate().map(|(i, uri)| (rect(i), *uri));
+            assert_eq!(create_links(&together, &page, links), first_error);
+            assert_eq!(printed(&together), printed(&one), "{uris:?}");
+            assert_eq!(first_error.is_err(), uris.contains(&"bogus"));
+        }
+    }
+
+    #[test]
+    fn many_links_on_a_page_keep_their_order() {
+        let doc = crate::testutil::doc_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]>>",
+        ]);
+        let page = Object::Ref(ObjRef::new(3, 0));
+        let uris: Vec<String> = (0..5000).map(|i| format!("http://x/{i}")).collect();
+        let links = uris
+            .iter()
+            .map(|u| (Rect::new(0.0, 0.0, 1.0, 1.0), u.as_str()));
+        assert_eq!(create_links(&doc, &page, links), Ok(()));
+        let Object::Array(annots) = doc.dict_get(&page, b"Annots") else {
+            panic!("no /Annots");
+        };
+        assert_eq!(annots.len(), 5000);
+        for (i, annot) in annots.iter().enumerate() {
+            let action = doc.dict_get(annot, b"A");
+            assert_eq!(
+                doc.dict_get(&action, b"URI"),
+                text_string(&format!("http://x/{i}")),
+                "link {i}"
+            );
+        }
+        // Nothing to add leaves the page, and a page that is no object,
+        // alone.
+        let before = printed(&doc);
+        assert_eq!(create_links(&doc, &page, []), Ok(()));
+        assert_eq!(create_links(&doc, &Object::Null, []), Ok(()));
+        assert_eq!(printed(&doc), before);
     }
 }
