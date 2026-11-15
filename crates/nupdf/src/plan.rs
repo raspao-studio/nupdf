@@ -122,12 +122,24 @@ pub struct PlanConflict {
     pub message: String,
 }
 
+/// An op that repeats, field for field, one another plan staged: it is
+/// applied once, as `same_as`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PlanDuplicate {
+    pub op: usize,
+    pub agent: Option<String>,
+    pub same_as: usize,
+    pub agent_of: Option<String>,
+}
+
 /// Summary of an executed (or dry-run) transactional edit plan.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PlanExecution {
     pub plan_count: usize,
     pub op_count: usize,
     pub conflicts: Vec<PlanConflict>,
+    /// Ops left out as repeats of another plan's.
+    pub duplicates: Vec<PlanDuplicate>,
     pub patches: Vec<AppliedPatch>,
     pub highlights_added: usize,
     pub annotations_deleted: usize,
@@ -136,7 +148,9 @@ pub struct PlanExecution {
     pub sanitized_items: usize,
     pub pages_kept: Option<Vec<i32>>,
     pub rotated: Option<i32>,
-    pub verified: bool,
+    /// Whether the edits passed their checks; null when they were not
+    /// checked (`--no-verify`).
+    pub verified: Option<bool>,
     pub patch_verification: Option<PatchVerification>,
     pub redact_verified: Option<bool>,
 }
@@ -312,9 +326,8 @@ fn resolve_content_id(
         .ok_or_else(bad)?
         .parse()
         .map_err(|_| bad())?;
-    let refs: Vec<&Block> = sp.blocks.iter().collect();
-    let text_blocks = extract::text_blocks(&refs);
-    let Some(tb) = b_num.checked_sub(1).and_then(|i| text_blocks.get(i)) else {
+    // The page's blocks, numbered as `extract` numbers them.
+    let Some(Block::Text(tb)) = b_num.checked_sub(1).and_then(|i| sp.blocks.get(i)) else {
         return Err(PlanError {
             code: "input.target_not_found",
             is_conflict_or_verify: false,
@@ -405,6 +418,7 @@ fn boxes_overlap(a: Rect, b: Rect) -> bool {
 
 /// Executes one or more [`EditPlan`]s atomically on a forked overlay of `base_doc`,
 /// checking `doc_id` freshness, cross-agent conflicts, and post-write verification.
+/// With conflicts, nothing is saved and the bytes are empty.
 pub fn execute_plans(
     base_doc: &Document,
     base_doc_id: &str,
@@ -414,6 +428,90 @@ pub fn execute_plans(
     password: Option<&str>,
     verify_output: bool,
 ) -> Result<(Vec<u8>, PlanExecution), PlanError> {
+    let mut staged = stage_plans(
+        base_doc,
+        base_doc_id,
+        plans,
+        write_opts,
+        patch_opts,
+        password,
+        verify_output,
+    )?;
+    if !staged.conflicts().is_empty() {
+        return Ok((Vec::new(), staged.finish(&[])?));
+    }
+    let bytes = write::save(&staged.work, &staged.write_options).map_err(|e| PlanError {
+        code: "input.write",
+        is_conflict_or_verify: false,
+        message: e.message,
+    })?;
+    let exec = staged.finish(&bytes)?;
+    Ok((bytes, exec))
+}
+
+/// Plans whose edits are made on a fork of the base, for the caller to
+/// save with [`StagedPlans::write_options`] and hand back to
+/// [`StagedPlans::finish`], which runs the checks still to run on the
+/// bytes saved.
+#[derive(Debug)]
+pub struct StagedPlans {
+    /// The fork the edits were made on: what to save, and whose
+    /// diagnostics to report.
+    pub work: Document,
+    /// The options to save it with: those asked for, with a full rewrite
+    /// once a redaction ran.
+    pub write_options: WriteOptions,
+    exec: PlanExecution,
+    pending: Option<PendingChecks>,
+}
+
+/// The checks that read the saved output, when no page op made them run
+/// on a save before it.
+#[derive(Debug)]
+struct PendingChecks {
+    password: Option<String>,
+    untouched: HashMap<i32, Vec<(String, Rect)>>,
+    patch_opts: PatchOptions,
+    redact: RedactCheck,
+}
+
+impl StagedPlans {
+    /// The conflicts found: with any, no edit was made.
+    pub fn conflicts(&self) -> &[PlanConflict] {
+        &self.exec.conflicts
+    }
+
+    /// The execution's summary, with the checks still to run run on
+    /// `bytes`, a save of [`StagedPlans::work`].
+    pub fn finish(&mut self, bytes: &[u8]) -> Result<PlanExecution, PlanError> {
+        if let Some(p) = self.pending.take() {
+            let (pv, rv) = run_checks(
+                bytes,
+                p.password.as_deref(),
+                &mut self.exec.patches,
+                &p.untouched,
+                &p.patch_opts,
+                &p.redact,
+            )?;
+            self.exec.verified = Some(pv.as_ref().is_none_or(|v| v.verified) && rv != Some(false));
+            self.exec.patch_verification = pv;
+            self.exec.redact_verified = rv;
+        }
+        Ok(self.exec.clone())
+    }
+}
+
+/// [`execute_plans`] up to the save: the edits made on a fork of
+/// `base_doc`, and the checks that need no save of it run.
+pub fn stage_plans(
+    base_doc: &Document,
+    base_doc_id: &str,
+    plans: &[EditPlan],
+    write_opts: &WriteOptions,
+    patch_opts: &PatchOptions,
+    password: Option<&str>,
+    verify_output: bool,
+) -> Result<StagedPlans, PlanError> {
     for p in plans {
         if let Some(expected) = &p.doc_id
             && expected != base_doc_id
@@ -432,18 +530,42 @@ pub fn execute_plans(
         }
     }
 
+    // An op another plan staged already, the same in every field, is the
+    // same edit asked twice: it is applied once, and the report says so.
+    // Within one plan, a repeat is the plan's own (two toggles cancel).
     let mut indexed = Vec::new();
-    for p in plans {
+    let mut duplicates: Vec<PlanDuplicate> = Vec::new();
+    let mut first_by_op: HashMap<String, (usize, usize, Option<String>)> = HashMap::new();
+    let mut op_count = 0usize;
+    for (plan_idx, p) in plans.iter().enumerate() {
         for op in &p.ops {
-            if indexed.len() >= MAX_PLAN_OPS {
+            if op_count >= MAX_PLAN_OPS {
                 return Err(PlanError {
                     code: "limit.plan_ops",
                     is_conflict_or_verify: false,
                     message: format!("plan exceeds maximum of {MAX_PLAN_OPS} operations"),
                 });
             }
+            let global_idx = op_count;
+            op_count += 1;
+            let key = serde_json::to_string(op).unwrap_or_default();
+            match first_by_op.get(&key) {
+                Some((first_plan, first_idx, first_agent)) if *first_plan != plan_idx => {
+                    duplicates.push(PlanDuplicate {
+                        op: global_idx,
+                        agent: p.agent.clone(),
+                        same_as: *first_idx,
+                        agent_of: first_agent.clone(),
+                    });
+                    continue;
+                }
+                Some(_) => {}
+                None => {
+                    first_by_op.insert(key, (plan_idx, global_idx, p.agent.clone()));
+                }
+            }
             indexed.push(IndexedOp {
-                global_idx: indexed.len(),
+                global_idx,
                 agent: p.agent.clone(),
                 op: op.clone(),
             });
@@ -480,7 +602,8 @@ pub fn execute_plans(
     let mut redact_texts: Vec<String> = Vec::new();
     let mut redact_regexes: Vec<String> = Vec::new();
     let mut redact_needles: Vec<(String, u32)> = Vec::new();
-    let mut annot_deletes: Vec<(usize, Option<String>, i32, String)> = Vec::new();
+    let mut annot_deletes: Vec<(usize, Option<String>, i32, String, crate::object::Object)> =
+        Vec::new();
     let mut fills: Vec<(usize, Option<String>, fill::Edit)> = Vec::new();
     let mut meta_sets: Vec<(usize, Option<String>, String, String)> = Vec::new();
     let mut meta_strip = false;
@@ -492,13 +615,8 @@ pub fn execute_plans(
     for item in &indexed {
         match &item.op {
             PlanOp::Patch { id, text } => {
-                let resolved = resolve_content_id(
-                    id,
-                    &mut stext_cache,
-                    base_doc,
-                    page_count,
-                    stext::Options::default(),
-                )?;
+                // Its page and box come from resolving every patch on the
+                // base together, below.
                 patches_resolved.push((
                     item.global_idx,
                     item.agent.clone(),
@@ -506,8 +624,8 @@ pub fn execute_plans(
                         target_id: id.clone(),
                         new_text: text.clone(),
                     },
-                    resolved.page_idx,
-                    resolved.bbox,
+                    0,
+                    Rect::EMPTY,
                 ));
             }
             PlanOp::Highlight {
@@ -543,13 +661,21 @@ pub fn execute_plans(
                         None => (0..page_count).collect(),
                     };
                     for p_idx in target_pages {
-                        let page_obj = base_doc.page(p_idx).map_err(|e| PlanError {
-                            code: "input.page_tree",
-                            is_conflict_or_verify: false,
-                            message: e.0,
-                        })?;
-                        let sp = page_stext(base_doc, &page_obj, stext::Options::default())?;
-                        let hits = search::search_page(&sp, needle, 0).map_err(|e| PlanError {
+                        // Each page extracted once, for every op that reads it.
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            stext_cache.entry(p_idx)
+                        {
+                            let page_obj = base_doc.page(p_idx).map_err(|e| PlanError {
+                                code: "input.page_tree",
+                                is_conflict_or_verify: false,
+                                message: e.0,
+                            })?;
+                            e.insert(page_stext(base_doc, &page_obj, stext::Options::default())?);
+                        }
+                        let Some(sp) = stext_cache.get(&p_idx) else {
+                            continue;
+                        };
+                        let hits = search::search_page(sp, needle, 0).map_err(|e| PlanError {
                             code: "usage.bad_pattern",
                             is_conflict_or_verify: false,
                             message: e,
@@ -591,7 +717,7 @@ pub fn execute_plans(
                     .ok_or_else(bad)?
                     .parse()
                     .map_err(|_| bad())?;
-                let _a_num: usize = a_s
+                let a_num: usize = a_s
                     .strip_prefix('a')
                     .ok_or_else(bad)?
                     .parse()
@@ -599,7 +725,28 @@ pub fn execute_plans(
                 if p_num < 1 || p_num > page_count {
                     return Err(bad());
                 }
-                annot_deletes.push((item.global_idx, item.agent.clone(), p_num - 1, id.clone()));
+                // By the base's listing, as `annots --delete` resolves its
+                // ids: an earlier delete must not renumber a later one.
+                let page_obj = base_doc.page(p_num - 1).map_err(|e| PlanError {
+                    code: "input.page_tree",
+                    is_conflict_or_verify: false,
+                    message: e.0,
+                })?;
+                let annot = a_num
+                    .checked_sub(1)
+                    .and_then(|i| annot::page_annots(base_doc, &page_obj).0.get(i).cloned())
+                    .ok_or_else(|| PlanError {
+                        code: "input.target_not_found",
+                        is_conflict_or_verify: false,
+                        message: format!("no annotation {id}"),
+                    })?;
+                annot_deletes.push((
+                    item.global_idx,
+                    item.agent.clone(),
+                    p_num - 1,
+                    id.clone(),
+                    annot,
+                ));
             }
             PlanOp::Fill { field, value } => {
                 fills.push((
@@ -628,12 +775,13 @@ pub fn execute_plans(
                 boxes,
             } => {
                 if let Some(cid) = id {
+                    // Numbered as `extract` and `redact --id` number them.
                     let resolved = resolve_content_id(
                         cid,
-                        &mut redact_stext_cache,
+                        &mut stext_cache,
                         base_doc,
                         page_count,
-                        redact_stext_opts,
+                        stext::Options::default(),
                     )?;
                     redactions_resolved.push((
                         item.global_idx,
@@ -663,7 +811,16 @@ pub fn execute_plans(
                     ));
                 }
                 let search_pair = match (text, regex) {
-                    (Some(t), _) => {
+                    (Some(_), Some(_)) => {
+                        return Err(PlanError {
+                            code: "usage.bad_plan",
+                            is_conflict_or_verify: false,
+                            message:
+                                "redact takes `text` or `regex`, not both: stage two redact ops"
+                                    .into(),
+                        });
+                    }
+                    (Some(t), None) => {
                         redact_texts.push(t.clone());
                         Some((t.clone(), 0u32))
                     }
@@ -784,6 +941,54 @@ pub fn execute_plans(
             }
         }
     }
+
+    // Every patch target found on the base, with the spans around it,
+    // before any op changes a page: a redaction that removes a block would
+    // renumber the ones after it.
+    let patch_specs: Vec<PatchSpec> = patches_resolved
+        .iter()
+        .map(|(_, _, s, _, _)| s.clone())
+        .collect();
+    let patch_err = |e: patch::PatchError| PlanError {
+        code: e.code,
+        is_conflict_or_verify: false,
+        message: e.message,
+    };
+    // Two patches of one place are a conflict, found below, or one patch
+    // asked twice: the place is resolved once, for both.
+    let overlaps = patch::overlapping_targets(&patch_specs).map_err(patch_err)?;
+    let (patch_targets, untouched_by_page) = if patch_specs.is_empty() {
+        (None, HashMap::new())
+    } else {
+        let firsts: Vec<PatchSpec> = patch_specs
+            .iter()
+            .zip(&overlaps)
+            .filter(|(_, o)| o.is_none())
+            .map(|(s, _)| s.clone())
+            .collect();
+        let resolved = patch::resolve_patches(base_doc, &firsts).map_err(patch_err)?;
+        let found = resolved.targets();
+        let mut first_slot: Vec<usize> = Vec::with_capacity(overlaps.len());
+        let mut next = 0usize;
+        for o in &overlaps {
+            let k = match o {
+                Some(earlier) => first_slot.get(*earlier).copied().unwrap_or(0),
+                None => {
+                    next += 1;
+                    next - 1
+                }
+            };
+            first_slot.push(k);
+        }
+        for (slot, &k) in patches_resolved.iter_mut().zip(&first_slot) {
+            if let Some(&(page, bbox)) = found.get(k) {
+                slot.3 = page - 1;
+                slot.4 = bbox;
+            }
+        }
+        let untouched = patch::snapshot_untouched_spans(base_doc, &firsts).map_err(patch_err)?;
+        (Some(resolved), untouched)
+    };
 
     // Check pairwise spatial & semantic conflicts.
     for i in 0..patches_resolved.len() {
@@ -906,11 +1111,14 @@ pub fn execute_plans(
     }
 
     if !conflicts.is_empty() {
-        return Ok((
-            Vec::new(),
-            PlanExecution {
+        return Ok(StagedPlans {
+            work: base_doc.fork_clean(),
+            write_options: write_opts.clone(),
+            pending: None,
+            exec: PlanExecution {
                 plan_count: plans.len(),
-                op_count: indexed.len(),
+                op_count,
+                duplicates,
                 conflicts,
                 patches: Vec::new(),
                 highlights_added: 0,
@@ -920,11 +1128,17 @@ pub fn execute_plans(
                 sanitized_items: 0,
                 pages_kept: None,
                 rotated: None,
-                verified: false,
+                verified: Some(false),
                 patch_verification: None,
                 redact_verified: None,
             },
-        ));
+        });
+    }
+
+    // Two patches of one place that do not conflict (the same text) are
+    // still one place patched twice.
+    if overlaps.iter().any(Option::is_some) {
+        patch::resolve_patches(base_doc, &patch_specs).map_err(patch_err)?;
     }
 
     // Fork an isolated O(1) overlay branch sharing the base document's parsed State.
@@ -948,28 +1162,26 @@ pub fn execute_plans(
     let mut highlights_added = 0usize;
     if !annot_deletes.is_empty() || !highlights_resolved.is_empty() {
         let mut editor = Editor::new(&work);
-        for (_, _, p_idx, id_str) in &annot_deletes {
-            let page_obj = work.page(*p_idx).map_err(|e| PlanError {
-                code: "input.page_tree",
+        for (_, _, p_idx, id_str, target_annot) in &annot_deletes {
+            editor.load_page(*p_idx).map_err(|e| PlanError {
+                code: "input.annots",
                 is_conflict_or_verify: false,
-                message: e.0,
+                message: e,
             })?;
-            let (list, _) = annot::page_annots(&work, &page_obj);
-            let a_idx: usize = id_str
-                .split('.')
-                .nth(1)
-                .and_then(|s| s.strip_prefix('a'))
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            if let Some(target_annot) = a_idx.checked_sub(1).and_then(|i| list.get(i)) {
-                editor.load_page(*p_idx).map_err(|e| PlanError {
-                    code: "input.annots",
-                    is_conflict_or_verify: false,
-                    message: e,
-                })?;
-                if editor.delete(*p_idx, target_annot).unwrap_or(false) {
-                    annotations_deleted += 1;
-                }
+            if editor.delete(*p_idx, target_annot).map_err(|e| PlanError {
+                code: "input.annots",
+                is_conflict_or_verify: false,
+                message: e,
+            })? {
+                annotations_deleted += 1;
+            } else {
+                // As `annots --delete`: see Editor::delete.
+                work.diagnostics().warn(
+                    "annot.not_deleted",
+                    format!(
+                        "{id_str} is not deleted: MuPDF does not find a direct annotation without an appearance"
+                    ),
+                );
             }
         }
         for (_, _, p_idx, _, pts, note) in &highlights_resolved {
@@ -1015,7 +1227,11 @@ pub fn execute_plans(
         }
         redaction_quads += quads.len();
     }
-    let matcher = Matcher::new(&redact_texts, &redact_regexes, false).ok();
+    let matcher = Matcher::new(&redact_texts, &redact_regexes, false).map_err(|e| PlanError {
+        code: "usage.bad_pattern",
+        is_conflict_or_verify: false,
+        message: e,
+    })?;
     for (&p_idx, (quads, boxes)) in &redaction_pages {
         let page_obj = work.page(p_idx).map_err(|e| PlanError {
             code: "input.page_tree",
@@ -1038,43 +1254,38 @@ pub fn execute_plans(
             text: TextMethod::Remove,
         };
         let _ = redact::redact_all_annotations(&work, p_idx, &pdf_quads);
-        redact::redact_page_with(&work, p_idx, &pdf_quads, ropts, matcher.as_ref()).map_err(
-            |e| PlanError {
+        redact::redact_page_with(&work, p_idx, &pdf_quads, ropts, Some(&matcher)).map_err(|e| {
+            PlanError {
                 code: "input.redact",
                 is_conflict_or_verify: false,
                 message: e,
-            },
-        )?;
+            }
+        })?;
     }
-    if let Some(m) = &matcher
-        && !redact_needles.is_empty()
-    {
-        let all_pages: Vec<i32> = (0..page_count).collect();
-        let _ = scrub::scrub(&work, m, &all_pages);
+    // As `redact`: the redacted pages lose their thumbnails, and every
+    // string the patterns match goes.
+    if !redaction_pages.is_empty() {
+        let pages: Vec<i32> = redaction_pages.keys().copied().collect();
+        let _ = scrub::scrub(&work, &matcher, &pages);
     }
 
-    // 4. Surgical text patches (snapshot untouched spans on affected pages first for verification!)
-    let patch_specs: Vec<PatchSpec> = patches_resolved
-        .iter()
-        .map(|(_, _, s, _, _)| s.clone())
-        .collect();
-    let mut untouched_by_page = if patch_specs.is_empty() {
-        HashMap::new()
-    } else {
-        patch::snapshot_untouched_spans(&work, &patch_specs).map_err(|e| PlanError {
-            code: e.code,
-            is_conflict_or_verify: false,
-            message: e.message,
-        })?
-    };
-    let mut applied_patches = if patch_specs.is_empty() {
-        Vec::new()
-    } else {
-        patch::apply_patches(&work, &patch_specs, patch_opts).map_err(|e| PlanError {
-            code: e.code,
-            is_conflict_or_verify: false,
-            message: e.message,
-        })?
+    // 4. Surgical text patches, at the targets found on the base.
+    let mut applied_patches = match patch_targets {
+        None => Vec::new(),
+        Some(resolved) => {
+            let (applied, gone) = patch::apply_resolved(&work, resolved).map_err(patch_err)?;
+            if !gone.is_empty() {
+                return Err(PlanError {
+                    code: "plan.target_destroyed",
+                    is_conflict_or_verify: true,
+                    message: format!(
+                        "another op of the plans removed the text of patch target(s) {}",
+                        gone.join(", ")
+                    ),
+                });
+            }
+            applied
+        }
     };
 
     // 5. Metadata
@@ -1097,7 +1308,50 @@ pub fn execute_plans(
         sanitized_items = removed.len();
     }
 
-    // 7. Page rotations and selection/deletion (applied last; remap 1-based patched page numbers if rearranged!)
+    // Full rewrite with GC is forced whenever redaction ran so no unreferenced stream or history leaks!
+    let mut effective_write = write_opts.clone();
+    if !redactions_resolved.is_empty() {
+        effective_write.incremental = false;
+        effective_write.compress = true;
+    }
+    if !effective_write.incremental {
+        effective_write.garbage = effective_write.garbage.max(1);
+    }
+
+    // The checks read the pages as the edits left them, before the page
+    // ops: the targets' boxes and the spans around them are in the base
+    // pages' coordinates, which a rotation turns and a page dropped moves.
+    let redact_check = RedactCheck {
+        needles: redact_needles,
+        texts: redact_texts,
+        regexes: redact_regexes,
+        areas: redaction_pages
+            .iter()
+            .map(|(&p, (quads, _))| (p, quads.clone()))
+            .collect(),
+    };
+    let has_page_ops = !page_rotations.is_empty() || page_kept.is_some();
+    let mut checked = None;
+    if verify_output && has_page_ops {
+        let mut snapshot_write = effective_write.clone();
+        snapshot_write.incremental = false;
+        snapshot_write.garbage = snapshot_write.garbage.max(1);
+        let snapshot = write::save(&work, &snapshot_write).map_err(|e| PlanError {
+            code: "input.write",
+            is_conflict_or_verify: false,
+            message: e.message,
+        })?;
+        checked = Some(run_checks(
+            &snapshot,
+            password,
+            &mut applied_patches,
+            &untouched_by_page,
+            patch_opts,
+            &redact_check,
+        )?);
+    }
+
+    // 7. Page rotations and selection/deletion (applied last; patched pages renumbered if rearranged)
     let mut last_rotated = None;
     for (deg, targets) in &page_rotations {
         edit::rotate_pages(&work, targets, *deg).map_err(|e| PlanError {
@@ -1115,14 +1369,6 @@ pub fn execute_plans(
             is_conflict_or_verify: false,
             message: crate::diag::report::strip(&e.0).to_string(),
         })?;
-        // `untouched_by_page` is keyed by 1-based page number!
-        let mut remapped_untouched: HashMap<i32, Vec<(String, Rect)>> = HashMap::new();
-        for (new_idx, &old_idx) in kept.iter().enumerate() {
-            if let Some(items) = untouched_by_page.get(&(old_idx + 1)) {
-                remapped_untouched.insert((new_idx + 1) as i32, items.clone());
-            }
-        }
-        untouched_by_page = remapped_untouched;
         for ap in &mut applied_patches {
             if let Some(pos) = kept.iter().position(|&old| old == ap.page - 1) {
                 ap.page = (pos + 1) as i32;
@@ -1131,75 +1377,24 @@ pub fn execute_plans(
         pages_kept_1based = Some(kept.iter().map(|i| i + 1).collect());
     }
 
-    // Full rewrite with GC is forced whenever redaction ran so no unreferenced stream or history leaks!
-    let mut effective_write = write_opts.clone();
-    if !redactions_resolved.is_empty() {
-        effective_write.incremental = false;
-        effective_write.compress = true;
-    }
-    if !effective_write.incremental {
-        effective_write.garbage = effective_write.garbage.max(1);
-    }
+    let checked_now = checked.is_some();
+    let (patch_verif, redact_verif) = checked.unwrap_or((None, None));
+    let all_ok = patch_verif.as_ref().is_none_or(|v| v.verified) && redact_verif != Some(false);
+    let pending = (verify_output && !checked_now).then(|| PendingChecks {
+        password: password.map(str::to_owned),
+        untouched: untouched_by_page,
+        patch_opts: *patch_opts,
+        redact: redact_check,
+    });
 
-    let bytes = write::save(&work, &effective_write).map_err(|e| PlanError {
-        code: "input.write",
-        is_conflict_or_verify: false,
-        message: e.message,
-    })?;
-
-    let mut patch_verif = None;
-    let mut redact_verif = None;
-    let mut all_ok = true;
-
-    if verify_output {
-        if !applied_patches.is_empty() {
-            let pv = patch::verify_patched_bytes(
-                &bytes,
-                password,
-                &mut applied_patches,
-                &untouched_by_page,
-                patch_opts,
-            )
-            .map_err(|e| PlanError {
-                code: e.code,
-                is_conflict_or_verify: true,
-                message: e.message,
-            })?;
-            if !pv.verified {
-                all_ok = false;
-            }
-            patch_verif = Some(pv);
-        }
-        if !redact_needles.is_empty()
-            && let Ok(verify_matcher) = Matcher::new(&redact_texts, &redact_regexes, false)
-        {
-            let reopened = Document::open(bytes.clone()).map_err(|e| PlanError {
-                code: e.code,
-                is_conflict_or_verify: true,
-                message: e.message,
-            })?;
-            if let Some(pw) = password {
-                let _ = reopened.authenticate(pw);
-            }
-            let targets = Targets {
-                needles: redact_needles,
-                matcher: verify_matcher,
-                areas: Vec::new(),
-            };
-            let v: Verification = verify::verify(&reopened, &targets);
-            let ok = v.verified();
-            if !ok {
-                all_ok = false;
-            }
-            redact_verif = Some(ok);
-        }
-    }
-
-    Ok((
-        bytes,
-        PlanExecution {
+    Ok(StagedPlans {
+        work,
+        write_options: effective_write,
+        pending,
+        exec: PlanExecution {
             plan_count: plans.len(),
-            op_count: indexed.len(),
+            op_count,
+            duplicates,
             conflicts: Vec::new(),
             patches: applied_patches,
             highlights_added,
@@ -1209,11 +1404,68 @@ pub fn execute_plans(
             sanitized_items,
             pages_kept: pages_kept_1based,
             rotated: last_rotated,
-            verified: all_ok,
+            verified: verify_output.then_some(all_ok),
             patch_verification: patch_verif,
             redact_verified: redact_verif,
         },
-    ))
+    })
+}
+
+/// What the redactions must leave no trace of: their texts and patterns.
+#[derive(Debug)]
+struct RedactCheck {
+    needles: Vec<(String, u32)>,
+    texts: Vec<String>,
+    regexes: Vec<String>,
+    /// The areas redacted, by 0-based page, in the base pages' space.
+    areas: Vec<(i32, Vec<Quad>)>,
+}
+
+/// The patches' and the redactions' checks on `bytes`, a save of the plans'
+/// edits: the patch verification, and whether no redacted text is left.
+fn run_checks(
+    bytes: &[u8],
+    password: Option<&str>,
+    patches: &mut [AppliedPatch],
+    untouched: &HashMap<i32, Vec<(String, Rect)>>,
+    patch_opts: &PatchOptions,
+    redact: &RedactCheck,
+) -> Result<(Option<PatchVerification>, Option<bool>), PlanError> {
+    let mut patch_verif = None;
+    if !patches.is_empty() {
+        let pv = patch::verify_patched_bytes(bytes, password, patches, untouched, patch_opts)
+            .map_err(|e| PlanError {
+                code: e.code,
+                is_conflict_or_verify: true,
+                message: e.message,
+            })?;
+        patch_verif = Some(pv);
+    }
+    let mut redact_verif = None;
+    if !redact.needles.is_empty() || !redact.areas.is_empty() {
+        let matcher =
+            Matcher::new(&redact.texts, &redact.regexes, false).map_err(|e| PlanError {
+                code: "usage.bad_pattern",
+                is_conflict_or_verify: false,
+                message: e,
+            })?;
+        let reopened = Document::open(bytes.to_vec()).map_err(|e| PlanError {
+            code: e.code,
+            is_conflict_or_verify: true,
+            message: e.message,
+        })?;
+        if let Some(pw) = password {
+            let _ = reopened.authenticate(pw);
+        }
+        let targets = Targets {
+            needles: redact.needles.clone(),
+            matcher,
+            areas: redact.areas.clone(),
+        };
+        let v: Verification = verify::verify(&reopened, &targets);
+        redact_verif = Some(v.verified());
+    }
+    Ok((patch_verif, redact_verif))
 }
 
 #[cfg(test)]
@@ -1308,7 +1560,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
 
         assert!(exec.conflicts.is_empty());
-        assert!(exec.verified);
+        assert_eq!(exec.verified, Some(true));
         assert_eq!(exec.plan_count, 2);
         assert_eq!(exec.highlights_added, 1);
         assert_eq!(exec.patches.len(), 1);
@@ -1363,7 +1615,7 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert!(bytes.is_empty());
-        assert!(!exec.verified);
+        assert_eq!(exec.verified, Some(false));
         assert_eq!(exec.conflicts.len(), 1);
         assert_eq!(exec.conflicts[0].code, "conflict.patch_vs_redact");
 
@@ -1385,8 +1637,370 @@ mod tests {
             true,
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        assert!(!exec2.verified);
+        assert_eq!(exec2.verified, Some(false));
         assert_eq!(exec2.conflicts[0].code, "conflict.page_deleted");
+    }
+
+    fn run(base: &Document, plans: &[&str]) -> Result<(Vec<u8>, PlanExecution), PlanError> {
+        let plans: Vec<EditPlan> = plans
+            .iter()
+            .map(|p| parse_plan(p).unwrap_or_else(|e| panic!("{e}")))
+            .collect();
+        execute_plans(
+            base,
+            "b3:base",
+            &plans,
+            &WriteOptions::default(),
+            &PatchOptions::default(),
+            None,
+            true,
+        )
+    }
+
+    #[test]
+    fn a_redaction_with_both_text_and_regex_is_refused() {
+        let base = multi_page_fixture();
+        let err = run(
+            &base,
+            &[r#"[{"op":"redact","text":"Mutual","regex":"[0-9]{3}-[0-9]{2}-[0-9]{4}"}]"#],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "usage.bad_plan");
+        assert!(!err.is_conflict_or_verify);
+    }
+
+    fn highlights_doc() -> Document {
+        let annot = |n: &str| {
+            format!(
+                "<</Type/Annot/Subtype/Highlight/Rect[72 700 200 714]/QuadPoints[72 714 200 714 72 700 200 700]/Contents({n})>>"
+            )
+            .into_bytes()
+        };
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R/Annots[5 0 R 6 0 R 7 0 R]>>"
+            )
+            .into_bytes(),
+            stream("", b"BT /F1 12 Tf 72 704 Td (Highlighted words) Tj ET"),
+            annot("first"),
+            annot("second"),
+            annot("third"),
+        ])
+    }
+
+    fn annot_contents(bytes: &[u8]) -> Vec<String> {
+        let out = Document::open(bytes.to_vec()).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        annot::page_annots(&out, &page)
+            .0
+            .iter()
+            .map(|a| annot::contents(&out, a))
+            .collect()
+    }
+
+    #[test]
+    fn annotation_deletes_resolve_by_the_base_listing() {
+        let base = highlights_doc();
+        let (bytes, exec) = run(
+            &base,
+            &[r#"[{"op":"annot_delete","id":"p1.a1"},{"op":"annot_delete","id":"p1.a2"}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.annotations_deleted, 2);
+        assert_eq!(annot_contents(&bytes), vec!["third".to_string()]);
+    }
+
+    #[test]
+    fn an_annotation_delete_that_names_nothing_is_an_error() {
+        let base = highlights_doc();
+        let err = run(
+            &base,
+            &[r#"[{"op":"annot_delete","id":"p1.a1"},{"op":"annot_delete","id":"p1.a9"}]"#],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "input.target_not_found");
+    }
+
+    #[test]
+    fn the_same_op_from_two_plans_is_applied_once() {
+        let base = multi_page_fixture();
+        let plan = |agent: &str| {
+            format!(
+                r#"{{"agent":"{agent}","ops":[
+                    {{"op":"patch","id":"p1.b2.l1.s1","text":"Service Fee: $25,000"}},
+                    {{"op":"highlight","id":"p1.b1.l1.s1"}},
+                    {{"op":"meta","set":{{"Title":"Agreement"}}}}
+                ]}}"#
+            )
+        };
+        let (bytes, exec) = run(&base, &[&plan("a"), &plan("b")]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(exec.conflicts.is_empty());
+        assert_eq!(exec.verified, Some(true));
+        assert_eq!(exec.op_count, 6);
+        assert_eq!(exec.patches.len(), 1);
+        assert_eq!(exec.highlights_added, 1);
+        let dups: Vec<(usize, usize)> = exec.duplicates.iter().map(|d| (d.op, d.same_as)).collect();
+        assert_eq!(dups, vec![(3, 0), (4, 1), (5, 2)]);
+        assert_eq!(exec.duplicates[0].agent.as_deref(), Some("b"));
+        assert_eq!(exec.duplicates[0].agent_of.as_deref(), Some("a"));
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(out.metadata("Title").as_deref(), Some("Agreement"));
+
+        let rotate = r#"{"ops":[{"op":"pages","rotate":90}]}"#;
+        let (bytes, exec) = run(&base, &[rotate, rotate]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.duplicates.len(), 1);
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        assert_eq!(out.dict_get(&page, b"Rotate").to_int(), 90);
+    }
+
+    #[test]
+    fn a_repeat_within_one_plan_is_the_plan_s_own() {
+        let base = multi_page_fixture();
+        let (bytes, exec) = run(
+            &base,
+            &[r#"[{"op":"pages","rotate":90},{"op":"pages","rotate":90}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(exec.duplicates.is_empty());
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        assert_eq!(out.dict_get(&page, b"Rotate").to_int(), 180);
+    }
+
+    #[test]
+    fn a_patch_lands_on_the_base_target_after_a_redaction_removes_a_block() {
+        let base = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R>>"
+            )
+            .into_bytes(),
+            stream(
+                "",
+                b"BT /F1 12 Tf 72 720 Td (Block one secret) Tj ET \
+                  BT /F1 12 Tf 72 600 Td (Block two) Tj ET \
+                  BT /F1 12 Tf 72 480 Td (Block three) Tj ET \
+                  BT /F1 12 Tf 72 360 Td (Block four) Tj ET",
+            ),
+        ]);
+        let (bytes, exec) = run(
+            &base,
+            &[r#"[{"op":"redact","id":"p1.b1"},{"op":"patch","id":"p1.b3.l1.s1","text":"XX"}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.verified, Some(true), "{exec:?}");
+        assert_eq!(exec.patches[0].old_text, "Block three");
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        let sp =
+            page_stext(&out, &page, stext::Options::default()).unwrap_or_else(|e| panic!("{e}"));
+        let refs: Vec<&Block> = sp.blocks.iter().collect();
+        let text: String = extract::text_blocks(&refs)
+            .into_iter()
+            .map(extract::block_text)
+            .collect();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("Block two"), "{text}");
+        assert!(text.contains("XX"), "{text}");
+        assert!(!text.contains("Block three"), "{text}");
+        assert!(text.contains("Block four"), "{text}");
+    }
+
+    /// A page whose first line has a neighbor close on its right, and a
+    /// second page.
+    fn rotation_fixture() -> Document {
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R>>"
+            )
+            .into_bytes(),
+            stream(
+                "",
+                b"BT /F1 12 Tf 72 720 Td ($50) Tj ET BT /F1 12 Tf 125 720 Td (RightColumn) Tj ET",
+            ),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 6 0 R>>"
+            )
+            .into_bytes(),
+            stream("", b"BT /F1 12 Tf 72 720 Td (Second page) Tj ET"),
+        ])
+    }
+
+    #[test]
+    fn page_ops_neither_hide_a_failing_patch_nor_fail_a_good_one() {
+        let base = rotation_fixture();
+        for pages in [
+            r#"{"op":"pages","rotate":90}"#,
+            r#"{"op":"pages","delete":"2"}"#,
+        ] {
+            let bad =
+                format!(r#"[{{"op":"patch","id":"p1.b1.l1.s1","text":"$50,000,000.00"}},{pages}]"#);
+            let (_, exec) = run(&base, &[&bad]).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(exec.verified, Some(false), "{pages}: {exec:?}");
+            let findings = &exec.patch_verification.as_ref().map(|v| v.findings.clone());
+            assert!(
+                findings
+                    .iter()
+                    .flatten()
+                    .any(|f| f.code == "verify.collision"),
+                "{pages}: {findings:?}"
+            );
+
+            let good = format!(r#"[{{"op":"patch","id":"p1.b1.l1.s1","text":"$75"}},{pages}]"#);
+            let (_, exec) = run(&base, &[&good]).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(exec.verified, Some(true), "{pages}: {exec:?}");
+        }
+        let moved =
+            r#"[{"op":"patch","id":"p2.b1.l1.s1","text":"Page two"},{"op":"pages","delete":"1"}]"#;
+        let (_, exec) = run(&base, &[moved]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.verified, Some(true), "{exec:?}");
+        assert_eq!(exec.patches[0].page, 1);
+    }
+
+    /// A page with text, an image, and a thumbnail.
+    fn region_fixture() -> Document {
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}/XObject<</Im1 5 0 R>>>>/Contents 4 0 R/Thumb 6 0 R>>"
+            )
+            .into_bytes(),
+            stream(
+                "",
+                b"BT /F1 12 Tf 72 720 Td (Account holder) Tj ET q 100 0 0 100 72 600 cm /Im1 Do Q",
+            ),
+            stream(
+                "/Type/XObject/Subtype/Image/Width 2/Height 2/BitsPerComponent 8/ColorSpace/DeviceRGB/Filter/JPXDecode",
+                b"not a jpx stream",
+            ),
+            stream(
+                "/Width 1/Height 1/BitsPerComponent 8/ColorSpace/DeviceRGB",
+                b"\xff\xff\xff",
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_region_redaction_drops_the_page_thumbnail_and_verifies() {
+        let base = region_fixture();
+        // Over the text, and over the image (page space has y down).
+        for region in ["p1:[60,40,300,80]", "p1:[60,80,200,200]"] {
+            let plan = format!(
+                r#"[{{"op":"redact","region":"{region}"}},{{"op":"redact","id":"p1.b1"}}]"#
+            );
+            let (_, exec) = run(&base, &[&plan]).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(exec.redact_verified, Some(true), "{exec:?}");
+        }
+        let (bytes, exec) = run(
+            &base,
+            &[r#"[{"op":"redact","region":"p1:[60,40,300,80]"}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.redact_verified, Some(true), "{exec:?}");
+        assert_eq!(exec.verified, Some(true));
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        assert!(matches!(
+            out.dict_get(&page, b"Thumb"),
+            crate::object::Object::Null
+        ));
+    }
+
+    #[test]
+    fn unchecked_edits_are_not_reported_verified() {
+        let base = multi_page_fixture();
+        let plan = parse_plan(r#"[{"op":"redact","region":"p1:[60,40,300,80]"}]"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (_, exec) = execute_plans(
+            &base,
+            "b3:base",
+            &[plan],
+            &WriteOptions::default(),
+            &PatchOptions::default(),
+            None,
+            false,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.verified, None);
+        assert_eq!(exec.redact_verified, None);
+    }
+
+    #[test]
+    fn two_patches_of_one_span_conflict_or_are_one_asked_twice() {
+        let base = multi_page_fixture();
+        let patch = |text: &str| {
+            format!(r#"{{"ops":[{{"op":"patch","id":"p1.b2.l1.s1","text":"{text}"}}]}}"#)
+        };
+        let (bytes, exec) =
+            run(&base, &[&patch("Fee: $1"), &patch("Fee: $2")]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(bytes.is_empty());
+        let codes: Vec<&str> = exec.conflicts.iter().map(|c| c.code.as_str()).collect();
+        assert_eq!(codes, vec!["conflict.overlapping_patch"]);
+
+        let twice = r#"[{"op":"patch","id":"p1.b2.l1.s1","text":"Fee: $1"},{"op":"patch","id":"p1.b2.l1","text":"Fee: $1"}]"#;
+        let err = run(&base, &[twice]).unwrap_err();
+        assert_eq!(err.code, "usage.duplicate_target");
+    }
+
+    #[test]
+    fn a_redaction_by_id_numbers_blocks_as_extract_does() {
+        // Text drawn under a clip that hides it: `extract` (clip on) leaves
+        // it out, so its p1.b1 is "Visible one".
+        let base = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R>>"
+            )
+            .into_bytes(),
+            stream(
+                "",
+                b"q 0 0 1 1 re W n BT /F1 12 Tf 72 720 Td (Clipped away) Tj ET Q \
+                  BT /F1 12 Tf 72 600 Td (Visible one) Tj ET \
+                  BT /F1 12 Tf 72 480 Td (Visible two) Tj ET",
+            ),
+        ]);
+        let page = base.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        let sp =
+            page_stext(&base, &page, stext::Options::default()).unwrap_or_else(|e| panic!("{e}"));
+        let first = match sp.blocks.first() {
+            Some(Block::Text(tb)) => extract::block_text(tb),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(first.trim(), "Visible one");
+
+        let (bytes, exec) =
+            run(&base, &[r#"[{"op":"redact","id":"p1.b1"}]"#]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.verified, Some(true));
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        let sp =
+            page_stext(&out, &page, stext::Options::default()).unwrap_or_else(|e| panic!("{e}"));
+        let refs: Vec<&Block> = sp.blocks.iter().collect();
+        let text: String = extract::text_blocks(&refs)
+            .into_iter()
+            .map(extract::block_text)
+            .collect();
+        assert!(!text.contains("Visible one"), "{text}");
+        assert!(text.contains("Visible two"), "{text}");
+    }
+
+    #[test]
+    fn text_highlights_on_shared_pages_each_find_their_hits() {
+        let base = multi_page_fixture();
+        let (_, exec) = run(
+            &base,
+            &[r#"[{"op":"highlight","text":"Indemnity"},{"op":"highlight","text":"Fee","pages":"1"},{"op":"highlight","id":"p2.b1.l1.s1"},{"op":"highlight","text":"Tax"}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.highlights_added, 4);
     }
 
     #[test]

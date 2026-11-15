@@ -923,7 +923,8 @@ pub fn run_pipeline_with_password(
                         message: summary,
                     });
                 }
-                if !exec.verified {
+                // The step asks for the check, so anything but a pass fails it.
+                if exec.verified != Some(true) {
                     return Err(PipelineError {
                         code: "verify.plan_failed",
                         step_index: Some(step_index),

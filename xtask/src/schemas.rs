@@ -263,6 +263,20 @@ fn overrides(name: &str) -> BTreeMap<String, Value> {
             ),
             ("/rotated", json!({"type": ["integer", "null"]})),
             ("/redact_verified", json!({"type": ["boolean", "null"]})),
+            ("/verified", json!({"type": ["boolean", "null"]})),
+            (
+                "/duplicates",
+                json!({"type": "array", "items": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {"type": ["null", "string"]},
+                        "agent_of": {"type": ["null", "string"]},
+                        "op": {"type": "integer"},
+                        "same_as": {"type": "integer"},
+                    },
+                    "required": ["agent", "agent_of", "op", "same_as"],
+                }}),
+            ),
         ],
         "query" => vec![
             ("/doc_id", json!({"type": ["string", "null"]})),

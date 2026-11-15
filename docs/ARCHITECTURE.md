@@ -134,11 +134,11 @@ Each layer only depends on the layers to its left. Consumers never see raw bytes
 | `appearance::widget` (text, choice and signature widgets, the unsigned signature's sign-here arrow; push buttons, check boxes and radio buttons, a stream per state) | `pdf/pdf-appearance.c` (`pdf_write_widget_appearance`, `pdf_update_button_appearance`); `pdf/pdf-annot.c` (`pdf_annot_MK_BG`, `pdf_annot_MK_BC`); `pdf/pdf-form.c` (`pdf_button_field_on_state`); `pdf/pdf-layout.c` (`pdf_layout_fit_text`) |
 | `page_run` (a whole page as `fz_run_page` runs it: contents, annotations, widgets; which are drawn, how each appearance maps onto its /Rect, the appearances made on loading kept in the local xref) | `fitz/document.c` (`fz_run_page`), `pdf/pdf-run.c` (`pdf_run_page_with_usage`, `pdf_run_annot_with_usage`, `pdf_run_page_annots_with_usage`, `pdf_run_page_widgets_with_usage`), `pdf/pdf-interpret.c` (`pdf_process_annot`), `pdf/pdf-annot.c` (`pdf_annot_ap`, `pdf_annot_transform`, `pdf_annot_display_rect`, `pdf_annot_display_rotate`), `pdf/pdf-appearance.c` (`pdf_update_appearance`'s local synthesis) |
 | `list_run` (a display list played as `fz_run_display_list` plays it: node rectangles, clips narrowed to what they hold, culling; the text `mutool draw -F txt` gathers) | `fitz/list-device.c` (`fz_append_display_node`, the `fz_list_*` rectangles, `fz_run_display_list`) |
-| `attest` (perceptual-vs-stream attestation: `NoTextDevice` background comparison, pixel occlusion/contrast, vector strikethroughs/underlines/boxes, `/ActualText` spoofs, unmapped glyphs, blind-spot crops) | nupdf's own (D53) |
-| `patch` (surgical content-stream text replacement with pre-write collision, overflow and read-back verification) | nupdf's own (D53) |
-| `plan` (multi-agent transactional edit plans anchored to base `doc_id` over `Document::fork_clean` zero-copy overlays) | nupdf's own (D53) |
-| `query` (spatial/relational text and widget queries, numeric parsing and parallel corpus aggregation) | nupdf's own (D53) |
-| `audit` (deterministic citation verification, page relocation, epistemic hazard checks and evidence crops) | nupdf's own (D53) |
+| `attest` (perceptual-vs-stream attestation: `NoTextDevice` background comparison, pixel occlusion/contrast, vector strikethroughs/underlines/boxes, `/ActualText` spoofs, unmapped glyphs, blind-spot crops) | nupdf's own (D59) |
+| `patch` (surgical content-stream text replacement with pre-write collision, overflow and read-back verification) | nupdf's own (D59) |
+| `plan` (multi-agent transactional edit plans anchored to base `doc_id` over `Document::fork_clean` zero-copy overlays) | nupdf's own (D59) |
+| `query` (spatial/relational text and widget queries, numeric parsing and parallel corpus aggregation) | nupdf's own (D59) |
+| `audit` (deterministic citation verification, page relocation, epistemic hazard checks and evidence crops) | nupdf's own (D59) |
 
 ## Core data model
 
