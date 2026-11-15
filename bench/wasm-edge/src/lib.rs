@@ -3,12 +3,24 @@
 
 //! Pure `wasm32-unknown-unknown` edge entrypoint for `nupdf`.
 //!
-//! Exposes a zero-import linear-memory ABI (`wasm_alloc`, `wasm_dealloc`,
-//! `wasm_invoke`, `wasm_result_ptr`, `wasm_result_len`) so sandboxed browser,
+//! Exposes a zero-import linear-memory ABI so sandboxed browser,
 //! V8 isolate, and Cloudflare Worker agents can run perceptual attestation,
 //! vector chart decompilation, flat-form synthesis, surgical reflow, PII
 //! cloaking, xref time-travel, compound pipelines, spatial queries, and claim
 //! auditing with zero OS/WASI syscalls.
+//!
+//! The module owns every buffer, so it never builds a slice from a pointer
+//! the host passed. The host calls `wasm_pdf_buffer(len)` and
+//! `wasm_cmd_buffer(len)`, writes the PDF and the JSON command into linear
+//! memory at the addresses they return, calls `wasm_invoke()`, then reads
+//! `wasm_result_len()` bytes at `wasm_result_ptr()`. An address stays valid
+//! until the next call that sizes the same buffer; the host re-reads
+//! `memory.buffer` after each call, since a call may grow memory.
+//!
+//! The only unsafe code is the export attribute (`#[unsafe(no_mangle)]`),
+//! which an export cannot do without.
+
+#![deny(unsafe_code)]
 
 use std::cell::RefCell;
 
@@ -26,6 +38,8 @@ use nupdf::{DocId, Document};
 use serde::Deserialize;
 
 thread_local! {
+    static PDF_INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static CMD_INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -70,48 +84,58 @@ fn default_true() -> bool {
     true
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn wasm_alloc(len: usize) -> *mut u8 {
-    let mut buf = Vec::<u8>::with_capacity(len);
-    let ptr = buf.as_mut_ptr();
-    std::mem::forget(buf);
-    ptr
+/// Sizes `buf` to `len` zero bytes and gives its address for the host to
+/// write into.
+fn reserve(buf: &'static std::thread::LocalKey<RefCell<Vec<u8>>>, len: usize) -> *mut u8 {
+    buf.with(|b| {
+        let mut b = b.borrow_mut();
+        b.clear();
+        b.resize(len, 0);
+        b.as_mut_ptr()
+    })
 }
 
-/// # Safety
-/// `ptr` and `cap` must come from a prior `wasm_alloc(cap)` call.
+/// Address of a module-owned buffer of `len` bytes for the PDF.
+// The export needs an unmangled symbol name; `no_mangle` is an unsafe attribute.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn wasm_dealloc(ptr: *mut u8, cap: usize) {
-    if !ptr.is_null() && cap > 0 {
-        // SAFETY: paired with wasm_alloc(cap) by caller.
-        let _ = unsafe { Vec::from_raw_parts(ptr, 0, cap) };
-    }
+pub extern "C" fn wasm_pdf_buffer(len: usize) -> *mut u8 {
+    reserve(&PDF_INPUT, len)
 }
 
+/// Address of a module-owned buffer of `len` bytes for the JSON command.
+// The export needs an unmangled symbol name; `no_mangle` is an unsafe attribute.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn wasm_cmd_buffer(len: usize) -> *mut u8 {
+    reserve(&CMD_INPUT, len)
+}
+
+/// Address of the last result's JSON.
+// The export needs an unmangled symbol name; `no_mangle` is an unsafe attribute.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_result_ptr() -> *const u8 {
     LAST_RESULT.with(|r| r.borrow().as_ptr())
 }
 
+/// Length of the last result's JSON.
+// The export needs an unmangled symbol name; `no_mangle` is an unsafe attribute.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn wasm_result_len() -> usize {
     LAST_RESULT.with(|r| r.borrow().len())
 }
 
-/// # Safety
-/// `(pdf_ptr, pdf_len)` and `(cmd_ptr, cmd_len)` must point to valid slices in WASM linear memory.
+/// Runs the command in the command buffer on the PDF in the PDF buffer and
+/// stores `{"ok": true, "result": ...}` or `{"ok": false, "error": ...}`.
+// The export needs an unmangled symbol name; `no_mangle` is an unsafe attribute.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn wasm_invoke(
-    pdf_ptr: *const u8,
-    pdf_len: usize,
-    cmd_ptr: *const u8,
-    cmd_len: usize,
-) -> i32 {
-    // SAFETY: slices allocated in WASM linear memory by host before call.
-    let pdf_bytes = unsafe { std::slice::from_raw_parts(pdf_ptr, pdf_len) };
-    let cmd_bytes = unsafe { std::slice::from_raw_parts(cmd_ptr, cmd_len) };
-
-    let out = match run_edge(pdf_bytes, cmd_bytes) {
+pub extern "C" fn wasm_invoke() -> i32 {
+    let outcome =
+        PDF_INPUT.with(|pdf| CMD_INPUT.with(|cmd| run_edge(&pdf.borrow(), &cmd.borrow())));
+    let out = match outcome {
         Ok(val) => serde_json::to_vec(&serde_json::json!({ "ok": true, "result": val }))
             .unwrap_or_else(|_| b"{\"ok\":false,\"error\":\"serialize\"}".to_vec()),
         Err(err) => serde_json::to_vec(&serde_json::json!({ "ok": false, "error": err }))
@@ -201,5 +225,50 @@ fn run_edge(pdf_bytes: &[u8], cmd_bytes: &[u8]) -> Result<serde_json::Value, Str
             let rep = audit::audit_claims(&doc, &doc_id, &claims, false, 72.0)?;
             serde_json::to_value(rep).map_err(|e| e.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the host does, with the writes into linear memory done through
+    /// the module's own buffers.
+    fn call(pdf: &[u8], cmd: &str) -> serde_json::Value {
+        let pdf_at = wasm_pdf_buffer(pdf.len());
+        PDF_INPUT.with(|b| {
+            assert_eq!(b.borrow().as_ptr(), pdf_at.cast_const());
+            b.borrow_mut().copy_from_slice(pdf);
+        });
+        wasm_cmd_buffer(cmd.len());
+        CMD_INPUT.with(|b| b.borrow_mut().copy_from_slice(cmd.as_bytes()));
+        assert_eq!(wasm_invoke(), 0);
+        let len = wasm_result_len();
+        let out = LAST_RESULT.with(|r| {
+            assert_eq!(r.borrow().as_ptr(), wasm_result_ptr());
+            r.borrow().clone()
+        });
+        assert_eq!(out.len(), len);
+        serde_json::from_slice(&out).unwrap()
+    }
+
+    #[test]
+    fn a_command_runs_on_the_buffers_the_module_owns() {
+        let pdf = include_bytes!("../../../corpus/smoke/incremental-update.pdf");
+        let out = call(pdf, r#"{"op": "history", "run_attest": false}"#);
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["revision_count"], 2);
+    }
+
+    #[test]
+    fn a_bad_command_is_an_error_result_not_a_trap() {
+        let pdf = include_bytes!("../../../corpus/smoke/incremental-update.pdf");
+        let out = call(pdf, r#"{"op": "nope"}"#);
+        assert_eq!(out["ok"], false);
+        let out = call(b"not a pdf", r#"{"op": "chart"}"#);
+        assert_eq!(out["ok"], false);
+        // A buffer resized smaller holds only what was asked for.
+        let out = call(&pdf[..0], r#"{"op": "chart"}"#);
+        assert_eq!(out["ok"], false);
     }
 }

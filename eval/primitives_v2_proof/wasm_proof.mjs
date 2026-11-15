@@ -36,31 +36,29 @@ const tInst0 = performance.now();
 const instance = new WebAssembly.Instance(mod, {});
 const instantiateMs = performance.now() - tInst0;
 
-const { memory, wasm_alloc, wasm_dealloc, wasm_invoke, wasm_result_ptr, wasm_result_len } =
+const { memory, wasm_pdf_buffer, wasm_cmd_buffer, wasm_invoke, wasm_result_ptr, wasm_result_len } =
   instance.exports;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+// The module owns its input and output buffers: ask for one of a length, write
+// at the address it gives, then read the result by its address and length.
+// Each call may grow memory, so `memory.buffer` is read again after it.
 function callEdge(pdfBuf, cmdObj) {
   const cmdBytes = encoder.encode(JSON.stringify(cmdObj));
-  const pdfPtr = wasm_alloc(pdfBuf.length);
-  const cmdPtr = wasm_alloc(cmdBytes.length);
-  try {
-    new Uint8Array(memory.buffer, pdfPtr, pdfBuf.length).set(pdfBuf);
-    new Uint8Array(memory.buffer, cmdPtr, cmdBytes.length).set(cmdBytes);
-    const rc = wasm_invoke(pdfPtr, pdfBuf.length, cmdPtr, cmdBytes.length);
-    if (rc !== 0) {
-      throw new Error(`wasm_invoke returned ${rc}`);
-    }
-    const resPtr = wasm_result_ptr();
-    const resLen = wasm_result_len();
-    const jsonText = decoder.decode(new Uint8Array(memory.buffer, resPtr, resLen));
-    return JSON.parse(jsonText);
-  } finally {
-    wasm_dealloc(pdfPtr, pdfBuf.length);
-    wasm_dealloc(cmdPtr, cmdBytes.length);
+  const pdfPtr = wasm_pdf_buffer(pdfBuf.length);
+  new Uint8Array(memory.buffer, pdfPtr, pdfBuf.length).set(pdfBuf);
+  const cmdPtr = wasm_cmd_buffer(cmdBytes.length);
+  new Uint8Array(memory.buffer, cmdPtr, cmdBytes.length).set(cmdBytes);
+  const rc = wasm_invoke();
+  if (rc !== 0) {
+    throw new Error(`wasm_invoke returned ${rc}`);
   }
+  const resPtr = wasm_result_ptr();
+  const resLen = wasm_result_len();
+  const jsonText = decoder.decode(new Uint8Array(memory.buffer, resPtr, resLen));
+  return JSON.parse(jsonText);
 }
 
 function benchCall(pdfBuf, cmdObj, iters = 7) {
