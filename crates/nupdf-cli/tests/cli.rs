@@ -4345,7 +4345,7 @@ fn report_schema(v: &Value) -> &str {
 fn cloak_and_uncloak_roundtrip_pdf_and_text_with_zero_leaks() {
     let content = concat!(
         "BT /F1 11 Tf 20 240 Td (Party: Alice Example SSN 412-88-9014) Tj ET\n",
-        "BT /F1 11 Tf 20 215 Td (Contact: alice@acme.org for Alice Example) Tj ET\n",
+        "BT /F1 11 Tf 20 215 Td (Contact: alice@acme.example for Alice Example) Tj ET\n",
     );
     let stream = format!("<</Length {}>>\nstream\n{content}endstream", content.len());
     let pdf = pdf_of(&[

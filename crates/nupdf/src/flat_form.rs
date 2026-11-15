@@ -3690,7 +3690,7 @@ mod tests {
                 },
                 FlatFillOp::SetText {
                     target: "email".into(),
-                    value: "ada@analytical.org".into(),
+                    value: "ada@analytical.example".into(),
                 },
                 FlatFillOp::SetText {
                     target: "ssn".into(),

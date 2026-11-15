@@ -458,7 +458,7 @@ def make_nda_pii_pdf(path: Path) -> dict:
     Builds a 1-page Mutual NDA + Wire Sheet containing:
       - Repeated party names ("Evelyn Vance" x2 and "Marcus Sterling" x2) to test coreference!
       - Two distinct SSNs ("412-88-9014", "509-31-7720")
-      - Email ("evelyn.vance@heliosbio.io") and Phone ("415-890-4412")
+      - Email ("evelyn.vance@heliosbio.example") and Phone ("415-890-4412")
       - An interactive AcroForm text widget containing PII ("Evelyn Vance") AND `/Info` Author metadata!
     """
     doc = fitz.open()
@@ -476,7 +476,7 @@ def make_nda_pii_pdf(path: Path) -> dict:
     )
     p.insert_text(
         (72, 180),
-        "Notice Email: evelyn.vance@heliosbio.io   Phone: 415-890-4412",
+        "Notice Email: evelyn.vance@heliosbio.example   Phone: 415-890-4412",
         fontsize=11,
     )
     p.insert_text(
@@ -495,7 +495,7 @@ def make_nda_pii_pdf(path: Path) -> dict:
     doc.set_metadata(
         {
             "title": "NDA Escrow Schedule - Evelyn Vance",
-            "author": "Evelyn Vance <evelyn.vance@heliosbio.io>",
+            "author": "Evelyn Vance <evelyn.vance@heliosbio.example>",
         }
     )
     doc.save(str(path))
@@ -506,7 +506,7 @@ def make_nda_pii_pdf(path: Path) -> dict:
             "Marcus Sterling",
             "412-88-9014",
             "509-31-7720",
-            "evelyn.vance@heliosbio.io",
+            "evelyn.vance@heliosbio.example",
             "415-890-4412",
         ]
     }

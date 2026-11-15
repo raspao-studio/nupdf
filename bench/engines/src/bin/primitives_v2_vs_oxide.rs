@@ -394,7 +394,7 @@ fn exp5_cloak_native(work: &Path) -> Result<Value, String> {
         "Evelyn Vance",
         "Marcus Sterling",
         "412-88-9014",
-        "evelyn.vance@heliosbio.io",
+        "evelyn.vance@heliosbio.example",
     ];
     let oxide_leaked_any = secrets.iter().any(|s| ox_cloaked_text.contains(s));
     let oxide_saw_person_01 = ox_cloaked_text.contains("[PERSON_01]");
