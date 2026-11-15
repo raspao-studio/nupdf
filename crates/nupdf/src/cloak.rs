@@ -408,21 +408,34 @@ impl CloakSession {
 
         let cat = sanitize_category(category);
         let secret_char_len = canonical_secret.chars().count();
-        let token = loop {
+        // Every counter value formats to a distinct candidate, and each rejected
+        // candidate equals a distinct literal, used token or the secret itself,
+        // so this many attempts always find a free token.
+        let max_attempts = self.literal_secrets.len() + self.used_tokens.len() + 2;
+        let mut found = None;
+        let mut last_n = 0;
+        for _ in 0..max_attempts {
             let next_n = {
                 let c = self.category_counters.entry(cat.clone()).or_insert(0);
                 *c += 1;
                 *c
             };
+            last_n = next_n;
             let candidate = format_synthetic_token(&cat, next_n, secret_char_len);
             let clashes_literal = self.literal_secrets.iter().any(|s| s == &candidate);
             if !clashes_literal
                 && candidate != canonical_secret
                 && self.used_tokens.insert(candidate.clone())
             {
-                break candidate;
+                found = Some(candidate);
+                break;
             }
-        };
+        }
+        let token = found.unwrap_or_else(|| {
+            let fallback = format!("[{cat}_{last_n}_{}]", self.used_tokens.len());
+            self.used_tokens.insert(fallback.clone());
+            fallback
+        });
 
         let idx = self.entries.len();
         self.entries.push(VaultEntry {
@@ -496,11 +509,13 @@ fn next_char_boundary(s: &str, mut idx: usize) -> usize {
 
 fn format_synthetic_token(category: &str, index: usize, secret_char_len: usize) -> String {
     match category {
-        "SSN" => format!("000-00-{:04}", index.min(9999)),
+        // Past the format's own width the number just grows a digit, so every
+        // index still gives a distinct token.
+        "SSN" => format!("000-00-{index:04}"),
         "EMAIL" => format!("u{index:02}@cloak.invalid"),
-        "PHONE" => format!("555-010-{:04}", index.min(9999)),
-        "CARD" => format!("0000-0000-0000-{:04}", index.min(9999)),
-        "IBAN" => format!("XX00CLOAK{:08}", index.min(99_999_999)),
+        "PHONE" => format!("555-010-{index:04}"),
+        "CARD" => format!("0000-0000-0000-{index:04}"),
+        "IBAN" => format!("XX00CLOAK{index:08}"),
         custom => {
             if secret_char_len <= 6 {
                 let short: String = custom
@@ -2419,6 +2434,25 @@ mod tests {
             crate::text_string::text_string(&title_bytes),
             "Schedule for ACCT-884210"
         );
+    }
+
+    #[test]
+    fn capped_format_categories_never_run_out_of_tokens() {
+        // More distinct secrets than the old four-digit format could express.
+        let mut session = CloakSession::new(&[CloakTarget::Preset("phone".to_string())]).unwrap();
+        let mut seen = HashSet::new();
+        for n in 0..10_050usize {
+            let secret = format!("212-{:03}-{:04}", n / 10_000, n % 10_000);
+            let token = session.token_for("PHONE", &secret, &secret);
+            assert!(seen.insert(token.clone()), "token {token} handed out twice");
+        }
+        for cat in ["SSN", "CARD"] {
+            let mut seen = HashSet::new();
+            for n in 0..10_001usize {
+                let secret = format!("{cat}-secret-{n}");
+                assert!(seen.insert(session.token_for(cat, &secret, &secret)));
+            }
+        }
     }
 
     #[test]
