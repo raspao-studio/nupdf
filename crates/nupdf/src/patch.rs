@@ -608,9 +608,19 @@ impl Hooks for SpanEraser {
         b.x1 -= w / 10.0;
         b.y0 += h / 10.0;
         b.y1 -= h / 10.0;
+        // A glyph is a target's when most of its box lies in one of the
+        // target's quads. Touching is not enough: lines set close together
+        // overlap the lines above and below them, and the same text a row
+        // down sits under the same columns.
+        let area = (b.x1 - b.x0) * (b.y1 - b.y0);
         let mut hit = false;
         for (q, &owner) in self.quads.iter().zip(&self.owners) {
-            if b.intersect(Rect::from_quad(*q)).is_valid() {
+            let shared = b.intersect(Rect::from_quad(*q));
+            if !shared.is_valid() {
+                continue;
+            }
+            let shared_area = (shared.x1 - shared.x0) * (shared.y1 - shared.y0);
+            if area <= 0.0 || shared_area * 2.0 > area {
                 hit = true;
                 if let Some(e) = self.erased.get_mut(owner) {
                     *e = true;
@@ -1785,7 +1795,6 @@ fn old_text_remained_at_bbox(
     }
     let old_norm = normalize_ws(old_trimmed);
     let new_norm = normalize_ws(new_trimmed);
-    let probe = shrink_for_collision(old_bbox, 0.5, 1.0);
 
     for block in &stext_page.blocks {
         let Block::Text(tb) = block else {
@@ -1797,7 +1806,14 @@ fn old_text_remained_at_bbox(
                 let slice = line.chars.get(span.start..span.end).unwrap_or(&[]);
                 let trimmed = trim_synthetic_edges(slice);
                 let sb = ink_bbox(trimmed, span.bbox);
-                if sb.intersect(probe).is_empty() {
+                // Old text left behind sits where the target was. The same
+                // text on the next line only overlaps that box at an edge.
+                let shared = sb.intersect(old_bbox);
+                let area = (sb.x1 - sb.x0) * (sb.y1 - sb.y0);
+                if shared.is_empty()
+                    || (area > 0.0
+                        && (shared.x1 - shared.x0) * (shared.y1 - shared.y0) * 2.0 <= area)
+                {
                     continue;
                 }
                 let span_norm = normalize_ws(&extract::chars_text(trimmed));
@@ -2333,6 +2349,87 @@ mod tests {
             let ver = result.verification.unwrap();
             assert!(ver.verified, "{specs:?}: {:?}", ver.findings);
         }
+    }
+
+    #[test]
+    fn patching_a_value_leaves_the_same_value_a_row_below() {
+        // Two rows 14pt apart that read the same: the rows' boxes overlap.
+        let content = b"BT /F1 12 Tf 72 700 Td (Tax:) Tj ET \
+            BT /F1 12 Tf 220 700 Td ($0.00) Tj ET \
+            BT /F1 12 Tf 72 686 Td (Fee:) Tj ET \
+            BT /F1 12 Tf 220 686 Td ($0.00) Tj ET";
+        let doc = page_doc(content, "/Font<</F1 5 0 R>>", &[HELVETICA.to_vec()]);
+        let spans = extract_all_spans(&doc, 0);
+        let amounts: Vec<&(String, String, Style, Rect)> =
+            spans.iter().filter(|s| s.1 == "$0.00").collect();
+        assert_eq!(amounts.len(), 2, "{spans:?}");
+        let upper = if amounts[0].3.y0 < amounts[1].3.y0 {
+            amounts[0]
+        } else {
+            amounts[1]
+        };
+        let d = doc.fork_clean();
+        let (bytes, result) = patch_and_verify(
+            &d,
+            &[PatchSpec {
+                target_id: upper.0.clone(),
+                new_text: "$5.00".into(),
+            }],
+            &PatchOptions::default(),
+            &WriteOptions::default(),
+            None,
+        )
+        .unwrap();
+        let out = Document::open(bytes).unwrap();
+        let after = extract_all_spans(&out, 0);
+        let texts: Vec<&str> = after.iter().map(|s| s.1.as_str()).collect();
+        assert!(texts.contains(&"$5.00"), "{texts:?}");
+        assert!(texts.contains(&"$0.00"), "the row below is gone: {texts:?}");
+        let ver = result.verification.unwrap();
+        assert!(ver.verified, "{:?}", ver.findings);
+    }
+
+    #[test]
+    fn old_text_left_where_the_target_was_is_told_from_the_same_text_a_row_below() {
+        let content = b"BT /F1 12 Tf 220 700 Td ($0.00) Tj ET \
+            BT /F1 12 Tf 220 686 Td ($0.00) Tj ET";
+        let doc = page_doc(content, "/Font<</F1 5 0 R>>", &[HELVETICA.to_vec()]);
+        let page = doc.page(0).unwrap();
+        let (res, _) = stext::extract_page(&doc, &page, StextOptions::default(), Store::default());
+        let stext_page = res.unwrap();
+        let spans = extract_all_spans(&doc, 0);
+        let (upper, lower) = if spans[0].3.y0 < spans[1].3.y0 {
+            (spans[0].3, spans[1].3)
+        } else {
+            (spans[1].3, spans[0].3)
+        };
+        assert!(
+            !upper.intersect(lower).is_empty(),
+            "the rows' boxes overlap"
+        );
+        // The text is still at each row's own box.
+        assert!(old_text_remained_at_bbox(
+            &stext_page,
+            "$0.00",
+            "$5.00",
+            upper
+        ));
+        assert!(old_text_remained_at_bbox(
+            &stext_page,
+            "$0.00",
+            "$5.00",
+            lower
+        ));
+        // A box where a row above the two would have been touches only the
+        // upper row's edge: what is there is not its old text.
+        let above = Rect::new(upper.x0, upper.y0 - 14.0, upper.x1, upper.y1 - 14.0);
+        assert!(!above.intersect(upper).is_empty());
+        assert!(!old_text_remained_at_bbox(
+            &stext_page,
+            "$0.00",
+            "$5.00",
+            above
+        ));
     }
 
     #[test]

@@ -953,7 +953,11 @@ fn match_quote_in_target(target: &ResolvedTarget, page: i32, quote: &str) -> Opt
     } else if matches!(target.granularity, TargetGranularity::Slice) {
         None
     } else {
-        find_clean_substring(&norm_target, &quote_norm)
+        find_clean_substring(
+            &norm_target,
+            &quote_norm,
+            number_goes_on_at(&target.chars, &byte_to_char, 0),
+        )
     };
 
     let range = matched_byte_range?;
@@ -987,12 +991,14 @@ fn find_quote_on_page(
     let quote_norm = normalize_text(quote);
     if !quote_norm.is_empty() {
         let (norm_page, byte_to_char) = normalize_indexed_chars(&chars);
-        if let Some(range) = find_clean_substring(&norm_page, &quote_norm)
-            && let (Some(&first_idx), Some(&last_idx)) = (
-                byte_to_char.get(range.start),
-                range.end.checked_sub(1).and_then(|e| byte_to_char.get(e)),
-            )
-            && let Some(slice) = chars.get(first_idx..=last_idx)
+        if let Some(range) = find_clean_substring(
+            &norm_page,
+            &quote_norm,
+            number_goes_on_at(&chars, &byte_to_char, 0),
+        ) && let (Some(&first_idx), Some(&last_idx)) = (
+            byte_to_char.get(range.start),
+            range.end.checked_sub(1).and_then(|e| byte_to_char.get(e)),
+        ) && let Some(slice) = chars.get(first_idx..=last_idx)
             && let Some(bbox) = indexed_chars_bbox(slice)
         {
             let span_id = common_content_id(slice);
@@ -1041,8 +1047,11 @@ fn search_document_elsewhere(
         let (norm_page, byte_to_char) = normalize_indexed_chars(&chars);
         let mut search_from = 0usize;
         while search_from < norm_page.len() {
-            let Some(rel_range) = find_clean_substring(&norm_page[search_from..], &quote_norm)
-            else {
+            let Some(rel_range) = find_clean_substring(
+                &norm_page[search_from..],
+                &quote_norm,
+                number_goes_on_at(&chars, &byte_to_char, search_from),
+            ) else {
                 break;
             };
             let abs_start = search_from + rel_range.start;
@@ -1094,11 +1103,17 @@ fn hit_cuts_a_number(page: &StextPage, hit: &search::Hit, quote: &str) -> bool {
         .and_then(|l| l.chars.get(..hit.begin.ch))
         .map(extract::chars_text)
         .unwrap_or_default();
-    let after = line(&hit.end)
+    let end_line = line(&hit.end);
+    let after = end_line
         .and_then(|l| l.chars.get(hit.end.ch + 1..))
         .map(extract::chars_text)
         .unwrap_or_default();
-    cuts_a_number(&before, quote.trim(), &after)
+    let quote = quote.trim();
+    cuts_a_number(&before, quote, &after)
+        || (ends_before_a_digit(quote, &after)
+            && end_line
+                .and_then(|l| l.chars.get(hit.end.ch..=hit.end.ch + 1))
+                .is_none_or(|pair| number_goes_on(&pair[0], &pair[1])))
 }
 
 fn matched_from_search_hit(
@@ -1137,8 +1152,9 @@ fn matched_from_search_hit(
             } else {
                 0
             };
+            // `hit.end` is the hit's last character, not one past it.
             let c_end = if bi == hit.end.block && li == hit.end.line {
-                hit.end.ch.min(line.chars.len())
+                hit.end.ch.saturating_add(1).min(line.chars.len())
             } else {
                 line.chars.len()
             };
@@ -1322,7 +1338,15 @@ fn push_normalized_char(ch: char, out: &mut String, prev_space: &mut bool) {
 /// Find `needle` in `haystack`, preferring token/word boundaries so short quotes
 /// do not match inside unrelated words while still allowing trailing superscript
 /// digits (`"capped at $1,000.1"` matching `"capped at $1,000."`).
-fn find_clean_substring(haystack: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+///
+/// A match that ends in `.` or `,` right before a digit is kept only when
+/// `number_goes_on(end)` says the digit at byte `end` is not more of the
+/// number (a superscript footnote marker).
+fn find_clean_substring(
+    haystack: &str,
+    needle: &str,
+    number_goes_on: impl Fn(usize) -> bool,
+) -> Option<std::ops::Range<usize>> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
@@ -1354,7 +1378,12 @@ fn find_clean_substring(haystack: &str, needle: &str) -> Option<std::ops::Range<
             }
         };
 
-        if left_ok && right_ok && !cuts_a_number(&haystack[..start], needle, &haystack[end..]) {
+        let after = &haystack[end..];
+        if left_ok
+            && right_ok
+            && !cuts_a_number(&haystack[..start], needle, after)
+            && !(ends_before_a_digit(needle, after) && number_goes_on(end))
+        {
             return Some(start..end);
         }
 
@@ -1369,8 +1398,9 @@ fn find_clean_substring(haystack: &str, needle: &str) -> Option<std::ops::Range<
 /// Whether a match of `needle` between `before` and `after` takes part of
 /// a number: digits, with `.` or `,` between digits. "Total 12" in "Total
 /// 125" names another amount than the page does. A quote that ends in
-/// punctuation keeps the digits after it, which can be a footnote marker
-/// ("capped at $1,000." before a superscript "1").
+/// `.` or `,` before a digit ("rate 12." before "5", or "capped at
+/// $1,000." before a superscript footnote "1") is left to
+/// [`ends_before_a_digit`] and the page's geometry.
 fn cuts_a_number(before: &str, needle: &str, after: &str) -> bool {
     let is_sep = |c: char| c == '.' || c == ',';
     let mut first = needle.chars();
@@ -1396,6 +1426,50 @@ fn cuts_a_number(before: &str, needle: &str, after: &str) -> bool {
             _ => false,
         };
     left_cut || right_cut
+}
+
+/// Whether `needle` ends in a number's `.` or `,` and `after` goes on with a
+/// digit: "rate 12." before "5", or "1,000." before a footnote marker "1".
+/// The two read the same; only the page tells them apart
+/// ([`number_goes_on`]).
+fn ends_before_a_digit(needle: &str, after: &str) -> bool {
+    let mut back = needle.chars().rev();
+    matches!(
+        (back.next(), back.next()),
+        (Some('.' | ','), Some(d)) if d.is_ascii_digit()
+    ) && after.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// Whether the digit `next` after the punctuation `prev` continues its
+/// number: it does unless it is a superscript marker, smaller and raised.
+fn number_goes_on(prev: &StextChar, next: &StextChar) -> bool {
+    !is_superscript(next, prev.origin.y, prev.size)
+}
+
+/// [`number_goes_on`] for a byte offset (plus `base`) of a normalised text
+/// of `chars` whose bytes `map` to them: the character there and the one
+/// before it. Unknown characters count as going on.
+fn number_goes_on_at<'a>(
+    chars: &'a [IndexedChar],
+    map: &'a [usize],
+    base: usize,
+) -> impl Fn(usize) -> bool + 'a {
+    move |end| {
+        let at = |b: usize| map.get(b).and_then(|&i| chars.get(i));
+        match ((base + end).checked_sub(1).and_then(at), at(base + end)) {
+            (Some(prev), Some(next)) => number_goes_on(&prev.ch, &next.ch),
+            _ => true,
+        }
+    }
+}
+
+/// A superscript against text of `ref_size` on the baseline `ref_origin_y`:
+/// under 82% of the size and raised (in top-down page space) by more than
+/// 4% and at most 115% of it.
+fn is_superscript(ch: &StextChar, ref_origin_y: f32, ref_size: f32) -> bool {
+    ch.size < 0.82 * ref_size
+        && ch.origin.y < ref_origin_y - 0.04 * ref_size
+        && ch.origin.y >= ref_origin_y - 1.15 * ref_size
 }
 
 /// Evaluate all five deterministic epistemic hazards on a matched quote.
@@ -1658,13 +1732,7 @@ fn check_unreferenced_footnote(
     let mut sup_cands: Vec<&StextChar> = all_chars
         .into_iter()
         .filter(|ch| {
-            let c = rune_char(ch.c);
-            if c.is_whitespace() || ch.size >= max_sup_size {
-                return false;
-            }
-            let raised = ch.origin.y < ref_origin_y - 0.04 * ref_size
-                && ch.origin.y >= ref_origin_y - 1.15 * ref_size;
-            if !raised {
+            if rune_char(ch.c).is_whitespace() || !is_superscript(ch, ref_origin_y, ref_size) {
                 return false;
             }
             let cr = Rect::from_quad(ch.quad);
@@ -2207,6 +2275,112 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_quote_ending_in_punctuation_before_the_numbers_next_digit_does_not_verify() {
+        // The digit after the full stop or comma is in the same size on the
+        // same baseline: the number goes on, so the quote names another one.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (The rate 12.5 applies to 1,000,000 units) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for quote in ["The rate 12.", "applies to 1,000,", "applies to 1,"] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                let claims = vec![ClaimInput {
+                    id: id.map(str::to_owned),
+                    page: Some(1),
+                    quote: quote.to_owned(),
+                    ..ClaimInput::default()
+                }];
+                let summary = audit_claims(&doc, "b3:doc", &claims, false, 72.0)
+                    .unwrap_or_else(|e| panic!("{e}"));
+                assert_ne!(
+                    summary.results[0].status,
+                    AuditStatus::Verified,
+                    "{quote:?} at {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_quote_ending_in_punctuation_before_a_superscript_marker_verifies() {
+        // The "1" after "$1,000." is a raised, smaller footnote marker, not
+        // more of the number. With no footnote text on the page, it is clean.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Liability is capped at $1,000.) Tj \
+            4 Ts /F1 7 Tf (1) Tj 0 Ts /F1 12 Tf ( Fees are 2,) Tj 4 Ts /F1 7 Tf (2) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for quote in ["Liability is capped at $1,000.", "Fees are 2,"] {
+            for id in [None, Some("p1.b1.l1")] {
+                let claims = vec![ClaimInput {
+                    id: id.map(str::to_owned),
+                    page: Some(1),
+                    quote: quote.to_owned(),
+                    ..ClaimInput::default()
+                }];
+                let summary = audit_claims(&doc, "b3:doc", &claims, false, 72.0)
+                    .unwrap_or_else(|e| panic!("{e}"));
+                assert_eq!(
+                    summary.results[0].status,
+                    AuditStatus::Verified,
+                    "{quote:?} at {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_quote_found_by_the_page_search_keeps_its_last_character() {
+        // "hyphen" is split over two lines at a soft hyphen (byte `d`
+        // through the font's ToUnicode), which the page's own text keeps as
+        // a line break, so only the page search finds the quote; its hit
+        // ends on the full stop.
+        let cmap = b"/CIDInit/ProcSet findresource begin 12 dict begin begincmap \
+            /CMapName/M def 1 begincodespacerange <00><FF> endcodespacerange \
+            1 beginbfchar <64><00AD> endbfchar endcmap CMapName currentdict /CMap \
+            defineresource pop end end";
+        let doc = page_doc(
+            b"BT /M 12 Tf 50 700 Td (the hyd) Tj 0 -14 Td (phen is here.) Tj ET",
+            "/Font<</M<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>>>",
+            &[stream("", cmap)],
+        );
+        let quote = "the hyphen is here.";
+        let page = stext::extract_page(
+            &doc,
+            &doc.page(0).unwrap_or_else(|e| panic!("{}", e.0)),
+            Options::default(),
+            Store::default(),
+        )
+        .0
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            find_quote_on_page(&page, 1, quote).is_some_and(|(m, _)| {
+                m.matched_chars.last().map(|c| rune_char(c.c)) == Some('.')
+                    && m.actual_text.ends_with("here.")
+            }),
+            "the matched characters end on the quote's full stop"
+        );
+        let claims = vec![ClaimInput {
+            page: Some(1),
+            quote: quote.to_owned(),
+            ..ClaimInput::default()
+        }];
+        let summary =
+            audit_claims(&doc, "b3:doc", &claims, false, 72.0).unwrap_or_else(|e| panic!("{e}"));
+        let item = &summary.results[0];
+        assert_eq!(item.status, AuditStatus::Verified);
+        assert!(
+            item.actual_text
+                .as_deref()
+                .is_some_and(|t| t.ends_with("here.")),
+            "{:?}",
+            item.actual_text
+        );
     }
 
     #[test]
