@@ -148,7 +148,9 @@ pub struct PlanExecution {
     pub sanitized_items: usize,
     pub pages_kept: Option<Vec<i32>>,
     pub rotated: Option<i32>,
-    pub verified: bool,
+    /// Whether the edits passed their checks; null when they were not
+    /// checked (`--no-verify`).
+    pub verified: Option<bool>,
     pub patch_verification: Option<PatchVerification>,
     pub redact_verified: Option<bool>,
 }
@@ -1031,7 +1033,7 @@ pub fn execute_plans(
                 sanitized_items: 0,
                 pages_kept: None,
                 rotated: None,
-                verified: false,
+                verified: Some(false),
                 patch_verification: None,
                 redact_verified: None,
             },
@@ -1130,7 +1132,11 @@ pub fn execute_plans(
         }
         redaction_quads += quads.len();
     }
-    let matcher = Matcher::new(&redact_texts, &redact_regexes, false).ok();
+    let matcher = Matcher::new(&redact_texts, &redact_regexes, false).map_err(|e| PlanError {
+        code: "usage.bad_pattern",
+        is_conflict_or_verify: false,
+        message: e,
+    })?;
     for (&p_idx, (quads, boxes)) in &redaction_pages {
         let page_obj = work.page(p_idx).map_err(|e| PlanError {
             code: "input.page_tree",
@@ -1153,19 +1159,19 @@ pub fn execute_plans(
             text: TextMethod::Remove,
         };
         let _ = redact::redact_all_annotations(&work, p_idx, &pdf_quads);
-        redact::redact_page_with(&work, p_idx, &pdf_quads, ropts, matcher.as_ref()).map_err(
-            |e| PlanError {
+        redact::redact_page_with(&work, p_idx, &pdf_quads, ropts, Some(&matcher)).map_err(|e| {
+            PlanError {
                 code: "input.redact",
                 is_conflict_or_verify: false,
                 message: e,
-            },
-        )?;
+            }
+        })?;
     }
-    if let Some(m) = &matcher
-        && !redact_needles.is_empty()
-    {
-        let all_pages: Vec<i32> = (0..page_count).collect();
-        let _ = scrub::scrub(&work, m, &all_pages);
+    // As `redact`: the redacted pages lose their thumbnails, and every
+    // string the patterns match goes.
+    if !redaction_pages.is_empty() {
+        let pages: Vec<i32> = redaction_pages.keys().copied().collect();
+        let _ = scrub::scrub(&work, &matcher, &pages);
     }
 
     // 4. Surgical text patches, at the targets found on the base.
@@ -1224,6 +1230,10 @@ pub fn execute_plans(
         needles: redact_needles,
         texts: redact_texts,
         regexes: redact_regexes,
+        areas: redaction_pages
+            .iter()
+            .map(|(&p, (quads, _))| (p, quads.clone()))
+            .collect(),
     };
     let has_page_ops = !page_rotations.is_empty() || page_kept.is_some();
     let mut checked = None;
@@ -1306,7 +1316,7 @@ pub fn execute_plans(
             sanitized_items,
             pages_kept: pages_kept_1based,
             rotated: last_rotated,
-            verified: all_ok,
+            verified: verify_output.then_some(all_ok),
             patch_verification: patch_verif,
             redact_verified: redact_verif,
         },
@@ -1318,6 +1328,8 @@ struct RedactCheck {
     needles: Vec<(String, u32)>,
     texts: Vec<String>,
     regexes: Vec<String>,
+    /// The areas redacted, by 0-based page, in the base pages' space.
+    areas: Vec<(i32, Vec<Quad>)>,
 }
 
 /// The patches' and the redactions' checks on `bytes`, a save of the plans'
@@ -1341,9 +1353,13 @@ fn run_checks(
         patch_verif = Some(pv);
     }
     let mut redact_verif = None;
-    if !redact.needles.is_empty()
-        && let Ok(matcher) = Matcher::new(&redact.texts, &redact.regexes, false)
-    {
+    if !redact.needles.is_empty() || !redact.areas.is_empty() {
+        let matcher =
+            Matcher::new(&redact.texts, &redact.regexes, false).map_err(|e| PlanError {
+                code: "usage.bad_pattern",
+                is_conflict_or_verify: false,
+                message: e,
+            })?;
         let reopened = Document::open(bytes.to_vec()).map_err(|e| PlanError {
             code: e.code,
             is_conflict_or_verify: true,
@@ -1355,7 +1371,7 @@ fn run_checks(
         let targets = Targets {
             needles: redact.needles.clone(),
             matcher,
-            areas: Vec::new(),
+            areas: redact.areas.clone(),
         };
         let v: Verification = verify::verify(&reopened, &targets);
         redact_verif = Some(v.verified());
@@ -1455,7 +1471,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
 
         assert!(exec.conflicts.is_empty());
-        assert!(exec.verified);
+        assert_eq!(exec.verified, Some(true));
         assert_eq!(exec.plan_count, 2);
         assert_eq!(exec.highlights_added, 1);
         assert_eq!(exec.patches.len(), 1);
@@ -1510,7 +1526,7 @@ mod tests {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         assert!(bytes.is_empty());
-        assert!(!exec.verified);
+        assert_eq!(exec.verified, Some(false));
         assert_eq!(exec.conflicts.len(), 1);
         assert_eq!(exec.conflicts[0].code, "conflict.patch_vs_redact");
 
@@ -1532,7 +1548,7 @@ mod tests {
             true,
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        assert!(!exec2.verified);
+        assert_eq!(exec2.verified, Some(false));
         assert_eq!(exec2.conflicts[0].code, "conflict.page_deleted");
     }
 
@@ -1632,7 +1648,7 @@ mod tests {
         };
         let (bytes, exec) = run(&base, &[&plan("a"), &plan("b")]).unwrap_or_else(|e| panic!("{e}"));
         assert!(exec.conflicts.is_empty());
-        assert!(exec.verified);
+        assert_eq!(exec.verified, Some(true));
         assert_eq!(exec.op_count, 6);
         assert_eq!(exec.patches.len(), 1);
         assert_eq!(exec.highlights_added, 1);
@@ -1687,7 +1703,7 @@ mod tests {
             &[r#"[{"op":"redact","id":"p1.b1"},{"op":"patch","id":"p1.b3.l1.s1","text":"XX"}]"#],
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        assert!(exec.verified, "{exec:?}");
+        assert_eq!(exec.verified, Some(true), "{exec:?}");
         assert_eq!(exec.patches[0].old_text, "Block three");
         let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
         let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
@@ -1737,7 +1753,7 @@ mod tests {
             let bad =
                 format!(r#"[{{"op":"patch","id":"p1.b1.l1.s1","text":"$50,000,000.00"}},{pages}]"#);
             let (_, exec) = run(&base, &[&bad]).unwrap_or_else(|e| panic!("{e}"));
-            assert!(!exec.verified, "{pages}: {exec:?}");
+            assert_eq!(exec.verified, Some(false), "{pages}: {exec:?}");
             let findings = &exec.patch_verification.as_ref().map(|v| v.findings.clone());
             assert!(
                 findings
@@ -1749,13 +1765,82 @@ mod tests {
 
             let good = format!(r#"[{{"op":"patch","id":"p1.b1.l1.s1","text":"$75"}},{pages}]"#);
             let (_, exec) = run(&base, &[&good]).unwrap_or_else(|e| panic!("{e}"));
-            assert!(exec.verified, "{pages}: {exec:?}");
+            assert_eq!(exec.verified, Some(true), "{pages}: {exec:?}");
         }
         let moved =
             r#"[{"op":"patch","id":"p2.b1.l1.s1","text":"Page two"},{"op":"pages","delete":"1"}]"#;
         let (_, exec) = run(&base, &[moved]).unwrap_or_else(|e| panic!("{e}"));
-        assert!(exec.verified, "{exec:?}");
+        assert_eq!(exec.verified, Some(true), "{exec:?}");
         assert_eq!(exec.patches[0].page, 1);
+    }
+
+    /// A page with text, an image, and a thumbnail.
+    fn region_fixture() -> Document {
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}/XObject<</Im1 5 0 R>>>>/Contents 4 0 R/Thumb 6 0 R>>"
+            )
+            .into_bytes(),
+            stream(
+                "",
+                b"BT /F1 12 Tf 72 720 Td (Account holder) Tj ET q 100 0 0 100 72 600 cm /Im1 Do Q",
+            ),
+            stream(
+                "/Type/XObject/Subtype/Image/Width 2/Height 2/BitsPerComponent 8/ColorSpace/DeviceRGB/Filter/JPXDecode",
+                b"not a jpx stream",
+            ),
+            stream(
+                "/Width 1/Height 1/BitsPerComponent 8/ColorSpace/DeviceRGB",
+                b"\xff\xff\xff",
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_region_redaction_drops_the_page_thumbnail_and_verifies() {
+        let base = region_fixture();
+        // Over the text, and over the image (page space has y down).
+        for region in ["p1:[60,40,300,80]", "p1:[60,80,200,200]"] {
+            let plan = format!(
+                r#"[{{"op":"redact","region":"{region}"}},{{"op":"redact","id":"p1.b1"}}]"#
+            );
+            let (_, exec) = run(&base, &[&plan]).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(exec.redact_verified, Some(true), "{exec:?}");
+        }
+        let (bytes, exec) = run(
+            &base,
+            &[r#"[{"op":"redact","region":"p1:[60,40,300,80]"}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.redact_verified, Some(true), "{exec:?}");
+        assert_eq!(exec.verified, Some(true));
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        assert!(matches!(
+            out.dict_get(&page, b"Thumb"),
+            crate::object::Object::Null
+        ));
+    }
+
+    #[test]
+    fn unchecked_edits_are_not_reported_verified() {
+        let base = multi_page_fixture();
+        let plan = parse_plan(r#"[{"op":"redact","region":"p1:[60,40,300,80]"}]"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (_, exec) = execute_plans(
+            &base,
+            "b3:base",
+            &[plan],
+            &WriteOptions::default(),
+            &PatchOptions::default(),
+            None,
+            false,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.verified, None);
+        assert_eq!(exec.redact_verified, None);
     }
 
     #[test]

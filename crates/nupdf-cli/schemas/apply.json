@@ -231,7 +231,10 @@
       "type": "string"
     },
     "verified": {
-      "type": "boolean"
+      "type": [
+        "boolean",
+        "null"
+      ]
     }
   },
   "required": [

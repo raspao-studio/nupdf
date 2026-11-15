@@ -328,7 +328,7 @@ pub fn apply_cmd(
         });
     }
 
-    if clean_plan.verify && !exec.verified {
+    if clean_plan.verify && exec.verified != Some(true) {
         return Err(Failure {
             exit: Exit::Verify,
             code: "verify.failed",

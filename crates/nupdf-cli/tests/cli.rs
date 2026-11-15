@@ -4163,3 +4163,28 @@ fn patch_accepts_a_line_on_single_spaced_text() {
         assert_eq!(report["verification"]["verified"], true, "{report}");
     }
 }
+
+#[test]
+fn apply_checks_a_region_redaction_and_says_when_it_did_not_check() {
+    let input = smoke("stext.pdf");
+    let plan = r#"[{"op":"redact","region":"p1:[10,70,200,95]"}]"#;
+    let checked = report_of(&[
+        "apply",
+        input.to_str().unwrap(),
+        "--inline",
+        plan,
+        "--dry-run",
+    ]);
+    assert_eq!(checked["redact_verified"], true, "{checked}");
+    assert_eq!(checked["verified"], true, "{checked}");
+    let unchecked = report_of(&[
+        "apply",
+        input.to_str().unwrap(),
+        "--inline",
+        plan,
+        "--dry-run",
+        "--no-verify",
+    ]);
+    assert_eq!(unchecked["redact_verified"], Value::Null, "{unchecked}");
+    assert_eq!(unchecked["verified"], Value::Null, "{unchecked}");
+}

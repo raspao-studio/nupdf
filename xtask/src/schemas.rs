@@ -263,6 +263,7 @@ fn overrides(name: &str) -> BTreeMap<String, Value> {
             ),
             ("/rotated", json!({"type": ["integer", "null"]})),
             ("/redact_verified", json!({"type": ["boolean", "null"]})),
+            ("/verified", json!({"type": ["boolean", "null"]})),
             (
                 "/duplicates",
                 json!({"type": "array", "items": {
