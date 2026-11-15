@@ -11,7 +11,7 @@
 //! AcroForm fields, annotations, and perceptual span visibility, and classifies
 //! each revision with deterministic forensic hazard codes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,13 @@ use crate::object::Object;
 use crate::signature;
 use crate::stext::{self, Options as StextOptions};
 
+/// Most objects hashed into one page's fingerprint; past it the rest of the
+/// page hashes as a marker, the same in every revision.
+const MAX_FINGERPRINT_NODES: usize = 200_000;
+
+/// Deepest object nesting followed when fingerprinting.
+const MAX_FINGERPRINT_DEPTH: usize = 64;
+
 /// Maximum incremental revisions inspected on a single document.
 const MAX_REVISIONS_INSPECTED: usize = 1024;
 
@@ -34,12 +41,16 @@ const MAX_REVISIONS_INSPECTED: usize = 1024;
 /// linear multiset comparison so pathological pages remain strictly bounded.
 const MAX_LCS_LINES: usize = 512;
 
-/// Hazard code: a revision altered page content streams after a valid signature.
+/// Hazard code: a revision altered page content streams, page resources
+/// (fonts, images, forms) or page boxes after a valid signature.
 pub const TAMPER_POST_SIGNATURE_CONTENT_EDIT: &str = "tamper.post_signature_content_edit";
 /// Hazard code: a revision visually occluded previously visible text after a valid signature.
 pub const TAMPER_POST_SIGNATURE_VISUAL_OCCLUSION: &str = "tamper.post_signature_visual_occlusion";
 /// Hazard code: a signature that was cryptographically valid (`"OK"`) in a prior revision broke.
 pub const TAMPER_SIGNATURE_BROKEN: &str = "tamper.signature_broken";
+/// Hazard code: annotations other than form-field widgets were added, removed
+/// or changed, or form fields were added or removed, after a valid signature.
+pub const TAMPER_POST_SIGNATURE_ANNOTATION_EDIT: &str = "tamper.post_signature_annotation_edit";
 
 /// Revision classification: initial base revision (`rev == 1`).
 pub const CLASS_INITIAL: &str = "initial";
@@ -160,11 +171,16 @@ struct AnnotKey {
     kind: &'static str,
     rect_q: [i32; 4],
     contents: String,
+    /// Fingerprint of the annotation's `/AP`.
+    appearance: [u8; 32],
 }
 
 struct ExtractedRevState {
     page_count: i32,
     lines_by_page: Vec<Vec<String>>,
+    /// Per page: a hash of its content streams, resources and boxes, with
+    /// everything they reach.
+    page_fingerprints: Vec<[u8; 32]>,
     fields: BTreeMap<String, String>,
     annots: BTreeMap<AnnotKey, usize>,
     signatures: Vec<RevisionSignature>,
@@ -252,6 +268,8 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
     let mut signatures = Vec::new();
     let mut seen_sig_objs: Vec<i32> = Vec::new();
     let mut store = Store::default();
+    let mut hasher = ObjHasher::new(doc);
+    let mut page_fingerprints = Vec::with_capacity(cap);
 
     for p_idx in 0..page_count {
         let page_obj = doc.page(p_idx).map_err(|e| e.0)?;
@@ -273,6 +291,7 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
             }
         }
         lines_by_page.push(page_lines);
+        page_fingerprints.push(hasher.page(&page_obj));
 
         // 2. Non-widget annotations and form/signature widgets on this page.
         let (page_annots, page_widgets) = annot::page_annots(doc, &page_obj);
@@ -286,11 +305,13 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
                 (r.y1 * 10.0).round() as i32,
             ];
             let contents = annot::contents(doc, a);
+            let appearance = hasher.value_hash(&doc.dict_get(a, b"AP"));
             let key = AnnotKey {
                 page: p_idx + 1,
                 kind,
                 rect_q,
                 contents,
+                appearance,
             };
             *annots.entry(key).or_insert(0) += 1;
         }
@@ -348,11 +369,147 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
     Ok(ExtractedRevState {
         page_count,
         lines_by_page,
+        page_fingerprints,
         fields,
         annots,
         signatures,
         attestations,
     })
+}
+
+/// Content hashes of objects in one revision, each reachable object hashed
+/// once (`memo`), cycles cut (`open`), and the whole walk bounded per page.
+struct ObjHasher<'a> {
+    doc: &'a Document,
+    memo: HashMap<i32, [u8; 32]>,
+    open: HashSet<i32>,
+    budget: usize,
+}
+
+impl<'a> ObjHasher<'a> {
+    fn new(doc: &'a Document) -> Self {
+        ObjHasher {
+            doc,
+            memo: HashMap::new(),
+            open: HashSet::new(),
+            budget: MAX_FINGERPRINT_NODES,
+        }
+    }
+
+    /// A page's content streams, resources and boxes, as drawn.
+    fn page(&mut self, page: &Object) -> [u8; 32] {
+        self.budget = MAX_FINGERPRINT_NODES;
+        let mut h = blake3::Hasher::new();
+        let contents = self.doc.dict_get(page, b"Contents");
+        h.update(b"Contents");
+        self.value(&contents, &mut h, 0);
+        for key in [&b"Resources"[..], b"MediaBox", b"CropBox", b"Rotate"] {
+            let v = self.doc.inherited(page, key).ok().flatten();
+            h.update(key);
+            self.value(&v.unwrap_or(Object::Null), &mut h, 0);
+        }
+        *h.finalize().as_bytes()
+    }
+
+    fn value_hash(&mut self, obj: &Object) -> [u8; 32] {
+        self.budget = MAX_FINGERPRINT_NODES;
+        let mut h = blake3::Hasher::new();
+        self.value(obj, &mut h, 0);
+        *h.finalize().as_bytes()
+    }
+
+    fn reference(&mut self, num: i32, depth: usize) -> [u8; 32] {
+        if let Some(done) = self.memo.get(&num) {
+            return *done;
+        }
+        let mut h = blake3::Hasher::new();
+        if !self.open.insert(num) {
+            h.update(b"cycle");
+            h.update(&num.to_le_bytes());
+            return *h.finalize().as_bytes();
+        }
+        let obj = self.doc.object(num).unwrap_or(Object::Null);
+        self.value(&obj, &mut h, depth + 1);
+        self.open.remove(&num);
+        let out = *h.finalize().as_bytes();
+        self.memo.insert(num, out);
+        out
+    }
+
+    fn value(&mut self, obj: &Object, h: &mut blake3::Hasher, depth: usize) {
+        if self.budget == 0 || depth > MAX_FINGERPRINT_DEPTH {
+            h.update(b"~");
+            return;
+        }
+        self.budget -= 1;
+        match obj {
+            Object::Null => {
+                h.update(b"n");
+            }
+            Object::Bool(b) => {
+                h.update(if *b { b"T" } else { b"F" });
+            }
+            Object::Int(i) => {
+                h.update(b"i");
+                h.update(&i.to_le_bytes());
+            }
+            Object::Real(f) => {
+                h.update(b"r");
+                h.update(&f.to_bits().to_le_bytes());
+            }
+            Object::Name(n) => {
+                h.update(b"/");
+                h.update(&(n.len() as u64).to_le_bytes());
+                h.update(n);
+            }
+            Object::String(st) => {
+                h.update(b"(");
+                h.update(&(st.len() as u64).to_le_bytes());
+                h.update(st);
+            }
+            Object::Array(a) => {
+                h.update(b"[");
+                h.update(&(a.len() as u64).to_le_bytes());
+                for item in a.iter() {
+                    self.value(item, h, depth + 1);
+                }
+            }
+            Object::Dict(d) => self.dict(d, h, depth),
+            Object::Ref(r) => {
+                let sub = self.reference(r.num, depth);
+                h.update(b"R");
+                h.update(&sub);
+            }
+            Object::Stream(st) => {
+                self.dict(&st.dict, h, depth);
+                h.update(b"stream");
+                match self.doc.raw_stream_data(st) {
+                    Ok(data) => {
+                        h.update(&(data.len() as u64).to_le_bytes());
+                        h.update(&data);
+                    }
+                    Err(_) => {
+                        h.update(b"unreadable");
+                    }
+                }
+            }
+        }
+    }
+
+    fn dict(&mut self, d: &crate::object::Dict, h: &mut blake3::Hasher, depth: usize) {
+        h.update(b"<<");
+        for (k, v) in d.iter() {
+            // A form XObject or pattern pointing back at its page would pull
+            // the page tree in; what it draws is what matters.
+            if k == b"Parent" {
+                continue;
+            }
+            h.update(&(k.len() as u64).to_le_bytes());
+            h.update(k);
+            self.value(v, h, depth + 1);
+        }
+        h.update(b">>");
+    }
 }
 
 fn inspect_signature_field(doc: &Document, field: &Object) -> RevisionSignature {
@@ -491,14 +648,30 @@ fn compute_delta(
         _ => Vec::new(),
     };
 
-    // Deterministic forensic hazard evaluation.
+    // Deterministic forensic hazard evaluation. Text is not the only thing a
+    // revision can change: an image, a font or a vector drawn over the page
+    // changes no extracted line, so the objects each page reaches are compared.
     let mut forensic_hazards = Vec::new();
+    let pages_redrawn = prev
+        .page_fingerprints
+        .iter()
+        .zip(&curr.page_fingerprints)
+        .any(|(a, b)| a != b);
     let content_edited = pages_added > 0
         || pages_removed > 0
         || !lines_added.is_empty()
-        || !lines_removed.is_empty();
+        || !lines_removed.is_empty()
+        || pages_redrawn;
     if had_valid_sig && content_edited {
         forensic_hazards.push(TAMPER_POST_SIGNATURE_CONTENT_EDIT.to_string());
+    }
+    // Filling existing fields and adding signatures is what may follow a
+    // signature; any other annotation, or a field added or removed, may not.
+    let fields_added_or_removed = fields_changed
+        .iter()
+        .any(|f| f.old_value.is_none() || f.new_value.is_none());
+    if had_valid_sig && (annots_added > 0 || annots_removed > 0 || fields_added_or_removed) {
+        forensic_hazards.push(TAMPER_POST_SIGNATURE_ANNOTATION_EDIT.to_string());
     }
     if had_valid_sig && !newly_occluded_spans.is_empty() {
         forensic_hazards.push(TAMPER_POST_SIGNATURE_VISUAL_OCCLUSION.to_string());
@@ -688,7 +861,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::annot_edit::Editor;
     use crate::fill;
-    use crate::geometry::Point;
     use crate::object::Dict;
     use crate::patch::{self, PatchOptions, PatchSpec};
     use crate::write::{self, WriteOptions};
@@ -1098,7 +1270,7 @@ pub(crate) mod tests {
             vec![("approval_sig".to_string(), "OK".to_string())]
         );
 
-        // --- Revision 2: Clean incremental form fill + Highlight annotation ---
+        // --- Revision 2: Clean incremental form fill (an annotation would be a hazard) ---
         let rev2_work = rev1_doc.fork_clean();
         fill::fill(
             &rev2_work,
@@ -1108,24 +1280,6 @@ pub(crate) mod tests {
             }],
         )
         .unwrap();
-        {
-            let mut ed = Editor::new(&rev2_work);
-            ed.load_page(0).unwrap();
-            let h_num = ed.create(0, "Highlight").unwrap();
-            ed.set_quad_points(
-                0,
-                h_num,
-                &[[
-                    Point::new(72.0, 75.0),
-                    Point::new(220.0, 75.0),
-                    Point::new(72.0, 95.0),
-                    Point::new(220.0, 95.0),
-                ]],
-            )
-            .unwrap();
-            ed.set_contents(h_num, "Verified line item");
-            ed.update();
-        }
         let rev2_bytes = write::save(&rev2_work, &inc_opts).unwrap();
         let rev2_doc = Document::open(rev2_bytes.clone()).unwrap();
         assert_eq!(rev2_doc.revisions(), 2);
@@ -1190,7 +1344,7 @@ pub(crate) mod tests {
                 new_value: Some("Reviewed by accounting".to_string()),
             }]
         );
-        assert_eq!(d2.annots_added, 1);
+        assert_eq!(d2.annots_added, 0);
 
         // Check Rev 3A snapshot: White rectangle occlusion caught despite zero text operator edits!
         let s3a = &report_occlude.revisions[2];
@@ -1238,6 +1392,91 @@ pub(crate) mod tests {
                 text: "Approved Total: $9,000.00".to_string(),
             }]
         );
+    }
+
+    /// Classification and hazards of revision 2, made from the signed
+    /// invoice by `edit` and saved incrementally.
+    fn signed_then(edit: impl FnOnce(&Document)) -> (String, Vec<String>) {
+        let rev1_doc = Document::open(build_signed_invoice_rev1()).unwrap();
+        let work = rev1_doc.fork_clean();
+        edit(&work);
+        let inc_opts = WriteOptions {
+            incremental: true,
+            ..WriteOptions::default()
+        };
+        let rev2 = Document::open(write::save(&work, &inc_opts).unwrap()).unwrap();
+        let report = inspect_history(&rev2, &HistoryOptions { run_attest: true }).unwrap();
+        assert_eq!(report.revision_count, 2);
+        let s2 = &report.revisions[1];
+        assert!(
+            s2.signatures[0].valid,
+            "the edit is not meant to break the digest"
+        );
+        let hazards = s2
+            .delta_from_previous
+            .as_ref()
+            .unwrap()
+            .forensic_hazards
+            .clone();
+        assert_eq!(
+            report.tampered,
+            s2.classification == CLASS_TAMPERED_AFTER_SIGNATURE
+        );
+        (s2.classification.clone(), hazards)
+    }
+
+    #[test]
+    fn edits_after_a_signature_that_change_no_text_are_still_hazards() {
+        // A FreeText annotation stating a new amount.
+        let (class, hazards) = signed_then(|doc| {
+            let mut ed = Editor::new(doc);
+            ed.load_page(0).unwrap();
+            let n = ed.create(0, "FreeText").unwrap();
+            ed.set_contents(n, "Approved Total: $9,000.00");
+            ed.update();
+        });
+        assert_eq!(class, CLASS_TAMPERED_AFTER_SIGNATURE);
+        assert!(hazards.contains(&TAMPER_POST_SIGNATURE_ANNOTATION_EDIT.to_string()));
+
+        // The page's font swapped for another.
+        let (class, hazards) = signed_then(|doc| {
+            doc.alter_object(
+                5,
+                Object::Dict(Arc::new({
+                    let mut d = Dict::new();
+                    d.put(b"Type", Object::name(b"Font"));
+                    d.put(b"Subtype", Object::name(b"Type1"));
+                    d.put(b"BaseFont", Object::name(b"Courier"));
+                    d.put(b"Encoding", Object::name(b"WinAnsiEncoding"));
+                    d
+                })),
+            );
+        });
+        assert_eq!(class, CLASS_TAMPERED_AFTER_SIGNATURE);
+        assert!(hazards.contains(&TAMPER_POST_SIGNATURE_CONTENT_EDIT.to_string()));
+
+        // Vector content added away from any text.
+        let (class, hazards) = signed_then(|doc| {
+            let data = b"BT /F1 14 Tf 72 700 Td (Approved Total: $1,000.00) Tj ET 0 0 1 rg 400 100 50 50 re f".to_vec();
+            let mut d = Dict::new();
+            d.put(b"Length", Object::Int(data.len() as i64));
+            doc.replace_stream(4, d, data);
+        });
+        assert_eq!(class, CLASS_TAMPERED_AFTER_SIGNATURE);
+        assert!(hazards.contains(&TAMPER_POST_SIGNATURE_CONTENT_EDIT.to_string()));
+
+        // Filling the existing field stays a clean fill.
+        let (class, hazards) = signed_then(|doc| {
+            fill::fill(
+                doc,
+                &[fill::Edit::Set {
+                    name: "notes".to_string(),
+                    value: "Reviewed".to_string(),
+                }],
+            )
+            .unwrap();
+        });
+        assert_eq!(class, CLASS_CLEAN_INCREMENTAL_FILL, "{hazards:?}");
     }
 
     #[test]
