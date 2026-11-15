@@ -1427,6 +1427,29 @@ fn find_clean_substring(
 /// `.` or `,` before a digit ("rate 12." before "5", or "capped at
 /// $1,000." before a superscript footnote "1") is left to
 /// [`ends_before_a_digit`] and the page's geometry.
+///
+/// This is one of three checks [`number_cut_in`] makes, each on the
+/// characters straight before and after the match in the page's
+/// normalised text (a content id's target read in its text block). The
+/// second is that punctuation rule; the third, [`cuts_a_grouped_number`],
+/// takes digit groups set apart by a space no wider than a word space on
+/// one baseline in one size.
+///
+/// None of them looks across a line break: a line that ends in a number
+/// and a next line that starts with one are read as two numbers, so a
+/// grouped figure wrapped at a group ("1,234," or "1 234" then "567")
+/// verifies cut. Even the narrowest shape, a line ending in two or more
+/// comma groups and a comma before a line starting with exactly three
+/// digits, is also the shape of a list of figures ("84,000," then
+/// "105,000, 119,000"), which a refusal there would refuse.
+/// Also not checked: digit groups split by a space character set wider
+/// than a word space (the page's text keeps no-break, thin and narrow
+/// no-break spaces only as U+0020 and their width); whether the spaces
+/// earlier in a chain of groups are grouping spaces (only the one at the
+/// match's edge is measured); other digit separators (apostrophes, a `.`
+/// thousands mark); digits other than ASCII; and vertical writing
+/// (rotated lines are measured along their direction, but no test covers
+/// them).
 fn cuts_a_number(before: &str, needle: &str, after: &str) -> bool {
     let is_sep = |c: char| c == '.' || c == ',';
     let mut first = needle.chars();
@@ -1517,8 +1540,8 @@ fn byte_range_of(
     (start < end).then_some(start..end)
 }
 
-/// What the space at a byte of a normalised text is between the digits
-/// (or a digit's comma) on either side of it.
+/// What the space at a byte of a normalised text is between the digits on
+/// either side of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gap {
     /// One that can group a number's digits: on one baseline, in one size,
@@ -2761,6 +2784,57 @@ mod tests {
             audit_one(&doc, Some(1), None, "Total 12 500").0,
             AuditStatus::WrongLocation
         );
+    }
+
+    #[test]
+    fn two_numbers_on_two_lines_verify() {
+        // A line that ends in a number and a next line that starts with one
+        // are two numbers: a year and a count, a list's "102," and "103",
+        // a list of figures. No check looks across a line break, so a
+        // grouped figure wrapped after its comma ("1,234," then "567") is
+        // a known miss: it verifies cut.
+        let one_block: [(&[u8], &[&str]); 7] = [
+            (
+                b"BT /F1 12 Tf 50 700 Td (in 2020.) Tj 0 -14 Td (150 people came) Tj ET",
+                &["in 2020.", "in 2020", "150 people"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (rows 12) Tj 0 -14 Td (345 left) Tj ET",
+                &["rows 12", "345 left"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (sections 101, 102,) Tj 0 -14 Td (103 and 104) Tj ET",
+                &["sections 101, 102,", "sections 101, 102", "103 and"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (sizes of 84,000,) Tj 0 -14 Td (105,000 and 119,000) Tj ET",
+                &["sizes of 84,000,", "sizes of 84,000", "105,000 and"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (cost 1,250.) Tj 0 -14 Td (300 more) Tj ET",
+                &["cost 1,250.", "300 more"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (Sum 1 234) Tj 0 -14 Td (567 kg) Tj ET",
+                &["Sum 1 234", "567 kg"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (Paid 1,234,) Tj 0 -14 Td (567 dollars) Tj ET",
+                &["Paid 1,234,", "Paid 1,234", "567 dollars"],
+            ),
+        ];
+        for (content, quotes) in one_block {
+            let doc = page_doc(content, FONT_RES, &[]);
+            for &quote in quotes {
+                for id in [None, Some("p1.b1")] {
+                    assert_eq!(
+                        audit_one(&doc, Some(1), id, quote).0,
+                        AuditStatus::Verified,
+                        "{quote:?} at {id:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
