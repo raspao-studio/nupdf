@@ -2646,6 +2646,17 @@ fn save_checked_from(
     plan: &Clean,
     saved: Option<Vec<u8>>,
 ) -> Result<(serde_json::Value, serde_json::Value), Failure> {
+    let (bytes, verification) = save_verified(doc, plan, saved)?;
+    write_verified(doc, plan, &bytes, verification)
+}
+
+/// The save of [`save_checked_from`] and its read-back check, with nothing
+/// written yet: for a command with checks of its own to run on the bytes.
+fn save_verified(
+    doc: &Document,
+    plan: &Clean,
+    saved: Option<Vec<u8>>,
+) -> Result<(Vec<u8>, Option<nupdf::write::Verification>), Failure> {
     // pdf_clean_file: "cannot authenticate password".
     if doc.needs_password() && plan.password.is_none() {
         return Err(Failure {
@@ -2687,24 +2698,34 @@ fn save_checked_from(
             })
         }
     });
-    let verification = verification.transpose()?;
+    Ok((bytes, verification.transpose()?))
+}
+
+/// The write of [`save_checked_from`], unless a dry run, of bytes
+/// [`save_verified`] made: the output's report and the verification's.
+fn write_verified(
+    doc: &Document,
+    plan: &Clean,
+    bytes: &[u8],
+    verification: Option<nupdf::write::Verification>,
+) -> Result<(serde_json::Value, serde_json::Value), Failure> {
     if plan.apply
         && let Some(path) = plan.output
     {
-        write_atomically(path, &bytes).map_err(|e| Failure {
+        write_atomically(path, bytes).map_err(|e| Failure {
             exit: Exit::Input,
             code: "output.unwritable",
             message: format!("cannot write {}: {e}", path.display()),
         })?;
     }
-    let hash = blake3::hash(&bytes);
+    let hash = blake3::hash(bytes);
     let mut output = serde_json::json!({
         "path": plan.output.map(|p| p.display().to_string()),
         "doc_id": DocId::from_hash(&hash).to_string(),
         "len": bytes.len(),
         "blake3": hash.to_hex().to_string(),
     });
-    if let Some(signatures) = signatures_kept(doc, &bytes, plan) {
+    if let Some(signatures) = signatures_kept(doc, bytes, plan) {
         output["signatures"] = signatures;
     }
     let verification = verification.map_or(serde_json::Value::Null, |v| {

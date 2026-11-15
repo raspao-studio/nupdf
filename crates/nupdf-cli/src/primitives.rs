@@ -5,18 +5,18 @@
 
 use std::path::{Path, PathBuf};
 
+use nupdf::Document;
 use nupdf::attest::{self, AttestOptions};
 use nupdf::audit::{self, ClaimInput};
 use nupdf::patch::{self, PatchOptions, PatchSpec};
 use nupdf::plan::{self, EditPlan};
 use nupdf::query::{self, Aggregation, QuerySpec};
-use nupdf::{DocId, Document};
 use serde_json::{Map, Value, json};
 
 use super::commands::WriteArgs;
 use super::{
-    Clean, Exit, Failure, FileFacts, diagnostics, emit, output_dir, report, signatures_kept,
-    standard_output, write_atomically, write_file,
+    Clean, Exit, Failure, FileFacts, diagnostics, emit, output_dir, report, save_verified,
+    standard_output, write_file, write_verified,
 };
 
 type OpenFn<'a> = &'a (dyn Fn(&Path) -> Result<(Document, FileFacts), Failure> + Sync);
@@ -174,36 +174,39 @@ pub fn patch_cmd(
         check_overflow: !no_overflow_check,
     };
 
+    // The edits are made on a fork, saved, read back and checked as every
+    // writer's are, then checked as patches, before anything is written.
     let work = doc.fork_clean();
     nupdf::write::check_document(&work);
-
-    let (bytes, res) = if plan.verify {
-        patch::patch_and_verify(&work, &specs, &patch_opts, &plan.options, password)
-            .map_err(map_patch_error)?
+    let untouched = if plan.verify {
+        patch::snapshot_untouched_spans(&work, &specs).map_err(map_patch_error)?
     } else {
-        let applied = patch::apply_patches(&work, &specs, &patch_opts).map_err(map_patch_error)?;
-        let mut write_opts = plan.options.clone();
-        if !write_opts.incremental {
-            write_opts.garbage = write_opts.garbage.max(1);
-        }
-        let saved = nupdf::write::save(&work, &write_opts).map_err(|e| {
-            input_err(
-                "input.unloadable_object",
-                nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
-                    .to_string(),
-            )
-        })?;
-        (
-            saved,
-            patch::PatchResult {
-                patches: applied,
-                verification: None,
-            },
+        Default::default()
+    };
+    let mut patches = patch::apply_patches(&work, &specs, &patch_opts).map_err(map_patch_error)?;
+    let mut options = plan.options.clone();
+    if !options.incremental {
+        options.garbage = options.garbage.max(1);
+    }
+    let save_plan = Clean {
+        options,
+        output: plan.output,
+        apply: plan.apply,
+        verify: plan.verify,
+        password: plan.password,
+        pages: None,
+    };
+    let (bytes, written) = save_verified(&work, &save_plan, None)?;
+    let verification = if plan.verify {
+        Some(
+            patch::verify_patched_bytes(&bytes, password, &mut patches, &untouched, &patch_opts)
+                .map_err(map_patch_error)?,
         )
+    } else {
+        None
     };
 
-    if plan.verify
-        && let Some(ref v) = res.verification
+    if let Some(v) = &verification
         && !v.verified
     {
         let details: Vec<String> = v
@@ -221,25 +224,14 @@ pub fn patch_cmd(
         });
     }
 
-    if plan.apply
-        && let Some(path) = plan.output
-    {
-        write_atomically(path, &bytes).map_err(|e| {
-            input_err(
-                "output.unwritable",
-                format!("cannot write {}: {e}", path.display()),
-            )
-        })?;
-    }
-
-    let output = output_summary(doc, &bytes, &plan);
+    let (output, _) = write_verified(&work, &save_plan, &bytes, written)?;
     let body = json!({
         "applied": plan.apply,
-        "patches": res.patches,
+        "patches": patches,
         "output": output,
-        "verification": res.verification,
+        "verification": verification,
     });
-    Ok(report("nupdf.patch/v1", facts, doc, body))
+    Ok(report("nupdf.patch/v1", facts, &work, body))
 }
 
 fn map_patch_error(e: patch::PatchError) -> Failure {
@@ -300,7 +292,7 @@ pub fn apply_cmd(
         check_overflow: true,
     };
 
-    let (bytes, exec) = plan::execute_plans(
+    let mut staged = plan::stage_plans(
         doc,
         &facts.doc_id,
         &plans,
@@ -311,9 +303,9 @@ pub fn apply_cmd(
     )
     .map_err(map_plan_error)?;
 
-    if !exec.conflicts.is_empty() {
-        let summary: Vec<String> = exec
-            .conflicts
+    if !staged.conflicts().is_empty() {
+        let summary: Vec<String> = staged
+            .conflicts()
             .iter()
             .map(|c| format!("{}: {}", c.code, c.message))
             .collect();
@@ -322,11 +314,24 @@ pub fn apply_cmd(
             code: "plan.conflict",
             message: format!(
                 "{} cross-plan conflict(s) detected ({}); nothing was written",
-                exec.conflicts.len(),
+                summary.len(),
                 summary.join("; ")
             ),
         });
     }
+
+    // Saved, read back and checked as every writer's output is, then the
+    // plans' own checks, before anything is written.
+    let save_plan = Clean {
+        options: staged.write_options.clone(),
+        output: clean_plan.output,
+        apply: clean_plan.apply,
+        verify: clean_plan.verify,
+        password: clean_plan.password,
+        pages: None,
+    };
+    let (bytes, written) = save_verified(&staged.work, &save_plan, None)?;
+    let exec = staged.finish(&bytes).map_err(map_plan_error)?;
 
     if clean_plan.verify && exec.verified != Some(true) {
         return Err(Failure {
@@ -336,25 +341,19 @@ pub fn apply_cmd(
         });
     }
 
-    if clean_plan.apply
-        && let Some(path) = clean_plan.output
-    {
-        write_atomically(path, &bytes).map_err(|e| {
-            input_err(
-                "output.unwritable",
-                format!("cannot write {}: {e}", path.display()),
-            )
-        })?;
-    }
-
-    let output = output_summary(doc, &bytes, &clean_plan);
+    let (output, _) = write_verified(&staged.work, &save_plan, &bytes, written)?;
     let mut body = Map::new();
     body.insert("applied".into(), clean_plan.apply.into());
     if let Ok(Value::Object(exec_fields)) = serde_json::to_value(&exec) {
         body.extend(exec_fields);
     }
     body.insert("output".into(), output);
-    Ok(report("nupdf.apply/v1", facts, doc, Value::Object(body)))
+    Ok(report(
+        "nupdf.apply/v1",
+        facts,
+        &staged.work,
+        Value::Object(body),
+    ))
 }
 
 fn map_plan_error(e: plan::PlanError) -> Failure {
@@ -378,20 +377,6 @@ fn input_failure_password() -> Failure {
         code: "input.needs_password",
         message: "the empty password does not open the document: pass --password".into(),
     }
-}
-
-fn output_summary(doc: &Document, bytes: &[u8], plan: &Clean<'_>) -> Value {
-    let hash = blake3::hash(bytes);
-    let mut output = json!({
-        "path": plan.output.map(|p| p.display().to_string()),
-        "doc_id": DocId::from_hash(&hash).to_string(),
-        "len": bytes.len(),
-        "blake3": hash.to_hex().to_string(),
-    });
-    if let Some(sigs) = signatures_kept(doc, bytes, plan) {
-        output["signatures"] = sigs;
-    }
-    output
 }
 
 /// Options for `nupdf query`.

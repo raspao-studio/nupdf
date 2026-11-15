@@ -4188,3 +4188,53 @@ fn apply_checks_a_region_redaction_and_says_when_it_did_not_check() {
     assert_eq!(unchecked["redact_verified"], Value::Null, "{unchecked}");
     assert_eq!(unchecked["verified"], Value::Null, "{unchecked}");
 }
+
+#[test]
+fn patch_and_apply_refuse_an_incremental_write_as_every_writer_does() {
+    // A repaired file takes no incremental write: a usage error, exit 2.
+    let input = smoke("broken-xref-offsets.pdf");
+    let out = scratch("incremental-refused.pdf");
+    for args in [
+        vec!["patch", "--replace", "p1.b1.l1.s1=Hi"],
+        vec![
+            "apply",
+            "--inline",
+            r#"[{"op":"meta","set":{"Title":"x"}}]"#,
+        ],
+    ] {
+        let mut full = vec![args[0], input.to_str().unwrap()];
+        full.extend(&args[1..]);
+        full.extend(["--incremental", "-o", out.to_str().unwrap()]);
+        let run = nupdf(&full);
+        assert_eq!(run.status.code(), Some(2), "{args:?}");
+        let err: Value = serde_json::from_slice(&run.stderr).unwrap();
+        assert_eq!(err["error"]["code"], "usage.incremental", "{err}");
+    }
+}
+
+#[test]
+fn apply_reports_the_warnings_raised_while_editing() {
+    // A direct annotation with no appearance, which MuPDF does not delete.
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Annots[<</Type/Annot/Subtype/Square/Rect[10 10 50 50]>>]>>",
+    ]);
+    let file = scratch("apply-direct-annot.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let report = report_of(&[
+        "apply",
+        file.to_str().unwrap(),
+        "--inline",
+        r#"[{"op":"annot_delete","id":"p1.a1"}]"#,
+        "--dry-run",
+    ]);
+    assert_eq!(report["annotations_deleted"], 0, "{report}");
+    let codes: Vec<&str> = report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["code"].as_str())
+        .collect();
+    assert!(codes.contains(&"annot.not_deleted"), "{report}");
+}

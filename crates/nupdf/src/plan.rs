@@ -419,6 +419,7 @@ fn boxes_overlap(a: Rect, b: Rect) -> bool {
 
 /// Executes one or more [`EditPlan`]s atomically on a forked overlay of `base_doc`,
 /// checking `doc_id` freshness, cross-agent conflicts, and post-write verification.
+/// With conflicts, nothing is saved and the bytes are empty.
 pub fn execute_plans(
     base_doc: &Document,
     base_doc_id: &str,
@@ -428,6 +429,90 @@ pub fn execute_plans(
     password: Option<&str>,
     verify_output: bool,
 ) -> Result<(Vec<u8>, PlanExecution), PlanError> {
+    let mut staged = stage_plans(
+        base_doc,
+        base_doc_id,
+        plans,
+        write_opts,
+        patch_opts,
+        password,
+        verify_output,
+    )?;
+    if !staged.conflicts().is_empty() {
+        return Ok((Vec::new(), staged.finish(&[])?));
+    }
+    let bytes = write::save(&staged.work, &staged.write_options).map_err(|e| PlanError {
+        code: "input.write",
+        is_conflict_or_verify: false,
+        message: e.message,
+    })?;
+    let exec = staged.finish(&bytes)?;
+    Ok((bytes, exec))
+}
+
+/// Plans whose edits are made on a fork of the base, for the caller to
+/// save with [`StagedPlans::write_options`] and hand back to
+/// [`StagedPlans::finish`], which runs the checks still to run on the
+/// bytes saved.
+#[derive(Debug)]
+pub struct StagedPlans {
+    /// The fork the edits were made on: what to save, and whose
+    /// diagnostics to report.
+    pub work: Document,
+    /// The options to save it with: those asked for, with a full rewrite
+    /// once a redaction ran.
+    pub write_options: WriteOptions,
+    exec: PlanExecution,
+    pending: Option<PendingChecks>,
+}
+
+/// The checks that read the saved output, when no page op made them run
+/// on a save before it.
+#[derive(Debug)]
+struct PendingChecks {
+    password: Option<String>,
+    untouched: HashMap<i32, Vec<(String, Rect)>>,
+    patch_opts: PatchOptions,
+    redact: RedactCheck,
+}
+
+impl StagedPlans {
+    /// The conflicts found: with any, no edit was made.
+    pub fn conflicts(&self) -> &[PlanConflict] {
+        &self.exec.conflicts
+    }
+
+    /// The execution's summary, with the checks still to run run on
+    /// `bytes`, a save of [`StagedPlans::work`].
+    pub fn finish(&mut self, bytes: &[u8]) -> Result<PlanExecution, PlanError> {
+        if let Some(p) = self.pending.take() {
+            let (pv, rv) = run_checks(
+                bytes,
+                p.password.as_deref(),
+                &mut self.exec.patches,
+                &p.untouched,
+                &p.patch_opts,
+                &p.redact,
+            )?;
+            self.exec.verified = Some(pv.as_ref().is_none_or(|v| v.verified) && rv != Some(false));
+            self.exec.patch_verification = pv;
+            self.exec.redact_verified = rv;
+        }
+        Ok(self.exec.clone())
+    }
+}
+
+/// [`execute_plans`] up to the save: the edits made on a fork of
+/// `base_doc`, and the checks that need no save of it run.
+pub fn stage_plans(
+    base_doc: &Document,
+    base_doc_id: &str,
+    plans: &[EditPlan],
+    write_opts: &WriteOptions,
+    patch_opts: &PatchOptions,
+    password: Option<&str>,
+    verify_output: bool,
+) -> Result<StagedPlans, PlanError> {
     for p in plans {
         if let Some(expected) = &p.doc_id
             && expected != base_doc_id
@@ -1018,9 +1103,11 @@ pub fn execute_plans(
     }
 
     if !conflicts.is_empty() {
-        return Ok((
-            Vec::new(),
-            PlanExecution {
+        return Ok(StagedPlans {
+            work: base_doc.fork_clean(),
+            write_options: write_opts.clone(),
+            pending: None,
+            exec: PlanExecution {
                 plan_count: plans.len(),
                 op_count,
                 duplicates,
@@ -1037,7 +1124,7 @@ pub fn execute_plans(
                 patch_verification: None,
                 redact_verified: None,
             },
-        ));
+        });
     }
 
     // Two patches of one place that do not conflict (the same text) are
@@ -1282,28 +1369,21 @@ pub fn execute_plans(
         pages_kept_1based = Some(kept.iter().map(|i| i + 1).collect());
     }
 
-    let bytes = write::save(&work, &effective_write).map_err(|e| PlanError {
-        code: "input.write",
-        is_conflict_or_verify: false,
-        message: e.message,
-    })?;
-
-    if verify_output && checked.is_none() {
-        checked = Some(run_checks(
-            &bytes,
-            password,
-            &mut applied_patches,
-            &untouched_by_page,
-            patch_opts,
-            &redact_check,
-        )?);
-    }
+    let checked_now = checked.is_some();
     let (patch_verif, redact_verif) = checked.unwrap_or((None, None));
     let all_ok = patch_verif.as_ref().is_none_or(|v| v.verified) && redact_verif != Some(false);
+    let pending = (verify_output && !checked_now).then(|| PendingChecks {
+        password: password.map(str::to_owned),
+        untouched: untouched_by_page,
+        patch_opts: *patch_opts,
+        redact: redact_check,
+    });
 
-    Ok((
-        bytes,
-        PlanExecution {
+    Ok(StagedPlans {
+        work,
+        write_options: effective_write,
+        pending,
+        exec: PlanExecution {
             plan_count: plans.len(),
             op_count,
             duplicates,
@@ -1320,10 +1400,11 @@ pub fn execute_plans(
             patch_verification: patch_verif,
             redact_verified: redact_verif,
         },
-    ))
+    })
 }
 
 /// What the redactions must leave no trace of: their texts and patterns.
+#[derive(Debug)]
 struct RedactCheck {
     needles: Vec<(String, u32)>,
     texts: Vec<String>,
