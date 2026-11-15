@@ -4145,3 +4145,21 @@ fn mcp_exposes_all_five_agent_primitives() {
     );
     mcp.close();
 }
+
+#[test]
+fn patch_accepts_a_line_on_single_spaced_text() {
+    // stext.pdf's paragraph lines are 16.5pt boxes 14pt apart: each box
+    // already overlaps the next one's, which is no collision of a patch.
+    let input = smoke("stext.pdf");
+    for text in ["A new paragraph", "A new and longer paragraph"] {
+        let replace = format!("p1.b2.l1.s1={text}");
+        let report = report_of(&[
+            "patch",
+            input.to_str().unwrap(),
+            "--replace",
+            &replace,
+            "--dry-run",
+        ]);
+        assert_eq!(report["verification"]["verified"], true, "{report}");
+    }
+}

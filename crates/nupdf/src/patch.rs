@@ -1446,6 +1446,32 @@ fn shrink_for_collision(r: Rect, dx: f32, dy: f32) -> Rect {
     Rect::new(x0, y0, x1, y1)
 }
 
+/// How far the intervals `a0..a1` and `b0..b1` overlap; negative for a gap.
+fn interval_overlap(a0: f32, a1: f32, b0: f32, b1: f32) -> f32 {
+    a1.min(b1) - a0.max(b0)
+}
+
+/// Whether box `a` (once `a_old`) overlaps box `b` (once `b_old`) where the
+/// old boxes did not: the boxes meet, and on some axis they overlap more
+/// than before while on the other they are not a thin band the old ones
+/// shared already (a line's box over the next line's).
+fn overlaps_deeper(a: Rect, a_old: Rect, b: Rect, b_old: Rect) -> bool {
+    const TOL: f32 = 0.5;
+    if a.intersect(b).is_empty() {
+        return false;
+    }
+    let ox = interval_overlap(a.x0, a.x1, b.x0, b.x1);
+    let oy = interval_overlap(a.y0, a.y1, b.y0, b.y1);
+    let ox_old = interval_overlap(a_old.x0, a_old.x1, b_old.x0, b_old.x1).max(0.0);
+    let oy_old = interval_overlap(a_old.y0, a_old.y1, b_old.y0, b_old.y1).max(0.0);
+    let deeper_x = ox > ox_old + TOL;
+    let deeper_y = oy > oy_old + TOL;
+    let thin_x = ox < 0.5 * (a.x1 - a.x0).min(b.x1 - b.x0);
+    let thin_y = oy < 0.5 * (a.y1 - a.y0).min(b.y1 - b.y0);
+    let kept_band = (thin_y && oy_old > 0.0 && !deeper_y) || (thin_x && ox_old > 0.0 && !deeper_x);
+    (deeper_x || deeper_y) && !kept_band
+}
+
 /// Normalizes whitespace runs to single `' '` for resilient comparison across
 /// `stext` synthetic space inference.
 fn normalize_ws(s: &str) -> String {
@@ -1783,19 +1809,24 @@ pub fn verify_patched_bytes(
         }
     }
 
-    // 5. Neighboring span collision check (shrunk by 0.5 pt horizontally and
-    // 1.5 pt vertically to ignore normal inter-line ascender/descender touch).
+    // 5. Neighboring span collision check: the replacement (shrunk by 0.5 pt
+    // horizontally and 1.5 pt vertically) overlapping a span deeper than the
+    // original did. Boxes of single-spaced lines overlap by their ascenders
+    // and descenders; a replacement that keeps that overlap collides with
+    // nothing.
     if options.check_collisions {
+        let shrink = |a: [f32; 4]| shrink_for_collision(rect_from_array(a), 0.5, 1.5);
         for i in 0..applied.len() {
             let Some(nb_arr) = applied[i].new_bbox else {
                 continue;
             };
-            let shrunk = shrink_for_collision(rect_from_array(nb_arr), 0.5, 1.5);
+            let new_i = shrink(nb_arr);
+            let old_i = shrink(applied[i].old_bbox);
             let page_num = applied[i].page;
 
             if let Some(untouched) = untouched_bboxes_by_page.get(&page_num) {
                 for (other_id, other_rect) in untouched {
-                    if !shrunk.intersect(*other_rect).is_empty() {
+                    if overlaps_deeper(new_i, old_i, *other_rect, *other_rect) {
                         findings.push(PatchFinding {
                             code: "verify.collision".into(),
                             id: applied[i].id.clone(),
@@ -1817,8 +1848,7 @@ pub fn verify_patched_bytes(
                 let Some(other_arr) = applied[j].new_bbox else {
                     continue;
                 };
-                let other_shrunk = shrink_for_collision(rect_from_array(other_arr), 0.5, 1.5);
-                if !shrunk.intersect(other_shrunk).is_empty() {
+                if overlaps_deeper(new_i, old_i, shrink(other_arr), shrink(applied[j].old_bbox)) {
                     findings.push(PatchFinding {
                         code: "verify.collision".into(),
                         id: applied[i].id.clone(),
@@ -2036,6 +2066,45 @@ mod tests {
             "unexpected findings: {:?}",
             ver.findings
         );
+    }
+
+    #[test]
+    fn single_spaced_lines_whose_boxes_overlap_do_not_collide() {
+        // 12pt Helvetica on 11pt leading: each line's box overlaps the next.
+        let content = b"BT /F1 12 Tf 11 TL 72 700 Td (First line of the paragraph) Tj \
+            T* (Second line of the paragraph goes on longer) Tj \
+            T* (Third line of the paragraph) Tj ET";
+        let doc = page_doc(content, "/Font<</F1 5 0 R>>", &[HELVETICA.to_vec()]);
+        let spans = extract_all_spans(&doc, 0);
+        let ids: Vec<String> = spans.iter().map(|s| s.0.clone()).collect();
+        assert_eq!(ids.len(), 3, "{spans:?}");
+        let (r1, r2) = (spans[0].3, spans[1].3);
+        assert!(!r1.intersect(r2).is_empty(), "the lines' boxes overlap");
+
+        for specs in [
+            vec![(ids[0].as_str(), "First line of the paragraph")],
+            vec![(ids[0].as_str(), "First line, a little longer")],
+            vec![(ids[0].as_str(), "One"), (ids[1].as_str(), "Two")],
+        ] {
+            let specs: Vec<PatchSpec> = specs
+                .into_iter()
+                .map(|(id, t)| PatchSpec {
+                    target_id: id.into(),
+                    new_text: t.into(),
+                })
+                .collect();
+            let d = doc.fork_clean();
+            let (_, result) = patch_and_verify(
+                &d,
+                &specs,
+                &PatchOptions::default(),
+                &WriteOptions::default(),
+                None,
+            )
+            .unwrap();
+            let ver = result.verification.unwrap();
+            assert!(ver.verified, "{specs:?}: {:?}", ver.findings);
+        }
     }
 
     #[test]
