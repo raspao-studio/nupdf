@@ -1288,7 +1288,9 @@ pub fn pipeline_cmd(
 
     let mut output_val = Value::Null;
     let mut applied = false;
-    if outcome.mutated {
+    // A gate abort writes nothing, like every other exit-4 path.
+    if outcome.aborted.is_some() {
+    } else if outcome.mutated {
         let plan: Clean<'_> = write.plan(write_opts, password)?;
         if let Some(ref bytes) = outcome.output_bytes {
             if plan.apply
