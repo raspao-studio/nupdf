@@ -3017,7 +3017,10 @@ fn form_fields_read_through_their_parents() {
 /// A form with a text field of two widgets (one read-only), a combo box, a
 /// check box and a radio group of two, for the filling tests.
 fn fill_form() -> PathBuf {
-    fill_form_with("", "fill-form.pdf")
+    // A file of its own for each caller, as for `annotated_pdf`.
+    static MADE: AtomicUsize = AtomicUsize::new(0);
+    let n = MADE.fetch_add(1, Ordering::Relaxed);
+    fill_form_with("", &format!("fill-form-{n}.pdf"))
 }
 
 /// `fill_form` with `extra` in the text field's dictionary.
