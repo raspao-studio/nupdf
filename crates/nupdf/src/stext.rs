@@ -1080,6 +1080,7 @@ impl<'a> StextDevice<'a> {
             || (!self.lazy_vectors.is_empty() && (new_line || cur_line.is_none() || force))
         {
             self.flush_lazy_vectors();
+            self.settle_last_line(true);
             self.page.blocks.push(Block::Text(TextBlock {
                 bbox: Rect::EMPTY,
                 flags: 0,
@@ -1095,6 +1096,7 @@ impl<'a> StextDevice<'a> {
             self.join_last_line();
         }
         if new_line || cur_line.is_none() || force {
+            self.settle_last_line(false);
             if let Block::Text(t) = &mut self.page.blocks[b] {
                 t.lines.push(StextLine {
                     wmode,
@@ -1130,6 +1132,25 @@ impl<'a> StextDevice<'a> {
         self.lastline = Some((b, l));
         self.lag_pen = p;
         self.pen = q;
+    }
+
+    /// The line the last character went to gives back the room it kept
+    /// for more characters, and with `block` its block the room it kept
+    /// for more lines: another line or block is starting. A vector grows
+    /// to four entries at its first, so a line of one character held
+    /// four, and a page where every glyph is a line of its own (a few
+    /// bytes of content each) cost 460 bytes a glyph.
+    fn settle_last_line(&mut self, block: bool) {
+        if let Some((b, l)) = self.lastline
+            && let Some(Block::Text(t)) = self.page.blocks.get_mut(b)
+        {
+            if let Some(line) = t.lines.get_mut(l) {
+                line.chars.shrink_to_fit();
+            }
+            if block {
+                t.lines.shrink_to_fit();
+            }
+        }
     }
 
     /// `add_char_to_line`.
@@ -2010,6 +2031,46 @@ pub fn extract_page_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_that_is_done_keeps_no_room_for_more_characters() {
+        // Three lines of one, two and three characters, in two blocks:
+        // each but the last, which may still grow, holds its characters
+        // and no more, and a block that is done holds its lines and no
+        // more.
+        let pdf = crate::draw::testkit::pdf_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R\
+             /Resources<</Font<</F1 5 0 R>>>>>>",
+            &crate::draw::testkit::stream(
+                "",
+                "BT /F1 10 Tf 20 150 Td (a) Tj 0 -12 Td (bc) Tj ET \
+                 BT /F1 10 Tf 20 40 Td (def) Tj ET",
+            ),
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        ]);
+        let doc = Document::open(pdf).unwrap_or_else(|e| panic!("{e:?}"));
+        let obj = doc.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let (page, _) = extract_page(&doc, &obj, Options::default(), Store::default());
+        let page = page.unwrap_or_else(|e| panic!("{e}"));
+        let blocks: Vec<&TextBlock> = page
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        let lines: Vec<&StextLine> = blocks.iter().flat_map(|b| &b.lines).collect();
+        let lens: Vec<usize> = lines.iter().map(|l| l.chars.len()).collect();
+        assert_eq!(lens, [1, 2, 3]);
+        for line in &lines[..2] {
+            assert_eq!(line.chars.capacity(), line.chars.len());
+        }
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].lines.capacity(), 2);
+    }
 
     #[test]
     fn utf8_reads_as_mupdf_reads_it() {
