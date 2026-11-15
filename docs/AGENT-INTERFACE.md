@@ -12,7 +12,7 @@ The contract that agents program against. The CLI and the MCP server expose the 
 6. **Inputs are never modified.** Mutating commands need `-o <path>` (or an explicit `--in-place`), write atomically, and report the output's `doc_id`, size and verification block.
 7. **Every mutation has `--dry-run`.** It returns the plan, writes nothing, and uses the same schema with `"applied": false`.
 8. **Budgets are explicit.** `--max-chars`, `--max-items`, `--fields <list>`, and pagination through `next_cursor`. Large outputs are truncated deliberately, with `"truncated": true` and a cursor, never cut off mid-object.
-9. **Limits are explicit.** `--timeout`, `--max-memory` and the decompression limits have safe defaults. Hitting one is an error with a `limit.*` code, not a hang. A command out of time (`--timeout SECONDS`) writes nothing, not its report and not its output files, and fails with exit 5 and `limit.timeout`.
+9. **Limits are explicit.** `--timeout`, the decompression limits (`--max-decoded-bytes`, `--max-xref-entries`) and `--max-page-glyphs` (two million glyphs a page, D57) have safe defaults; a page over its glyph limit is that page's error, with the warning `limit.page_glyphs`, and the rest of the document is read. Hitting one is an error with a `limit.*` code, not a hang. A command out of time (`--timeout SECONDS`) writes nothing, not its report and not its output files, and fails with exit 5 and `limit.timeout`.
 10. **Deterministic.** Same file, same arguments, same nupdf version: byte-identical output.
 11. **Discoverable.** `nupdf guide` prints compact usage written for models. `nupdf schema <command>` prints the JSON Schema of a report.
 
@@ -101,7 +101,7 @@ Each editing command makes one edit, then writes the document as `clean` writes 
 | `streams` | Every stream's decoded length and BLAKE3 hash (image filters listed, not decoded; `--images` decodes only those); `show <ref> --data` decodes one |
 | `decrypt`, `encrypt` | Remove or add encryption |
 | `merge`, `split`, `pages`, `meta`, `clean` | Structural editing |
-| `operators` | Each page's content-stream operators with their operands, as MuPDF's interpreter dispatches them; `--no-resources` processes the content streams alone |
+| `operators` | Each page's content-stream operators with their operands, as MuPDF's interpreter dispatches them; `--no-resources` processes the content streams alone. Written while the pages run, as `trace` and `objects` are, so the report is never held whole (D56) |
 | `trace` | Each page's device calls, as MuPDF's run processor makes them for the page's contents: paths with their matrices, colors and stroke states, clips, images, shadings, text (spans with their font, matrix, writing mode and language, and each glyph's id, Unicode and position), groups, masks, layers, structure and metatext |
 | `fonts` | The fonts the pages use, as `mutool info` finds them (page, object, subtype, name, encoding), with what each loads as (`load`: program, glyph count, embedded or substituted, ToUnicode, vertical); `--extract DIR` writes each embedded program as `mutool extract` does (`font-NNNN.ext`) |
 | `images` | The images the pages use, as `mutool info` finds them (page, object, size, depth, filters, colorspace); `--digests` decodes every image XObject as MuPDF does and gives its pixmap's size, components, colorspace and MD5; `--extract DIR` writes each as `mutool extract` does (`image-NNNN.jpg`, `.png` or `.pam`; `--format pam` for all PAM) |
