@@ -555,3 +555,126 @@ fn the_v2_writers_refuse_an_output_that_reads_back_differently() {
     }
     assert!(!cloak_vault.exists(), "a refused cloak wrote its vault");
 }
+
+fn test_data(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data")
+        .join(name)
+}
+
+/// `input` with its /Title set in a new revision appended by `meta --incremental`,
+/// which changes nothing any page draws.
+fn retitled(input: &Path, name: &str) -> PathBuf {
+    let out = scratch(name);
+    report_of(&[
+        "meta",
+        input.to_str().unwrap(),
+        "--set",
+        "Title=Reviewed",
+        "--incremental",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    out
+}
+
+#[test]
+fn a_signed_page_nested_too_deep_to_fingerprint_is_unchecked_and_gated() {
+    // signed-deep.pdf is signed.pdf with an array nested 80 deep in the
+    // page's resources: past the 64 levels a page's fingerprint follows, so
+    // no later revision can be shown to leave the page as it was signed.
+    let deep = retitled(&test_data("signed-deep.pdf"), "history-deep-retitled.pdf");
+    let shallow = retitled(&test_data("signed.pdf"), "history-shallow-retitled.pdf");
+
+    let rep = report_of(&["history", deep.to_str().unwrap()]);
+    assert_eq!(rep["revision_count"], 2, "{rep}");
+    assert_eq!(rep["revisions"][0]["signatures"][0]["valid"], true, "{rep}");
+    let rev2 = &rep["revisions"][1];
+    assert_eq!(rev2["classification"], "tampered_after_signature", "{rep}");
+    let delta = &rev2["delta_from_previous"];
+    assert_eq!(
+        delta["forensic_hazards"],
+        serde_json::json!(["tamper.post_signature_unchecked"]),
+        "{rep}"
+    );
+    assert_eq!(delta["unchecked_pages"], serde_json::json!([1]), "{rep}");
+    assert_eq!(rep["tampered"], true);
+
+    // The same new revision on the shallow page is a clean one.
+    let rep = report_of(&["history", shallow.to_str().unwrap()]);
+    let delta = &rep["revisions"][1]["delta_from_previous"];
+    assert_eq!(delta["forensic_hazards"], serde_json::json!([]), "{rep}");
+    // An empty list is left out of the report.
+    assert!(delta.get("unchecked_pages").is_none(), "{rep}");
+    assert_eq!(rep["tampered"], false);
+
+    let strict = nupdf(&["history", "--strict", deep.to_str().unwrap()]);
+    assert_eq!(strict.status.code(), Some(4));
+    let err: Value = serde_json::from_slice(&strict.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "tamper.detected", "{err}");
+    let strict = nupdf(&["history", "--strict", shallow.to_str().unwrap()]);
+    assert_eq!(strict.status.code(), Some(0));
+
+    // A pipeline's history gate aborts on it and writes nothing; on the
+    // shallow page it passes and writes its copy.
+    let gate = r#"{"steps": [{"id": "h", "op": "history", "abort_on_tamper": true}]}"#;
+    let out = scratch("history-deep-gated.pdf");
+    let run = nupdf(&[
+        "pipeline",
+        deep.to_str().unwrap(),
+        "--inline",
+        gate,
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(run.status.code(), Some(4));
+    let err: Value = serde_json::from_slice(&run.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "gate.tamper_detected", "{err}");
+    let rep: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert!(rep["aborted"].is_object(), "{rep}");
+    assert_eq!(rep["applied"], false, "{rep}");
+    assert!(!out.exists(), "an aborted pipeline wrote its output");
+    report_of(&[
+        "pipeline",
+        shallow.to_str().unwrap(),
+        "--inline",
+        gate,
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(out.exists());
+}
+
+#[test]
+fn an_unsigned_page_nested_too_deep_to_fingerprint_raises_nothing() {
+    let deep = format!("{}1{}", "[".repeat(80), "]".repeat(80));
+    let file = scratch("history-deep-unsigned.pdf");
+    std::fs::write(
+        &file,
+        pdf_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            &format!("<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<</Deep {deep}>>>>"),
+        ]),
+    )
+    .unwrap();
+    let file = retitled(&file, "history-deep-unsigned-retitled.pdf");
+    let rep = report_of(&["history", file.to_str().unwrap()]);
+    assert_eq!(rep["revision_count"], 2, "{rep}");
+    let delta = &rep["revisions"][1]["delta_from_previous"];
+    assert_eq!(delta["forensic_hazards"], serde_json::json!([]), "{rep}");
+    // An empty list is left out of the report.
+    assert!(delta.get("unchecked_pages").is_none(), "{rep}");
+    assert_eq!(rep["tampered"], false);
+    let strict = nupdf(&["history", "--strict", file.to_str().unwrap()]);
+    assert_eq!(strict.status.code(), Some(0));
+    let gate = r#"{"steps": [{"id": "h", "op": "history", "abort_on_tamper": true}]}"#;
+    let rep = report_of(&[
+        "pipeline",
+        file.to_str().unwrap(),
+        "--inline",
+        gate,
+        "--dry-run",
+    ]);
+    assert_eq!(rep["aborted"], Value::Null, "{rep}");
+}

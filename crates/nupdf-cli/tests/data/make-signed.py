@@ -1,11 +1,18 @@
+# python3 make-signed.py DIR OUT [DEPTH]: signs with DIR/cert.pem and
+# DIR/key.pem (any self-signed pair, e.g. `openssl req -x509 -newkey rsa:2048
+# -nodes -subj "/C=US/O=nupdf tests/CN=Test Signer/emailAddress=signer@example.org"
+# -keyout key.pem -out cert.pem`). With DEPTH, the page's resources hold an
+# array nested DEPTH deep (signed-deep.pdf: 80).
 import subprocess, sys
 S = sys.argv[1]
 PLACE = 8192
+DEPTH = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+RESOURCES = b" /Resources << /Deep " + b"[" * DEPTH + b"1" + b"]" * DEPTH + b" >>" if DEPTH else b""
 def build(contents_hex, br):
     objs = []
     objs.append(b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /SigFlags 3 >> >>")
     objs.append(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
-    objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>")
+    objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R]" + RESOURCES + b" >>")
     objs.append(b"<< /Type /Annot /Subtype /Widget /FT /Sig /T (Approval) /Rect [0 0 0 0] /F 132 /P 3 0 R /V 5 0 R >>")
     objs.append(b"<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /Name (Test Signer) /Reason (Testing) /Location (Here) /M (D:20261112120000Z) /ByteRange " + br + b" /Contents <" + contents_hex + b"> >>")
     out = b"%PDF-1.7\n"
