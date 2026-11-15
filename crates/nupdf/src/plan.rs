@@ -326,9 +326,8 @@ fn resolve_content_id(
         .ok_or_else(bad)?
         .parse()
         .map_err(|_| bad())?;
-    let refs: Vec<&Block> = sp.blocks.iter().collect();
-    let text_blocks = extract::text_blocks(&refs);
-    let Some(tb) = b_num.checked_sub(1).and_then(|i| text_blocks.get(i)) else {
+    // The page's blocks, numbered as `extract` numbers them.
+    let Some(Block::Text(tb)) = b_num.checked_sub(1).and_then(|i| sp.blocks.get(i)) else {
         return Err(PlanError {
             code: "input.target_not_found",
             is_conflict_or_verify: false,
@@ -768,12 +767,13 @@ pub fn stage_plans(
                 boxes,
             } => {
                 if let Some(cid) = id {
+                    // Numbered as `extract` and `redact --id` number them.
                     let resolved = resolve_content_id(
                         cid,
-                        &mut redact_stext_cache,
+                        &mut stext_cache,
                         base_doc,
                         page_count,
-                        redact_stext_opts,
+                        stext::Options::default(),
                     )?;
                     redactions_resolved.push((
                         item.global_idx,
@@ -1939,6 +1939,49 @@ mod tests {
         let twice = r#"[{"op":"patch","id":"p1.b2.l1.s1","text":"Fee: $1"},{"op":"patch","id":"p1.b2.l1","text":"Fee: $1"}]"#;
         let err = run(&base, &[twice]).unwrap_err();
         assert_eq!(err.code, "usage.duplicate_target");
+    }
+
+    #[test]
+    fn a_redaction_by_id_numbers_blocks_as_extract_does() {
+        // Text drawn under a clip that hides it: `extract` (clip on) leaves
+        // it out, so its p1.b1 is "Visible one".
+        let base = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R>>"
+            )
+            .into_bytes(),
+            stream(
+                "",
+                b"q 0 0 1 1 re W n BT /F1 12 Tf 72 720 Td (Clipped away) Tj ET Q \
+                  BT /F1 12 Tf 72 600 Td (Visible one) Tj ET \
+                  BT /F1 12 Tf 72 480 Td (Visible two) Tj ET",
+            ),
+        ]);
+        let page = base.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        let sp =
+            page_stext(&base, &page, stext::Options::default()).unwrap_or_else(|e| panic!("{e}"));
+        let first = match sp.blocks.first() {
+            Some(Block::Text(tb)) => extract::block_text(tb),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(first.trim(), "Visible one");
+
+        let (bytes, exec) =
+            run(&base, &[r#"[{"op":"redact","id":"p1.b1"}]"#]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.verified, Some(true));
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        let sp =
+            page_stext(&out, &page, stext::Options::default()).unwrap_or_else(|e| panic!("{e}"));
+        let refs: Vec<&Block> = sp.blocks.iter().collect();
+        let text: String = extract::text_blocks(&refs)
+            .into_iter()
+            .map(extract::block_text)
+            .collect();
+        assert!(!text.contains("Visible one"), "{text}");
+        assert!(text.contains("Visible two"), "{text}");
     }
 
     #[test]
