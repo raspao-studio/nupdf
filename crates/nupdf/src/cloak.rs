@@ -220,10 +220,15 @@ struct RawMatch {
 struct CloakSession {
     rules: Vec<CompiledRule>,
     literal_secrets: Vec<String>,
+    /// [`CloakSession::literal_secrets`], to look a candidate token up in.
+    literal_set: HashSet<String>,
     /// Every secret spelling seen, with its category.
     observed_raw_secrets: BTreeMap<String, String>,
     secret_to_entry: HashMap<String, usize>,
     used_tokens: HashSet<String>,
+    /// [`CloakSession::used_tokens`] by byte length, so a string is scanned
+    /// once per length a token has, not once per token.
+    tokens_by_len: BTreeMap<usize, HashSet<Vec<u8>>>,
     category_counters: HashMap<String, usize>,
     entries: Vec<VaultEntry>,
 }
@@ -303,10 +308,12 @@ impl CloakSession {
 
         Ok(CloakSession {
             rules,
+            literal_set: literal_secrets.iter().cloned().collect(),
             literal_secrets,
             observed_raw_secrets: BTreeMap::new(),
             secret_to_entry: HashMap::new(),
             used_tokens: HashSet::new(),
+            tokens_by_len: BTreeMap::new(),
             category_counters: HashMap::new(),
             entries: Vec::new(),
         })
@@ -317,6 +324,77 @@ impl CloakSession {
     }
 
     fn find_matches(&self, text: &str) -> Vec<RawMatch> {
+        if self.rules.is_empty() || text.is_empty() {
+            return Vec::new();
+        }
+        let bytes = text.as_bytes();
+        let mut candidates: Vec<RawMatch> = Vec::new();
+
+        // The byte ranges of any synthetic tokens already present in `text`,
+        // so format-preserving tokens (e.g. `000-00-0001`) are never double-cloaked.
+        let protected = ProtectedRanges::new(self.token_ranges(text));
+
+        for (rule_idx, rule) in self.rules.iter().enumerate() {
+            let mut at = 0usize;
+            while at <= bytes.len() {
+                let flags = if at > 0 { regexp::NOTBOL } else { 0 } | regexp::RUNAWAY;
+                match rule.regex.exec(bytes, at, flags) {
+                    Ok(Some((a, b))) if b > a => {
+                        if text.is_char_boundary(a) && text.is_char_boundary(b) {
+                            let overlaps_token = protected.overlaps(a, b);
+                            let boundary_ok = if rule.numeric_boundary {
+                                let prev_digit = a > 0 && bytes[a - 1].is_ascii_digit();
+                                let next_digit = b < bytes.len() && bytes[b].is_ascii_digit();
+                                !prev_digit && !next_digit
+                            } else {
+                                true
+                            };
+                            if !overlaps_token && boundary_ok {
+                                candidates.push(RawMatch {
+                                    start: a,
+                                    end: b,
+                                    rule_idx,
+                                });
+                            }
+                        }
+                        at = next_char_boundary(text, a.max(b));
+                        if b == a {
+                            break;
+                        }
+                    }
+                    Ok(Some((a, _))) => {
+                        if a >= bytes.len() {
+                            break;
+                        }
+                        at = next_char_boundary(text, a + 1);
+                    }
+                    _ => break,
+                }
+            }
+        }
+
+        candidates.sort_by(|x, y| {
+            x.start
+                .cmp(&y.start)
+                .then_with(|| (y.end - y.start).cmp(&(x.end - x.start)))
+                .then_with(|| x.rule_idx.cmp(&y.rule_idx))
+        });
+
+        let mut selected = Vec::new();
+        let mut cursor = 0usize;
+        for cand in candidates {
+            if cand.start >= cursor {
+                cursor = cand.end;
+                selected.push(cand);
+            }
+        }
+        selected
+    }
+
+    /// The scan [`CloakSession::find_matches`] replaced: every used token
+    /// searched for in every string, kept to check the new one against.
+    #[cfg(test)]
+    fn find_matches_reference(&self, text: &str) -> Vec<RawMatch> {
         if self.rules.is_empty() || text.is_empty() {
             return Vec::new();
         }
@@ -392,6 +470,47 @@ impl CloakSession {
         selected
     }
 
+    /// Where each used token occurs in `text`, as `str::match_indices`
+    /// finds a token (left to right, not overlapping itself), sorted: one
+    /// pass over `text` per token length, with a hash lookup per position.
+    fn token_ranges(&self, text: &str) -> Vec<(usize, usize)> {
+        let bytes = text.as_bytes();
+        let mut out = Vec::new();
+        for (&len, tokens) in &self.tokens_by_len {
+            if len == 0 || len > bytes.len() {
+                continue;
+            }
+            let mut last_end: HashMap<&[u8], usize> = HashMap::new();
+            for start in 0..=bytes.len() - len {
+                if !text.is_char_boundary(start) {
+                    continue;
+                }
+                let Some(tok) = bytes.get(start..start + len).and_then(|w| tokens.get(w)) else {
+                    continue;
+                };
+                let end = last_end.entry(tok.as_slice()).or_insert(0);
+                if start >= *end {
+                    out.push((start, start + len));
+                    *end = start + len;
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// Records `token` as used, as `HashSet::insert` answers.
+    fn claim_token(&mut self, token: &str) -> bool {
+        if !self.used_tokens.insert(token.to_string()) {
+            return false;
+        }
+        self.tokens_by_len
+            .entry(token.len())
+            .or_default()
+            .insert(token.as_bytes().to_vec());
+        true
+    }
+
     fn token_for(&mut self, category: &str, canonical_secret: &str, raw_matched: &str) -> String {
         let cat = sanitize_category(category);
         if !raw_matched.trim().is_empty() {
@@ -424,18 +543,15 @@ impl CloakSession {
             };
             last_n = next_n;
             let candidate = format_synthetic_token(&cat, next_n, secret_char_len);
-            let clashes_literal = self.literal_secrets.iter().any(|s| s == &candidate);
-            if !clashes_literal
-                && candidate != canonical_secret
-                && self.used_tokens.insert(candidate.clone())
-            {
+            let clashes_literal = self.literal_set.contains(&candidate);
+            if !clashes_literal && candidate != canonical_secret && self.claim_token(&candidate) {
                 found = Some(candidate);
                 break;
             }
         }
         let token = found.unwrap_or_else(|| {
             let fallback = format!("[{cat}_{last_n}_{}]", self.used_tokens.len());
-            self.used_tokens.insert(fallback.clone());
+            self.claim_token(&fallback);
             fallback
         });
 
@@ -507,6 +623,31 @@ impl CloakSession {
     }
 }
 
+/// Sorted byte ranges, asked whether any overlaps `a..b` in `O(log n)`.
+struct ProtectedRanges {
+    ranges: Vec<(usize, usize)>,
+    /// The largest end among `ranges[..=i]`.
+    max_end: Vec<usize>,
+}
+
+impl ProtectedRanges {
+    fn new(ranges: Vec<(usize, usize)>) -> Self {
+        let mut max_end = Vec::with_capacity(ranges.len());
+        let mut m = 0;
+        for &(_, end) in &ranges {
+            m = m.max(end);
+            max_end.push(m);
+        }
+        ProtectedRanges { ranges, max_end }
+    }
+
+    /// Some range starts before `b` and ends after `a`.
+    fn overlaps(&self, a: usize, b: usize) -> bool {
+        let before_b = self.ranges.partition_point(|&(start, _)| start < b);
+        before_b > 0 && self.max_end.get(before_b - 1).is_some_and(|&end| end > a)
+    }
+}
+
 fn next_char_boundary(s: &str, mut idx: usize) -> usize {
     while idx < s.len() && !s.is_char_boundary(idx) {
         idx += 1;
@@ -545,6 +686,10 @@ fn format_synthetic_token(category: &str, index: usize, secret_char_len: usize) 
 struct VaultReplacer {
     /// `(token, secret, entry_idx)` sorted by descending `token.len()`.
     rules: Vec<(String, String, Option<usize>)>,
+    /// For each token length, longest first, the first rule with each
+    /// token of that length: one lookup per length at each position of a
+    /// string, not one comparison per token.
+    by_len: Vec<(usize, HashMap<Vec<u8>, usize>)>,
     hit_entries: HashSet<usize>,
     token_replacements: usize,
 }
@@ -559,11 +704,14 @@ impl VaultReplacer {
             .map(|(idx, e)| (e.token.clone(), e.secret.clone(), Some(idx)))
             .collect();
         rules.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
-        VaultReplacer {
+        let mut replacer = VaultReplacer {
             rules,
+            by_len: Vec::new(),
             hit_entries: HashSet::new(),
             token_replacements: 0,
-        }
+        };
+        replacer.index();
+        replacer
     }
 
     fn for_text(vault: &CloakVault) -> Self {
@@ -580,8 +728,33 @@ impl VaultReplacer {
             replacer
                 .rules
                 .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+            replacer.index();
         }
         replacer
+    }
+
+    /// Builds [`VaultReplacer::by_len`] from the sorted rules: the first
+    /// rule in their order wins a token two rules share, as a scan in that
+    /// order finds it first.
+    fn index(&mut self) {
+        let mut by_len: Vec<(usize, HashMap<Vec<u8>, usize>)> = Vec::new();
+        for (i, (tok, _, _)) in self.rules.iter().enumerate() {
+            let len = tok.len();
+            if by_len.last().is_none_or(|(l, _)| *l != len) {
+                by_len.push((len, HashMap::new()));
+            }
+            if let Some((_, map)) = by_len.last_mut() {
+                map.entry(tok.as_bytes().to_vec()).or_insert(i);
+            }
+        }
+        self.by_len = by_len;
+    }
+
+    /// The rule whose token `tail` starts with, the longest first.
+    fn rule_at(&self, tail: &[u8]) -> Option<usize> {
+        self.by_len
+            .iter()
+            .find_map(|(len, map)| tail.get(..*len).and_then(|head| map.get(head)).copied())
     }
 
     fn is_empty(&self) -> bool {
@@ -589,6 +762,57 @@ impl VaultReplacer {
     }
 
     fn has_match(&self, text: &str) -> bool {
+        if self.rules.is_empty() || text.is_empty() {
+            return false;
+        }
+        let bytes = text.as_bytes();
+        let mut pos = 0usize;
+        while pos < text.len() {
+            if self.rule_at(&bytes[pos..]).is_some() {
+                return true;
+            }
+            pos = next_char_boundary(text, pos + 1);
+        }
+        false
+    }
+
+    fn replace_in_str(&mut self, text: &str) -> Option<(String, usize)> {
+        if self.rules.is_empty() || text.is_empty() {
+            return None;
+        }
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut pos = 0usize;
+        let mut any_changed = false;
+        let mut local_tokens = 0usize;
+
+        while pos < text.len() {
+            if let Some((tok, secret, entry_idx)) =
+                self.rule_at(&bytes[pos..]).and_then(|i| self.rules.get(i))
+            {
+                out.push_str(secret);
+                pos += tok.len();
+                any_changed = true;
+                if let Some(idx) = *entry_idx {
+                    self.hit_entries.insert(idx);
+                    self.token_replacements += 1;
+                    local_tokens += 1;
+                }
+            } else {
+                let next = next_char_boundary(text, pos + 1);
+                out.push_str(&text[pos..next]);
+                pos = next;
+            }
+        }
+
+        any_changed.then_some((out, local_tokens))
+    }
+
+    /// The scans [`VaultReplacer::has_match`] and
+    /// [`VaultReplacer::replace_in_str`] replaced, every rule tried at every
+    /// position, kept to check the new ones against.
+    #[cfg(test)]
+    fn has_match_reference(&self, text: &str) -> bool {
         if self.rules.is_empty() || text.is_empty() {
             return false;
         }
@@ -608,7 +832,8 @@ impl VaultReplacer {
         false
     }
 
-    fn replace_in_str(&mut self, text: &str) -> Option<(String, usize)> {
+    #[cfg(test)]
+    fn replace_in_str_reference(&mut self, text: &str) -> Option<(String, usize)> {
         if self.rules.is_empty() || text.is_empty() {
             return None;
         }
@@ -2677,6 +2902,206 @@ mod tests {
         assert_eq!(wrong.code, "verify.unreadable");
         let leak = verify_zero_secret_leaks(bytes, &secrets, Some("user")).unwrap_err();
         assert_eq!(leak.code, "verify.leak");
+    }
+
+    /// A deterministic xorshift, for varied inputs without a dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+    }
+
+    /// A string of digits, separators, words, and copies (whole, doubled or
+    /// cut short) of the tokens the session has used.
+    fn varied_text(rng: &mut Rng, tokens: &[String]) -> String {
+        const PIECES: &[&str] = &[
+            "0",
+            "1",
+            "5",
+            "9",
+            "-",
+            " ",
+            ".",
+            "@",
+            "(",
+            ")",
+            "+",
+            "_",
+            "[",
+            "]",
+            "x",
+            "Z",
+            "é",
+            "日",
+            "555",
+            "010",
+            "000-00-",
+            "Vance",
+            "Lin",
+            "a.b",
+            "@cloak.invalid",
+            "DE89",
+        ];
+        let mut out = String::new();
+        for _ in 0..rng.below(40) {
+            if !tokens.is_empty() && rng.below(4) == 0 {
+                let tok = &tokens[rng.below(tokens.len())];
+                match rng.below(3) {
+                    0 => out.push_str(tok),
+                    1 => {
+                        out.push_str(tok);
+                        out.push_str(tok);
+                    }
+                    _ => {
+                        let cut = next_char_boundary(tok, rng.below(tok.len()));
+                        out.push_str(&tok[..cut]);
+                    }
+                }
+            } else {
+                out.push_str(PIECES[rng.below(PIECES.len())]);
+            }
+        }
+        out
+    }
+
+    fn spans(matches: &[RawMatch]) -> Vec<(usize, usize, usize)> {
+        matches
+            .iter()
+            .map(|m| (m.start, m.end, m.rule_idx))
+            .collect()
+    }
+
+    #[test]
+    fn token_lookups_find_what_the_scans_they_replaced_found() {
+        let targets = [
+            CloakTarget::Preset("pii".into()),
+            CloakTarget::Literal {
+                category: "PERSON".into(),
+                secret: "Vance".into(),
+            },
+            CloakTarget::Literal {
+                category: "X".into(),
+                secret: "Lin".into(),
+            },
+            CloakTarget::Regex {
+                category: "RUN".into(),
+                pattern: "[0-9]+".into(),
+            },
+        ];
+        for seed in 1..=40u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let mut session = CloakSession::new(&targets).unwrap();
+            let mut tokens: Vec<String> = Vec::new();
+            for _ in 0..60 {
+                let text = varied_text(&mut rng, &tokens);
+                assert_eq!(
+                    spans(&session.find_matches(&text)),
+                    spans(&session.find_matches_reference(&text)),
+                    "seed {seed}: {text:?}"
+                );
+                session.replace_in_str(&text);
+                tokens = session.used_tokens.iter().cloned().collect();
+                tokens.sort();
+            }
+
+            // The vault those strings made, uncloaked both ways.
+            let mut entries = session.entries.clone();
+            // Two entries with one token: the first in the vault wins.
+            if let Some(first) = entries.first().cloned() {
+                entries.push(VaultEntry {
+                    secret: "other".into(),
+                    ..first
+                });
+            }
+            let vault = CloakVault {
+                schema: CLOAK_VAULT_SCHEMA.into(),
+                original_doc_id: "b3:aaaa".into(),
+                cloaked_doc_id: "b3:aa".into(),
+                entries,
+            };
+            for make in [VaultReplacer::for_pdf, VaultReplacer::for_text] {
+                let mut new = make(&vault);
+                let mut old = make(&vault);
+                for _ in 0..60 {
+                    let mut text = varied_text(&mut rng, &tokens);
+                    if rng.below(5) == 0 {
+                        text.push_str("b3:aa");
+                    }
+                    assert_eq!(
+                        new.has_match(&text),
+                        old.has_match_reference(&text),
+                        "{text:?}"
+                    );
+                    assert_eq!(
+                        new.replace_in_str(&text),
+                        old.replace_in_str_reference(&text),
+                        "seed {seed}: {text:?}"
+                    );
+                }
+                assert_eq!(new.hit_entries, old.hit_entries);
+                assert_eq!(new.token_replacements, old.token_replacements);
+            }
+        }
+    }
+
+    /// `n` lines of a phone directory, cloaked and uncloaked: the work the
+    /// token scans did grew with the square of `n`.
+    fn cloak_directory(n: usize) -> std::time::Duration {
+        let lines: Vec<String> = (0..n)
+            .map(|i| format!("Name {i}: 415-{:03}-{:04}", i / 10_000 % 1000, i % 10_000))
+            .collect();
+        let started = std::time::Instant::now();
+        let mut session = CloakSession::new(&[CloakTarget::Preset("phone".into())]).unwrap();
+        let cloaked: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                session
+                    .replace_in_str(l)
+                    .map_or_else(|| l.clone(), |(t, _)| t)
+            })
+            .collect();
+        assert_eq!(session.entries.len(), n);
+        let vault = CloakVault {
+            schema: CLOAK_VAULT_SCHEMA.into(),
+            original_doc_id: String::new(),
+            cloaked_doc_id: String::new(),
+            entries: session.entries.clone(),
+        };
+        let mut replacer = VaultReplacer::for_pdf(&vault);
+        for (line, c) in lines.iter().zip(&cloaked) {
+            assert!(replacer.has_match(c));
+            assert_eq!(
+                replacer.replace_in_str(c).map(|(t, _)| t).as_ref(),
+                Some(line)
+            );
+        }
+        started.elapsed()
+    }
+
+    #[test]
+    fn thousands_of_secrets_do_not_each_cost_every_string() {
+        // With every string scanned for every token, 8,000 secrets took
+        // 3.7 s in a release build; a generous bound, not a benchmark.
+        let took = cloak_directory(8_000);
+        assert!(took < std::time::Duration::from_secs(4), "{took:?}");
+    }
+
+    /// `cargo test --release -p nupdf --lib cloak_directory_timings -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a timing to read, not a check"]
+    fn cloak_directory_timings() {
+        for n in [2_000, 8_000, 32_000] {
+            eprintln!("{n} secrets: {:?}", cloak_directory(n));
+        }
     }
 
     #[test]
