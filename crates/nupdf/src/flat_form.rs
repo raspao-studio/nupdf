@@ -4400,10 +4400,16 @@ mod tests {
         (started.elapsed(), fields.len())
     }
 
-    /// `cargo test --release -p nupdf --lib flat_form_busy_page_timings -- --ignored --nocapture`
+    /// `NUPDF_TIMINGS=1 cargo test --release -p nupdf --lib flat_form_busy_page_timings -- --ignored --nocapture`
     #[test]
     #[ignore = "a timing to read, not a check"]
     fn flat_form_busy_page_timings() {
+        // CI runs every ignored test in a debug build, where this one's old
+        // paths take over an hour: it is run by hand, with the variable set.
+        if std::env::var_os("NUPDF_TIMINGS").is_none() {
+            eprintln!("set NUPDF_TIMINGS=1 to run this timing");
+            return;
+        }
         for n in [1_000, 4_000, 16_000] {
             let (took, fields) = time_busy_page(n);
             let (used, items) = LAST_WORK.with(std::cell::Cell::get);
@@ -4641,10 +4647,16 @@ mod tests {
         assert!(!doc.diagnostics().has("limit.flat_form_work"));
     }
 
-    /// `cargo test --release -p nupdf --lib flat_form_adversarial_timings -- --ignored --nocapture`
+    /// `NUPDF_TIMINGS=1 cargo test --release -p nupdf --lib flat_form_adversarial_timings -- --ignored --nocapture`
     #[test]
     #[ignore = "a timing to read, not a check"]
     fn flat_form_adversarial_timings() {
+        // CI runs every ignored test in a debug build, where this one's old
+        // paths take over an hour: it is run by hand, with the variable set.
+        if std::env::var_os("NUPDF_TIMINGS").is_none() {
+            eprintln!("set NUPDF_TIMINGS=1 to run this timing");
+            return;
+        }
         for (name, doc) in [
             ("packed row", packed_row_page()),
             ("oversized strokes", oversized_items_page(false)),

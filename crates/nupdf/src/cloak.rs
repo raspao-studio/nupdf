@@ -3170,10 +3170,16 @@ mod tests {
         assert!(took < std::time::Duration::from_secs(4), "{took:?}");
     }
 
-    /// `cargo test --release -p nupdf --lib cloak_directory_timings -- --ignored --nocapture`
+    /// `NUPDF_TIMINGS=1 cargo test --release -p nupdf --lib cloak_directory_timings -- --ignored --nocapture`
     #[test]
     #[ignore = "a timing to read, not a check"]
     fn cloak_directory_timings() {
+        // CI runs every ignored test in a debug build, where this one's old
+        // paths take over an hour: it is run by hand, with the variable set.
+        if std::env::var_os("NUPDF_TIMINGS").is_none() {
+            eprintln!("set NUPDF_TIMINGS=1 to run this timing");
+            return;
+        }
         for n in [2_000, 8_000, 32_000] {
             eprintln!("{n} secrets: {:?}", cloak_directory(n));
         }
@@ -3236,10 +3242,16 @@ mod tests {
         (bytes, secrets, whole)
     }
 
-    /// `cargo test --release -p nupdf --lib cloak_leak_check_timings -- --ignored --nocapture`
+    /// `NUPDF_TIMINGS=1 cargo test --release -p nupdf --lib cloak_leak_check_timings -- --ignored --nocapture`
     #[test]
     #[ignore = "a timing to read, not a check"]
     fn cloak_leak_check_timings() {
+        // CI runs every ignored test in a debug build, where this one's old
+        // paths take over an hour: it is run by hand, with the variable set.
+        if std::env::var_os("NUPDF_TIMINGS").is_none() {
+            eprintln!("set NUPDF_TIMINGS=1 to run this timing");
+            return;
+        }
         for (pages, per_page) in [(80, 50), (320, 50)] {
             let (bytes, secrets, whole) = cloaked_directory(pages, per_page);
             let doc = Document::open(bytes).unwrap();
