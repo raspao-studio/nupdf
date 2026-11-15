@@ -383,14 +383,11 @@ pub fn run_pipeline_with_password(
     let mut mutated = false;
     let mut output_bytes: Option<Vec<u8>> = None;
     let mut vars: HashMap<String, String> = HashMap::new();
-    // Maps pre-patch content IDs to where their replacement text was written,
-    // so `Query -> Patch -> Audit` finds the replacement even when appending a
-    // patch stream shifts `stext` block numbering.
-    let mut patched_id_remap: HashMap<String, SpanAnchor> = HashMap::new();
-    // What each span ID bound by a query addressed, so a later step that uses
-    // it after a mutation finds that text again or fails instead of reaching
-    // whatever span has the number now.
-    let mut bound_ids: HashMap<String, SpanAnchor> = HashMap::new();
+    // What each variable that names a span addressed when its step bound it,
+    // so a later step using it after a mutation finds that text again or
+    // fails, instead of reaching whatever span has the number now or what
+    // another step bound to the same id string since.
+    let mut spans = SpanBindings::default();
     // Mutations so far: an anchor made at the current generation is current.
     let mut generation = 0usize;
     let mut step_results: Vec<PipelineStepResult> = Vec::with_capacity(spec.steps.len());
@@ -555,18 +552,20 @@ pub fn run_pipeline_with_password(
                 );
                 if let Some(m) = qres.matches.first() {
                     let base_span = m.id.split(':').next().unwrap_or(&m.id).to_string();
-                    if let Some(text) = span_text_at(&working_doc, &base_span) {
-                        bound_ids.insert(
-                            base_span.clone(),
-                            SpanAnchor {
-                                id: base_span.clone(),
-                                page: m.page,
-                                text,
-                                bbox: m.bbox,
-                                generation,
-                            },
-                        );
-                    }
+                    let anchor = span_at(&working_doc, &base_span).map(|(text, bbox)| SpanAnchor {
+                        id: base_span.clone(),
+                        page: m.page,
+                        text,
+                        positions: vec![bbox],
+                        generation,
+                    });
+                    let suffix = m.id.get(base_span.len()..).unwrap_or("").to_string();
+                    spans.bind(
+                        id.as_deref(),
+                        &positional_key,
+                        &[("first_id", suffix), ("first_span_id", String::new())],
+                        anchor,
+                    );
                     bind_step_var(
                         &mut vars,
                         id.as_deref(),
@@ -671,13 +670,14 @@ pub fn run_pipeline_with_password(
                 incremental,
             } => {
                 let mut patch_specs = Vec::with_capacity(replacements.len());
+                // Resolved target -> the binding it came from.
+                let mut target_bindings: Vec<(String, usize)> = Vec::new();
                 for item in replacements {
-                    let raw_target = interpolate_str(&item.target_id, &vars, step_index)?;
-                    let raw_target = resolve_bound_id(
+                    let (raw_target, binding) = spans.resolve(
                         &working_doc,
-                        &raw_target,
-                        &bound_ids,
-                        None,
+                        &item.target_id,
+                        &vars,
+                        false,
                         generation,
                         step_index,
                     )?;
@@ -689,6 +689,9 @@ pub fn run_pipeline_with_password(
                     } else {
                         expand_subspan_patch_if_needed(&working_doc, &raw_target, &raw_new_text)?
                     };
+                    if let Some(b) = binding {
+                        target_bindings.push((resolved_target.clone(), b));
+                    }
                     patch_specs.push(PatchSpec {
                         target_id: resolved_target,
                         new_text: resolved_text,
@@ -705,14 +708,42 @@ pub fn run_pipeline_with_password(
                 }
 
                 let branch = working_doc.fork_clean();
-                let (bytes, result) = patch::patch_and_verify_with_reflow(
-                    &branch,
-                    &patch_specs,
-                    &patch_opts,
-                    reflow.unwrap_or(false),
-                    &step_write,
-                    password,
-                )
+                let reflowing = reflow.unwrap_or(false)
+                    || patch_specs
+                        .iter()
+                        .any(|s| crate::reflow::is_block_target_id(&s.target_id));
+                // A reflow reports how far it moved what is below it, which
+                // the anchors there need; other patches move nothing.
+                let (bytes, result, moves) = if reflowing {
+                    crate::reflow::reflow_and_verify(
+                        &branch,
+                        &patch_specs,
+                        &patch_opts,
+                        &step_write,
+                        password,
+                    )
+                    .map(|(bytes, r)| {
+                        let moves: Vec<(i32, f32, f32)> = r
+                            .reflows
+                            .iter()
+                            .map(|a| (a.page, a.old_bbox[3], a.delta_y))
+                            .collect();
+                        let result = patch::PatchResult {
+                            patches: r.patches,
+                            verification: r.verification,
+                        };
+                        (bytes, result, moves)
+                    })
+                } else {
+                    patch::patch_and_verify(
+                        &branch,
+                        &patch_specs,
+                        &patch_opts,
+                        &step_write,
+                        password,
+                    )
+                    .map(|(bytes, result)| (bytes, result, Vec::new()))
+                }
                 .map_err(|e| PipelineError {
                     code: e.code,
                     step_index: Some(step_index),
@@ -742,24 +773,36 @@ pub fn run_pipeline_with_password(
                 let next_doc = reopen_step_output(&bytes, &working_doc, password, step_index)?;
                 let next_doc_id = DocId::of(&bytes).to_string();
 
+                for &(page, below, delta_y) in &moves {
+                    spans.shift_below(page, below, delta_y);
+                }
                 generation += 1;
-                // Update `patched_id_remap` for each applied patch so downstream `Audit`
-                // steps citing the original `target_id` locate the replacement span cleanly.
-                let mut first_new_id = None;
+                // Each patched binding learns where its replacement is, so an
+                // audit citing it checks the new text.
+                let mut first_new = None;
                 for ap in &result.patches {
                     if let Some(anchor) = replacement_anchor(&next_doc, ap, generation) {
-                        first_new_id.get_or_insert_with(|| anchor.id.clone());
-                        bound_ids.insert(anchor.id.clone(), anchor.clone());
-                        patched_id_remap.insert(ap.id.clone(), anchor);
+                        for (target, b) in &target_bindings {
+                            if *target == ap.id {
+                                spans.replaced(*b, anchor.clone());
+                            }
+                        }
+                        first_new.get_or_insert(anchor);
                     }
                 }
-                if let Some(new_id) = first_new_id {
+                if let Some(anchor) = first_new {
                     bind_step_var(
                         &mut vars,
                         id.as_deref(),
                         &positional_key,
                         "first_new_id",
-                        new_id,
+                        anchor.id.clone(),
+                    );
+                    spans.bind(
+                        id.as_deref(),
+                        &positional_key,
+                        &[("first_new_id", String::new())],
+                        Some(anchor),
                     );
                 }
 
@@ -871,22 +914,35 @@ pub fn run_pipeline_with_password(
             } => {
                 let mut resolved_plans =
                     interpolate_plans(plans, &vars, &working_doc_id, step_index)?;
-                for plan in &mut resolved_plans {
-                    for op in &mut plan.ops {
+                let mut target_bindings: Vec<(String, usize)> = Vec::new();
+                for (raw_plan, plan) in plans.iter().zip(&mut resolved_plans) {
+                    for (raw_op, op) in raw_plan.ops.iter().zip(&mut plan.ops) {
+                        let is_patch = matches!(op, PlanOp::Patch { .. });
                         let target = match op {
                             PlanOp::Patch { id, .. } => Some(id),
                             PlanOp::Highlight { id, .. } | PlanOp::Redact { id, .. } => id.as_mut(),
                             _ => None,
                         };
-                        if let Some(target) = target {
-                            *target = resolve_bound_id(
+                        let raw_target = match raw_op {
+                            PlanOp::Patch { id, .. } => Some(id),
+                            PlanOp::Highlight { id, .. } | PlanOp::Redact { id, .. } => id.as_ref(),
+                            _ => None,
+                        };
+                        if let (Some(target), Some(raw_target)) = (target, raw_target) {
+                            let (resolved, binding) = spans.resolve(
                                 &working_doc,
-                                target,
-                                &bound_ids,
-                                None,
+                                raw_target,
+                                &vars,
+                                false,
                                 generation,
                                 step_index,
                             )?;
+                            if let Some(b) = binding
+                                && is_patch
+                            {
+                                target_bindings.push((resolved.clone(), b));
+                            }
+                            *target = resolved;
                         }
                     }
                 }
@@ -938,8 +994,11 @@ pub fn run_pipeline_with_password(
                 generation += 1;
                 for ap in &exec.patches {
                     if let Some(anchor) = replacement_anchor(&next_doc, ap, generation) {
-                        bound_ids.insert(anchor.id.clone(), anchor.clone());
-                        patched_id_remap.insert(ap.id.clone(), anchor);
+                        for (target, b) in &target_bindings {
+                            if *target == ap.id {
+                                spans.replaced(*b, anchor.clone());
+                            }
+                        }
                     }
                 }
 
@@ -1056,17 +1115,14 @@ pub fn run_pipeline_with_password(
                         None | Some("") | Some("current") => Some(working_doc_id.clone()),
                         Some(other) => Some(other.to_string()),
                     };
-                    let mut cited_id = interpolate_opt(c.id.as_deref(), &vars, step_index)?;
-                    if let Some(ref cid) = cited_id {
-                        cited_id = Some(resolve_bound_id(
-                            &working_doc,
-                            cid,
-                            &bound_ids,
-                            Some(&patched_id_remap),
-                            generation,
-                            step_index,
-                        )?);
-                    }
+                    let cited_id = match c.id.as_deref() {
+                        Some(raw) => Some(
+                            spans
+                                .resolve(&working_doc, raw, &vars, true, generation, step_index)?
+                                .0,
+                        ),
+                        None => None,
+                    };
                     let quote = interpolate_str(&c.quote, &vars, step_index)?;
                     resolved_claims.push(ClaimInput {
                         claim_id,
@@ -1147,6 +1203,14 @@ pub fn run_pipeline_with_password(
     })
 }
 
+/// Most positions one anchor may be found at: its own, and its own moved by
+/// each reflow above it that may or may not have moved it.
+const MAX_ANCHOR_POSITIONS: usize = 8;
+
+/// How far (in points, on each axis) a span may be from where its anchor
+/// expects it and still be taken for the same span.
+const ANCHOR_TOLERANCE: f32 = 2.0;
+
 /// Where a span's text was when a step bound its ID.
 #[derive(Debug, Clone)]
 struct SpanAnchor {
@@ -1155,72 +1219,229 @@ struct SpanAnchor {
     /// 1-based.
     page: i32,
     text: String,
-    bbox: [f32; 4],
+    /// Where the span's box may be now: where it was, and that moved by the
+    /// shifts of reflows above it since.
+    positions: Vec<[f32; 4]>,
     generation: usize,
+}
+
+/// One variable binding of a span, and its replacement once a patch replaced
+/// it.
+#[derive(Debug, Clone)]
+struct SpanBinding {
+    anchor: SpanAnchor,
+    replacement: Option<SpanAnchor>,
+}
+
+/// The spans the pipeline's variables name, by variable (`q1.first_id`,
+/// `step_0.first_id`) rather than by the id string they held, which another
+/// step may bind to other text after a mutation.
+#[derive(Debug, Default)]
+struct SpanBindings {
+    bindings: Vec<SpanBinding>,
+    /// Variable -> its binding and the suffix (`:3-8`) its value carries.
+    by_var: HashMap<String, (usize, String)>,
+}
+
+impl SpanBindings {
+    /// Binds `fields` of a step (under its explicit and positional names) to
+    /// `anchor`, or unbinds them when there is none.
+    fn bind(
+        &mut self,
+        explicit_id: Option<&str>,
+        positional_id: &str,
+        fields: &[(&str, String)],
+        anchor: Option<SpanAnchor>,
+    ) {
+        let index = anchor.map(|anchor| {
+            self.bindings.push(SpanBinding {
+                anchor,
+                replacement: None,
+            });
+            self.bindings.len() - 1
+        });
+        let names = std::iter::once(positional_id).chain(explicit_id.filter(|i| !i.is_empty()));
+        for name in names {
+            for (field, suffix) in fields {
+                let key = format!("{name}.{field}");
+                match index {
+                    Some(i) => {
+                        self.by_var.insert(key, (i, suffix.clone()));
+                    }
+                    None => {
+                        self.by_var.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn replaced(&mut self, binding: usize, anchor: SpanAnchor) {
+        if let Some(b) = self.bindings.get_mut(binding) {
+            b.replacement = Some(anchor);
+        }
+    }
+
+    /// A reflow on `page` moved what lies below `below` (page space, y
+    /// down) by `delta_y`: anchors there may now be found that far down.
+    fn shift_below(&mut self, page: i32, below: f32, delta_y: f32) {
+        if delta_y == 0.0 || !delta_y.is_finite() {
+            return;
+        }
+        let anchors = self
+            .bindings
+            .iter_mut()
+            .flat_map(|b| std::iter::once(&mut b.anchor).chain(b.replacement.as_mut()));
+        for a in anchors.filter(|a| a.page == page) {
+            let moved: Vec<[f32; 4]> = a
+                .positions
+                .iter()
+                .filter(|p| p[1] > below + 1.0)
+                .map(|p| [p[0], p[1] + delta_y, p[2], p[3] + delta_y])
+                .collect();
+            for p in moved {
+                if a.positions.len() < MAX_ANCHOR_POSITIONS {
+                    a.positions.push(p);
+                }
+            }
+        }
+    }
+
+    /// The ID that addresses, on `doc`, what the id field `raw` addressed
+    /// when it was bound, and the binding it came from.
+    ///
+    /// A field that is a variable naming a span (`${q1.first_id}`, with an
+    /// optional `:` suffix after it) resolves through what that variable
+    /// bound: unchanged at the generation it was bound, otherwise to the span
+    /// with the same text at the anchor's position, or that position moved by
+    /// a known reflow shift; no such span, or more than one, is
+    /// `pipeline.stale_id`. With `cite_replacement`, a binding a patch
+    /// replaced resolves to its replacement (what an audit of the patch
+    /// cites). Anything else is interpolated and used as given.
+    fn resolve(
+        &self,
+        doc: &Document,
+        raw: &str,
+        vars: &HashMap<String, String>,
+        cite_replacement: bool,
+        generation: usize,
+        step_index: usize,
+    ) -> Result<(String, Option<usize>), PipelineError> {
+        let bound = leading_variable(raw).and_then(|(key, rest)| {
+            let (index, suffix) = self.by_var.get(key)?;
+            let binding = self.bindings.get(*index)?;
+            (rest.is_empty() || rest.starts_with(':')).then_some((*index, binding, suffix, rest))
+        });
+        let Some((index, binding, suffix, rest)) = bound else {
+            return Ok((interpolate_str(raw, vars, step_index)?, None));
+        };
+        let rest = interpolate_str(rest, vars, step_index)?;
+        let stale = |why: &str| PipelineError {
+            code: "pipeline.stale_id",
+            step_index: Some(step_index),
+            message: format!(
+                "content id {raw:?} was bound before the document changed, and {why}; query it again"
+            ),
+        };
+        let (anchor, suffix) = match (&binding.replacement, cite_replacement) {
+            (Some(r), true) => (r, ""),
+            _ => (&binding.anchor, suffix.as_str()),
+        };
+        if anchor.generation == generation {
+            return Ok((format!("{}{suffix}{rest}", anchor.id), Some(index)));
+        }
+        match locate_anchor(doc, anchor) {
+            Located::One(id) => Ok((format!("{id}{suffix}{rest}"), Some(index))),
+            Located::None => Err(stale("the text it addressed is no longer where it was")),
+            Located::Several => Err(stale(
+                "more than one span with its text is where it was, so which it addressed is not known",
+            )),
+        }
+    }
+}
+
+/// The variable a field starts with (`${key}` or `$key`) and the rest of
+/// the field after it.
+fn leading_variable(raw: &str) -> Option<(&str, &str)> {
+    let body = raw.strip_prefix('$')?;
+    if let Some(inner) = body.strip_prefix('{') {
+        let close = inner.find('}')?;
+        return Some((inner.get(..close)?.trim(), inner.get(close + 1..)?));
+    }
+    let end = body
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'))
+        .unwrap_or(body.len());
+    let key = body.get(..end)?.trim_end_matches('.');
+    Some((key, body.get(key.len()..)?))
+}
+
+enum Located {
+    One(String),
+    None,
+    Several,
+}
+
+/// The span on `doc` with `anchor`'s text at one of its positions.
+fn locate_anchor(doc: &Document, anchor: &SpanAnchor) -> Located {
+    let wanted = anchor.text.trim();
+    let Some(page_obj) = anchor.page.checked_sub(1).and_then(|p| doc.page(p).ok()) else {
+        return Located::None;
+    };
+    let (stext_res, _) =
+        stext::extract_page(doc, &page_obj, StextOptions::default(), Store::default());
+    let Ok(stext_page) = stext_res else {
+        return Located::None;
+    };
+    let mut found: Option<String> = None;
+    for (bi, block) in stext_page.blocks.iter().enumerate() {
+        let Block::Text(tb) = block else {
+            continue;
+        };
+        for (li, line) in tb.lines.iter().enumerate() {
+            for (si, span) in extract::spans(line).into_iter().enumerate() {
+                let slice = line.chars.get(span.start..span.end).unwrap_or(&[]);
+                if wanted.is_empty() || extract::chars_text(slice).trim() != wanted {
+                    continue;
+                }
+                let here = anchor.positions.iter().any(|p| {
+                    (span.bbox.x0 - p[0]).abs() <= ANCHOR_TOLERANCE
+                        && (span.bbox.y0 - p[1]).abs() <= ANCHOR_TOLERANCE
+                });
+                if !here {
+                    continue;
+                }
+                if found.is_some() {
+                    return Located::Several;
+                }
+                found = Some(format!(
+                    "p{}.b{}.l{}.s{}",
+                    anchor.page,
+                    bi + 1,
+                    li + 1,
+                    si + 1
+                ));
+            }
+        }
+    }
+    found.map_or(Located::None, Located::One)
 }
 
 /// The anchor of a patch's replacement text on the document it produced.
 fn replacement_anchor(doc: &Document, ap: &AppliedPatch, generation: usize) -> Option<SpanAnchor> {
     let bbox = ap.new_bbox?;
     let id = locate_span_at_bbox(doc, ap.page, &ap.new_text, bbox)?;
-    let text = span_text_at(doc, &id)?;
+    let (text, span_bbox) = span_at(doc, &id)?;
     Some(SpanAnchor {
         id,
         page: ap.page,
         text,
-        bbox,
+        positions: vec![span_bbox],
         generation,
     })
 }
 
-/// The ID that addresses, on `doc`, what `raw` addressed when it was bound.
-///
-/// IDs bound by a query or a patch before the latest mutation are checked:
-/// the span with that text nearest where it was gives the ID, and text that
-/// is gone from there fails with `pipeline.stale_id`. With `patched`, an ID a patch
-/// replaced resolves to its replacement (what an audit of the patch cites).
-/// IDs no step bound are used as given.
-fn resolve_bound_id(
-    doc: &Document,
-    raw: &str,
-    bound: &HashMap<String, SpanAnchor>,
-    patched: Option<&HashMap<String, SpanAnchor>>,
-    generation: usize,
-    step_index: usize,
-) -> Result<String, PipelineError> {
-    let (base, suffix) = match raw.find(':') {
-        Some(i) => (&raw[..i], &raw[i..]),
-        None => (raw, ""),
-    };
-    let stale = || PipelineError {
-        code: "pipeline.stale_id",
-        step_index: Some(step_index),
-        message: format!(
-            "content id {raw:?} was bound before the document changed, and the text it addressed is no longer there; query it again"
-        ),
-    };
-    let relocate = |a: &SpanAnchor| -> Option<String> {
-        if a.generation == generation {
-            return Some(a.id.clone());
-        }
-        // By where it was, not by its number: after a renumbering the old
-        // number may name another span that reads the same.
-        let id = locate_span_at_bbox(doc, a.page, &a.text, a.bbox)?;
-        (span_text_at(doc, &id).as_deref() == Some(a.text.as_str())).then_some(id)
-    };
-    if let Some(a) = patched.and_then(|m| m.get(raw).or_else(|| m.get(base))) {
-        return relocate(a).ok_or_else(stale);
-    }
-    match bound.get(base) {
-        Some(a) => relocate(a)
-            .map(|id| format!("{id}{suffix}"))
-            .ok_or_else(stale),
-        None => Ok(raw.to_string()),
-    }
-}
-
-/// The text of span `pN.bB.lL.sS` on `doc`, if it names one.
-fn span_text_at(doc: &Document, span_id: &str) -> Option<String> {
+/// The text and box of span `pN.bB.lL.sS` on `doc`, if it names one.
+fn span_at(doc: &Document, span_id: &str) -> Option<(String, [f32; 4])> {
     let mut parts = span_id.split('.');
     let mut num = |prefix: char| -> Option<usize> {
         parts
@@ -1243,7 +1464,9 @@ fn span_text_at(doc: &Document, span_id: &str) -> Option<String> {
     };
     let line = tb.lines.get(l - 1)?;
     let span = extract::spans(line).into_iter().nth(sp - 1)?;
-    Some(extract::chars_text(line.chars.get(span.start..span.end)?))
+    let text = extract::chars_text(line.chars.get(span.start..span.end)?);
+    let r = span.bbox;
+    Some((text, [r.x0, r.y0, r.x1, r.y1]))
 }
 
 /// Opens a step's output as the next working document, with `password` when
@@ -1979,6 +2202,212 @@ mod tests {
         let err = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap_err();
         assert_eq!(err.code, "pipeline.stale_id", "{err:?}");
         assert_eq!(err.step_index, Some(3));
+    }
+
+    fn query_first_id(outcome: &PipelineOutcome, step: usize) -> String {
+        match &outcome.steps[step].data {
+            StepOutput::Query(q) => q.first_id.clone().unwrap(),
+            other => panic!("expected Query output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_variable_keeps_its_own_binding_when_a_later_query_reuses_its_id() {
+        // Patching the heading renumbers the blocks below it, so after it
+        // Bravo has the number Alpha had when q1 bound it.
+        let content = b"BT /F1 14 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Heading) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 72 600 Tm (Alpha) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 72 500 Tm (Bravo) Tj ET";
+        let doc = page_doc(content, "/Font<</F1 5 0 R>>", &[HELVETICA.to_vec()]);
+        let spec = parse_pipeline_spec(
+            r#"{"steps": [
+                {"id": "q1", "op": "query", "pattern": "Alpha"},
+                {"id": "head", "op": "query", "pattern": "Heading"},
+                {"id": "p1", "op": "patch", "replacements": [{"target_id": "${head.first_id}", "new_text": "Title"}]},
+                {"id": "q2", "op": "query", "pattern": "Bravo"},
+                {"id": "p2", "op": "patch", "replacements": [{"target_id": "${q1.first_id}", "new_text": "Ahoy"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let outcome = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap();
+        assert_eq!(
+            query_first_id(&outcome, 0),
+            query_first_id(&outcome, 3),
+            "the scenario needs q2 to bind the id string q1 bound"
+        );
+        let out = Document::open(outcome.output_bytes.clone().unwrap()).unwrap();
+        let text = page_text(&out);
+        assert!(text.contains("Ahoy") && text.contains("Bravo"), "{text}");
+        assert!(!text.contains("Alpha"), "{text}");
+    }
+
+    /// A tax and a fee that read the same, one row (18 pt) apart.
+    fn twin_rows_doc() -> Document {
+        let content = b"BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 600 Tm (Tax:) Tj ET \
+            BT /F1 12 Tf 0 0 0 rg 1 0 0 1 220 600 Tm ($0.00) Tj ET \
+            BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 582 Tm (Fee:) Tj ET \
+            BT /F1 12 Tf 0 0 0 rg 1 0 0 1 220 582 Tm ($0.00) Tj ET";
+        page_doc(
+            content,
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), HELVETICA_BOLD.to_vec()],
+        )
+    }
+
+    #[test]
+    fn a_bound_span_patched_away_is_stale_not_its_twin_a_row_below() {
+        let spec = parse_pipeline_spec(
+            r#"{"steps": [
+                {"id": "q1", "op": "query", "right_of": "Tax:", "nearest_only": true},
+                {"id": "p1", "op": "patch", "replacements": [{"target_id": "${q1.first_id}", "new_text": "$5.00"}]},
+                {"id": "p2", "op": "patch", "replacements": [{"target_id": "${q1.first_id}", "new_text": "$7.00"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let err = run_pipeline(&twin_rows_doc(), &spec, &WriteOptions::default()).unwrap_err();
+        assert_eq!(err.code, "pipeline.stale_id", "{err:?}");
+        assert_eq!(err.step_index, Some(2));
+    }
+
+    #[test]
+    fn a_bound_span_redacted_away_is_stale_not_its_twin_a_row_below() {
+        let spec = parse_pipeline_spec(
+            r#"{"steps": [
+                {"id": "q1", "op": "query", "right_of": "Tax:", "nearest_only": true},
+                {"id": "r1", "op": "apply_plan", "plans": [
+                    {"doc_id": "current", "ops": [{"op": "redact", "id": "${q1.first_id}"}]}
+                ]},
+                {"id": "p2", "op": "patch", "replacements": [{"target_id": "${q1.first_id}", "new_text": "$7.00"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let err = run_pipeline(&twin_rows_doc(), &spec, &WriteOptions::default()).unwrap_err();
+        assert_eq!(err.code, "pipeline.stale_id", "{err:?}");
+        assert_eq!(err.step_index, Some(2));
+    }
+
+    #[test]
+    fn a_bound_span_moved_down_by_a_reflow_above_it_still_resolves() {
+        let content = b"BT /F1 12 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Payment is due within thirty days of the invoice date.) Tj ET \
+            BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 600 Tm (Total:) Tj ET \
+            BT /F1 12 Tf 0 0 0 rg 1 0 0 1 220 600 Tm ($9.00) Tj ET";
+        let doc = page_doc(
+            content,
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), HELVETICA_BOLD.to_vec()],
+        );
+        let long = "Payment is due within thirty days of the invoice date. ".repeat(8);
+        let spec = parse_pipeline_spec(&format!(
+            r#"{{"steps": [
+                {{"id": "q1", "op": "query", "right_of": "Total:", "nearest_only": true}},
+                {{"id": "qp", "op": "query", "pattern": "Payment is due"}},
+                {{"id": "p1", "op": "patch", "reflow": true, "replacements": [{{"target_id": "${{qp.first_span_id}}", "new_text": "{}"}}]}},
+                {{"id": "p2", "op": "patch", "replacements": [{{"target_id": "${{q1.first_id}}", "new_text": "$10.00"}}]}}
+            ]}}"#,
+            long.trim()
+        ))
+        .unwrap();
+        let outcome = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap();
+        match &outcome.steps[2].data {
+            StepOutput::Patch(p) => assert_eq!(p.patch_count, 1),
+            other => panic!("expected Patch output, got {other:?}"),
+        }
+        let out = Document::open(outcome.output_bytes.clone().unwrap()).unwrap();
+        let after = query::run_query(
+            &out,
+            &QuerySpec {
+                right_of: Some("Total:".to_string()),
+                nearest_only: true,
+                ..QuerySpec::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(after.matches[0].text, "$10.00");
+        // Moved further than any nearness window would have allowed.
+        assert!(
+            after.matches[0].bbox[1] > 192.0 + 36.0,
+            "{:?}",
+            after.matches[0].bbox
+        );
+    }
+
+    #[test]
+    fn two_spans_with_the_anchor_text_where_it_may_be_are_not_guessed_between() {
+        let doc = twin_rows_doc();
+        let (_, tax) = span_at(&doc, "p1.b1.l2.s1").unwrap();
+        let (_, fee) = span_at(&doc, "p1.b1.l4.s1").unwrap();
+        let mut anchor = SpanAnchor {
+            id: "p1.b1.l2.s1".to_string(),
+            page: 1,
+            text: "$0.00".to_string(),
+            positions: vec![tax],
+            generation: 0,
+        };
+        assert!(matches!(locate_anchor(&doc, &anchor), Located::One(id) if id == "p1.b1.l2.s1"));
+        // A known shift that would put it on the fee row as well.
+        anchor.positions.push(fee);
+        assert!(matches!(locate_anchor(&doc, &anchor), Located::Several));
+        // Nowhere near either.
+        anchor.positions = vec![[tax[0] + 5.0, tax[1], tax[2] + 5.0, tax[3]]];
+        assert!(matches!(locate_anchor(&doc, &anchor), Located::None));
+    }
+
+    #[test]
+    fn an_id_typed_in_the_spec_is_used_as_given() {
+        let content = b"BT /F1 14 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Heading) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 72 600 Tm (Alpha) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 72 500 Tm (Bravo) Tj ET";
+        let doc = page_doc(content, "/Font<</F1 5 0 R>>", &[HELVETICA.to_vec()]);
+        let spec = parse_pipeline_spec(
+            r#"{"steps": [
+                {"id": "q1", "op": "query", "pattern": "Alpha"},
+                {"id": "head", "op": "query", "pattern": "Heading"},
+                {"id": "p1", "op": "patch", "replacements": [{"target_id": "${head.first_id}", "new_text": "Title"}]},
+                {"id": "q2", "op": "query", "pattern": "Bravo"}
+            ]}"#,
+        )
+        .unwrap();
+        let outcome = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap();
+        let typed = query_first_id(&outcome, 0);
+        let mut steps: Vec<serde_json::Value> =
+            serde_json::from_str::<serde_json::Value>(
+                r#"[{"id": "q1", "op": "query", "pattern": "Alpha"},
+                    {"id": "head", "op": "query", "pattern": "Heading"},
+                    {"id": "p1", "op": "patch", "replacements": [{"target_id": "${head.first_id}", "new_text": "Title"}]}]"#,
+            )
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        steps.push(serde_json::json!({"id": "p2", "op": "patch", "replacements": [{"target_id": typed, "new_text": "Boat"}]}));
+        let spec = parse_pipeline_spec(&serde_json::json!({ "steps": steps }).to_string()).unwrap();
+        let out = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap();
+        let text = page_text(&Document::open(out.output_bytes.unwrap()).unwrap());
+        // The typed id names Bravo now, and is taken as the spec says.
+        assert!(text.contains("Alpha") && text.contains("Boat"), "{text}");
+        assert_eq!(query_first_id(&outcome, 3), typed);
+    }
+
+    #[test]
+    fn a_leading_variable_is_split_from_what_follows_it() {
+        assert_eq!(
+            leading_variable("${q1.first_id}"),
+            Some(("q1.first_id", ""))
+        );
+        assert_eq!(
+            leading_variable("${ q1.first_span_id }:0-4"),
+            Some(("q1.first_span_id", ":0-4"))
+        );
+        assert_eq!(
+            leading_variable("$q1.first_id:2-3"),
+            Some(("q1.first_id", ":2-3"))
+        );
+        assert_eq!(
+            leading_variable("$q1.first_id."),
+            Some(("q1.first_id", "."))
+        );
+        assert_eq!(leading_variable("p1.b1.l1.s1"), None);
+        assert_eq!(leading_variable("${unclosed"), None);
     }
 
     #[test]
