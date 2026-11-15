@@ -1413,3 +1413,115 @@ fn map_pipeline_error(e: pipeline::PipelineError) -> Failure {
         message: e.message,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn open(bytes: &[u8]) -> Document {
+        Document::open(bytes.to_vec()).unwrap()
+    }
+
+    /// The message of a refused read-back, after checking it is
+    /// `verify.failed` with exit 4.
+    fn refused(doc: &Document, bytes: &[u8], password: Option<&str>) -> String {
+        let Err(failure) = read_back_output(doc, bytes, password) else {
+            panic!("the read-back took the output");
+        };
+        assert_eq!(failure.code, "verify.failed", "{}", failure.message);
+        assert_eq!(failure.exit as i32, Exit::Verify as i32);
+        assert!(
+            failure.message.ends_with("; nothing was written"),
+            "{}",
+            failure.message
+        );
+        failure.message
+    }
+
+    const MINIMAL: &[u8] = include_bytes!("../../../corpus/smoke/minimal.pdf");
+
+    #[test]
+    fn a_pipeline_output_that_opens_cleanly_reads_back() {
+        let doc = open(MINIMAL);
+        let out = read_back_output(&doc, MINIMAL, None)
+            .map_err(|f| f.message)
+            .unwrap();
+        assert_eq!(out.page_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_pipeline_output_that_does_not_open_is_refused() {
+        let doc = open(MINIMAL);
+        let message = refused(&doc, b"not a PDF at all", None);
+        assert!(message.starts_with("the output does not open"), "{message}");
+    }
+
+    #[test]
+    fn a_pipeline_output_that_needs_a_repair_is_refused() {
+        let doc = open(MINIMAL);
+        let broken = include_bytes!("../../../corpus/smoke/broken-xref-offsets.pdf");
+        let message = refused(&doc, broken, None);
+        assert_eq!(
+            message,
+            "the output needs a repair to open; nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_locked_pipeline_output_reads_back_only_with_its_password() {
+        let locked = include_bytes!("../../../corpus/smoke/encrypted-user-password.pdf");
+        let doc = open(locked);
+        for password in [None, Some("wrong")] {
+            let message = refused(&doc, locked, password);
+            assert!(
+                message.starts_with("the output does not open with the document's password"),
+                "{password:?}: {message}"
+            );
+        }
+        assert!(read_back_output(&doc, locked, Some("user")).is_ok());
+    }
+
+    /// One page, in a page tree whose /Count is `count`.
+    fn one_page_counted(count: i32) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let objects = [
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            format!("<</Type/Pages/Kids[3 0 R]/Count {count}>>"),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]>>".to_string(),
+        ];
+        let mut offsets = Vec::new();
+        for (i, o) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        for o in offsets {
+            bytes.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!("trailer\n<</Size 4/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        bytes
+    }
+
+    #[test]
+    fn a_pipeline_output_whose_pages_do_not_load_is_refused() {
+        let doc = open(MINIMAL);
+        assert!(read_back_output(&doc, &one_page_counted(1), None).is_ok());
+        // Two pages counted, one there: the second does not load.
+        let message = refused(&doc, &one_page_counted(2), None);
+        assert!(
+            message.starts_with("page 2 of the output does not load"),
+            "{message}"
+        );
+        // More pages counted than the file has objects: none load.
+        let message = refused(&doc, &one_page_counted(99), None);
+        assert!(
+            message.starts_with("the output's pages do not load"),
+            "{message}"
+        );
+    }
+}
