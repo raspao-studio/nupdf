@@ -842,7 +842,8 @@ pub fn flat_forms_cmd(
 
     if promote {
         let (bytes, rep) =
-            flat_form::promote_flat_forms(doc, &plan.options).map_err(map_flat_form_error)?;
+            flat_form::promote_flat_forms_with_password(doc, &plan.options, password)
+                .map_err(map_flat_form_error)?;
         if plan.apply
             && let Some(path) = plan.output
         {
@@ -901,7 +902,8 @@ pub fn flat_forms_cmd(
     }
 
     let (bytes, fill_rep) =
-        flat_form::fill_flat_forms(doc, &ops, &plan.options).map_err(map_flat_form_error)?;
+        flat_form::fill_flat_forms_with_password(doc, &ops, &plan.options, password)
+            .map_err(map_flat_form_error)?;
     if plan.verify && !fill_rep.verified {
         return Err(Failure {
             exit: Exit::Verify,
@@ -1082,7 +1084,8 @@ pub fn cloak_cmd(
     }
 
     let (bytes, vault, rep) =
-        cloak::cloak_document(doc, &targets, &plan.options).map_err(map_cloak_error)?;
+        cloak::cloak_document_with_password(doc, &targets, &plan.options, password)
+            .map_err(map_cloak_error)?;
 
     if plan.apply {
         let vault_json = serde_json::to_vec_pretty(&vault).map_err(|e| Failure {
@@ -1280,7 +1283,8 @@ pub fn pipeline_cmd(
         incremental: write.incremental,
         ..nupdf::write::WriteOptions::default()
     };
-    let outcome = pipeline::run_pipeline(doc, &spec, &write_opts).map_err(map_pipeline_error)?;
+    let outcome = pipeline::run_pipeline_with_password(doc, &spec, &write_opts, password)
+        .map_err(map_pipeline_error)?;
 
     let mut output_val = Value::Null;
     let mut applied = false;

@@ -355,6 +355,17 @@ pub fn run_pipeline(
     spec: &PipelineSpec,
     write_opts: &WriteOptions,
 ) -> Result<PipelineOutcome, PipelineError> {
+    run_pipeline_with_password(doc, spec, write_opts, None)
+}
+
+/// [`run_pipeline`] for a document opened with `password`: each mutating step
+/// verifies with it, and each intermediate output is reopened with it.
+pub fn run_pipeline_with_password(
+    doc: &Document,
+    spec: &PipelineSpec,
+    write_opts: &WriteOptions,
+    password: Option<&str>,
+) -> Result<PipelineOutcome, PipelineError> {
     if spec.steps.len() > MAX_PIPELINE_STEPS {
         return Err(PipelineError {
             code: "limit.pipeline_steps",
@@ -674,7 +685,7 @@ pub fn run_pipeline(
                     &patch_opts,
                     reflow.unwrap_or(false),
                     &step_write,
-                    None,
+                    password,
                 )
                 .map_err(|e| PipelineError {
                     code: e.code,
@@ -702,14 +713,7 @@ pub fn run_pipeline(
                     });
                 }
 
-                let next_doc =
-                    Document::open_with(bytes.clone(), working_doc.limits()).map_err(|e| {
-                        PipelineError {
-                            code: e.code,
-                            step_index: Some(step_index),
-                            message: e.message,
-                        }
-                    })?;
+                let next_doc = reopen_step_output(&bytes, &working_doc, password, step_index)?;
                 let next_doc_id = DocId::of(&bytes).to_string();
 
                 // Update `patched_id_remap` for each applied patch so downstream `Audit`
@@ -848,7 +852,7 @@ pub fn run_pipeline(
                     &resolved_plans,
                     &step_write,
                     &PatchOptions::default(),
-                    None,
+                    password,
                     true,
                 )
                 .map_err(|e| PipelineError {
@@ -878,14 +882,7 @@ pub fn run_pipeline(
                     });
                 }
 
-                let next_doc =
-                    Document::open_with(bytes.clone(), working_doc.limits()).map_err(|e| {
-                        PipelineError {
-                            code: e.code,
-                            step_index: Some(step_index),
-                            message: e.message,
-                        }
-                    })?;
+                let next_doc = reopen_step_output(&bytes, &working_doc, password, step_index)?;
                 let next_doc_id = DocId::of(&bytes).to_string();
 
                 patched_id_remap.clear();
@@ -1099,6 +1096,32 @@ pub fn run_pipeline(
         steps: step_results,
         output_bytes,
     })
+}
+
+/// Opens a step's output as the next working document, with `password` when
+/// the output stayed encrypted, so later steps read what was written.
+fn reopen_step_output(
+    bytes: &[u8],
+    previous: &Document,
+    password: Option<&str>,
+    step_index: usize,
+) -> Result<Document, PipelineError> {
+    let next =
+        Document::open_with(bytes.to_vec(), previous.limits()).map_err(|e| PipelineError {
+            code: e.code,
+            step_index: Some(step_index),
+            message: e.message,
+        })?;
+    if next.needs_password()
+        && !password.is_some_and(|p| next.authenticate(p).is_ok_and(|a| a != 0))
+    {
+        return Err(PipelineError {
+            code: "input.needs_password",
+            step_index: Some(step_index),
+            message: "the step's output needs a password to read: pass --password".to_string(),
+        });
+    }
+    Ok(next)
 }
 
 fn collect_info(

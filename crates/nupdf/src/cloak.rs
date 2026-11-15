@@ -1779,9 +1779,12 @@ fn rewrite_metadata_and_objects<T: TextTransform>(
 
 /// Fails with `verify.leak` when any secret survives in `saved_bytes`. The
 /// error names the class, page and category of what leaked, never the secret.
+/// A locked output is read with `password`; one that cannot be read fails
+/// with `verify.unreadable`, since nothing in it was checked.
 fn verify_zero_secret_leaks(
     saved_bytes: &[u8],
     secrets_with_category: &[(String, String)],
+    password: Option<&str>,
 ) -> Result<(), CloakError> {
     if secrets_with_category.is_empty() {
         return Ok(());
@@ -1795,6 +1798,15 @@ fn verify_zero_secret_leaks(
         code: "verify.reopen_failed",
         message: format!("failed to reopen cloaked PDF for leak check: {e}"),
     })?;
+    if reopened.needs_password() {
+        let opened = password.is_some_and(|p| reopened.authenticate(p).is_ok_and(|a| a != 0));
+        if !opened {
+            return Err(CloakError {
+                code: "verify.unreadable",
+                message: "the cloaked output needs a password to read back for the leak check: pass the document's password".to_string(),
+            });
+        }
+    }
 
     let matcher = Matcher::new(secrets, &[], false).map_err(|e| CloakError {
         code: "verify.matcher",
@@ -1890,6 +1902,17 @@ pub fn cloak_document(
     targets: &[CloakTarget],
     write_opts: &WriteOptions,
 ) -> Result<(Vec<u8>, CloakVault, CloakReport), CloakError> {
+    cloak_document_with_password(doc, targets, write_opts, None)
+}
+
+/// [`cloak_document`] for a document opened with `password`, which the
+/// zero-leak check needs to read an output that stays encrypted.
+pub fn cloak_document_with_password(
+    doc: &Document,
+    targets: &[CloakTarget],
+    write_opts: &WriteOptions,
+    password: Option<&str>,
+) -> Result<(Vec<u8>, CloakVault, CloakReport), CloakError> {
     let original_doc_id = DocId::of(doc.data()).to_string();
     let mut session = CloakSession::new(targets)?;
 
@@ -1911,7 +1934,7 @@ pub fn cloak_document(
     })?;
 
     let secrets_to_check = session.all_secrets_for_verification();
-    verify_zero_secret_leaks(&saved_bytes, &secrets_to_check)?;
+    verify_zero_secret_leaks(&saved_bytes, &secrets_to_check, password)?;
 
     let cloaked_doc_id = DocId::of(&saved_bytes).to_string();
     let entries = session.entries;
@@ -2548,11 +2571,24 @@ mod tests {
         let refs: Vec<&str> = objs.iter().map(String::as_str).collect();
         let doc = crate::testutil::doc_of(&refs);
         let secrets = [("ACCT-884210".to_string(), "ACCT".to_string())];
-        let err = verify_zero_secret_leaks(doc.data(), &secrets).unwrap_err();
+        let err = verify_zero_secret_leaks(doc.data(), &secrets, None).unwrap_err();
         assert_eq!(err.code, "verify.leak");
         assert!(!err.to_string().contains("884210"), "{err}");
         assert!(err.message.contains("ACCT"), "{err}");
         assert!(err.message.contains("page 1"), "{err}");
+    }
+
+    #[test]
+    fn leak_check_reads_a_locked_output_only_with_its_password() {
+        // The page says "Encrypted"; the output opens only with "user".
+        let bytes = include_bytes!("../../../corpus/smoke/encrypted-user-password.pdf");
+        let secrets = [("Encrypted".to_string(), "WORD".to_string())];
+        let unread = verify_zero_secret_leaks(bytes, &secrets, None).unwrap_err();
+        assert_eq!(unread.code, "verify.unreadable");
+        let wrong = verify_zero_secret_leaks(bytes, &secrets, Some("nope")).unwrap_err();
+        assert_eq!(wrong.code, "verify.unreadable");
+        let leak = verify_zero_secret_leaks(bytes, &secrets, Some("user")).unwrap_err();
+        assert_eq!(leak.code, "verify.leak");
     }
 
     #[test]

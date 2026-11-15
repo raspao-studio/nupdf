@@ -1854,6 +1854,17 @@ pub fn fill_flat_forms(
     ops: &[FlatFillOp],
     write_opts: &WriteOptions,
 ) -> Result<(Vec<u8>, FlatFillReport), FlatFormError> {
+    fill_flat_forms_with_password(doc, ops, write_opts, None)
+}
+
+/// [`fill_flat_forms`] for a document opened with `password`, which the
+/// read-back needs when the output stays encrypted.
+pub fn fill_flat_forms_with_password(
+    doc: &Document,
+    ops: &[FlatFillOp],
+    write_opts: &WriteOptions,
+    password: Option<&str>,
+) -> Result<(Vec<u8>, FlatFillReport), FlatFormError> {
     let fork = doc.fork_clean();
     let detected = detect_flat_forms(&fork, None).map_err(|message| FlatFormError {
         code: "input.detect_failed",
@@ -2159,7 +2170,7 @@ pub fn fill_flat_forms(
         message: e.message,
     })?;
 
-    verify_filled_bytes(&bytes, &applied)?;
+    verify_filled_bytes(&bytes, &applied, password)?;
 
     Ok((
         bytes,
@@ -2371,11 +2382,31 @@ fn append_content_layer_with_font(
     })
 }
 
-fn verify_filled_bytes(bytes: &[u8], applied: &[AppliedFlatFill]) -> Result<(), FlatFormError> {
+/// Reopens written bytes for read-back, with `password` when they are
+/// encrypted. An output that cannot be read fails: nothing in it was checked.
+fn reopen_for_readback(bytes: &[u8], password: Option<&str>) -> Result<Document, FlatFormError> {
     let reopened = Document::open(bytes.to_vec()).map_err(|e| FlatFormError {
         code: e.code,
         message: e.message,
     })?;
+    if reopened.needs_password()
+        && !password.is_some_and(|p| reopened.authenticate(p).is_ok_and(|a| a != 0))
+    {
+        return Err(FlatFormError {
+            code: "verify.unreadable",
+            message: "the output needs a password to read back: pass the document's password"
+                .into(),
+        });
+    }
+    Ok(reopened)
+}
+
+fn verify_filled_bytes(
+    bytes: &[u8],
+    applied: &[AppliedFlatFill],
+    password: Option<&str>,
+) -> Result<(), FlatFormError> {
+    let reopened = reopen_for_readback(bytes, password)?;
 
     let mut pages_needed: Vec<i32> = applied.iter().map(|a| a.page).collect();
     pages_needed.sort_unstable();
@@ -2500,6 +2531,16 @@ fn verify_filled_bytes(bytes: &[u8], applied: &[AppliedFlatFill]) -> Result<(), 
 pub fn promote_flat_forms(
     doc: &Document,
     write_opts: &WriteOptions,
+) -> Result<(Vec<u8>, FlatFormReport), FlatFormError> {
+    promote_flat_forms_with_password(doc, write_opts, None)
+}
+
+/// [`promote_flat_forms`] for a document opened with `password`, which the
+/// read-back needs when the output stays encrypted.
+pub fn promote_flat_forms_with_password(
+    doc: &Document,
+    write_opts: &WriteOptions,
+    password: Option<&str>,
 ) -> Result<(Vec<u8>, FlatFormReport), FlatFormError> {
     let fork = doc.fork_clean();
     let mut report = detect_flat_forms(&fork, None).map_err(|message| FlatFormError {
@@ -2627,7 +2668,7 @@ pub fn promote_flat_forms(
         message: e.message,
     })?;
 
-    verify_promoted_acroform(&bytes, &report.fields)?;
+    verify_promoted_acroform(&bytes, &report.fields, password)?;
 
     Ok((bytes, report))
 }
@@ -2744,11 +2785,12 @@ fn install_acroform_catalog(
     Ok(())
 }
 
-fn verify_promoted_acroform(bytes: &[u8], expected: &[FlatField]) -> Result<(), FlatFormError> {
-    let reopened = Document::open(bytes.to_vec()).map_err(|e| FlatFormError {
-        code: e.code,
-        message: e.message,
-    })?;
+fn verify_promoted_acroform(
+    bytes: &[u8],
+    expected: &[FlatField],
+    password: Option<&str>,
+) -> Result<(), FlatFormError> {
+    let reopened = reopen_for_readback(bytes, password)?;
     if !form::need_appearances(&reopened) {
         return Err(FlatFormError {
             code: "verify.promote_failed",
