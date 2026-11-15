@@ -2684,6 +2684,61 @@ fn a_page_over_its_glyph_limit_fails_alone_and_is_never_called_clean() {
 }
 
 #[test]
+fn a_page_over_its_operator_limit_fails_where_it_is_run_and_not_where_it_is_listed() {
+    // 500 strokes of three operators each.
+    let file = heavy_pdf("operator-limit.pdf", 500);
+    let file = file.to_str().unwrap();
+    let limit = ["--max-page-operators", "100"];
+    let error = "page runs more than 100 operators (--max-page-operators)";
+    // Run for its text or its calls, the page is its error.
+    let report = run_json(&["extract", file, limit[0], limit[1]]);
+    assert_eq!(report["pages"][0]["error"], error);
+    assert_eq!(report["diagnostics"][0]["code"], "limit.page_operators");
+    let report = run_json(&["trace", file, limit[0], limit[1]]);
+    assert_eq!(report["pages"][0]["error"], error);
+    // As far as it got: the default colour spaces and 33 strokes.
+    assert_eq!(report["pages"][0]["events"].as_array().unwrap().len(), 34);
+    // Within the limit it is read as without one.
+    let roomy = nupdf(&["trace", file, "--max-page-operators", "1500"]);
+    assert_eq!(roomy.stdout, nupdf(&["trace", file]).stdout);
+    let tight = run_json(&["trace", file, "--max-page-operators", "1499"]);
+    assert!(tight["pages"][0]["error"].is_string());
+    // `operators` lists a page and does not run it: every operator is there.
+    let listed = nupdf(&["operators", file, limit[0], limit[1]]);
+    assert_eq!(listed.stdout, nupdf(&["operators", file]).stdout);
+    let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(report["pages"][0]["ops"].as_array().unwrap().len(), 1500);
+    // `verify` has not searched the page, and does not call it clean.
+    let out = nupdf(&["verify", file, "--text", "zebra", limit[0], limit[1]]);
+    assert_eq!(out.status.code(), Some(4));
+    // A rewrite keeps the whole page, whatever the limit.
+    let written = scratch("operator-limit-clean.pdf");
+    let _ = std::fs::remove_file(&written);
+    let out = nupdf(&[
+        "clean",
+        "-s",
+        file,
+        limit[0],
+        limit[1],
+        "-o",
+        written.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let kept = run_json(&["operators", written.to_str().unwrap()]);
+    let strokes = kept["pages"][0]["ops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|op| op[0] == "S")
+        .count();
+    assert_eq!(strokes, 500);
+}
+
+#[test]
 fn a_report_written_as_it_is_made_is_not_written_out_of_time() {
     let heavy = heavy_pdf("timeout-streamed.pdf", 2_000);
     let heavy = heavy.to_str().unwrap();

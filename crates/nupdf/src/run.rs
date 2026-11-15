@@ -1432,6 +1432,21 @@ impl<'a> Run<'a> {
         Err(format!("limit error: {message}"))
     }
 
+    /// One more operator for this page's run, unless it has taken as many
+    /// as a page may (`Limits::max_page_operators`): then the page ends
+    /// here, as it does past its glyphs.
+    fn count_operator(&mut self) -> Result<(), String> {
+        let limit = self.doc.limits().max_page_operators;
+        let taken = &mut self.state.store.page_operators;
+        if *taken < limit {
+            *taken += 1;
+            return Ok(());
+        }
+        let message = format!("page runs more than {limit} operators (--max-page-operators)");
+        self.warn("limit.page_operators", message.clone());
+        Err(format!("limit error: {message}"))
+    }
+
     /// `show_string`.
     fn show_codes(&mut self, fd: &Arc<FontDesc>, s: &[u8]) -> Result<(), String> {
         let lang = self.lang_from_marked_content();
@@ -3368,6 +3383,11 @@ impl Processor for Run<'_> {
 
     fn op(&mut self, op: Op<'_>) -> Result<(), String> {
         let doc = self.doc;
+        // The interpreter's own marks at the end of a stream are not the
+        // page's operators.
+        if !matches!(op, Op::EndOfData | Op::End) {
+            self.count_operator()?;
+        }
         match op {
             Op::LineWidth(w) => {
                 self.flush_text()?;
@@ -4125,6 +4145,7 @@ pub fn run_page_contents_with(
     let mut store = Some(store);
     if let Some(store) = &mut store {
         store.page_glyphs = 0;
+        store.page_operators = 0;
     }
     let error = run_page_imp(doc, page, dev, &mut store, usage, user).err();
     PageRun {

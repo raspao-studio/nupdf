@@ -328,8 +328,10 @@ pub fn run_page_parts(
     let annots = made(&annots);
     let widgets = made(&widgets);
     let mut store = store;
-    // The page's glyphs are counted from here, whichever parts are run.
+    // The page's glyphs and operators are counted from here, whichever
+    // parts are run.
     store.page_glyphs = 0;
+    store.page_operators = 0;
     let mut store = Some(store);
     let mut error = None;
     if parts.contents {
@@ -427,6 +429,13 @@ mod tests {
     /// Two pages that each show "abcde", the first with a stamp whose
     /// appearance shows "xyz", opened with `limit` glyphs a page.
     fn lettered(limit: usize) -> Document {
+        lettered_within(crate::Limits {
+            max_page_glyphs: limit,
+            ..Default::default()
+        })
+    }
+
+    fn lettered_within(limits: crate::Limits) -> Document {
         let content = stream("", "BT /F1 10 Tf 10 50 Td (ab) Tj (cde) Tj ET");
         let stamp = stream(
             "/Type/XObject/Subtype/Form/BBox[0 0 50 20]/Resources<</Font<</F1 6 0 R>>>>",
@@ -442,10 +451,6 @@ mod tests {
             "<</Type/Annot/Subtype/Stamp/Rect[10 10 60 30]/AP<</N 8 0 R>>>>",
             &stamp,
         ]);
-        let limits = crate::Limits {
-            max_page_glyphs: limit,
-            ..Default::default()
-        };
         Document::open_with(pdf, limits).unwrap_or_else(|e| panic!("{e:?}"))
     }
 
@@ -492,6 +497,37 @@ mod tests {
         assert_eq!(texts(&doc, Parts::ALL), both("abcde xyz", "abcde"));
         // The default is far from any page: a page of five is read.
         assert_eq!(crate::Limits::default().max_page_glyphs, 2_000_000);
+    }
+
+    #[test]
+    fn a_page_runs_no_more_operators_than_its_limit() {
+        let open = |n: usize| {
+            lettered_within(crate::Limits {
+                max_page_operators: n,
+                ..Default::default()
+            })
+        };
+        let over = |n: usize| {
+            Err(format!(
+                "limit error: page runs more than {n} operators (--max-page-operators)"
+            ))
+        };
+        let both = |a: &str, b: &str| vec![Ok(a.to_string()), Ok(b.to_string())];
+        // Each page's contents are six operators (BT Tf Td Tj Tj ET): the
+        // count starts again on each page.
+        let doc = open(6);
+        assert_eq!(texts(&doc, Parts::CONTENTS), both("abcde", "abcde"));
+        assert!(!doc.diagnostics().has("limit.page_operators"));
+        let doc = open(5);
+        assert_eq!(texts(&doc, Parts::CONTENTS), [over(5), over(5)]);
+        assert!(doc.diagnostics().has("limit.page_operators"));
+        // What an annotation's appearance runs counts with its page's: the
+        // stamp's five operators and the four it is drawn with.
+        let doc = open(14);
+        assert_eq!(texts(&doc, Parts::ALL), [over(14), Ok("abcde".into())]);
+        let doc = open(15);
+        assert_eq!(texts(&doc, Parts::ALL), both("abcde xyz", "abcde"));
+        assert_eq!(crate::Limits::default().max_page_operators, 5_000_000);
     }
 
     #[test]

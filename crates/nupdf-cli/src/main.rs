@@ -53,6 +53,10 @@ struct Cli {
     /// limit error.
     #[arg(long, global = true, default_value_t = nupdf::Limits::default().max_page_glyphs)]
     max_page_glyphs: usize,
+    /// Most content-stream operators a page's run may take; a page that
+    /// runs more fails with a limit error.
+    #[arg(long, global = true, default_value_t = nupdf::Limits::default().max_page_operators)]
+    max_page_operators: usize,
     /// Password for an encrypted document (user or owner).
     #[arg(long, global = true)]
     password: Option<String>,
@@ -942,6 +946,7 @@ fn run(cli: Cli) -> ExitCode {
         max_decoded_bytes: cli.max_decoded_bytes,
         max_xref_entries: cli.max_xref_entries,
         max_page_glyphs: cli.max_page_glyphs,
+        max_page_operators: cli.max_page_operators,
         ..nupdf::Limits::default()
     };
     let password = cli.password.as_deref();
