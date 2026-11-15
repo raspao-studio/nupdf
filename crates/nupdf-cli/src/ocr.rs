@@ -60,7 +60,10 @@ pub fn scan(doc: &Document, indices: &[i32], quick: bool) -> Vec<Result<PageText
         flags,
         ..Options::default()
     };
-    nupdf::parallel::map(doc, indices, opts, None, &|i, page| {
+    // A long document's pages on threads, as the commands that read
+    // text take them unasked (DECISIONS D53).
+    let threads = crate::threads_for(None, indices.len());
+    nupdf::parallel::map(doc, indices, opts, threads, &|i, page| {
         let page = page?;
         let mut chars = 0;
         let mut images = Vec::new();
@@ -219,7 +222,7 @@ pub fn ocr(
             .and_then(|r| {
                 r.pix
                     .to_pixmap(Some(nupdf::colorspace::ColorSpace::Rgb))
-                    .png()
+                    .png_at(crate::render::PNG_LEVEL)
             });
         let png = match png {
             Ok(p) => p,

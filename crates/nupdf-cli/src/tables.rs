@@ -96,6 +96,7 @@ pub fn tables(
         flags: opts.flags | nupdf::stext::flags::TABLE_HUNT | nupdf::stext::flags::COLLECT_VECTORS,
         ..opts
     };
+    let threads = crate::threads_for(threads, indices.len());
     let pages: Vec<Value> =
         nupdf::parallel::map(doc, indices, opts, threads, &|i, page| match page {
             Ok(p) => {

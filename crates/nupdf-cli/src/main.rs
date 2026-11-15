@@ -251,7 +251,8 @@ enum Command {
         #[arg(long, default_value = "")]
         options: String,
         /// Work on this many threads, a page per thread at a time; the
-        /// output is the same at every count (DECISIONS D37).
+        /// output is the same at every count (DECISIONS D37). Without it,
+        /// up to eight for 32 pages or more.
         #[arg(long)]
         threads: Option<usize>,
     },
@@ -288,7 +289,8 @@ enum Command {
         #[arg(long)]
         fields: Option<String>,
         /// Work on this many threads, a page per thread at a time; the
-        /// output is the same at every count (DECISIONS D37).
+        /// output is the same at every count (DECISIONS D37). Without it,
+        /// up to eight for 32 pages or more.
         #[arg(long)]
         threads: Option<usize>,
         /// For `--format text`: the page contents' text alone, without the
@@ -317,7 +319,8 @@ enum Command {
         #[arg(long)]
         max_items: Option<usize>,
         /// Work on this many threads, a page per thread at a time; the
-        /// output is the same at every count (DECISIONS D37).
+        /// output is the same at every count (DECISIONS D37). Without it,
+        /// up to eight for 32 pages or more.
         #[arg(long)]
         threads: Option<usize>,
     },
@@ -439,9 +442,11 @@ enum Command {
         /// Render on this many threads: pages at once, and threads left
         /// over split a page into bands. A page drawn in bands can differ
         /// by a few levels where strokes and shadings cross a band's edge,
-        /// as MuPDF's bands do.
-        #[arg(long, default_value_t = 1)]
-        threads: usize,
+        /// as MuPDF's bands do. Without it, pages at once on up to eight
+        /// threads and no bands: the pixels of one thread. Pages that
+        /// depend on the pages before them are drawn in order either way.
+        #[arg(long)]
+        threads: Option<usize>,
         /// Convert colors by MuPDF's formulas instead of its ICC profiles,
         /// as `mutool draw -N`.
         #[arg(long)]
@@ -466,7 +471,8 @@ enum Command {
         #[arg(long, value_enum, default_value = "json")]
         format: TableFormat,
         /// Work on this many threads, a page per thread at a time; the
-        /// output is the same at every count.
+        /// output is the same at every count. Without it, up to eight for
+        /// 32 pages or more.
         #[arg(long)]
         threads: Option<usize>,
     },
@@ -938,7 +944,11 @@ fn run(cli: Cli) -> ExitCode {
         Command::Info { file } => open(file).and_then(|opened| {
             // On a copy of its own, so that drawing the pages to look at
             // them adds nothing to what `info` says of the file.
-            let text = Document::open(opened.0.data().to_vec())
+            // The copy shares the file's bytes, and works within the
+            // same limits.
+            let text = opened
+                .0
+                .reopen()
                 .map(|copy| {
                     if let Some(pw) = password {
                         let _ = copy.authenticate(pw);
@@ -1504,7 +1514,7 @@ fn run(cli: Cli) -> ExitCode {
                 dpi: *dpi,
                 region,
                 max_pixels: *max_pixels,
-                threads: (*threads).max(1),
+                threads: threads.map(|t| t.max(1)),
                 icc: !*no_icc,
                 parts: if *no_annots {
                     nupdf::draw::Parts::CONTENTS
@@ -1753,6 +1763,38 @@ fn run(cli: Cli) -> ExitCode {
         }
         Err(failure) => fail(failure, cli.pretty),
     }
+}
+
+/// Pages from which a command not given `--threads` runs them on threads.
+/// Below it a document is read in a few milliseconds either way; from
+/// about forty pages of text up, threads halve the time or better.
+const THREADED_FROM_PAGES: usize = 32;
+
+/// The most threads a command takes without being asked: past eight, a
+/// page more at a time gains little.
+const MOST_THREADS_UNASKED: usize = 8;
+
+/// How many commands run at once in this process, as `batch` runs one per
+/// job: each takes its share of the processors, not all of them.
+pub(crate) static COMMANDS_AT_ONCE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1);
+
+/// The threads a command works on when none were asked for: this
+/// process's share of the processors, eight at most.
+pub(crate) fn threads_unasked() -> usize {
+    let processors = std::thread::available_parallelism().map_or(1, usize::from);
+    let at_once = COMMANDS_AT_ONCE.load(std::sync::atomic::Ordering::Relaxed);
+    (processors / at_once.max(1)).clamp(1, MOST_THREADS_UNASKED)
+}
+
+/// What `--threads` comes to for a command reading `pages` pages: the
+/// count given; without one, threads for a long document and MuPDF's one
+/// page after another for a short one (DECISIONS D37, D53). Which of the
+/// two it is depends on the pages alone, never on the machine, so a
+/// report is the same wherever it is made: on one processor a long
+/// document still runs the threaded way, on one thread.
+pub(crate) fn threads_for(given: Option<usize>, pages: usize) -> Option<usize> {
+    given.or_else(|| (pages >= THREADED_FROM_PAGES).then(threads_unasked))
 }
 
 fn fail(failure: Failure, pretty: bool) -> ExitCode {
@@ -2130,7 +2172,7 @@ fn previews(doc: &Document, plan: &redact::Plan, dir: &Path, dpi: f32) -> Vec<se
         match rendered.and_then(|r| {
             r.pix
                 .to_pixmap(Some(nupdf::colorspace::ColorSpace::Rgb))
-                .png()
+                .png_at(render::PNG_LEVEL)
         }) {
             Ok(png) => match write_file(&path, &png) {
                 Ok(()) => entry["file"] = path.display().to_string().into(),
@@ -2702,4 +2744,31 @@ fn info((doc, facts): (Document, FileFacts), authenticated: bool) -> Result<Info
         metadata,
         diagnostics,
     })
+}
+
+#[cfg(test)]
+mod thread_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn long_documents_take_threads_unasked_and_short_ones_do_not() {
+        // The count asked for, whatever the pages.
+        assert_eq!(threads_for(Some(3), 1), Some(3));
+        assert_eq!(threads_for(Some(1), 500), Some(1));
+        // Short documents run as MuPDF runs them.
+        assert_eq!(threads_for(None, 0), None);
+        assert_eq!(threads_for(None, THREADED_FROM_PAGES - 1), None);
+        // Long ones on threads: at least one, so that the way they run
+        // does not depend on the machine, and eight at most.
+        for pages in [THREADED_FROM_PAGES, 10_000] {
+            let threads = threads_for(None, pages).unwrap_or(0);
+            assert!((1..=MOST_THREADS_UNASKED).contains(&threads), "{threads}");
+        }
+        // Commands running at once share the processors.
+        let before = COMMANDS_AT_ONCE.swap(usize::MAX, Ordering::Relaxed);
+        assert_eq!(threads_unasked(), 1);
+        assert_eq!(threads_for(None, THREADED_FROM_PAGES), Some(1));
+        COMMANDS_AT_ONCE.store(before, Ordering::Relaxed);
+    }
 }

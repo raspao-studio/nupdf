@@ -97,6 +97,7 @@ impl Body {
 pub fn stext(doc: &Document, opts: Options, threads: Option<usize>, keep: bool) -> Body {
     let count = doc.page_count().ok();
     let indices: Vec<i32> = (0..count.unwrap_or(0)).collect();
+    let threads = crate::threads_for(threads, indices.len());
     let pages = if keep {
         Pages::Kept(nupdf::parallel::map(
             doc,

@@ -1883,6 +1883,316 @@ fn render_threads_and_bands_do_not_change_the_pixels() {
     assert_eq!(images[0], images[1]);
 }
 
+/// A document of `pages` pages, each with a line of text naming it and,
+/// on every fifth, an operator that is not one.
+fn long_text_pdf(name: &str, pages: usize) -> PathBuf {
+    let mut objects = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        format!(
+            "<</Type/Pages/Count {pages}/Kids[{}]>>",
+            (0..pages)
+                .map(|i| format!("{} 0 R ", 4 + 2 * i))
+                .collect::<String>()
+        ),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
+    ];
+    for i in 0..pages {
+        let odd = if i % 5 == 0 { "nonsense " } else { "" };
+        let content = format!(
+            "{odd}BT /F1 12 Tf 20 100 Td (Page {} alpha beta) Tj ET",
+            i + 1
+        );
+        objects.push(format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<</Font<</F1 3 0 R>>>>/Contents {} 0 R>>",
+            5 + 2 * i
+        ));
+        objects.push(format!(
+            "<</Length {}>>\nstream\n{content}\nendstream",
+            content.len()
+        ));
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    let path = scratch(name);
+    std::fs::write(&path, out).unwrap();
+    path
+}
+
+#[test]
+fn a_long_document_reads_the_same_with_and_without_threads_asked_for() {
+    // 40 pages of text and 32 of inline images, some damaged: enough
+    // pages for the commands to take threads unasked.
+    let text = long_text_pdf("threads-unasked.pdf", 40);
+    let images = smoke("content-inline-images.pdf");
+    assert_eq!(info("content-inline-images.pdf")["page_count"], 32);
+    for file in [text.to_str().unwrap(), images.to_str().unwrap()] {
+        for command in [
+            &["extract"][..],
+            &["extract", "--format", "text"],
+            &["extract", "--format", "markdown", "--pages", "N-1"],
+            &["stext"],
+            &["search", "a", "--options", "regexp"],
+            &["tables"],
+        ] {
+            let run = |threads: &[&str]| {
+                let out = nupdf(&[&[command[0], file], &command[1..], threads].concat());
+                assert!(out.status.success(), "{command:?} {threads:?}");
+                (out.stdout, out.stderr)
+            };
+            let unasked = run(&[]);
+            assert!(!unasked.0.is_empty(), "{command:?}");
+            for threads in ["1", "3", "8"] {
+                assert_eq!(
+                    run(&["--threads", threads]),
+                    unasked,
+                    "{command:?} {threads}"
+                );
+            }
+        }
+    }
+    // With a budget, extract still runs the pages one after another and
+    // search runs them a window at a time, each stopping at it; they say
+    // the same as threads do, but for the warnings of pages only threads
+    // got to. The needles are on the first pages, far in, on the last
+    // page alone, and nowhere.
+    let file = text.to_str().unwrap();
+    for command in [
+        &["extract", "--max-chars", "40"][..],
+        &["extract", "--max-items", "3"],
+        &["search", "alpha", "--max-items", "2"],
+        &["search", "Page 3", "--max-items", "4"],
+        &["search", "Page 40", "--max-items", "1"],
+        &["search", "Page 4", "--max-items", "11"],
+        &["search", "gamma", "--max-items", "1"],
+    ] {
+        let run = |threads: &[&str]| {
+            let out = nupdf(&[&[command[0], file], &command[1..], threads].concat());
+            assert!(out.status.success(), "{command:?} {threads:?}");
+            serde_json::from_slice::<Value>(&out.stdout).unwrap()
+        };
+        let (mut unasked, mut threaded) = (run(&[]), run(&["--threads", "8"]));
+        // "Page 3" is on pages 3 and 30 to 39: 11 hits, capped at 4.
+        // "Page 4" is on pages 4 and 40: 2 hits, under the cap of 11.
+        let capped = !matches!(command[1], "Page 40" | "Page 4" | "gamma");
+        assert_eq!(unasked["truncated"], capped, "{command:?}");
+        if command[1] == "Page 3" {
+            let pages: Vec<_> = unasked["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| &h["page"])
+                .collect();
+            assert_eq!(pages, [3, 30, 31, 32], "{command:?}");
+        }
+        for report in [&mut unasked, &mut threaded] {
+            report.as_object_mut().unwrap().remove("diagnostics");
+        }
+        assert_eq!(unasked, threaded, "{command:?}");
+    }
+    // Pages drawn at once are the pages drawn one at a time.
+    let dir = scratch("threads-unasked-render");
+    let draw = |name: &str, threads: &[&str]| {
+        let out = dir.join(name);
+        let args = [&["render", file, "-o", out.to_str().unwrap()], threads].concat();
+        assert!(nupdf(&args).status.success(), "{threads:?}");
+        (1..=40)
+            .map(|n| std::fs::read(out.join(format!("page-{n:04}.png"))).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(draw("unasked", &[]), draw("one", &["--threads", "1"]));
+}
+
+#[test]
+fn pages_that_depend_on_the_pages_before_them_are_drawn_in_order() {
+    // A Type 3 font without resources of its own draws what /X is where
+    // the font is first used: on page 1 a black square, on the other 23
+    // pages nothing. Drawn in order, as MuPDF draws them, every page has
+    // the square; a page that loaded the font itself would be blank.
+    let pages = 24;
+    let mut objects = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        format!(
+            "<</Type/Pages/Count {pages}/Kids[{}]>>",
+            (0..pages).map(|i| format!("{} 0 R ", 8 + i)).collect::<String>()
+        ),
+        "<</Type/Font/Subtype/Type3/FontMatrix[1 0 0 1 0 0]/FontBBox[0 0 1 1]/FirstChar 65/LastChar 65\
+         /Widths[1]/Encoding<</Type/Encoding/Differences[65/a]>>/CharProcs<</a 4 0 R>>>>"
+            .to_string(),
+        "<</Length 15>>\nstream\n1 0 d0 /X Do   \nendstream".to_string(),
+        "<</Type/XObject/Subtype/Form/BBox[0 0 1 1]/Length 12>>\nstream\n0 0 1 1 re f\nendstream"
+            .to_string(),
+        "<</Type/XObject/Subtype/Form/BBox[0 0 1 1]/Length 0>>\nstream\n\nendstream".to_string(),
+        "<</Length 36>>\nstream\nBT /F 20 Tf 10 10 Td (A) Tj ET      \nendstream".to_string(),
+    ];
+    for i in 0..pages {
+        let x = if i == 0 { 5 } else { 6 };
+        objects.push(format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 40 40]/Contents 7 0 R\
+             /Resources<</Font<</F 3 0 R>>/XObject<</X {x} 0 R>>>>>>"
+        ));
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    let file = scratch("type3-borrowed.pdf");
+    std::fs::write(&file, out).unwrap();
+    let dir = scratch("type3-borrowed-render");
+    let draw = |name: &str, extra: &[&str]| {
+        let to = dir.join(name);
+        let args = [
+            &["render", file.to_str().unwrap(), "-o", to.to_str().unwrap()][..],
+            &["--format", "ppm"],
+            extra,
+        ]
+        .concat();
+        let run = nupdf(&args);
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        (1..=pages)
+            .filter_map(|n| std::fs::read(to.join(format!("page-{n:04}.ppm"))).ok())
+            .collect::<Vec<_>>()
+    };
+    let in_order = draw("one", &["--threads", "1"]);
+    assert_eq!(in_order.len(), pages);
+    // The square is there, on the first page and on the last.
+    let inked = |page: &[u8]| page[page.len() - 40 * 40 * 3..].iter().any(|&v| v < 128);
+    assert!(inked(&in_order[0]) && inked(&in_order[pages - 1]));
+    assert!(in_order.iter().all(|p| p == &in_order[0]));
+    for round in 0..3 {
+        assert!(draw("unasked", &[]) == in_order, "unasked, round {round}");
+        assert!(
+            draw("eight", &["--threads", "8"]) == in_order,
+            "8 threads, round {round}"
+        );
+    }
+    // The last page alone loads the font itself, and is blank, as in MuPDF.
+    let alone = draw("alone", &["--pages", "N"]);
+    assert_eq!(alone.len(), 1);
+    assert!(!inked(&alone[0]));
+}
+
+/// The data of a PNG's IDAT chunks inflated: its rows, each after a
+/// filter byte. nupdf inflates it, as a stream of a PDF made for it.
+fn png_rows(png: &[u8]) -> Vec<u8> {
+    assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    let (mut at, mut idat) = (8, Vec::new());
+    while at + 8 <= png.len() {
+        let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        if &png[at + 4..at + 8] == b"IDAT" {
+            idat.extend_from_slice(&png[at + 8..at + 8 + len]);
+        }
+        at += 12 + len;
+    }
+    let mut pdf = format!(
+        "%PDF-1.4\n1 0 obj\n<</Filter/FlateDecode/Length {}>>\nstream\n",
+        idat.len()
+    )
+    .into_bytes();
+    pdf.extend_from_slice(&idat);
+    pdf.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<</Root 1 0 R>>\n");
+    let doc = nupdf::Document::open(pdf).unwrap();
+    // No rows where the stream is not one: the caller counts them.
+    match doc.object(1) {
+        Some(nupdf::Object::Stream(stream)) => {
+            doc.stream_data(&stream).map_err(|e| e.report()).unwrap()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn render_writes_the_same_pixels_as_png_and_as_ppm() {
+    let input = smoke("stext.pdf");
+    let (png_dir, ppm_dir) = (scratch("render-png-pixels"), scratch("render-ppm-pixels"));
+    for (dir, format) in [(&png_dir, "png"), (&ppm_dir, "ppm")] {
+        let run = nupdf(&[
+            "render",
+            input.to_str().unwrap(),
+            "-o",
+            dir.to_str().unwrap(),
+            "--format",
+            format,
+            "--dpi",
+            "150",
+        ]);
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+    for page in ["page-0001", "page-0002"] {
+        let ppm = std::fs::read(ppm_dir.join(format!("{page}.ppm"))).unwrap();
+        // "P6\n<w> <h>\n255\n", then the pixels.
+        let header: Vec<&[u8]> = ppm.splitn(4, |&b| b == b'\n').collect();
+        let size: Vec<usize> = std::str::from_utf8(header[1])
+            .unwrap()
+            .split(' ')
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let (w, h, pixels) = (size[0], size[1], header[3]);
+        assert_eq!(pixels.len(), w * h * 3);
+        let png = std::fs::read(png_dir.join(format!("{page}.png"))).unwrap();
+        assert_eq!(
+            &png[16..24],
+            &[(w as u32).to_be_bytes(), (h as u32).to_be_bytes()].concat()[..]
+        );
+        // 8 bits, RGB, and every row unfiltered.
+        assert_eq!(&png[24..26], &[8, 2]);
+        let rows = png_rows(&png);
+        assert_eq!(rows.len(), (w * 3 + 1) * h);
+        for (row, want) in rows.chunks(w * 3 + 1).zip(pixels.chunks(w * 3)) {
+            assert_eq!(row[0], 0);
+            assert!(&row[1..] == want, "{page}");
+        }
+        // Text on white deflates to a fraction of its pixels.
+        assert!(
+            png.len() * 10 < pixels.len(),
+            "{} of {}",
+            png.len(),
+            pixels.len()
+        );
+    }
+}
+
 #[test]
 fn render_region_and_pixel_budget() {
     let input = smoke("stext.pdf");

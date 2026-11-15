@@ -50,13 +50,23 @@ pub fn parse_region(s: &str) -> Result<nupdf::geometry::Rect, String> {
     Ok(nupdf::geometry::Rect::new(x0, y0, x1, y1))
 }
 
+/// The zlib level pages are written as PNG at. MuPDF writes at zlib's
+/// default, 6, which took as long as drawing the pages did; at 3 the
+/// same pixels are written in a third of that time into files a seventh
+/// larger (DECISIONS D54). `images --extract` keeps MuPDF's level, as its
+/// files are compared with `mutool extract`'s.
+pub const PNG_LEVEL: i32 = 3;
+
 /// How to render: resolution, an optional region, the pixel budget and the
 /// threads pages run on.
 pub struct Settings {
     pub dpi: f32,
     pub region: Option<nupdf::geometry::Rect>,
     pub max_pixels: u64,
-    pub threads: usize,
+    /// Pages at once, with those left over splitting a page into bands;
+    /// without a count, pages at once on the threads a command takes
+    /// unasked and no bands, so the pixels are those of one thread.
+    pub threads: Option<usize>,
     /// Color management, as `mutool draw` has it on unless `-N`.
     pub icc: bool,
     /// What of each page to draw: everything, as `mutool draw`, or the contents alone (`--no-annots`).
@@ -83,8 +93,15 @@ pub fn render(
         .region
         .map(|r| nupdf::geometry::IRect::round(r.transform(ctm)));
     // Threads go to pages first, and those left over to bands of a page.
-    let bands = (settings.threads / pages.len().max(1)).max(1);
-    let pages_threads = settings.threads.min(pages.len().max(1));
+    let (bands, pages_threads) = match settings.threads {
+        Some(threads) => (
+            (threads / pages.len().max(1)).max(1),
+            threads.min(pages.len().max(1)),
+        ),
+        None => (1, crate::threads_unasked().min(pages.len().max(1))),
+    };
+    // Where what a page draws depends on the pages before it, the pages
+    // go one after another whatever the threads (`parallel::run_pages`).
     let job =
         |i: usize, doc: &Document, page: &Result<nupdf::Object, String>, store| -> (Value, _) {
             let (rendered, store) = match page {
@@ -123,7 +140,7 @@ fn page_entry(
                 Format::Png => r
                     .pix
                     .to_pixmap(Some(nupdf::colorspace::ColorSpace::Rgb))
-                    .png(),
+                    .png_at(PNG_LEVEL),
                 Format::Ppm => Ok(ppm(&r.pix)),
             };
             entry["width"] = r.pix.w.into();

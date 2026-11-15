@@ -149,7 +149,7 @@ fn run_jobs<T: Send>(
         let ((r, store), d) = diag::capture(|| job(i, doc, &pages[i], store));
         ((r, d), store)
     };
-    let threads = threads.clamp(1, pages.len().max(1));
+    let threads = in_order_if_tied(doc, threads.clamp(1, pages.len().max(1)));
     let mut done: Vec<Option<Done<T>>> = (0..pages.len()).map(|_| None).collect();
     if threads == 1 {
         let mut store = Store::default();
@@ -278,6 +278,7 @@ pub fn with_workers<T: Send, R>(
     job: &PageJob<'_, T>,
     body: impl FnOnce(&mut dyn FnMut(&[i32]) -> Vec<T>) -> R,
 ) -> R {
+    let threads = in_order_if_tied(doc, threads);
     let shared = Shared {
         round: Mutex::new(Round {
             id: 0,
@@ -466,6 +467,149 @@ pub fn map<T: Send>(
     }
 }
 
+/// `threads`, or one where `doc`'s pages are tied together
+/// ([`pages_draw_apart`]): threads take pages as they come free, so which
+/// page came first for a thread, and with it what such a page draws and
+/// how its text is boxed, would change from run to run. On one thread the
+/// pages run in order with one store, as MuPDF runs them.
+fn in_order_if_tied(doc: &Document, threads: usize) -> usize {
+    if threads > 1 && !pages_draw_apart(doc) {
+        1
+    } else {
+        threads
+    }
+}
+
+/// How deep a font dictionary written inside another object is looked for.
+const MAX_FONT_NESTING: usize = 16;
+
+/// The most glyph procedures looked through before giving up on telling.
+const MAX_GLYPH_PROCS: usize = 4096;
+
+/// Whether `doc`'s pages can be drawn each on its own, on threads, with
+/// the pixels of drawing them one after another: whether no Type 3 font
+/// draws with resources it takes from where it is first used.
+///
+/// A Type 3 font without /Resources borrows those in use where it is
+/// loaded (`pdf_load_type3_font`), and stays loaded for the pages after,
+/// so what its glyphs draw on one page can depend on which page came
+/// before it. MuPDF draws such a document's pages differently in a run
+/// than alone, and nupdf follows it; pages given out to threads as they
+/// come free would draw it differently from run to run. Most such fonts
+/// borrow nothing: their glyphs are paths and inline images, which name no
+/// resource. Only one whose glyphs do (a form, an image, a graphics
+/// state, a font, a colour space, a pattern or a shading by name) ties
+/// the pages together.
+///
+/// Every object is looked at, in a copy of the document opened afresh, so
+/// that nothing it loads or warns of shows in `doc`. False where it
+/// cannot be told: a document made or changed in memory, a run that has
+/// been interrupted, a glyph that does not parse.
+pub fn pages_draw_apart(doc: &Document) -> bool {
+    let Some(copy) = doc.reopen() else {
+        return false;
+    };
+    let mut procs = 0;
+    let (apart, _) = diag::capture(|| {
+        for num in 1..copy.xref_len() {
+            if num % 1024 == 0 && crate::interrupt::interrupted() {
+                return false;
+            }
+            let Ok(num) = i32::try_from(num) else {
+                return false;
+            };
+            if let Ok(Some(o)) = copy.load_object(num)
+                && borrows(&copy, &o, 0, &mut procs)
+            {
+                return false;
+            }
+        }
+        true
+    });
+    apart
+}
+
+/// Whether `o`, or a dictionary written inside it, is a Type 3 font
+/// without resources of its own whose glyphs name one.
+fn borrows(doc: &Document, o: &Object, depth: usize, procs: &mut usize) -> bool {
+    let dict = match o {
+        _ if depth > MAX_FONT_NESTING => return false,
+        Object::Dict(d) => d,
+        Object::Stream(s) => &s.dict,
+        Object::Array(items) => return items.iter().any(|i| borrows(doc, i, depth + 1, procs)),
+        _ => return false,
+    };
+    let type3 = dict.get(b"Subtype").is_some_and(|s| s.is_name(b"Type3"));
+    let own = !matches!(dict.get(b"Resources"), None | Some(Object::Null));
+    if type3 && !own {
+        let Some(glyphs) = dict.get(b"CharProcs").map(|c| doc.resolve(c)) else {
+            return false;
+        };
+        let Object::Dict(glyphs) = glyphs else {
+            return false;
+        };
+        return glyphs.iter().any(|(_, glyph)| {
+            *procs += 1;
+            *procs > MAX_GLYPH_PROCS || names_a_resource(doc, glyph)
+        });
+    }
+    dict.iter().any(|(_, v)| borrows(doc, v, depth + 1, procs))
+}
+
+/// Whether the glyph procedure `glyph` uses a resource by name, as far as
+/// running it with no resources shows: an operator that takes one, or
+/// anything that goes wrong.
+fn names_a_resource(doc: &Document, glyph: &Object) -> bool {
+    use crate::content::{Op, ProcState, Processor};
+
+    #[derive(Default)]
+    struct Probe {
+        state: ProcState,
+        named: bool,
+    }
+
+    impl Processor for Probe {
+        fn op(&mut self, op: Op<'_>) -> Result<(), String> {
+            let device = |name: &[u8]| {
+                matches!(
+                    name,
+                    b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK" | b"G" | b"RGB" | b"CMYK"
+                )
+            };
+            self.named |= match op {
+                Op::GsBegin { .. }
+                | Op::Font { .. }
+                | Op::ColorPattern { .. }
+                | Op::ColorShade { .. }
+                | Op::Shade { .. }
+                | Op::DrawImage { .. }
+                | Op::DrawForm { .. } => true,
+                Op::ColorSpace { name, .. } => !device(name) && name != b"Pattern",
+                Op::InlineImage {
+                    colorspace_name, ..
+                } => colorspace_name.is_some_and(|n| !device(n)),
+                Op::MarkedPointProperties { raw, .. } | Op::BeginMarkedProperties { raw, .. } => {
+                    matches!(raw, Some(Object::Name(_)))
+                }
+                _ => false,
+            };
+            Ok(())
+        }
+
+        fn state(&mut self) -> &mut ProcState {
+            &mut self.state
+        }
+    }
+
+    if !matches!(doc.resolve(glyph), Object::Stream(_)) {
+        return false;
+    }
+    let mut probe = Probe::default();
+    let (ran, warnings) =
+        diag::capture(|| crate::content::process_raw_contents(doc, glyph, &mut probe));
+    probe.named || ran.is_err() || !warnings.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +624,143 @@ mod tests {
             .iter()
             .map(|r| r.as_ref().map(|p| p.text()).map_err(Clone::clone))
             .collect()
+    }
+
+    #[test]
+    fn pages_tied_by_a_borrowing_type3_font_run_in_order_on_any_threads() {
+        // A Type 3 font with no box and no resources of its own: its box,
+        // and so the box of the text set in it, is measured from what its
+        // glyph draws, which is the /X of the page that first uses it. On
+        // page 1 that is a square of 1, on the other 47 a square of 3.
+        let pages = 48;
+        let mut objects = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            format!(
+                "<</Type/Pages/Count {pages}/Kids[{}]>>",
+                (0..pages).map(|i| format!("{} 0 R ", 8 + i)).collect::<String>()
+            )
+            .into_bytes(),
+            b"<</Type/Font/Subtype/Type3/FontMatrix[1 0 0 1 0 0]/FontBBox[0 0 0 0]/FirstChar 65/LastChar 65\
+              /Widths[1]/Encoding<</Type/Encoding/Differences[65/a]>>/CharProcs<</a 4 0 R>>\
+              /ToUnicode 99 0 R>>"
+                .to_vec(),
+            crate::testutil::stream("", b"1 0 d0 /X Do"),
+            crate::testutil::stream("/Type/XObject/Subtype/Form/BBox[0 0 1 1]", b"0 0 1 1 re f"),
+            crate::testutil::stream("/Type/XObject/Subtype/Form/BBox[0 0 3 3]", b"0 0 3 3 re f"),
+            crate::testutil::stream("", b"BT /F 10 Tf 10 10 Td (A) Tj ET"),
+        ];
+        for i in 0..pages {
+            let x = if i == 0 { 5 } else { 6 };
+            objects.push(
+                format!(
+                    "<</Type/Page/Parent 2 0 R/MediaBox[0 0 80 80]/Contents 7 0 R\
+                     /Resources<</Font<</F 3 0 R>>/XObject<</X {x} 0 R>>>>>>"
+                )
+                .into_bytes(),
+            );
+        }
+        let doc = Document::open(crate::testutil::pdf_bytes(&objects)).unwrap();
+        assert!(!pages_draw_apart(&doc));
+        let indices: Vec<i32> = (0..pages).collect();
+        let boxes = |results: &[PageResult]| -> Vec<String> {
+            results
+                .iter()
+                .map(|r| format!("{:?}", r.as_ref().map(|p| p.blocks.clone())))
+                .collect()
+        };
+        let in_order = boxes(&extract_sequential(&doc, &indices, Options::default()));
+        // Every page's text has the box of page 1's square; alone, the
+        // last page has that of its own, which is not the same.
+        assert!(in_order.iter().all(|b| b == &in_order[0]));
+        let alone = boxes(&extract_sequential(
+            &doc,
+            &indices[pages as usize - 1..],
+            Options::default(),
+        ));
+        assert_ne!(alone[0], in_order[0]);
+        for threads in [2, 8] {
+            for round in 0..3 {
+                let got = boxes(&extract_pages(&doc, &indices, Options::default(), threads));
+                assert!(got == in_order, "{threads} threads, round {round}");
+                // In windows on kept threads too.
+                let job = |_: i32, doc: &Document, page: &Result<Object, String>, store: Store| {
+                    run_page(
+                        doc,
+                        page,
+                        Options::default(),
+                        store,
+                        crate::page_run::Parts::CONTENTS,
+                    )
+                };
+                let got = with_workers(&doc, threads, &job, |run| {
+                    indices.chunks(7).flat_map(run).collect::<Vec<_>>()
+                });
+                assert!(
+                    boxes(&got) == in_order,
+                    "{threads} threads in windows, round {round}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pages_draw_apart_unless_a_type3_font_borrows_its_resources() {
+        // A document with a Type 3 font (4) whose one glyph is `proc`.
+        let doc = |font_rest: &str, proc: &str| {
+            let page =
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 9 9]/Resources<</Font<</F 4 0 R>>>>>>";
+            let font = format!(
+                "<</Type/Font/Subtype/Type3/FontMatrix[1 0 0 1 0 0]/FontBBox[0 0 1 1]/FirstChar 65\
+                 /LastChar 65/Widths[1]/Encoding<</Differences[65/a]>>/CharProcs<</a 5 0 R>>{font_rest}>>"
+            );
+            let objects = [
+                b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+                b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+                page.as_bytes().to_vec(),
+                font.into_bytes(),
+                crate::testutil::stream("", proc.as_bytes()),
+            ];
+            Document::open(crate::testutil::pdf_bytes(&objects)).unwrap()
+        };
+        // No Type 3 font at all.
+        assert!(pages_draw_apart(&smoke("stext.pdf")));
+        // Glyphs that name no resource: paths, colours, an inline image.
+        for proc in [
+            "1 0 0 0 1 1 d1 0 0 1 1 re f",
+            "1 0 d0 1 0 0 rg /DeviceRGB cs 0 1 0 sc q 2 0 0 2 0 0 cm 0 0 m 1 1 l S Q",
+            "1 0 d0 BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI",
+            "1 0 d0 /Span BMC 0 0 1 1 re f EMC /T <</K 1>> BDC EMC",
+            "",
+        ] {
+            assert!(pages_draw_apart(&doc("", proc)), "{proc}");
+        }
+        // Glyphs that do, in a font without resources of its own: the
+        // pages are tied together.
+        for proc in [
+            "1 0 d0 /X Do",
+            "1 0 d0 /G0 gs 0 0 1 1 re f",
+            "1 0 d0 /C0 cs 0 0 1 1 re f",
+            "1 0 d0 /Pattern cs /P0 scn 0 0 1 1 re f",
+            "1 0 d0 /S0 sh",
+            "1 0 d0 BT /F0 1 Tf (a) Tj ET",
+            "1 0 d0 BI /W 1 /H 1 /BPC 8 /CS /C0 ID \x00 EI",
+            "1 0 d0 /OC /L0 BDC 0 0 1 1 re f EMC",
+            "1 0 d0 0 0 1 1 re f nonsense",
+        ] {
+            assert!(!pages_draw_apart(&doc("", proc)), "{proc}");
+            assert!(!pages_draw_apart(&doc("/Resources null", proc)), "{proc}");
+            // With resources of its own the font takes none from a page.
+            assert!(pages_draw_apart(&doc("/Resources<<>>", proc)), "{proc}");
+        }
+        // Nothing the look loads or warns of shows in the document.
+        let quiet = doc("", "1 0 d0 /X Do nonsense");
+        assert!(!pages_draw_apart(&quiet));
+        assert!(quiet.diagnostics().snapshot().is_empty());
+        // A document changed in memory has no file to look in.
+        let edited = doc("/Resources<<>>", "");
+        assert!(pages_draw_apart(&edited));
+        edited.add_object(Object::Null);
+        assert!(!pages_draw_apart(&edited));
     }
 
     #[test]

@@ -113,6 +113,25 @@ fn hit_value(page: &StextPage, n: usize, hit: &Hit) -> Value {
     Value::Object(m)
 }
 
+/// The pages a capped search works on at a time: 4, then twice as many
+/// each time up to 64, whatever the threads, so that the pages run, and
+/// with them the warnings reported, are the same on every machine. Hits
+/// on the first pages, the usual case, cost four pages; a needle far in
+/// is soon found 64 pages at a time.
+fn windows(indices: &[i32]) -> impl Iterator<Item = &[i32]> {
+    let mut rest = indices;
+    let mut size = 4;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let (window, after) = rest.split_at(size.min(rest.len()));
+        rest = after;
+        size = (size * 2).min(64);
+        Some(window)
+    })
+}
+
 /// Searches the pages `args` asks for.
 pub fn search(doc: &Document, args: &Args) -> Result<Value, String> {
     let page_count = doc.page_count();
@@ -124,8 +143,7 @@ pub fn search(doc: &Document, args: &Args) -> Result<Value, String> {
     let mut hits = Vec::new();
     let mut errors = Vec::new();
     let mut truncated = false;
-    let page_hits = |i: usize, page: nupdf::parallel::PageResult| {
-        let n = indices[i] as usize + 1;
+    let hits_of = |n: usize, page: nupdf::parallel::PageResult| {
         page.and_then(|p| {
             search::search_page(&p, args.needle, args.options).map(|h| {
                 // As many as can be kept: those past the cap are dropped.
@@ -137,31 +155,68 @@ pub fn search(doc: &Document, args: &Args) -> Result<Value, String> {
             })
         })
     };
-    // Without threads, pages past the last hit kept are not run, as in
-    // MuPDF's loop.
-    let found: Box<dyn Iterator<Item = Result<Vec<Value>, String>>> = match args.threads {
-        None => Box::new(
-            nupdf::parallel::sequential(doc, &indices, args.stext)
-                .enumerate()
-                .map(|(i, p)| page_hits(i, p)),
-        ),
-        Some(n) => Box::new(
-            nupdf::parallel::map_pages(doc, &indices, args.stext, n, &page_hits).into_iter(),
-        ),
-    };
-    'pages: for (index, page) in indices.iter().zip(found) {
-        let n = *index as usize + 1;
+    // A page's hits added to the report; false once the cap is passed.
+    let mut take = |index: i32, page: Result<Vec<Value>, String>| {
         match page {
             Ok(page_hits) => {
                 for hit in page_hits {
                     if args.max_items.is_some_and(|m| hits.len() >= m) {
                         truncated = true;
-                        break 'pages;
+                        return false;
                     }
                     hits.push(hit);
                 }
             }
-            Err(e) => errors.push(json!({ "page": n, "error": e })),
+            Err(e) => errors.push(json!({ "page": index + 1, "error": e })),
+        }
+        true
+    };
+    let unasked = crate::threads_for(None, indices.len());
+    match (args.threads, args.max_items, unasked) {
+        // All the pages on the threads asked for, or on those a long
+        // document takes unasked.
+        (Some(threads), _, _) | (None, None, Some(threads)) => {
+            let found = nupdf::parallel::map_pages(doc, &indices, args.stext, threads, &|i, p| {
+                hits_of(indices[i] as usize + 1, p)
+            });
+            for (index, page) in indices.iter().zip(found) {
+                if !take(*index, page) {
+                    break;
+                }
+            }
+        }
+        // A long document with a cap on the hits: windows of pages on
+        // threads, stopping at the window that passes the cap. Page by
+        // page, a needle whose first hit is far in took longer than
+        // searching every page on threads does.
+        (None, Some(_), Some(threads)) => {
+            let job = |index: i32,
+                       doc: &Document,
+                       page: &Result<nupdf::Object, String>,
+                       store: nupdf::content::Store| {
+                let parts = nupdf::page_run::Parts::CONTENTS;
+                let (r, store) = nupdf::parallel::run_page(doc, page, args.stext, store, parts);
+                (hits_of(index as usize + 1, r), store)
+            };
+            nupdf::parallel::with_workers(doc, threads, &job, |run| {
+                for window in windows(&indices) {
+                    for (index, page) in window.iter().zip(run(window)) {
+                        if !take(*index, page) {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+        // A short one: pages past the last hit kept are not run, as in
+        // MuPDF's loop.
+        (None, _, None) => {
+            let found = nupdf::parallel::sequential(doc, &indices, args.stext);
+            for (index, page) in indices.iter().zip(found) {
+                if !take(*index, hits_of(*index as usize + 1, page)) {
+                    break;
+                }
+            }
         }
     }
     let mut body = Map::new();
@@ -174,4 +229,23 @@ pub fn search(doc: &Document, args: &Args) -> Result<Value, String> {
     body.insert("page_errors".into(), errors.into());
     body.insert("truncated".into(), truncated.into());
     Ok(Value::Object(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_capped_search_takes_pages_in_growing_windows() {
+        let pages: Vec<i32> = (0..300).collect();
+        let sizes: Vec<usize> = windows(&pages).map(<[i32]>::len).collect();
+        assert_eq!(sizes, [4, 8, 16, 32, 64, 64, 64, 48]);
+        let again: Vec<i32> = windows(&pages).flatten().copied().collect();
+        assert_eq!(again, pages);
+        assert_eq!(
+            windows(&pages[..3]).map(<[i32]>::len).collect::<Vec<_>>(),
+            [3]
+        );
+        assert_eq!(windows(&[]).count(), 0);
+    }
 }

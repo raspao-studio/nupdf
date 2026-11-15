@@ -247,6 +247,15 @@ pub trait Device {
     fn begin_metatext(&mut self, meta: Metatext, text: &[u8]) {}
 
     fn end_metatext(&mut self) {}
+
+    /// Whether the device is to get each string as it is shown, where
+    /// MuPDF hands a text object's text over when something ends it. A
+    /// device that stops the run at the first character asks for this:
+    /// held back, a text object of ten million strings is read whole
+    /// before the device sees its first.
+    fn text_as_shown(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

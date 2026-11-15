@@ -1619,6 +1619,10 @@ impl Walker for Split<'_, '_> {
 
 #[allow(unused_variables)]
 impl Device for StextDevice<'_> {
+    fn text_as_shown(&self) -> bool {
+        self.flags & flags::STOP_AT_TEXT != 0
+    }
+
     fn fill_path(
         &mut self,
         path: &Path,
@@ -2279,6 +2283,32 @@ mod tests {
         // Nothing is left stopped for the next run.
         assert_eq!(chars(0), 1001);
         assert_eq!(chars(flags::STOP_AT_TEXT), 1);
+        // One text object of a thousand strings stops at its first too:
+        // the text is handed over as it is shown, not when the object
+        // ends, by when all of it would have been read.
+        let mut one = b"BT /F1 12 Tf 10 10 Td ".to_vec();
+        for _ in 0..1000 {
+            one.extend_from_slice(b"(B) Tj [(C) 5 (D)] TJ ");
+        }
+        one.extend_from_slice(b"ET");
+        let d = doc(&one, "", "", &[]);
+        let page = d.page(0).unwrap_or_else(|e| panic!("{e:?}"));
+        let chars = |flags: u32| {
+            let opts = Options {
+                flags,
+                ..Options::default()
+            };
+            let page = extract_page(&d, &page, opts, Store::default())
+                .0
+                .unwrap_or_else(|e| panic!("{e}"));
+            all_lines(&page.blocks)
+                .iter()
+                .map(|l| l.chars.len())
+                .sum::<usize>()
+        };
+        assert_eq!(chars(0), 3000);
+        assert_eq!(chars(flags::STOP_AT_TEXT), 1);
+        assert_eq!(chars(0), 3000);
         // A page without text runs to its end.
         let blank = doc(b"0 0 1 1 re f", "", "", &[]);
         let page = blank.page(0).unwrap_or_else(|e| panic!("{e:?}"));
