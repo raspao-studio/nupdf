@@ -28,7 +28,8 @@ use crate::signature;
 use crate::stext::{self, Options as StextOptions};
 
 /// Most objects hashed into one page's fingerprint; past it the rest of the
-/// page hashes as a marker, the same in every revision.
+/// page hashes as a marker, the same in every revision, and the page is
+/// reported unchecked after a signature ([`TAMPER_POST_SIGNATURE_UNCHECKED`]).
 const MAX_FINGERPRINT_NODES: usize = 200_000;
 
 /// Deepest object nesting followed when fingerprinting.
@@ -51,6 +52,11 @@ pub const TAMPER_SIGNATURE_BROKEN: &str = "tamper.signature_broken";
 /// Hazard code: annotations other than form-field widgets were added, removed
 /// or changed, or form fields were added or removed, after a valid signature.
 pub const TAMPER_POST_SIGNATURE_ANNOTATION_EDIT: &str = "tamper.post_signature_annotation_edit";
+/// Hazard code: after a valid signature, a page (listed in
+/// `unchecked_pages`) reaches more objects, or nests deeper, than its
+/// fingerprint may follow in this revision or the one before, so an edit to
+/// what it draws could not be ruled out.
+pub const TAMPER_POST_SIGNATURE_UNCHECKED: &str = "tamper.post_signature_unchecked";
 
 /// Revision classification: initial base revision (`rev == 1`).
 pub const CLASS_INITIAL: &str = "initial";
@@ -131,6 +137,11 @@ pub struct RevisionDelta {
     pub annots_removed: usize,
     pub newly_occluded_spans: Vec<String>,
     pub forensic_hazards: Vec<String>,
+    /// 1-based pages present in both revisions whose fingerprint was cut
+    /// short in either, after a valid signature
+    /// ([`TAMPER_POST_SIGNATURE_UNCHECKED`]); omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unchecked_pages: Vec<i32>,
 }
 
 /// Forensic snapshot of a single chronological PDF revision (`1..=N`).
@@ -181,6 +192,9 @@ struct ExtractedRevState {
     /// Per page: a hash of its content streams, resources and boxes, with
     /// everything they reach.
     page_fingerprints: Vec<[u8; 32]>,
+    /// Per page: whether its fingerprint, and those of its annotations'
+    /// appearances, reached everything.
+    page_complete: Vec<bool>,
     fields: BTreeMap<String, String>,
     annots: BTreeMap<AnnotKey, usize>,
     signatures: Vec<RevisionSignature>,
@@ -190,6 +204,29 @@ struct ExtractedRevState {
 /// Inspects every chronological revision of `doc`, verifying signatures and
 /// computing inter-revision deltas and post-signature tamper classifications.
 pub fn inspect_history(doc: &Document, opts: &HistoryOptions) -> Result<HistoryReport, String> {
+    inspect_history_with(doc, opts, FingerprintLimits::DEFAULT)
+}
+
+/// How far one page's fingerprint walk may go: tests lower it rather than
+/// build pages that reach 200,000 objects.
+#[derive(Debug, Clone, Copy)]
+struct FingerprintLimits {
+    nodes: usize,
+    depth: usize,
+}
+
+impl FingerprintLimits {
+    const DEFAULT: Self = Self {
+        nodes: MAX_FINGERPRINT_NODES,
+        depth: MAX_FINGERPRINT_DEPTH,
+    };
+}
+
+fn inspect_history_with(
+    doc: &Document,
+    opts: &HistoryOptions,
+    limits: FingerprintLimits,
+) -> Result<HistoryReport, String> {
     let ends = doc.revision_byte_ends();
     if ends.len() > MAX_REVISIONS_INSPECTED {
         return Err(format!(
@@ -207,7 +244,7 @@ pub fn inspect_history(doc: &Document, opts: &HistoryOptions) -> Result<HistoryR
         let rev_bytes = doc.revision_bytes(rev_num).map_err(|e| e.message)?;
         let doc_id = DocId::of(rev_bytes).to_string();
         let rev_doc = doc.open_revision(rev_num).map_err(|e| e.message)?;
-        let curr_state = extract_rev_state(&rev_doc, opts.run_attest && ends.len() > 1)?;
+        let curr_state = extract_rev_state(&rev_doc, opts.run_attest && ends.len() > 1, limits)?;
 
         let (classification, delta) = match &prev_state {
             None => {
@@ -259,7 +296,11 @@ pub fn inspect_history(doc: &Document, opts: &HistoryOptions) -> Result<HistoryR
     })
 }
 
-fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevState, String> {
+fn extract_rev_state(
+    doc: &Document,
+    run_attest: bool,
+    limits: FingerprintLimits,
+) -> Result<ExtractedRevState, String> {
     let page_count = doc.page_count().map_err(|e| e.0)?;
     let cap = usize::try_from(page_count.max(0)).unwrap_or(0);
     let mut lines_by_page = Vec::with_capacity(cap);
@@ -268,8 +309,9 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
     let mut signatures = Vec::new();
     let mut seen_sig_objs: Vec<i32> = Vec::new();
     let mut store = Store::default();
-    let mut hasher = ObjHasher::new(doc);
+    let mut hasher = ObjHasher::new(doc, limits);
     let mut page_fingerprints = Vec::with_capacity(cap);
+    let mut page_complete = Vec::with_capacity(cap);
 
     for p_idx in 0..page_count {
         let page_obj = doc.page(p_idx).map_err(|e| e.0)?;
@@ -291,7 +333,9 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
             }
         }
         lines_by_page.push(page_lines);
-        page_fingerprints.push(hasher.page(&page_obj));
+        let print = hasher.page(&page_obj);
+        page_fingerprints.push(print.hash);
+        let mut complete = print.complete;
 
         // 2. Non-widget annotations and form/signature widgets on this page.
         let (page_annots, page_widgets) = annot::page_annots(doc, &page_obj);
@@ -306,15 +350,17 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
             ];
             let contents = annot::contents(doc, a);
             let appearance = hasher.value_hash(&doc.dict_get(a, b"AP"));
+            complete &= appearance.complete;
             let key = AnnotKey {
                 page: p_idx + 1,
                 kind,
                 rect_q,
                 contents,
-                appearance,
+                appearance: appearance.hash,
             };
             *annots.entry(key).or_insert(0) += 1;
         }
+        page_complete.push(complete);
 
         for w in &page_widgets {
             if form::type_string(doc, w) == "signature" {
@@ -370,6 +416,7 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
         page_count,
         lines_by_page,
         page_fingerprints,
+        page_complete,
         fields,
         annots,
         signatures,
@@ -377,28 +424,56 @@ fn extract_rev_state(doc: &Document, run_attest: bool) -> Result<ExtractedRevSta
     })
 }
 
+/// One page's (or one value's) hash, and whether the walk reached all of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    hash: [u8; 32],
+    /// `false` when the node budget or the depth limit cut the walk short:
+    /// what lies past the cut hashes as a marker, so an edit there is not seen.
+    complete: bool,
+}
+
 /// Content hashes of objects in one revision, each reachable object hashed
 /// once (`memo`), cycles cut (`open`), and the whole walk bounded per page.
+///
+/// Only a hash that is the same wherever the object is reached from is
+/// memoised: one cut short by the budget or the depth limit depends on how
+/// much was spent before it, and one cut at a cycle on which of the cycle's
+/// objects was entered first. Those are hashed again where they recur.
 struct ObjHasher<'a> {
     doc: &'a Document,
     memo: HashMap<i32, [u8; 32]>,
     open: HashSet<i32>,
     budget: usize,
+    limits: FingerprintLimits,
+    /// The walk since the last reset hit the budget or the depth limit.
+    cut: bool,
+    /// The walk since the last reset met an object already open.
+    cycle: bool,
 }
 
 impl<'a> ObjHasher<'a> {
-    fn new(doc: &'a Document) -> Self {
+    fn new(doc: &'a Document, limits: FingerprintLimits) -> Self {
         ObjHasher {
             doc,
             memo: HashMap::new(),
             open: HashSet::new(),
-            budget: MAX_FINGERPRINT_NODES,
+            budget: limits.nodes,
+            limits,
+            cut: false,
+            cycle: false,
         }
     }
 
+    fn reset(&mut self) {
+        self.budget = self.limits.nodes;
+        self.cut = false;
+        self.cycle = false;
+    }
+
     /// A page's content streams, resources and boxes, as drawn.
-    fn page(&mut self, page: &Object) -> [u8; 32] {
-        self.budget = MAX_FINGERPRINT_NODES;
+    fn page(&mut self, page: &Object) -> Fingerprint {
+        self.reset();
         let mut h = blake3::Hasher::new();
         let contents = self.doc.dict_get(page, b"Contents");
         h.update(b"Contents");
@@ -408,14 +483,20 @@ impl<'a> ObjHasher<'a> {
             h.update(key);
             self.value(&v.unwrap_or(Object::Null), &mut h, 0);
         }
-        *h.finalize().as_bytes()
+        Fingerprint {
+            hash: *h.finalize().as_bytes(),
+            complete: !self.cut,
+        }
     }
 
-    fn value_hash(&mut self, obj: &Object) -> [u8; 32] {
-        self.budget = MAX_FINGERPRINT_NODES;
+    fn value_hash(&mut self, obj: &Object) -> Fingerprint {
+        self.reset();
         let mut h = blake3::Hasher::new();
         self.value(obj, &mut h, 0);
-        *h.finalize().as_bytes()
+        Fingerprint {
+            hash: *h.finalize().as_bytes(),
+            complete: !self.cut,
+        }
     }
 
     fn reference(&mut self, num: i32, depth: usize) -> [u8; 32] {
@@ -424,20 +505,29 @@ impl<'a> ObjHasher<'a> {
         }
         let mut h = blake3::Hasher::new();
         if !self.open.insert(num) {
+            self.cycle = true;
             h.update(b"cycle");
             h.update(&num.to_le_bytes());
             return *h.finalize().as_bytes();
         }
+        let (outer_cut, outer_cycle) = (self.cut, self.cycle);
+        self.cut = false;
+        self.cycle = false;
         let obj = self.doc.object(num).unwrap_or(Object::Null);
         self.value(&obj, &mut h, depth + 1);
         self.open.remove(&num);
         let out = *h.finalize().as_bytes();
-        self.memo.insert(num, out);
+        if !self.cut && !self.cycle {
+            self.memo.insert(num, out);
+        }
+        self.cut |= outer_cut;
+        self.cycle |= outer_cycle;
         out
     }
 
     fn value(&mut self, obj: &Object, h: &mut blake3::Hasher, depth: usize) {
-        if self.budget == 0 || depth > MAX_FINGERPRINT_DEPTH {
+        if self.budget == 0 || depth > self.limits.depth {
+            self.cut = true;
             h.update(b"~");
             return;
         }
@@ -679,6 +769,22 @@ fn compute_delta(
     if signature_was_broken(&prev.signatures, &curr.signatures) {
         forensic_hazards.push(TAMPER_SIGNATURE_BROKEN.to_string());
     }
+    // A page whose fingerprint was cut short compares equal past the cut
+    // whatever is there, so it cannot be called unchanged.
+    let unchecked_pages: Vec<i32> = if had_valid_sig {
+        prev.page_complete
+            .iter()
+            .zip(&curr.page_complete)
+            .enumerate()
+            .filter(|(_, (a, b))| !**a || !**b)
+            .map(|(p, _)| (p as i32).saturating_add(1))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !unchecked_pages.is_empty() {
+        forensic_hazards.push(TAMPER_POST_SIGNATURE_UNCHECKED.to_string());
+    }
 
     RevisionDelta {
         pages_added,
@@ -690,6 +796,7 @@ fn compute_delta(
         annots_removed,
         newly_occluded_spans,
         forensic_hazards,
+        unchecked_pages,
     }
 }
 
@@ -1397,6 +1504,16 @@ pub(crate) mod tests {
     /// Classification and hazards of revision 2, made from the signed
     /// invoice by `edit` and saved incrementally.
     fn signed_then(edit: impl FnOnce(&Document)) -> (String, Vec<String>) {
+        let (class, hazards, _) = signed_then_with(FingerprintLimits::DEFAULT, edit);
+        (class, hazards)
+    }
+
+    /// [`signed_then`] with the fingerprint walk bounded by `limits`, also
+    /// returning the pages reported unchecked.
+    fn signed_then_with(
+        limits: FingerprintLimits,
+        edit: impl FnOnce(&Document),
+    ) -> (String, Vec<String>, Vec<i32>) {
         let rev1_doc = Document::open(build_signed_invoice_rev1()).unwrap();
         let work = rev1_doc.fork_clean();
         edit(&work);
@@ -1405,24 +1522,158 @@ pub(crate) mod tests {
             ..WriteOptions::default()
         };
         let rev2 = Document::open(write::save(&work, &inc_opts).unwrap()).unwrap();
-        let report = inspect_history(&rev2, &HistoryOptions { run_attest: true }).unwrap();
+        let report =
+            inspect_history_with(&rev2, &HistoryOptions { run_attest: true }, limits).unwrap();
         assert_eq!(report.revision_count, 2);
         let s2 = &report.revisions[1];
         assert!(
             s2.signatures[0].valid,
             "the edit is not meant to break the digest"
         );
-        let hazards = s2
-            .delta_from_previous
-            .as_ref()
-            .unwrap()
-            .forensic_hazards
-            .clone();
+        let delta = s2.delta_from_previous.as_ref().unwrap();
         assert_eq!(
             report.tampered,
             s2.classification == CLASS_TAMPERED_AFTER_SIGNATURE
         );
-        (s2.classification.clone(), hazards)
+        (
+            s2.classification.clone(),
+            delta.forensic_hazards.clone(),
+            delta.unchecked_pages.clone(),
+        )
+    }
+
+    /// The invoice page's fingerprint reaches its content stream (3 nodes),
+    /// then its resource and font dictionaries; a budget of 5 stops before
+    /// the font object itself.
+    const INVOICE_CUT: FingerprintLimits = FingerprintLimits {
+        nodes: 5,
+        depth: MAX_FINGERPRINT_DEPTH,
+    };
+
+    fn swap_invoice_font(doc: &Document) {
+        doc.alter_object(
+            5,
+            Object::Dict(Arc::new({
+                let mut d = Dict::new();
+                d.put(b"Type", Object::name(b"Font"));
+                d.put(b"Subtype", Object::name(b"Type1"));
+                d.put(b"BaseFont", Object::name(b"Courier"));
+                d.put(b"Encoding", Object::name(b"WinAnsiEncoding"));
+                d
+            })),
+        );
+    }
+
+    #[test]
+    fn an_edit_past_the_fingerprint_budget_after_a_signature_is_not_clean() {
+        let (class, hazards, pages) = signed_then_with(INVOICE_CUT, swap_invoice_font);
+        assert_eq!(class, CLASS_TAMPERED_AFTER_SIGNATURE, "{hazards:?}");
+        assert!(hazards.contains(&TAMPER_POST_SIGNATURE_UNCHECKED.to_string()));
+        assert_eq!(pages, vec![1]);
+    }
+
+    #[test]
+    fn a_page_too_large_to_compare_is_unchecked_even_unedited() {
+        let fill_notes = |doc: &Document| {
+            fill::fill(
+                doc,
+                &[fill::Edit::Set {
+                    name: "notes".to_string(),
+                    value: "Reviewed".to_string(),
+                }],
+            )
+            .unwrap();
+        };
+        let (class, hazards, pages) = signed_then_with(INVOICE_CUT, fill_notes);
+        assert_eq!(class, CLASS_TAMPERED_AFTER_SIGNATURE);
+        assert_eq!(hazards, vec![TAMPER_POST_SIGNATURE_UNCHECKED.to_string()]);
+        assert_eq!(pages, vec![1]);
+
+        // A depth limit cut short counts the same.
+        let shallow = FingerprintLimits {
+            nodes: MAX_FINGERPRINT_NODES,
+            depth: 2,
+        };
+        let (_, hazards, pages) = signed_then_with(shallow, fill_notes);
+        assert_eq!(hazards, vec![TAMPER_POST_SIGNATURE_UNCHECKED.to_string()]);
+        assert_eq!(pages, vec![1]);
+
+        // Within the default budget the same fill is clean.
+        let (class, hazards, pages) = signed_then_with(FingerprintLimits::DEFAULT, fill_notes);
+        assert_eq!(class, CLASS_CLEAN_INCREMENTAL_FILL, "{hazards:?}");
+        assert!(pages.is_empty());
+    }
+
+    #[test]
+    fn an_unsigned_page_too_large_to_compare_raises_nothing() {
+        let bytes = include_bytes!("../../../corpus/smoke/incremental-update.pdf");
+        let doc = Document::open(bytes.to_vec()).unwrap();
+        let cut = FingerprintLimits {
+            nodes: 1,
+            depth: MAX_FINGERPRINT_DEPTH,
+        };
+        let report = inspect_history_with(&doc, &HistoryOptions::default(), cut).unwrap();
+        let d2 = report.revisions[1].delta_from_previous.as_ref().unwrap();
+        assert_eq!(report.revisions[1].classification, CLASS_UNSIGNED_EDIT);
+        assert!(d2.forensic_hazards.is_empty());
+        assert!(d2.unchecked_pages.is_empty());
+    }
+
+    fn ref_to(num: i32) -> Object {
+        Object::Ref(crate::object::ObjRef::new(num, 0))
+    }
+
+    fn page_dict(entries: &[(&[u8], Object)]) -> Object {
+        let mut d = Dict::new();
+        for (k, v) in entries {
+            d.put(k, v.clone());
+        }
+        Object::Dict(Arc::new(d))
+    }
+
+    fn ints(n: i64) -> Object {
+        Object::Array(Arc::new((0..n).map(Object::Int).collect()))
+    }
+
+    #[test]
+    fn a_hash_cut_short_on_one_page_is_not_reused_on_another() {
+        let doc = Document::open(build_signed_invoice_rev1()).unwrap();
+        let shared = doc.add_object(ints(4));
+        // Page a spends the budget on padding and runs out inside `shared`.
+        let a = page_dict(&[(
+            b"Resources",
+            page_dict(&[(b"A", ints(8)), (b"Z", ref_to(shared))]),
+        )]);
+        // Page b reaches `shared` well within the budget.
+        let b = page_dict(&[(b"Resources", page_dict(&[(b"X", ref_to(shared))]))]);
+        let limits = FingerprintLimits {
+            nodes: 14,
+            depth: MAX_FINGERPRINT_DEPTH,
+        };
+
+        let mut hasher = ObjHasher::new(&doc, limits);
+        assert!(!hasher.page(&a).complete);
+        let after_a = hasher.page(&b);
+        let alone = ObjHasher::new(&doc, limits).page(&b);
+        assert!(alone.complete);
+        assert_eq!(after_a, alone);
+    }
+
+    #[test]
+    fn a_hash_cut_at_a_cycle_does_not_depend_on_where_the_cycle_was_entered() {
+        let doc = Document::open(build_signed_invoice_rev1()).unwrap();
+        let first = doc.add_object(Object::Null);
+        let second = doc.add_object(page_dict(&[(b"Next", ref_to(first))]));
+        doc.alter_object(first, page_dict(&[(b"Next", ref_to(second))]));
+        let via_first = page_dict(&[(b"Resources", page_dict(&[(b"X", ref_to(first))]))]);
+        let via_second = page_dict(&[(b"Resources", page_dict(&[(b"X", ref_to(second))]))]);
+
+        let mut hasher = ObjHasher::new(&doc, FingerprintLimits::DEFAULT);
+        hasher.page(&via_first);
+        let after = hasher.page(&via_second);
+        let alone = ObjHasher::new(&doc, FingerprintLimits::DEFAULT).page(&via_second);
+        assert!(alone.complete, "a cycle cut loses nothing");
+        assert_eq!(after, alone);
     }
 
     #[test]
@@ -1439,19 +1690,7 @@ pub(crate) mod tests {
         assert!(hazards.contains(&TAMPER_POST_SIGNATURE_ANNOTATION_EDIT.to_string()));
 
         // The page's font swapped for another.
-        let (class, hazards) = signed_then(|doc| {
-            doc.alter_object(
-                5,
-                Object::Dict(Arc::new({
-                    let mut d = Dict::new();
-                    d.put(b"Type", Object::name(b"Font"));
-                    d.put(b"Subtype", Object::name(b"Type1"));
-                    d.put(b"BaseFont", Object::name(b"Courier"));
-                    d.put(b"Encoding", Object::name(b"WinAnsiEncoding"));
-                    d
-                })),
-            );
-        });
+        let (class, hazards) = signed_then(swap_invoice_font);
         assert_eq!(class, CLASS_TAMPERED_AFTER_SIGNATURE);
         assert!(hazards.contains(&TAMPER_POST_SIGNATURE_CONTENT_EDIT.to_string()));
 
