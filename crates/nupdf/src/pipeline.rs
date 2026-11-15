@@ -1176,8 +1176,8 @@ fn replacement_anchor(doc: &Document, ap: &AppliedPatch, generation: usize) -> O
 /// The ID that addresses, on `doc`, what `raw` addressed when it was bound.
 ///
 /// IDs bound by a query or a patch before the latest mutation are checked:
-/// unchanged text keeps the ID, moved text gets its new ID, and text that is
-/// gone fails with `pipeline.stale_id`. With `patched`, an ID a patch
+/// the span with that text nearest where it was gives the ID, and text that
+/// is gone from there fails with `pipeline.stale_id`. With `patched`, an ID a patch
 /// replaced resolves to its replacement (what an audit of the patch cites).
 /// IDs no step bound are used as given.
 fn resolve_bound_id(
@@ -1203,9 +1203,8 @@ fn resolve_bound_id(
         if a.generation == generation {
             return Some(a.id.clone());
         }
-        if span_text_at(doc, &a.id).as_deref() == Some(a.text.as_str()) {
-            return Some(a.id.clone());
-        }
+        // By where it was, not by its number: after a renumbering the old
+        // number may name another span that reads the same.
         let id = locate_span_at_bbox(doc, a.page, &a.text, a.bbox)?;
         (span_text_at(doc, &id).as_deref() == Some(a.text.as_str())).then_some(id)
     };
@@ -1910,6 +1909,51 @@ mod tests {
             StepOutput::Audit(au) => assert!(au.all_verified, "{au:?}"),
             other => panic!("expected Audit output, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_bound_id_is_found_again_where_it_was_not_at_a_twin_with_its_number() {
+        // Two amounts read the same. Patching the heading renumbers the
+        // blocks below it, so the first amount's old id names the second.
+        let content = b"BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 700 Tm (Heading) Tj ET \
+            BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 600 Tm (Tax:) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 220 600 Tm ($0.00) Tj ET \
+            BT /F2 12 Tf 0 0 0 rg 1 0 0 1 72 500 Tm (Fee:) Tj ET \
+            BT /F1 14 Tf 0 0 0 rg 1 0 0 1 220 500 Tm ($0.00) Tj ET";
+        let doc = page_doc(
+            content,
+            "/Font<</F1 5 0 R/F2 6 0 R>>",
+            &[HELVETICA.to_vec(), HELVETICA_BOLD.to_vec()],
+        );
+        let spec = parse_pipeline_spec(
+            r#"{"steps": [
+                {"id": "tax", "op": "query", "right_of": "Tax:", "nearest_only": true},
+                {"id": "head", "op": "query", "pattern": "Heading"},
+                {"id": "p1", "op": "patch", "replacements": [{"target_id": "${head.first_id}", "new_text": "Title"}]},
+                {"id": "p2", "op": "patch", "replacements": [{"target_id": "${tax.first_id}", "new_text": "$5.00"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let outcome = run_pipeline(&doc, &spec, &WriteOptions::default()).unwrap();
+        let out = Document::open(outcome.output_bytes.clone().unwrap()).unwrap();
+        let page = out.page(0).unwrap();
+        let (res, _) = stext::extract_page(&out, &page, StextOptions::default(), Store::default());
+        let mut tops = Vec::new();
+        for block in &res.unwrap().blocks {
+            let Block::Text(tb) = block else { continue };
+            for line in &tb.lines {
+                let text = extract::chars_text(&line.chars);
+                if text.contains("$5.00") || text.contains("$0.00") {
+                    tops.push((line.bbox.y0, text.trim().to_string()));
+                }
+            }
+        }
+        tops.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let texts: Vec<&str> = tops.iter().map(|t| t.1.as_str()).collect();
+        // The tax line is the upper of the two.
+        assert_eq!(texts.len(), 2, "{tops:?}");
+        assert!(texts[0].contains("$5.00"), "{tops:?}");
+        assert!(texts[1].contains("$0.00"), "{tops:?}");
     }
 
     #[test]
