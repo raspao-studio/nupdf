@@ -1137,8 +1137,9 @@ fn matched_from_search_hit(
             } else {
                 0
             };
+            // `hit.end` is the hit's last character, not one past it.
             let c_end = if bi == hit.end.block && li == hit.end.line {
-                hit.end.ch.min(line.chars.len())
+                hit.end.ch.saturating_add(1).min(line.chars.len())
             } else {
                 line.chars.len()
             };
@@ -2207,6 +2208,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_quote_found_by_the_page_search_keeps_its_last_character() {
+        // "hyphen" is split over two lines at a soft hyphen (byte `d`
+        // through the font's ToUnicode), which the page's own text keeps as
+        // a line break, so only the page search finds the quote; its hit
+        // ends on the full stop.
+        let cmap = b"/CIDInit/ProcSet findresource begin 12 dict begin begincmap \
+            /CMapName/M def 1 begincodespacerange <00><FF> endcodespacerange \
+            1 beginbfchar <64><00AD> endbfchar endcmap CMapName currentdict /CMap \
+            defineresource pop end end";
+        let doc = page_doc(
+            b"BT /M 12 Tf 50 700 Td (the hyd) Tj 0 -14 Td (phen is here.) Tj ET",
+            "/Font<</M<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>>>",
+            &[stream("", cmap)],
+        );
+        let quote = "the hyphen is here.";
+        let page = stext::extract_page(
+            &doc,
+            &doc.page(0).unwrap_or_else(|e| panic!("{}", e.0)),
+            Options::default(),
+            Store::default(),
+        )
+        .0
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            find_quote_on_page(&page, 1, quote).is_some_and(|(m, _)| {
+                m.matched_chars.last().map(|c| rune_char(c.c)) == Some('.')
+                    && m.actual_text.ends_with("here.")
+            }),
+            "the matched characters end on the quote's full stop"
+        );
+        let claims = vec![ClaimInput {
+            page: Some(1),
+            quote: quote.to_owned(),
+            ..ClaimInput::default()
+        }];
+        let summary =
+            audit_claims(&doc, "b3:doc", &claims, false, 72.0).unwrap_or_else(|e| panic!("{e}"));
+        let item = &summary.results[0];
+        assert_eq!(item.status, AuditStatus::Verified);
+        assert!(
+            item.actual_text
+                .as_deref()
+                .is_some_and(|t| t.ends_with("here.")),
+            "{:?}",
+            item.actual_text
+        );
     }
 
     #[test]
