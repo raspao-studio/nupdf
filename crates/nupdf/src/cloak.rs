@@ -39,7 +39,6 @@ use crate::patch::{
 };
 use crate::redact;
 use crate::regexp::{self, Regex};
-use crate::scrub::Matcher;
 use crate::stext::{self, Block, Options as StextOptions, StextChar, StextLine, StextPage};
 use crate::verify;
 use crate::write::{self, WriteOptions};
@@ -2014,11 +2013,6 @@ fn verify_zero_secret_leaks(
     if secrets_with_category.is_empty() {
         return Ok(());
     }
-    let secrets: Vec<String> = secrets_with_category
-        .iter()
-        .map(|(s, _)| s.clone())
-        .collect();
-    let secrets = secrets.as_slice();
     let reopened = Document::open(saved_bytes.to_vec()).map_err(|e| CloakError {
         code: "verify.reopen_failed",
         message: format!("failed to reopen cloaked PDF for leak check: {e}"),
@@ -2033,90 +2027,171 @@ fn verify_zero_secret_leaks(
         }
     }
 
-    let matcher = Matcher::new(secrets, &[], false).map_err(|e| CloakError {
+    check_leaks(&reopened, secrets_with_category)
+}
+
+/// The leak check on the output, opened: [`verify::verify_literals`] with
+/// every secret, then every page's full text searched for each.
+fn check_leaks(
+    doc: &Document,
+    secrets_with_category: &[(String, String)],
+) -> Result<(), CloakError> {
+    let secrets: Vec<String> = secrets_with_category
+        .iter()
+        .map(|(s, _)| s.clone())
+        .collect();
+    let verdict = verify::verify_literals(doc, &secrets).map_err(|e| CloakError {
         code: "verify.matcher",
         message: e,
     })?;
+    if let Some(e) = leak_findings_error(&verdict, secrets_with_category) {
+        return Err(e);
+    }
+    // Also verify full-page rendered text including synthesized/committed widget
+    // and annotation appearances (`Parts::ALL` = contents + annots + widgets).
+    // Each page's text is read once for every secret; only the secrets it
+    // may hold are searched for in it.
     let needles: Vec<(String, u32)> = secrets.iter().map(|s| (s.clone(), 0u32)).collect();
+    let page_needles = verify::PageNeedles::new(&needles);
+    match rendered_leak(doc, |page| {
+        page_needles
+            .candidates(page)
+            .into_iter()
+            .map(|k| (k, page_needles.hits(page, k)))
+            .find(|&(_, hits)| hits > 0)
+    }) {
+        Some((hits, k, page_idx)) => Err(rendered_leak_error(
+            hits,
+            secrets_with_category.get(k).map_or("unknown", |(_, c)| c),
+            page_idx,
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The check [`check_leaks`] replaced, each secret searched for on its own
+/// in every page and string: the reference it must agree with.
+#[cfg(test)]
+fn check_leaks_reference(
+    doc: &Document,
+    secrets_with_category: &[(String, String)],
+) -> Result<(), CloakError> {
+    let secrets: Vec<String> = secrets_with_category
+        .iter()
+        .map(|(s, _)| s.clone())
+        .collect();
+    let matcher = crate::scrub::Matcher::new(&secrets, &[], false).map_err(|e| CloakError {
+        code: "verify.matcher",
+        message: e,
+    })?;
     let targets = verify::Targets {
-        needles,
+        needles: secrets.iter().map(|s| (s.clone(), 0u32)).collect(),
         matcher,
         areas: Vec::new(),
     };
-
-    let verdict = verify::verify(&reopened, &targets);
-    if !verdict.verified() {
-        // `Finding::detail` quotes the needle, so it never reaches the message.
-        let summary: Vec<String> = verdict
-            .findings
-            .iter()
-            .take(3)
-            .map(|f| {
-                let categories: BTreeSet<&str> = secrets_with_category
-                    .iter()
-                    .filter(|(s, _)| {
-                        f.detail.contains(s.as_str()) || f.detail.contains(&format!("{s:?}"))
-                    })
-                    .map(|(_, c)| c.as_str())
-                    .collect();
-                let category = if categories.is_empty() {
-                    "unknown".to_string()
-                } else {
-                    categories.into_iter().collect::<Vec<_>>().join(",")
-                };
-                let mut where_ = String::new();
-                if let Some(p) = f.page {
-                    where_.push_str(&format!(" on page {p}"));
-                }
-                if let Some(o) = f.object {
-                    where_.push_str(&format!(" in object {o}"));
-                }
-                format!("{}{where_} (category {category})", f.class.name())
-            })
-            .collect();
-        return Err(CloakError {
-            code: "verify.leak",
-            message: format!(
-                "zero-leak verification failed ({} finding(s)): {}",
-                verdict.findings.len(),
-                summary.join("; ")
-            ),
-        });
+    let verdict = verify::verify(doc, &targets);
+    if let Some(e) = leak_findings_error(&verdict, secrets_with_category) {
+        return Err(e);
     }
+    match rendered_leak(doc, |page| {
+        secrets.iter().enumerate().find_map(|(k, secret)| {
+            let hits = crate::search::search_page(page, secret, 0).map_or(0, |found| found.len());
+            (hits > 0).then_some((k, hits))
+        })
+    }) {
+        Some((hits, k, page_idx)) => Err(rendered_leak_error(
+            hits,
+            &secrets_with_category[k].1,
+            page_idx,
+        )),
+        None => Ok(()),
+    }
+}
 
-    // Also verify full-page rendered text including synthesized/committed widget
-    // and annotation appearances (`Parts::ALL` = contents + annots + widgets).
-    let page_count = reopened.page_count().unwrap_or(0);
+/// `verify.leak` for a verdict's findings, naming their classes, pages,
+/// objects and categories, never the secrets.
+fn leak_findings_error(
+    verdict: &verify::Verification,
+    secrets_with_category: &[(String, String)],
+) -> Option<CloakError> {
+    if verdict.verified() {
+        return None;
+    }
+    // `Finding::detail` quotes the needle, so it never reaches the message.
+    let summary: Vec<String> = verdict
+        .findings
+        .iter()
+        .take(3)
+        .map(|f| {
+            let categories: BTreeSet<&str> = secrets_with_category
+                .iter()
+                .filter(|(s, _)| {
+                    f.detail.contains(s.as_str()) || f.detail.contains(&format!("{s:?}"))
+                })
+                .map(|(_, c)| c.as_str())
+                .collect();
+            let category = if categories.is_empty() {
+                "unknown".to_string()
+            } else {
+                categories.into_iter().collect::<Vec<_>>().join(",")
+            };
+            let mut where_ = String::new();
+            if let Some(p) = f.page {
+                where_.push_str(&format!(" on page {p}"));
+            }
+            if let Some(o) = f.object {
+                where_.push_str(&format!(" in object {o}"));
+            }
+            format!("{}{where_} (category {category})", f.class.name())
+        })
+        .collect();
+    Some(CloakError {
+        code: "verify.leak",
+        message: format!(
+            "zero-leak verification failed ({} finding(s)): {}",
+            verdict.findings.len(),
+            summary.join("; ")
+        ),
+    })
+}
+
+/// The first page, in order, on whose full text (contents, annotations
+/// and widgets, every layer) `first_hit` finds a secret: its hits, the
+/// secret's index and the page's.
+fn rendered_leak(
+    doc: &Document,
+    mut first_hit: impl FnMut(&stext::StextPage) -> Option<(usize, usize)>,
+) -> Option<(usize, usize, i32)> {
+    let page_count = doc.page_count().unwrap_or(0);
     let stext_opts = StextOptions {
         flags: stext::flags::ALL_LAYERS,
         clip: Rect::INFINITE,
     };
     let mut store = Store::default();
     for page_idx in 0..page_count {
-        let Ok(page_obj) = reopened.page(page_idx) else {
+        let Ok(page_obj) = doc.page(page_idx) else {
             continue;
         };
         let (res, next_store) =
-            stext::extract_page_parts(&reopened, &page_obj, stext_opts, store, Parts::ALL);
+            stext::extract_page_parts(doc, &page_obj, stext_opts, store, Parts::ALL);
         store = next_store;
-        if let Ok(full_page) = res {
-            for (secret, category) in secrets_with_category {
-                let hits = crate::search::search_page(&full_page, secret, 0)
-                    .map_or(0, |found| found.len());
-                if hits > 0 {
-                    return Err(CloakError {
-                        code: "verify.leak",
-                        message: format!(
-                            "zero-leak verification failed: {hits} hit(s) of a {category} secret still rendered on page {}",
-                            page_idx + 1
-                        ),
-                    });
-                }
-            }
+        if let Ok(full_page) = res
+            && let Some((k, hits)) = first_hit(&full_page)
+        {
+            return Some((hits, k, page_idx));
         }
     }
+    None
+}
 
-    Ok(())
+fn rendered_leak_error(hits: usize, category: &str, page_idx: i32) -> CloakError {
+    CloakError {
+        code: "verify.leak",
+        message: format!(
+            "zero-leak verification failed: {hits} hit(s) of a {category} secret still rendered on page {}",
+            page_idx + 1
+        ),
+    }
 }
 
 /// Cloaks all matching PII entities across `doc` with deterministic,
@@ -3101,6 +3176,260 @@ mod tests {
     fn cloak_directory_timings() {
         for n in [2_000, 8_000, 32_000] {
             eprintln!("{n} secrets: {:?}", cloak_directory(n));
+        }
+    }
+
+    /// A `pages`-page phone directory, `per_page` distinct numbers a page.
+    fn directory_pdf(pages: usize, per_page: usize) -> Document {
+        let mut objs: Vec<Vec<u8>> = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            {
+                let kids: Vec<String> = (0..pages).map(|p| format!("{} 0 R", 4 + 2 * p)).collect();
+                format!("<</Type/Pages/Kids[{}]/Count {pages}>>", kids.join(" ")).into_bytes()
+            },
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_vec(),
+        ];
+        for p in 0..pages {
+            let mut content = String::from("BT /F1 8 Tf 40 780 Td 10 TL\n");
+            for k in 0..per_page {
+                let i = p * per_page + k;
+                content.push_str(&format!(
+                    "(Name {i}: 415-{:03}-{:04}) '\n",
+                    i / 10_000 % 1000,
+                    i % 10_000
+                ));
+            }
+            content.push_str("ET");
+            objs.push(
+                format!(
+                    "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 3 0 R>>>>/Contents {} 0 R>>",
+                    5 + 2 * p
+                )
+                .into_bytes(),
+            );
+            objs.push(crate::testutil::stream("", content.as_bytes()));
+        }
+        crate::testutil::doc_bytes(&objs)
+    }
+
+    /// A directory cloaked: the output, and its secrets with categories.
+    fn cloaked_directory(
+        pages: usize,
+        per_page: usize,
+    ) -> (Vec<u8>, Vec<(String, String)>, std::time::Duration) {
+        let doc = directory_pdf(pages, per_page);
+        let started = std::time::Instant::now();
+        let (bytes, vault, report) = cloak_document(
+            &doc,
+            &[CloakTarget::Preset("phone".into())],
+            &WriteOptions::default(),
+        )
+        .unwrap();
+        let whole = started.elapsed();
+        assert!(report.verified_zero_leaks);
+        assert_eq!(vault.entries.len(), pages * per_page);
+        let secrets = vault
+            .entries
+            .iter()
+            .map(|e| (e.secret.clone(), e.category.clone()))
+            .collect();
+        (bytes, secrets, whole)
+    }
+
+    /// `cargo test --release -p nupdf --lib cloak_leak_check_timings -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a timing to read, not a check"]
+    fn cloak_leak_check_timings() {
+        for (pages, per_page) in [(80, 50), (320, 50)] {
+            let (bytes, secrets, whole) = cloaked_directory(pages, per_page);
+            let doc = Document::open(bytes).unwrap();
+            let started = std::time::Instant::now();
+            check_leaks(&doc, &secrets).unwrap();
+            let fast = started.elapsed();
+            let started = std::time::Instant::now();
+            check_leaks_reference(&doc, &secrets).unwrap();
+            let slow = started.elapsed();
+            eprintln!(
+                "{} secrets, {pages} pages: cloak {whole:?}, of it the leak check {fast:?}; \
+                 the check it replaced {slow:?}",
+                pages * per_page
+            );
+        }
+    }
+
+    #[test]
+    fn a_clean_cloak_output_is_not_searched_for_each_secret() {
+        // 1,000 secrets on 20 pages; each searched for on each page and
+        // in each string was 20,000 page searches and more matches.
+        let (bytes, secrets, _) = cloaked_directory(20, 50);
+        let doc = Document::open(bytes).unwrap();
+        let before = verify::full_calls();
+        assert_eq!(check_leaks(&doc, &secrets), Ok(()));
+        assert_eq!(verify::full_calls() - before, 0);
+    }
+
+    /// A one-page document whose page shows `content` with Helvetica as
+    /// /F1, with `catalog` and `page` added to the catalog and page, and
+    /// `extra` as objects 6 onwards.
+    fn leak_doc(catalog: &str, page: &str, content: &str, extra: &[Vec<u8>]) -> Document {
+        let mut objs = vec![
+            format!("<</Type/Catalog/Pages 2 0 R{catalog}>>").into_bytes(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R{page}>>"
+            )
+            .into_bytes(),
+            crate::testutil::stream("", content.as_bytes()),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_vec(),
+        ];
+        objs.extend(extra.iter().cloned());
+        crate::testutil::doc_bytes(&objs)
+    }
+
+    #[test]
+    fn the_leak_check_finds_what_the_one_it_replaced_found() {
+        let s = "415-555-0199";
+        let text = |t: &str| format!("BT /F1 10 Tf 50 700 Td ({t}) Tj ET");
+        let clean = text("Call 415-555-0100 today");
+        let leaks: Vec<(&str, Document)> = vec![
+            ("clean", leak_doc("", "", &clean, &[])),
+            (
+                "page text",
+                leak_doc("", "", &text(&format!("Call {s} today")), &[]),
+            ),
+            (
+                "split over lines",
+                leak_doc(
+                    "",
+                    "",
+                    "BT /F1 10 Tf 50 700 Td (Call 415-) Tj 0 -12 Td (555-0199) Tj ET",
+                    &[],
+                ),
+            ),
+            (
+                "annotation",
+                leak_doc(
+                    "",
+                    &format!("/Annots[<</Subtype/Text/Rect[0 0 9 9]/Contents(at {s})>>]"),
+                    &clean,
+                    &[],
+                ),
+            ),
+            (
+                "field value",
+                leak_doc(
+                    "/AcroForm<</Fields[6 0 R]>>",
+                    "/Annots[6 0 R]",
+                    &clean,
+                    &[format!(
+                        "<</Type/Annot/Subtype/Widget/FT/Tx/T(phone)/V({s})/Rect[50 500 250 520]>>"
+                    )
+                    .into_bytes()],
+                ),
+            ),
+            (
+                "appearance",
+                leak_doc(
+                    "",
+                    "/Annots[<</Subtype/FreeText/Rect[50 500 250 520]/AP<</N 6 0 R>>>>]",
+                    &clean,
+                    &[crate::testutil::stream(
+                        "/Subtype/Form/BBox[0 0 200 20]/Resources<</Font<</F1 5 0 R>>>>",
+                        format!("BT /F1 10 Tf 2 5 Td ({s}) Tj ET").as_bytes(),
+                    )],
+                ),
+            ),
+            (
+                "metadata",
+                leak_doc(
+                    "/Metadata 6 0 R",
+                    "",
+                    &clean,
+                    &[crate::testutil::stream(
+                        "/Type/Metadata/Subtype/XML",
+                        format!("<x:xmpmeta><dc:description>{s}</dc:description></x:xmpmeta>")
+                            .as_bytes(),
+                    )],
+                ),
+            ),
+            (
+                "outline",
+                leak_doc(&format!("/Outlines<</Title(File {s})>>"), "", &clean, &[]),
+            ),
+            (
+                "outline with its white space changed",
+                leak_doc(
+                    "/Outlines<</First 6 0 R>>",
+                    "",
+                    &clean,
+                    &[b"<</Title(For Alice\\r\\n  Vance)>>".to_vec()],
+                ),
+            ),
+            (
+                "marked content",
+                leak_doc(
+                    "",
+                    "",
+                    &format!("/Span <</ActualText({s})>> BDC {clean} EMC"),
+                    &[],
+                ),
+            ),
+            (
+                "hidden layer",
+                leak_doc(
+                    "/OCProperties<</OCGs[6 0 R]/D<</OFF[6 0 R]>>>>",
+                    "/Resources<</Font<</F1 5 0 R>>/Properties<</oc 6 0 R>>>>",
+                    &format!("/OC /oc BDC {} EMC", text(s)),
+                    &[b"<</Type/OCG/Name(layer)>>".to_vec()],
+                ),
+            ),
+            (
+                "script",
+                leak_doc(
+                    "/Names<</JavaScript<</Names[(a)<</S/JavaScript/JS 6 0 R>>]>>>>",
+                    "",
+                    &clean,
+                    &[crate::testutil::stream(
+                        "",
+                        format!("app.alert('{s}')").as_bytes(),
+                    )],
+                ),
+            ),
+            (
+                "stream nothing reaches",
+                leak_doc("", "", &clean, &[crate::testutil::stream("", s.as_bytes())]),
+            ),
+        ];
+        // The secret among others: prefixes and suffixes of it, one of
+        // one character, and many that are nowhere.
+        let mut secrets: Vec<(String, String)> = (0..400)
+            .map(|i| (format!("415-555-{:04}", 1000 + i), "PHONE".to_string()))
+            .collect();
+        for (extra, category) in [
+            ("415-555-019", "PREFIX"),
+            ("15-555-0199", "SUFFIX"),
+            ("415-555-01999", "LONGER"),
+            ("Z", "ONE"),
+            ("Alice Vance", "PERSON"),
+        ] {
+            secrets.push((extra.to_string(), category.to_string()));
+        }
+        secrets.insert(200, (s.to_string(), "PHONE".to_string()));
+        for (name, doc) in &leaks {
+            let fast = check_leaks(doc, &secrets);
+            assert_eq!(fast, check_leaks_reference(doc, &secrets), "{name}");
+            assert_eq!(fast.is_ok(), *name == "clean", "{name}: {fast:?}");
+            if let Err(e) = fast {
+                assert_eq!(e.code, "verify.leak");
+                assert!(!e.message.contains("0199"), "{name}: {e}");
+            }
+            // Alone.
+            let one = [(s.to_string(), "PHONE".to_string())];
+            assert_eq!(
+                check_leaks(doc, &one),
+                check_leaks_reference(doc, &one),
+                "{name}"
+            );
         }
     }
 
