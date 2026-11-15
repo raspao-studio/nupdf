@@ -1171,6 +1171,112 @@ impl Document {
             .collect()
     }
 
+    /// Exact byte end offsets (`1..=data.len()`) of each saved revision in
+    /// chronological order (`rev 1` = oldest, ..., `rev N` = `self.data.len()`).
+    ///
+    /// Falls back gracefully to `[self.data.len()]` when the document has at
+    /// most one revision or its cross-reference table was rebuilt by repair.
+    pub fn revision_byte_ends(&self) -> Vec<usize> {
+        let total_len = self.data.len();
+        if total_len == 0 {
+            return Vec::new();
+        }
+        let state = self.current();
+        if state.repaired || self.revisions() <= 1 || state.section_offsets.len() <= 1 {
+            return vec![total_len];
+        }
+
+        let mut abs_offsets: Vec<usize> = state
+            .section_offsets
+            .iter()
+            .rev()
+            .filter_map(|&o| usize::try_from(o.saturating_add(state.bias as i64)).ok())
+            .filter(|&o| o < total_len)
+            .collect();
+
+        // A linearized file's first-page xref sits near the top of the file;
+        // drop that smallest offset so revision 1 ends after the main xref.
+        if self.linearized
+            && abs_offsets.len() > 1
+            && let Some((min_idx, _)) = abs_offsets.iter().enumerate().min_by_key(|&(_, &o)| o)
+        {
+            abs_offsets.remove(min_idx);
+        }
+
+        if abs_offsets.len() <= 1 {
+            return vec![total_len];
+        }
+
+        let mut ends: Vec<usize> = Vec::with_capacity(abs_offsets.len());
+        for i in 0..abs_offsets.len().saturating_sub(1) {
+            let abs_ofs = abs_offsets[i];
+            let next_ofs = abs_offsets[i + 1];
+            let upper = if next_ofs > abs_ofs {
+                next_ofs.min(total_len)
+            } else {
+                total_len
+            };
+            if let Some(end) = find_revision_eof_end(&self.data, abs_ofs, upper)
+                && end > 0
+                && end < total_len
+                && ends.last().is_none_or(|&prev| end > prev)
+            {
+                ends.push(end);
+            }
+        }
+        ends.push(total_len);
+        ends
+    }
+
+    /// Returns the raw file byte prefix `&self.data[..end]` for 1-based
+    /// historical revision `rev_1based` (`1..=revision_byte_ends().len()`).
+    pub fn revision_bytes(&self, rev_1based: usize) -> Result<&[u8], OpenError> {
+        let ends = self.revision_byte_ends();
+        if rev_1based == 0 || rev_1based > ends.len() {
+            return Err(OpenError {
+                code: "usage.revision_out_of_range",
+                message: format!("revision {rev_1based} out of range (1..={})", ends.len()),
+            });
+        }
+        let end = ends[rev_1based - 1];
+        self.data.get(..end).ok_or_else(|| OpenError {
+            code: "input.truncated",
+            message: format!("revision {rev_1based} byte end {end} exceeds file length"),
+        })
+    }
+
+    /// Opens a standalone [`Document`] at 1-based historical revision `rev_1based`.
+    ///
+    /// For the final revision of an unedited document, branches an `O(1)` view via
+    /// [`Document::fork_clean`]; for historical revisions `1..N`, slices `&self.data[..end]`
+    /// and opens it with this document's [`Limits`].
+    pub fn open_revision(&self, rev_1based: usize) -> Result<Document, OpenError> {
+        let ends = self.revision_byte_ends();
+        if rev_1based == 0 || rev_1based > ends.len() {
+            return Err(OpenError {
+                code: "usage.revision_out_of_range",
+                message: format!("revision {rev_1based} out of range (1..={})", ends.len()),
+            });
+        }
+        if rev_1based == ends.len() && !self.is_edited() {
+            return Ok(self.fork_clean());
+        }
+        let end = ends[rev_1based - 1];
+        let slice = self.data.get(..end).ok_or_else(|| OpenError {
+            code: "input.truncated",
+            message: format!("revision {rev_1based} byte end {end} exceeds file length"),
+        })?;
+        let rev_doc = Self::open_with(Arc::<[u8]>::from(slice), self.limits)?;
+        if rev_doc.needs_password()
+            && !self.needs_password()
+            && let (Ok(mut c), Some(current)) = (rev_doc.crypt.write(), self.crypt())
+        {
+            *c = Some(current);
+            rev_doc.needs_password.store(false, Ordering::SeqCst);
+        }
+        Ok(rev_doc)
+    }
+
     /// MuPDF's `doc->startxref`: where the newest xref section starts, as
     /// the file's `startxref` gives it; 0 after a repair.
     pub(crate) fn startxref(&self) -> i64 {
@@ -2153,6 +2259,71 @@ fn crypt_error(e: &str) -> OpenError {
     }
 }
 
+/// Scans `data[abs_ofs..upper]` for the `%%EOF` marker terminating the xref
+/// section at `abs_ofs`, preferring a `startxref <digits> %%EOF` sequence and
+/// including at most one trailing line ending (`\r\n`, `\n`, or `\r`).
+fn find_revision_eof_end(data: &[u8], abs_ofs: usize, upper: usize) -> Option<usize> {
+    if abs_ofs >= upper || upper > data.len() {
+        return None;
+    }
+    let slice = data.get(abs_ofs..upper)?;
+    let is_pdf_ws = |b: u8| matches!(b, 0 | 9 | 10 | 12 | 13 | 32);
+
+    let mut first_eof = None;
+    let mut matched_eof = None;
+    for eof_rel in memchr::memmem::find_iter(slice, b"%%EOF") {
+        if first_eof.is_none() {
+            first_eof = Some(eof_rel);
+        }
+        // Check whether `slice[..eof_rel]` ends with `startxref <ws> <digits> <ws>`.
+        let mut p = eof_rel;
+        let ws_after_end = p;
+        while p > 0 && slice.get(p - 1).is_some_and(|&b| is_pdf_ws(b)) {
+            p -= 1;
+        }
+        if p == ws_after_end {
+            continue;
+        }
+        let digits_end = p;
+        while p > 0 && slice.get(p - 1).is_some_and(|b| b.is_ascii_digit()) {
+            p -= 1;
+        }
+        if p == digits_end {
+            continue;
+        }
+        let ws_before_end = p;
+        while p > 0 && slice.get(p - 1).is_some_and(|&b| is_pdf_ws(b)) {
+            p -= 1;
+        }
+        if p < ws_before_end
+            && slice
+                .get(..p)
+                .is_some_and(|head| head.ends_with(b"startxref"))
+        {
+            matched_eof = Some(eof_rel);
+            break;
+        }
+    }
+
+    let eof_rel = matched_eof.or(first_eof)?;
+    let after_marker = abs_ofs.saturating_add(eof_rel).saturating_add(5);
+    let tail = data.get(after_marker..)?;
+    let h_ws = tail
+        .iter()
+        .take(16)
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
+    let eol_tail = tail.get(h_ws..).unwrap_or(&[]);
+    let extra = if eol_tail.starts_with(b"\r\n") {
+        h_ws + 2
+    } else if eol_tail.first().is_some_and(|&b| b == b'\n' || b == b'\r') {
+        h_ws + 1
+    } else {
+        0
+    };
+    Some(after_marker.saturating_add(extra).min(data.len()))
+}
+
 /// Re-point a cached object at the entry's stream data. In MuPDF an object
 /// is a stream when its entry has stream data, whatever was cached, so a
 /// cached dictionary becomes a stream again when a later definition of the
@@ -3128,5 +3299,39 @@ mod lookups_and_edits {
         assert_eq!(d.object(7), None);
         assert_eq!(messages(&d), [failure, failure].concat());
         assert!(!d.repair_attempted());
+    }
+
+    #[test]
+    fn open_revision_time_travels_across_incremental_updates() {
+        let bytes = include_bytes!("../../../corpus/smoke/incremental-update.pdf");
+        let d = doc(bytes);
+        assert_eq!(d.revisions(), 2);
+        let ends = d.revision_byte_ends();
+        assert_eq!(ends, vec![555, bytes.len()]);
+
+        assert!(d.revision_bytes(0).is_err());
+        assert!(d.revision_bytes(3).is_err());
+        assert!(d.open_revision(0).is_err());
+        assert!(d.open_revision(3).is_err());
+
+        let rev1_bytes = d.revision_bytes(1).unwrap();
+        assert!(rev1_bytes.ends_with(b"%%EOF\n"));
+
+        let rev1 = d.open_revision(1).unwrap();
+        assert_eq!(rev1.revisions(), 1);
+        assert_eq!(rev1.metadata("Title"), None);
+
+        let rev2 = d.open_revision(2).unwrap();
+        assert_eq!(rev2.revisions(), 2);
+        assert_eq!(rev2.metadata("Title").as_deref(), Some("Revision 2"));
+
+        // Single-revision and repaired files fall back cleanly to `[data.len()]`.
+        let minimal = include_bytes!("../../../corpus/smoke/minimal.pdf");
+        let m = doc(minimal);
+        assert_eq!(m.revision_byte_ends(), vec![minimal.len()]);
+
+        let repaired = doc(include_bytes!("../../../corpus/smoke/no-xref.pdf"));
+        assert!(repaired.repaired());
+        assert_eq!(repaired.revision_byte_ends(), vec![repaired.data().len()]);
     }
 }

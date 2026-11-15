@@ -299,6 +299,69 @@ fn overrides(name: &str) -> BTreeMap<String, Value> {
                 json!({"type": ["string", "null"]}),
             ),
         ],
+        "chart" => vec![
+            ("/charts/[]/title", json!({"type": ["string", "null"]})),
+            (
+                "/charts/[]/series/[]/points/[]/x_value",
+                json!({"type": ["number", "null"]}),
+            ),
+            (
+                "/diagrams/[]/edges/[]/label",
+                json!({"type": ["string", "null"]}),
+            ),
+        ],
+        "flat_forms" => vec![
+            ("/verified", json!({"type": ["boolean", "null"]})),
+            ("/output", json!({"type": ["object", "null"]})),
+            ("/fields/[]/label", json!({"type": ["string", "null"]})),
+            ("/fields/[]/checked", json!({"type": ["boolean", "null"]})),
+            (
+                "/fields/[]/cell_count",
+                json!({"type": ["integer", "null"]}),
+            ),
+            (
+                "/fields/[]/current_text",
+                json!({"type": ["string", "null"]}),
+            ),
+            (
+                "/applied_fills/[]/value",
+                json!({"type": ["string", "null"]}),
+            ),
+            (
+                "/applied_fills/[]/checked",
+                json!({"type": ["boolean", "null"]}),
+            ),
+            (
+                "/applied_fills/[]/font_size",
+                json!({"type": ["number", "null"]}),
+            ),
+        ],
+        "history" => vec![
+            ("/extracted_revision", json!({"type": ["integer", "null"]})),
+            ("/extracted_output", json!({"type": ["object", "null"]})),
+            (
+                "/revisions/[]/delta_from_previous",
+                json!({"type": ["object", "null"]}),
+            ),
+            (
+                "/revisions/[]/signatures/[]/signatory",
+                json!({"type": ["string", "null"]}),
+            ),
+        ],
+        "cloak" => vec![("/output/path", json!({"type": ["string", "null"]}))],
+        "uncloak" => vec![
+            ("/doc_id", json!({"type": ["string", "null"]})),
+            ("/restored_doc_id", json!({"type": ["string", "null"]})),
+            ("/output/path", json!({"type": ["string", "null"]})),
+        ],
+        "pipeline" => vec![
+            ("/aborted", json!({"type": ["object", "null"]})),
+            ("/output", json!({"type": ["object", "null"]})),
+            (
+                "/steps/[]/data",
+                json!({"type": "object", "description": "step-specific output payload"}),
+            ),
+        ],
         _ => vec![],
     };
     pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
@@ -495,7 +558,97 @@ fn runs(file: &str, work: &Path) -> Vec<Vec<String>> {
         "--dpi".into(),
         "36".into(),
     ]);
+    out.push(vec!["chart".into(), file.into()]);
+    out.push(vec!["flat-forms".into(), file.into()]);
+    out.push(vec!["history".into(), file.into()]);
+    out.push(vec![
+        "patch".into(),
+        file.into(),
+        "--replace".into(),
+        "p1.b1=Reflowed".into(),
+        "--reflow".into(),
+        "--dry-run".into(),
+    ]);
+    out.push(vec![
+        "cloak".into(),
+        file.into(),
+        "--vault".into(),
+        w("vault.json"),
+        "--entity".into(),
+        "WORD=e".into(),
+        "-o".into(),
+        w("cloaked.pdf"),
+    ]);
+    out.push(vec![
+        "uncloak".into(),
+        w("cloaked.pdf"),
+        "--vault".into(),
+        w("vault.json"),
+        "--dry-run".into(),
+    ]);
+    out.push(vec![
+        "pipeline".into(),
+        file.into(),
+        "--inline".into(),
+        r#"[{"op":"info","id":"i1"},{"op":"query","id":"q1","right_of":"e"},{"op":"chart","id":"c1"},{"op":"flat_forms","id":"ff1"},{"op":"history","id":"h1"}]"#.into(),
+    ]);
     out
+}
+
+/// Writes a compact 1-page PDF into `work` with a calibrated bar chart, a
+/// 2-node directed flowchart, flat underline/checkbox/comb fields, and PII so
+/// `infer` observes populated array items for `chart`, `flat-forms`, `history`,
+/// `cloak`, `uncloak`, and `pipeline`.
+fn write_v2_showcase_pdf(work: &Path) -> Result<PathBuf> {
+    let stream = "\
+BT /F1 12 Tf 180 760 Td (Quarterly Revenue) Tj ET\n\
+0.2 0.4 0.8 rg 360 758 10 8 re f\n\
+BT /F1 9 Tf 375 759 Td (Revenue) Tj ET\n\
+0 0 0 RG 1 w 80 580 m 80 730 l 320 580 m 80 580 l S\n\
+BT /F1 9 Tf 55 577 Td (0) Tj 50 652 Td (50) Tj 45 727 Td (100) Tj ET\n\
+0.2 0.4 0.8 rg 120 580 36 75 re f 210 580 36 120 re f\n\
+BT /F1 9 Tf 128 565 Td (Q1) Tj 218 565 Td (Q2) Tj ET\n\
+0 0 0 RG 1 w 80 460 80 32 re S 230 460 80 32 re S\n\
+BT /F1 10 Tf 102 472 Td (Start) Tj 254 472 Td (Done) Tj ET\n\
+0 0 0 RG 1 w 160 476 m 224 476 l S\n\
+0 0 0 rg 230 476 m 222 480 l 222 472 l h f\n\
+BT /F1 8 Tf 185 482 Td (ok) Tj ET\n\
+BT /F1 10 Tf 80 380 Td (Applicant:) Tj ET\n\
+0 0 0 RG 1 w 145 378 m 300 378 l S\n\
+BT /F1 10 Tf 80 340 Td (Agree) Tj ET\n\
+0 0 0 RG 1 w 64 338 10 10 re S\n\
+BT /F1 10 Tf 80 300 Td (Code:) Tj ET\n\
+0 0 0 RG 1 w 125 295 80 18 re S 145 295 m 145 313 l 165 295 m 165 313 l 185 295 m 185 313 l S\n\
+BT /F1 10 Tf 80 240 Td (SSN 123-45-6789 Email alice@example.com) Tj ET\n";
+
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>".to_string(),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
+        format!("<</Length {}>>\nstream\n{stream}endstream", stream.len()),
+    ];
+    let mut pdf = Vec::from(&b"%PDF-1.7\n"[..]);
+    let mut offsets = vec![0usize];
+    for (idx, body) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", idx + 1).as_bytes());
+    }
+    let xref_pos = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for off in offsets.iter().skip(1) {
+        pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref_pos}\n%%EOF\n",
+            objs.len() + 1
+        )
+        .as_bytes(),
+    );
+    let path = work.join("v2_showcase.pdf");
+    std::fs::write(&path, pdf)?;
+    Ok(path)
 }
 
 /// Every report in what a run printed, by its `schema`.
@@ -585,6 +738,93 @@ fn infer(root: &Path, nupdf: &Path) -> Result<BTreeMap<String, Value>> {
     )?;
     run(&["info".into(), "/no/such/file.pdf".into()], &mut reports)?;
     run(&["schema".into()], &mut reports)?;
+
+    let showcase = write_v2_showcase_pdf(&work)?;
+    let sc = showcase.to_string_lossy().into_owned();
+    let w = |p: &str| work.join(p).to_string_lossy().into_owned();
+    run(&["chart".into(), sc.clone()], &mut reports)?;
+    run(&["flat-forms".into(), sc.clone()], &mut reports)?;
+    run(
+        &[
+            "flat-forms".into(),
+            sc.clone(),
+            "--set".into(),
+            "applicant=Ada".into(),
+            "--check".into(),
+            "agree".into(),
+            "-o".into(),
+            w("v2_ff_filled.pdf"),
+        ],
+        &mut reports,
+    )?;
+    run(
+        &[
+            "flat-forms".into(),
+            sc.clone(),
+            "--promote".into(),
+            "--dry-run".into(),
+        ],
+        &mut reports,
+    )?;
+    run(
+        &[
+            "meta".into(),
+            sc.clone(),
+            "--set".into(),
+            "Title=Rev2".into(),
+            "--incremental".into(),
+            "-o".into(),
+            w("v2_rev2.pdf"),
+        ],
+        &mut reports,
+    )?;
+    run(
+        &[
+            "history".into(),
+            w("v2_rev2.pdf"),
+            "--extract-revision".into(),
+            "1".into(),
+            "-o".into(),
+            w("v2_rev1.pdf"),
+        ],
+        &mut reports,
+    )?;
+    run(
+        &[
+            "cloak".into(),
+            sc.clone(),
+            "--vault".into(),
+            w("v2_vault.json"),
+            "--preset".into(),
+            "pii".into(),
+            "-o".into(),
+            w("v2_cloaked.pdf"),
+        ],
+        &mut reports,
+    )?;
+    let txt_path = work.join("v2_summary.txt");
+    std::fs::write(&txt_path, "Summary token check\n")?;
+    run(
+        &[
+            "uncloak".into(),
+            txt_path.to_string_lossy().into_owned(),
+            "--vault".into(),
+            w("v2_vault.json"),
+            "--text-mode".into(),
+            "--dry-run".into(),
+        ],
+        &mut reports,
+    )?;
+    run(
+        &[
+            "pipeline".into(),
+            sc,
+            "--inline".into(),
+            r#"[{"op":"query","id":"q1","right_of":"Applicant"},{"op":"patch","id":"p1","replacements":[{"id":"p1.b1.l1.s1","text":"Edited Revenue"}]}]"#.into(),
+            "--dry-run".into(),
+        ],
+        &mut reports,
+    )?;
     let cli = abouts(nupdf)?;
     let mut out = BTreeMap::new();
     for (id, values) in &reports {

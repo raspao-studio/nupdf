@@ -219,4 +219,4 @@ hayro's own crypto is marked unaudited by its author, and nupdf also needs to en
 
 ## Determinism
 
-Same input, arguments and nupdf version give byte-identical JSON and PDF output. That means no timestamps unless asked for, `/ID` derived from content, object numbering and dictionary key order that are stable, and parallel results ordered by page. The harness and the agent eval both rely on this.
+Same input, arguments and nupdf version give byte-identical JSON and PDF output. That means no timestamps unless asked for, `/ID` derived from content, object numbering and dictionary key order that are stable, and parallel results ordered by page. Because the entire crate graph is pure safe Rust without C libraries, system font dependencies or entropy syscalls, `nupdf` also compiles directly to `wasm32-unknown-unknown` with zero host imports (`bench/wasm-edge`, DECISIONS D54). The harness and the agent eval both rely on this.

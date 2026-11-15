@@ -4145,3 +4145,357 @@ fn mcp_exposes_all_five_agent_primitives() {
     );
     mcp.close();
 }
+
+#[test]
+fn chart_decompiles_vector_bars_and_directed_diagrams() {
+    // Page 1: Vertical bar chart with ticks 0, 50, 100 at y=50, 150, 250 in PDF space
+    // (on a 300pt tall page, page-space y = 250, 150, 50 -> 2.0 pt per unit)
+    // plus two bars of height 80pt (value 40.0) and 150pt (value 75.0).
+    let p1 = concat!(
+        "0 0 0 RG 1 w 60 50 m 60 250 l S 60 50 m 260 50 l S\n",
+        "BT /F1 9 Tf 35 47 Td (0) Tj ET\n",
+        "BT /F1 9 Tf 30 147 Td (50) Tj ET\n",
+        "BT /F1 9 Tf 25 247 Td (100) Tj ET\n",
+        "0.2 0.4 0.8 rg 90 50 24 80 re f 160 50 24 150 re f\n",
+        "BT /F1 9 Tf 95 35 Td (Q1) Tj ET\n",
+        "BT /F1 9 Tf 165 35 Td (Q2) Tj ET\n",
+    );
+    // Page 2: Two stroked boxes connected by a shaft + filled triangle arrowhead
+    let p2 = concat!(
+        "0 0 0 RG 1 w 30 130 70 30 re S 160 130 80 30 re S\n",
+        "BT /F1 10 Tf 40 142 Td (Ingest) Tj ET\n",
+        "BT /F1 10 Tf 172 142 Td (Verify) Tj ET\n",
+        "100 145 m 153 145 l S\n",
+        "0 0 0 rg 160 145 m 152 149 l 152 141 l h f\n",
+    );
+    let s1 = format!("<</Length {}>>\nstream\n{p1}endstream", p1.len());
+    let s2 = format!("<</Length {}>>\nstream\n{p2}endstream", p2.len());
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 5 0 R/Resources<</Font<</F1 7 0 R>>>>>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 6 0 R/Resources<</Font<</F1 7 0 R>>>>>>",
+        &s1,
+        &s2,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("chart-v2.pdf");
+    std::fs::write(&file, pdf).unwrap();
+
+    let report = report_of(&["chart", file.to_str().unwrap()]);
+    assert_eq!(report["schema"], "nupdf.chart/v1");
+    assert_eq!(report["charts"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["diagrams"].as_array().unwrap().len(), 1, "{report}");
+    let pts = report["charts"][0]["series"][0]["points"]
+        .as_array()
+        .unwrap();
+    assert_eq!(pts.len(), 2);
+    assert!((pts[0]["value"].as_f64().unwrap() - 40.0).abs() < 0.5);
+    assert!((pts[1]["value"].as_f64().unwrap() - 75.0).abs() < 0.5);
+    assert_eq!(report["diagrams"][0]["edges"][0]["directed"], true);
+}
+
+#[test]
+fn flat_forms_detects_fills_rejects_comb_overflow_and_promotes() {
+    // Stroked underline after "Name:", 4-cell comb after "PIN:", and 10x10 checkbox before "Agree"
+    let content = concat!(
+        "BT /F1 11 Tf 20 240 Td (Name:) Tj ET\n",
+        "0 0 0 RG 1 w 65 238 m 220 238 l S\n",
+        "BT /F1 11 Tf 20 190 Td (PIN:) Tj ET\n",
+        "65 185 72 18 re S 83 185 m 83 203 l S 101 185 m 101 203 l S 119 185 m 119 203 l S\n",
+        "20 140 10 10 re S\n",
+        "BT /F1 10 Tf 36 141 Td (Agree) Tj ET\n",
+    );
+    let stream = format!("<</Length {}>>\nstream\n{content}endstream", content.len());
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        &stream,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("flat-v2.pdf");
+    std::fs::write(&file, pdf).unwrap();
+
+    let det = report_of(&["flat-forms", file.to_str().unwrap()]);
+    assert_eq!(det["schema"], "nupdf.flat_forms/v1");
+    assert_eq!(det["fields"].as_array().unwrap().len(), 3, "{det}");
+
+    // Comb overflow (5 chars into 4 cells) exits 4
+    let ovf = nupdf(&[
+        "flat-forms",
+        file.to_str().unwrap(),
+        "--set",
+        "pin=12345",
+        "--dry-run",
+    ]);
+    assert_eq!(ovf.status.code(), Some(4));
+
+    // Fill + check
+    let filled = scratch("flat-v2-filled.pdf");
+    let fill_rep = report_of(&[
+        "flat-forms",
+        file.to_str().unwrap(),
+        "--set",
+        "name=Ada Lovelace",
+        "--set",
+        "pin=9042",
+        "--check",
+        "agree",
+        "-o",
+        filled.to_str().unwrap(),
+    ]);
+    assert_eq!(fill_rep["applied"], true);
+    assert_eq!(fill_rep["verified"], true);
+
+    // Promote to real /AcroForm and confirm `nupdf forms` sees 3 interactive widgets
+    let promoted = scratch("flat-v2-promoted.pdf");
+    let prom_rep = report_of(&[
+        "flat-forms",
+        file.to_str().unwrap(),
+        "--promote",
+        "-o",
+        promoted.to_str().unwrap(),
+    ]);
+    assert_eq!(prom_rep["promoted_widgets"], 3);
+    let forms_rep = report_of(&["forms", promoted.to_str().unwrap()]);
+    assert_eq!(
+        forms_rep["pages"][0]["widgets"].as_array().unwrap().len(),
+        3
+    );
+}
+
+#[test]
+fn patch_reflow_wraps_paragraph_shifts_downstream_and_rejects_page_overflow() {
+    let content = concat!(
+        "BT /F1 11 Tf 30 250 Td (1. Scope. Initial short scope.) Tj ET\n",
+        "BT /F1 11 Tf 30 236 Td (Second line of scope block.) Tj ET\n",
+        "BT /F1 11 Tf 30 190 Td (2. Payment. Net thirty days.) Tj ET\n",
+    );
+    let stream = format!("<</Length {}>>\nstream\n{content}endstream", content.len());
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        &stream,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("reflow-v2.pdf");
+    std::fs::write(&file, pdf).unwrap();
+
+    let out = scratch("reflow-v2-out.pdf");
+    let rep = report_of(&[
+        "patch",
+        file.to_str().unwrap(),
+        "--replace",
+        "p1.b1=1. Scope. Expanded multi-line scope paragraph covering deliverables, milestones, acceptance testing, and support obligations.",
+        "--reflow",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(rep["verification"]["verified"], true, "{rep}");
+
+    let huge = "1. Scope. ".to_string() + &"Long overflow sentence pushing off bottom. ".repeat(35);
+    let arg = format!("p1.b1={huge}");
+    let ovf = nupdf(&[
+        "patch",
+        file.to_str().unwrap(),
+        "--replace",
+        &arg,
+        "--reflow",
+        "--dry-run",
+    ]);
+    assert_eq!(ovf.status.code(), Some(4));
+}
+
+#[test]
+fn history_tracks_signed_incremental_revisions_and_extracts_prior_revision() {
+    let base = fill_form_with("", "history-base.pdf");
+    let rev2 = scratch("history-inc-v2.pdf");
+    let _ = report_of(&[
+        "forms",
+        base.to_str().unwrap(),
+        "--set",
+        "person=Grace",
+        "--incremental",
+        "-o",
+        rev2.to_str().unwrap(),
+    ]);
+    let extracted = scratch("history-rev1-extracted.pdf");
+    let rep = report_of(&[
+        "history",
+        rev2.to_str().unwrap(),
+        "--extract-revision",
+        "1",
+        "-o",
+        extracted.to_str().unwrap(),
+    ]);
+    assert_eq!(report_schema(&rep), "nupdf.history/v1");
+    assert_eq!(rep["revision_count"], 2, "{rep}");
+    assert!(extracted.exists());
+    let r1_forms = report_of(&["forms", extracted.to_str().unwrap()]);
+    assert_eq!(widget(&r1_forms, "person", 0)["value"], "Ada");
+}
+
+fn report_schema(v: &Value) -> &str {
+    v["schema"].as_str().unwrap_or_default()
+}
+
+#[test]
+fn cloak_and_uncloak_roundtrip_pdf_and_text_with_zero_leaks() {
+    let content = concat!(
+        "BT /F1 11 Tf 20 240 Td (Party: Alice Example SSN 412-88-9014) Tj ET\n",
+        "BT /F1 11 Tf 20 215 Td (Contact: alice@acme.org for Alice Example) Tj ET\n",
+    );
+    let stream = format!("<</Length {}>>\nstream\n{content}endstream", content.len());
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 320 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        &stream,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("cloak-v2.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let vault = scratch("cloak-v2-vault.json");
+    let cloaked = scratch("cloak-v2-out.pdf");
+
+    let rep = report_of(&[
+        "cloak",
+        file.to_str().unwrap(),
+        "--vault",
+        vault.to_str().unwrap(),
+        "--preset",
+        "pii",
+        "--entity",
+        "PERSON=Alice Example",
+        "-o",
+        cloaked.to_str().unwrap(),
+    ]);
+    assert_eq!(rep["schema"], "nupdf.cloak/v1");
+    assert_eq!(rep["verified_zero_leaks"], true);
+
+    let ext = String::from_utf8_lossy(
+        &nupdf(&["extract", cloaked.to_str().unwrap(), "--format", "text"]).stdout,
+    )
+    .into_owned();
+    assert!(!ext.contains("Alice Example") && !ext.contains("412-88-9014"));
+    assert!(ext.contains("[PERSON_01]") && ext.contains("000-00-0001"));
+
+    // Text-mode uncloak
+    let note_in = scratch("cloak-note.json");
+    let note_out = scratch("cloak-note-restored.json");
+    std::fs::write(&note_in, r#"{"who":"[PERSON_01]","ssn":"000-00-0001"}"#).unwrap();
+    let txt_rep = run_json(&[
+        "uncloak",
+        note_in.to_str().unwrap(),
+        "--vault",
+        vault.to_str().unwrap(),
+        "--text-mode",
+        "-o",
+        note_out.to_str().unwrap(),
+    ]);
+    assert_eq!(txt_rep["schema"], "nupdf.uncloak/v1");
+    let restored_note = std::fs::read_to_string(&note_out).unwrap();
+    assert!(restored_note.contains("Alice Example") && restored_note.contains("412-88-9014"));
+
+    // PDF uncloak
+    let restored_pdf = scratch("cloak-v2-restored.pdf");
+    let pdf_rep = report_of(&[
+        "uncloak",
+        cloaked.to_str().unwrap(),
+        "--vault",
+        vault.to_str().unwrap(),
+        "-o",
+        restored_pdf.to_str().unwrap(),
+    ]);
+    assert_eq!(pdf_rep["schema"], "nupdf.uncloak/v1");
+    let ext_restored = String::from_utf8_lossy(
+        &nupdf(&[
+            "extract",
+            restored_pdf.to_str().unwrap(),
+            "--format",
+            "text",
+        ])
+        .stdout,
+    )
+    .into_owned();
+    assert!(ext_restored.contains("Alice Example") && ext_restored.contains("412-88-9014"));
+}
+
+#[test]
+fn pipeline_chains_variables_across_steps_and_mcp_exposes_v2_primitives() {
+    let content =
+        "BT /F1 12 Tf 20 200 Td (Amount:) Tj ET\nBT /F1 12 Tf 90 200 Td ($100.00) Tj ET\n";
+    let stream = format!("<</Length {}>>\nstream\n{content}endstream", content.len());
+    let pdf = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        &stream,
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]);
+    let file = scratch("pipe-v2.pdf");
+    std::fs::write(&file, pdf).unwrap();
+    let out_pdf = scratch("pipe-v2-out.pdf");
+    let spec = serde_json::json!({
+        "steps": [
+            {"id": "q1", "op": "query", "right_of": "Amount:", "nearest_only": true},
+            {"id": "p1", "op": "patch", "replacements": [{"target_id": "${q1.first_id}", "new_text": "$250.00"}]},
+            {"id": "a1", "op": "audit", "claims": [{"claim_id": "c1", "page": 1, "quote": "$250.00"}], "strict": true}
+        ]
+    });
+    let rep = report_of(&[
+        "pipeline",
+        file.to_str().unwrap(),
+        "--inline",
+        &spec.to_string(),
+        "-o",
+        out_pdf.to_str().unwrap(),
+    ]);
+    assert_eq!(rep["schema"], "nupdf.pipeline/v1");
+    assert_eq!(rep["mutated"], true, "{rep}");
+    assert!(out_pdf.exists());
+
+    // Verify all 6 v2 tools are exposed on `nupdf mcp`
+    let mut mcp = Mcp::start();
+    mcp.send(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"}
+        }
+    }));
+    let _ = mcp.next();
+    mcp.send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
+    let tools = mcp.next()["result"]["tools"].clone();
+    let names: Vec<&str> = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "chart",
+        "flat-forms",
+        "history",
+        "cloak",
+        "uncloak",
+        "pipeline",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected} in MCP tools: {names:?}"
+        );
+    }
+    let res = mcp.call(
+        3,
+        "chart",
+        serde_json::json!({"file": file.to_str().unwrap()}),
+    );
+    assert_eq!(res["structuredContent"]["schema"], "nupdf.chart/v1");
+    mcp.close();
+}
