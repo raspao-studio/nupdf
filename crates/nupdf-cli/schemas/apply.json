@@ -41,6 +41,38 @@
     "doc_id": {
       "type": "string"
     },
+    "duplicates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "agent_of": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "op": {
+            "type": "integer"
+          },
+          "same_as": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "agent",
+          "agent_of",
+          "op",
+          "same_as"
+        ]
+      }
+    },
     "fields_changed": {
       "type": "integer"
     },
@@ -208,6 +240,7 @@
     "conflicts",
     "diagnostics",
     "doc_id",
+    "duplicates",
     "fields_changed",
     "highlights_added",
     "op_count",

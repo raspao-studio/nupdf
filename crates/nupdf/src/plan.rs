@@ -122,12 +122,24 @@ pub struct PlanConflict {
     pub message: String,
 }
 
+/// An op that repeats, field for field, one another plan staged: it is
+/// applied once, as `same_as`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PlanDuplicate {
+    pub op: usize,
+    pub agent: Option<String>,
+    pub same_as: usize,
+    pub agent_of: Option<String>,
+}
+
 /// Summary of an executed (or dry-run) transactional edit plan.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PlanExecution {
     pub plan_count: usize,
     pub op_count: usize,
     pub conflicts: Vec<PlanConflict>,
+    /// Ops left out as repeats of another plan's.
+    pub duplicates: Vec<PlanDuplicate>,
     pub patches: Vec<AppliedPatch>,
     pub highlights_added: usize,
     pub annotations_deleted: usize,
@@ -432,18 +444,42 @@ pub fn execute_plans(
         }
     }
 
+    // An op another plan staged already, the same in every field, is the
+    // same edit asked twice: it is applied once, and the report says so.
+    // Within one plan, a repeat is the plan's own (two toggles cancel).
     let mut indexed = Vec::new();
-    for p in plans {
+    let mut duplicates: Vec<PlanDuplicate> = Vec::new();
+    let mut first_by_op: HashMap<String, (usize, usize, Option<String>)> = HashMap::new();
+    let mut op_count = 0usize;
+    for (plan_idx, p) in plans.iter().enumerate() {
         for op in &p.ops {
-            if indexed.len() >= MAX_PLAN_OPS {
+            if op_count >= MAX_PLAN_OPS {
                 return Err(PlanError {
                     code: "limit.plan_ops",
                     is_conflict_or_verify: false,
                     message: format!("plan exceeds maximum of {MAX_PLAN_OPS} operations"),
                 });
             }
+            let global_idx = op_count;
+            op_count += 1;
+            let key = serde_json::to_string(op).unwrap_or_default();
+            match first_by_op.get(&key) {
+                Some((first_plan, first_idx, first_agent)) if *first_plan != plan_idx => {
+                    duplicates.push(PlanDuplicate {
+                        op: global_idx,
+                        agent: p.agent.clone(),
+                        same_as: *first_idx,
+                        agent_of: first_agent.clone(),
+                    });
+                    continue;
+                }
+                Some(_) => {}
+                None => {
+                    first_by_op.insert(key, (plan_idx, global_idx, p.agent.clone()));
+                }
+            }
             indexed.push(IndexedOp {
-                global_idx: indexed.len(),
+                global_idx,
                 agent: p.agent.clone(),
                 op: op.clone(),
             });
@@ -941,7 +977,8 @@ pub fn execute_plans(
             Vec::new(),
             PlanExecution {
                 plan_count: plans.len(),
-                op_count: indexed.len(),
+                op_count,
+                duplicates,
                 conflicts,
                 patches: Vec::new(),
                 highlights_added: 0,
@@ -1228,7 +1265,8 @@ pub fn execute_plans(
         bytes,
         PlanExecution {
             plan_count: plans.len(),
-            op_count: indexed.len(),
+            op_count,
+            duplicates,
             conflicts: Vec::new(),
             patches: applied_patches,
             highlights_added,
@@ -1498,6 +1536,53 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "input.target_not_found");
+    }
+
+    #[test]
+    fn the_same_op_from_two_plans_is_applied_once() {
+        let base = multi_page_fixture();
+        let plan = |agent: &str| {
+            format!(
+                r#"{{"agent":"{agent}","ops":[
+                    {{"op":"patch","id":"p1.b2.l1.s1","text":"Service Fee: $25,000"}},
+                    {{"op":"highlight","id":"p1.b1.l1.s1"}},
+                    {{"op":"meta","set":{{"Title":"Agreement"}}}}
+                ]}}"#
+            )
+        };
+        let (bytes, exec) = run(&base, &[&plan("a"), &plan("b")]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(exec.conflicts.is_empty());
+        assert!(exec.verified);
+        assert_eq!(exec.op_count, 6);
+        assert_eq!(exec.patches.len(), 1);
+        assert_eq!(exec.highlights_added, 1);
+        let dups: Vec<(usize, usize)> = exec.duplicates.iter().map(|d| (d.op, d.same_as)).collect();
+        assert_eq!(dups, vec![(3, 0), (4, 1), (5, 2)]);
+        assert_eq!(exec.duplicates[0].agent.as_deref(), Some("b"));
+        assert_eq!(exec.duplicates[0].agent_of.as_deref(), Some("a"));
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(out.metadata("Title").as_deref(), Some("Agreement"));
+
+        let rotate = r#"{"ops":[{"op":"pages","rotate":90}]}"#;
+        let (bytes, exec) = run(&base, &[rotate, rotate]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(exec.duplicates.len(), 1);
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        assert_eq!(out.dict_get(&page, b"Rotate").to_int(), 90);
+    }
+
+    #[test]
+    fn a_repeat_within_one_plan_is_the_plan_s_own() {
+        let base = multi_page_fixture();
+        let (bytes, exec) = run(
+            &base,
+            &[r#"[{"op":"pages","rotate":90},{"op":"pages","rotate":90}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(exec.duplicates.is_empty());
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        assert_eq!(out.dict_get(&page, b"Rotate").to_int(), 180);
     }
 
     #[test]
