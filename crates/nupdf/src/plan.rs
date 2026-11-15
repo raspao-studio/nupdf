@@ -529,13 +529,8 @@ pub fn execute_plans(
     for item in &indexed {
         match &item.op {
             PlanOp::Patch { id, text } => {
-                let resolved = resolve_content_id(
-                    id,
-                    &mut stext_cache,
-                    base_doc,
-                    page_count,
-                    stext::Options::default(),
-                )?;
+                // Its page and box come from resolving every patch on the
+                // base together, below.
                 patches_resolved.push((
                     item.global_idx,
                     item.agent.clone(),
@@ -543,8 +538,8 @@ pub fn execute_plans(
                         target_id: id.clone(),
                         new_text: text.clone(),
                     },
-                    resolved.page_idx,
-                    resolved.bbox,
+                    0,
+                    Rect::EMPTY,
                 ));
             }
             PlanOp::Highlight {
@@ -852,6 +847,31 @@ pub fn execute_plans(
         }
     }
 
+    // Every patch target found on the base, with the spans around it,
+    // before any op changes a page: a redaction that removes a block would
+    // renumber the ones after it.
+    let patch_specs: Vec<PatchSpec> = patches_resolved
+        .iter()
+        .map(|(_, _, s, _, _)| s.clone())
+        .collect();
+    let patch_err = |e: patch::PatchError| PlanError {
+        code: e.code,
+        is_conflict_or_verify: false,
+        message: e.message,
+    };
+    let (patch_targets, mut untouched_by_page) = if patch_specs.is_empty() {
+        (None, HashMap::new())
+    } else {
+        let resolved = patch::resolve_patches(base_doc, &patch_specs).map_err(patch_err)?;
+        for (slot, (page, bbox)) in patches_resolved.iter_mut().zip(resolved.targets()) {
+            slot.3 = page - 1;
+            slot.4 = bbox;
+        }
+        let untouched =
+            patch::snapshot_untouched_spans(base_doc, &patch_specs).map_err(patch_err)?;
+        (Some(resolved), untouched)
+    };
+
     // Check pairwise spatial & semantic conflicts.
     for i in 0..patches_resolved.len() {
         let (idx_a, ref ag_a, ref spec_a, p_a, bbox_a) = patches_resolved[i];
@@ -1119,28 +1139,23 @@ pub fn execute_plans(
         let _ = scrub::scrub(&work, m, &all_pages);
     }
 
-    // 4. Surgical text patches (snapshot untouched spans on affected pages first for verification!)
-    let patch_specs: Vec<PatchSpec> = patches_resolved
-        .iter()
-        .map(|(_, _, s, _, _)| s.clone())
-        .collect();
-    let mut untouched_by_page = if patch_specs.is_empty() {
-        HashMap::new()
-    } else {
-        patch::snapshot_untouched_spans(&work, &patch_specs).map_err(|e| PlanError {
-            code: e.code,
-            is_conflict_or_verify: false,
-            message: e.message,
-        })?
-    };
-    let mut applied_patches = if patch_specs.is_empty() {
-        Vec::new()
-    } else {
-        patch::apply_patches(&work, &patch_specs, patch_opts).map_err(|e| PlanError {
-            code: e.code,
-            is_conflict_or_verify: false,
-            message: e.message,
-        })?
+    // 4. Surgical text patches, at the targets found on the base.
+    let mut applied_patches = match patch_targets {
+        None => Vec::new(),
+        Some(resolved) => {
+            let (applied, gone) = patch::apply_resolved(&work, resolved).map_err(patch_err)?;
+            if !gone.is_empty() {
+                return Err(PlanError {
+                    code: "plan.target_destroyed",
+                    is_conflict_or_verify: true,
+                    message: format!(
+                        "another op of the plans removed the text of patch target(s) {}",
+                        gone.join(", ")
+                    ),
+                });
+            }
+            applied
+        }
     };
 
     // 5. Metadata
@@ -1583,6 +1598,46 @@ mod tests {
         let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
         let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
         assert_eq!(out.dict_get(&page, b"Rotate").to_int(), 180);
+    }
+
+    #[test]
+    fn a_patch_lands_on_the_base_target_after_a_redaction_removes_a_block() {
+        let base = doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R>>"
+            )
+            .into_bytes(),
+            stream(
+                "",
+                b"BT /F1 12 Tf 72 720 Td (Block one secret) Tj ET \
+                  BT /F1 12 Tf 72 600 Td (Block two) Tj ET \
+                  BT /F1 12 Tf 72 480 Td (Block three) Tj ET \
+                  BT /F1 12 Tf 72 360 Td (Block four) Tj ET",
+            ),
+        ]);
+        let (bytes, exec) = run(
+            &base,
+            &[r#"[{"op":"redact","id":"p1.b1"},{"op":"patch","id":"p1.b3.l1.s1","text":"XX"}]"#],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(exec.verified, "{exec:?}");
+        assert_eq!(exec.patches[0].old_text, "Block three");
+        let out = Document::open(bytes).unwrap_or_else(|e| panic!("{}", e.message));
+        let page = out.page(0).unwrap_or_else(|e| panic!("{}", e.0));
+        let sp =
+            page_stext(&out, &page, stext::Options::default()).unwrap_or_else(|e| panic!("{e}"));
+        let refs: Vec<&Block> = sp.blocks.iter().collect();
+        let text: String = extract::text_blocks(&refs)
+            .into_iter()
+            .map(extract::block_text)
+            .collect();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("Block two"), "{text}");
+        assert!(text.contains("XX"), "{text}");
+        assert!(!text.contains("Block three"), "{text}");
+        assert!(text.contains("Block four"), "{text}");
     }
 
     #[test]

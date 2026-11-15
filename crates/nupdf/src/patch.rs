@@ -554,6 +554,10 @@ fn page_has_matching_base14(doc: &Document, page_obj: &Object, base14_name: &str
 #[derive(Debug)]
 struct SpanEraser {
     quads: Vec<Quad>,
+    /// For each quad, the target it erases.
+    owners: Vec<usize>,
+    /// For each target, whether a glyph of it was erased.
+    erased: Vec<bool>,
 }
 
 impl Hooks for SpanEraser {
@@ -579,9 +583,16 @@ impl Hooks for SpanEraser {
         b.x1 -= w / 10.0;
         b.y0 += h / 10.0;
         b.y1 -= h / 10.0;
-        self.quads
-            .iter()
-            .any(|q| b.intersect(Rect::from_quad(*q)).is_valid())
+        let mut hit = false;
+        for (q, &owner) in self.quads.iter().zip(&self.owners) {
+            if b.intersect(Rect::from_quad(*q)).is_valid() {
+                hit = true;
+                if let Some(e) = self.erased.get_mut(owner) {
+                    *e = true;
+                }
+            }
+        }
+        hit
     }
 }
 
@@ -1115,9 +1126,44 @@ pub fn apply_patches(
     specs: &[PatchSpec],
     _options: &PatchOptions,
 ) -> Result<Vec<AppliedPatch>, PatchError> {
+    let resolved = resolve_patches(doc, specs)?;
+    Ok(apply_resolved(doc, resolved)?.0)
+}
+
+/// Patches with their targets found: the glyphs to erase, where and in
+/// what style to write the replacement, and the old text and box. Made by
+/// [`resolve_patches`] on one document, applied by [`apply_resolved`] to it
+/// or to an edited fork of it whose pages keep the targets' glyphs where
+/// they were.
+#[derive(Debug, Clone)]
+pub struct ResolvedPatches {
+    count: usize,
+    by_page: BTreeMap<i32, (Matrix, Vec<ResolvedTarget>)>,
+}
+
+impl ResolvedPatches {
+    /// Each patch's 1-based page and its target's box, in spec order.
+    pub fn targets(&self) -> Vec<(i32, Rect)> {
+        let mut out = vec![(0, Rect::EMPTY); self.count];
+        for (_, targets) in self.by_page.values() {
+            for t in targets {
+                if let Some(slot) = out.get_mut(t.spec_index) {
+                    *slot = (t.page, t.old_bbox);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Finds every target of `specs` on `doc`, before any of them is changed.
+pub fn resolve_patches(doc: &Document, specs: &[PatchSpec]) -> Result<ResolvedPatches, PatchError> {
     let addrs = parse_and_validate_specs(specs)?;
     if addrs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ResolvedPatches {
+            count: 0,
+            by_page: BTreeMap::new(),
+        });
     }
 
     let page_count = doc.page_count().map_err(|e| PatchError {
@@ -1248,19 +1294,39 @@ pub fn apply_patches(
         }
         resolved_by_page.insert(page_num, (page_ctm, page_targets));
     }
+    Ok(ResolvedPatches {
+        count: specs.len(),
+        by_page: resolved_by_page,
+    })
+}
+
+/// Applies `resolved` to `doc`: on each page the targets' glyphs erased and
+/// the replacements written. With the patches, the ids of targets of which
+/// no glyph was left to erase (another edit took them).
+pub fn apply_resolved(
+    doc: &Document,
+    resolved: ResolvedPatches,
+) -> Result<(Vec<AppliedPatch>, Vec<String>), PatchError> {
+    let ResolvedPatches {
+        count,
+        by_page: resolved_by_page,
+    } = resolved;
+    let mut gone = Vec::new();
 
     // Shared cache across pages so identical replacement fonts share one PDF object.
     let mut doc_font_cache: HashMap<FontKey, i32> = HashMap::new();
     let mut shared_tounicode: Option<i32> = None;
-    let mut applied_by_index: Vec<Option<AppliedPatch>> = vec![None; specs.len()];
+    let mut applied_by_index: Vec<Option<AppliedPatch>> = vec![None; count];
 
     for (page_num, (page_ctm, targets)) in resolved_by_page {
         let page_index = page_num - 1;
 
         // Step 1: Surgically erase only the target glyphs on this page.
         let mut all_erase_quads = Vec::new();
-        for t in &targets {
+        let mut owners = Vec::new();
+        for (k, t) in targets.iter().enumerate() {
             all_erase_quads.extend_from_slice(&t.erase_quads_pdf);
+            owners.extend(std::iter::repeat_n(k, t.erase_quads_pdf.len()));
         }
         let clean_opts = content_clean::Options {
             recurse: false,
@@ -1271,6 +1337,8 @@ pub fn apply_patches(
         };
         let mut eraser = SpanEraser {
             quads: all_erase_quads,
+            owners,
+            erased: vec![false; targets.len()],
         };
         filter_page_contents(doc, page_index, &clean_opts, &mut eraser).map_err(|message| {
             PatchError {
@@ -1278,6 +1346,11 @@ pub fn apply_patches(
                 message,
             }
         })?;
+        for (t, erased) in targets.iter().zip(&eraser.erased) {
+            if !erased {
+                gone.push(t.id.clone());
+            }
+        }
 
         // Inspect post-filter `/Resources /Font` so new resource names never collide.
         let post_page = doc.page(page_index).map_err(|e| PatchError {
@@ -1415,7 +1488,7 @@ pub fn apply_patches(
         }
     }
 
-    let mut out = Vec::with_capacity(specs.len());
+    let mut out = Vec::with_capacity(count);
     for slot in applied_by_index {
         let Some(p) = slot else {
             return Err(PatchError {
@@ -1425,7 +1498,7 @@ pub fn apply_patches(
         };
         out.push(p);
     }
-    Ok(out)
+    Ok((out, gone))
 }
 
 fn shrink_for_collision(r: Rect, dx: f32, dy: f32) -> Rect {
@@ -2105,6 +2178,29 @@ mod tests {
             let ver = result.verification.unwrap();
             assert!(ver.verified, "{specs:?}: {:?}", ver.findings);
         }
+    }
+
+    #[test]
+    fn a_target_resolved_before_another_edit_took_its_glyphs_is_reported_gone() {
+        let content = b"BT /F1 12 Tf 72 700 Td (Taken away) Tj ET \
+            BT /F1 12 Tf 72 600 Td (Still here) Tj ET";
+        let doc = page_doc(content, "/Font<</F1 5 0 R>>", &[HELVETICA.to_vec()]);
+        let spec = |id: &str, text: &str| PatchSpec {
+            target_id: id.into(),
+            new_text: text.into(),
+        };
+        let resolved = resolve_patches(
+            &doc,
+            &[spec("p1.b1.l1.s1", "New"), spec("p1.b2.l1.s1", "Kept")],
+        )
+        .unwrap();
+        assert_eq!(resolved.targets()[0].0, 1);
+        // Another edit erases the first target's glyphs.
+        apply_patches(&doc, &[spec("p1.b1.l1.s1", "")], &PatchOptions::default()).unwrap();
+        let (applied, gone) = apply_resolved(&doc, resolved).unwrap();
+        assert_eq!(applied.len(), 2);
+        assert_eq!(applied[0].old_text, "Taken away");
+        assert_eq!(gone, vec!["p1.b1.l1.s1".to_string()]);
     }
 
     #[test]
