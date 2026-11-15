@@ -31,7 +31,7 @@ New reports, at v1: `annots`, `annots-edit`, `attachments`, `fill`, `flatten`, `
 
 ## Additions to v1 (2026-11-14)
 
-New reports, at v1: `apply`, `attest`, `audit`, `patch`, `query` (DECISIONS D53).
+New reports, at v1: `apply`, `attest`, `audit`, `patch`, `query` (DECISIONS D59).
 
 ## v0
 
