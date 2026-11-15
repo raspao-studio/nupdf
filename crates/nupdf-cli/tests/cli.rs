@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
@@ -3530,7 +3531,11 @@ fn annotated_pdf() -> PathBuf {
         "<</Type/Annot/Subtype/Text/Rect[10 10 30 30]/Contents(old)/Popup 5 0 R>>",
         "<</Type/Annot/Subtype/Popup/Parent 4 0 R/Rect[40 10 140 60]>>",
     ]);
-    let file = scratch("annot-edit.pdf");
+    // A file of its own for each caller: tests run at once, and one writing
+    // the file another was reading made that one's command fail to open it.
+    static MADE: AtomicUsize = AtomicUsize::new(0);
+    let n = MADE.fetch_add(1, Ordering::Relaxed);
+    let file = scratch(&format!("annot-edit-{n}.pdf"));
     std::fs::write(&file, pdf).unwrap();
     file
 }
