@@ -1008,7 +1008,7 @@ fn find_quote_on_page(
 
     // Fallback to MuPDF's page search (`search::search_page`) for soft-hyphen / diacritic edge cases.
     if let Ok(hits) = search::search_page(page, quote, search::options::EXACT)
-        && let Some(hit) = hits.first()
+        && let Some(hit) = hits.iter().find(|h| !hit_cuts_a_number(page, h, quote))
         && let Some((matched, span_id)) = matched_from_search_hit(page, page_num, hit)
     {
         return Some((matched, span_id));
@@ -1066,7 +1066,10 @@ fn search_document_elsewhere(
         if found_ids.is_empty()
             && let Ok(hits) = search::search_page(stext_page, quote, search::options::EXACT)
         {
-            for hit in &hits {
+            for hit in hits
+                .iter()
+                .filter(|h| !hit_cuts_a_number(stext_page, h, quote))
+            {
                 if let Some((_, cid)) = matched_from_search_hit(stext_page, p, hit)
                     && exclude_id.is_none_or(|ex| ex != cid)
                     && !found_ids.contains(&cid)
@@ -1078,6 +1081,24 @@ fn search_document_elsewhere(
     }
 
     Ok(found_ids)
+}
+
+/// [`cuts_a_number`] for a hit of the page search: the characters on its
+/// first line before it and on its last line after it.
+fn hit_cuts_a_number(page: &StextPage, hit: &search::Hit, quote: &str) -> bool {
+    let line = |at: &search::Position| match page.blocks.get(at.block) {
+        Some(Block::Text(tb)) => tb.lines.get(at.line),
+        _ => None,
+    };
+    let before = line(&hit.begin)
+        .and_then(|l| l.chars.get(..hit.begin.ch))
+        .map(extract::chars_text)
+        .unwrap_or_default();
+    let after = line(&hit.end)
+        .and_then(|l| l.chars.get(hit.end.ch + 1..))
+        .map(extract::chars_text)
+        .unwrap_or_default();
+    cuts_a_number(&before, quote.trim(), &after)
 }
 
 fn matched_from_search_hit(
@@ -1333,7 +1354,7 @@ fn find_clean_substring(haystack: &str, needle: &str) -> Option<std::ops::Range<
             }
         };
 
-        if left_ok && right_ok {
+        if left_ok && right_ok && !cuts_a_number(&haystack[..start], needle, &haystack[end..]) {
             return Some(start..end);
         }
 
@@ -1343,6 +1364,38 @@ fn find_clean_substring(haystack: &str, needle: &str) -> Option<std::ops::Range<
         }
     }
     None
+}
+
+/// Whether a match of `needle` between `before` and `after` takes part of
+/// a number: digits, with `.` or `,` between digits. "Total 12" in "Total
+/// 125" names another amount than the page does. A quote that ends in
+/// punctuation keeps the digits after it, which can be a footnote marker
+/// ("capped at $1,000." before a superscript "1").
+fn cuts_a_number(before: &str, needle: &str, after: &str) -> bool {
+    let is_sep = |c: char| c == '.' || c == ',';
+    let mut first = needle.chars();
+    let starts_numeric = match (first.next(), first.next()) {
+        (Some(f), _) if f.is_ascii_digit() => true,
+        (Some(f), Some(g)) => is_sep(f) && g.is_ascii_digit(),
+        _ => false,
+    };
+    let mut back = before.chars().rev();
+    let left_cut = starts_numeric
+        && match (back.next(), back.next()) {
+            (Some(p), _) if p.is_ascii_digit() => true,
+            (Some(p), Some(q)) => {
+                is_sep(p) && q.is_ascii_digit() && needle.starts_with(|c: char| c.is_ascii_digit())
+            }
+            _ => false,
+        };
+    let mut fwd = after.chars();
+    let right_cut = needle.ends_with(|c: char| c.is_ascii_digit())
+        && match (fwd.next(), fwd.next()) {
+            (Some(n), _) if n.is_ascii_digit() => true,
+            (Some(n), Some(m)) => is_sep(n) && m.is_ascii_digit(),
+            _ => false,
+        };
+    left_cut || right_cut
 }
 
 /// Evaluate all five deterministic epistemic hazards on a matched quote.
@@ -2111,6 +2164,49 @@ mod tests {
         );
         assert_eq!(summary.results[1].status, AuditStatus::NotFound);
         assert_eq!(summary.results[2].status, AuditStatus::StaleDocId);
+    }
+
+    #[test]
+    fn a_quote_that_cuts_a_number_short_does_not_verify() {
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Total 125 units, fee $125, rate 12.5 and 1,000 more) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        let status = |quote: &str, id: Option<&str>| {
+            let claims = vec![ClaimInput {
+                claim_id: None,
+                doc_id: None,
+                id: id.map(str::to_owned),
+                page: Some(1),
+                quote: quote.to_owned(),
+            }];
+            let summary = audit_claims(&doc, "b3:doc", &claims, false, 72.0)
+                .unwrap_or_else(|e| panic!("{e}"));
+            summary.results[0].status
+        };
+        for cut in [
+            "Total 12", "fee $12", "rate 12", "25 units", "5 units", "000 more", "and 1",
+        ] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                assert_ne!(status(cut, id), AuditStatus::Verified, "{cut:?} at {id:?}");
+            }
+        }
+        for whole in [
+            "Total 125",
+            "fee $125",
+            "rate 12.5",
+            "1,000 more",
+            "125 units,",
+        ] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                assert_eq!(
+                    status(whole, id),
+                    AuditStatus::Verified,
+                    "{whole:?} at {id:?}"
+                );
+            }
+        }
     }
 
     #[test]
