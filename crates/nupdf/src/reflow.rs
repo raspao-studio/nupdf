@@ -1996,6 +1996,81 @@ mod tests {
     }
 
     #[test]
+    fn top_level_cm_and_text_state_do_not_leak_into_the_shifted_or_new_content() {
+        // The page scales everything by half with a `cm` outside any q/Q (or
+        // with unbalanced q/Q around it) and leaves character spacing set, so
+        // coordinates are doubled. The sanitizer balances each partition, so
+        // neither the shifted content nor the new paragraph inherits them.
+        for prefix in [
+            "0.5 0 0 0.5 0 0 cm 3 Tc",
+            "q 0.5 0 0 0.5 0 0 cm 3 Tc",
+            "Q Q 0.5 0 0 0.5 0 0 cm 3 Tc q",
+        ] {
+            let content = format!(
+                "{prefix} \
+                BT /F1 24 Tf 1 0 0 1 144 1440 Tm (Header Clause) Tj ET \
+                BT /F1 24 Tf \
+                1 0 0 1 144 1360 Tm (2. Long Clause line one with detailed provisions) Tj \
+                1 0 0 1 144 1330 Tm (continuing onto line two with more obligations) Tj \
+                1 0 0 1 144 1300 Tm (and concluding on line three of the paragraph.) Tj ET \
+                BT /F1 24 Tf 1 0 0 1 144 1140 Tm (3. Downstream Clause Follows.) Tj ET"
+            );
+            let base_doc = page_doc(
+                content.as_bytes(),
+                "/Font<</F1 5 0 R>>",
+                &[HELVETICA.to_vec()],
+            );
+            let before = extract_blocks(&base_doc, 0);
+            assert_eq!(before[1].2.len(), 3, "{prefix}");
+            let clause3_before = before[2].1;
+
+            let work = base_doc.fork_clean();
+            let specs = [PatchSpec {
+                target_id: "p1.b2".into(),
+                new_text: "2. Shortened single-line clause.".into(),
+            }];
+            let (bytes, res) = reflow_and_verify(
+                &work,
+                &specs,
+                &PatchOptions::default(),
+                &WriteOptions::default(),
+                None,
+            )
+            .unwrap();
+            let r = &res.reflows[0];
+            assert!(r.delta_y < -10.0, "{prefix}: delta_y {}", r.delta_y);
+            assert!(res.verification.unwrap().verified, "{prefix}");
+
+            let reopened = Document::open(bytes).unwrap();
+            let after = extract_blocks(&reopened, 0);
+            let clause3_after = after
+                .iter()
+                .find(|(_, _, ls)| ls.iter().any(|l| l.starts_with("3. Downstream")))
+                .unwrap()
+                .1;
+            assert!(
+                (clause3_after.y0 - (clause3_before.y0 + r.delta_y)).abs() < 2.0,
+                "{prefix}: clause 3 moved from {clause3_before:?} to {clause3_after:?}"
+            );
+            assert!(
+                (clause3_after.x0 - clause3_before.x0).abs() < 1.0,
+                "{prefix}"
+            );
+            assert!(
+                (clause3_after.x1 - clause3_before.x1).abs() < 1.0,
+                "{prefix}"
+            );
+            let new_block = after
+                .iter()
+                .find(|(_, _, ls)| ls.iter().any(|l| l.contains("Shortened")))
+                .unwrap()
+                .1;
+            assert!((new_block.x0 - before[1].1.x0).abs() < 1.0, "{prefix}");
+            assert!((new_block.y0 - before[1].1.y0).abs() < 3.0, "{prefix}");
+        }
+    }
+
+    #[test]
     fn forty_five_line_expansion_reports_page_overflow() {
         let content = b"BT /F1 12 Tf 1 0 0 1 72 680 Tm (1. Intro.) Tj ET \
             BT /F1 12 Tf 1 0 0 1 72 640 Tm (2. Expandable Clause.) Tj \
