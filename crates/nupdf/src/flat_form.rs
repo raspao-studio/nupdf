@@ -339,12 +339,214 @@ struct VertLine {
     y1: f32,
 }
 
+/// The point a whiteout must cover to paint `m` over.
+fn ink_midpoint(m: &InkMark) -> Point {
+    match *m {
+        InkMark::Seg { p0, p1 } => Point::new(0.5 * (p0.x + p1.x), 0.5 * (p0.y + p1.y)),
+        InkMark::Box { bbox } => Point::new(0.5 * (bbox.x0 + bbox.x1), 0.5 * (bbox.y0 + bbox.y1)),
+    }
+}
+
+/// The box a mark's ink lies in.
+fn ink_box(m: &InkMark) -> Rect {
+    match *m {
+        InkMark::Seg { p0, p1 } => Rect::new(
+            p0.x.min(p1.x),
+            p0.y.min(p1.y),
+            p0.x.max(p1.x),
+            p0.y.max(p1.y),
+        ),
+        InkMark::Box { bbox } => bbox,
+    }
+}
+
 /// Z-ordered dark stroke/fill/glyph mark used to determine whether a vector
 /// checkbox interior is currently checked or has been painted white over.
 #[derive(Debug, Clone, Copy)]
 enum InkMark {
     Seg { p0: Point, p1: Point },
     Box { bbox: Rect },
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by tests: every index answers with every item, as the scans the
+    /// indexes replaced did, to check both find the same fields.
+    static BRUTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn brute() -> bool {
+    BRUTE.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn brute() -> bool {
+    false
+}
+
+/// Most grid cells one item is filed under; a bigger item, or one with a
+/// coordinate that is not finite, is returned by every query.
+const MAX_GRID_SPAN: i64 = 1024;
+
+/// Item numbers filed under the cells of a uniform grid their boxes touch,
+/// so what lies near a box is found without scanning every item. A query
+/// returns a superset of the items whose box meets its box, in item order;
+/// callers test their own predicate on each, so results are those of a scan.
+struct Grid {
+    cell: f32,
+    cells: HashMap<(i64, i64), Vec<usize>>,
+    wide: Vec<usize>,
+    len: usize,
+    brute: bool,
+}
+
+impl Grid {
+    /// Cells of 16 pt, or of 1/128 of the page on a page over 2048 pt.
+    fn new(mediabox: Rect) -> Self {
+        let size = (mediabox.x1 - mediabox.x0)
+            .abs()
+            .max((mediabox.y1 - mediabox.y0).abs());
+        let cell = if size.is_finite() {
+            (size / 128.0).max(16.0)
+        } else {
+            16.0
+        };
+        Grid {
+            cell,
+            cells: HashMap::new(),
+            wide: Vec::new(),
+            len: 0,
+            brute: brute(),
+        }
+    }
+
+    /// The cells `r` touches, unless it has a coordinate that is not
+    /// finite or touches more than [`MAX_GRID_SPAN`].
+    fn span(&self, r: Rect) -> Option<(i64, i64, i64, i64)> {
+        if ![r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let at = |v: f32| (v / self.cell).floor() as i64;
+        let (cx0, cx1) = (at(r.x0.min(r.x1)), at(r.x0.max(r.x1)));
+        let (cy0, cy1) = (at(r.y0.min(r.y1)), at(r.y0.max(r.y1)));
+        let cells = (cx1.saturating_sub(cx0).saturating_add(1))
+            .saturating_mul(cy1.saturating_sub(cy0).saturating_add(1));
+        (cells <= MAX_GRID_SPAN).then_some((cx0, cy0, cx1, cy1))
+    }
+
+    fn insert(&mut self, item: usize, r: Rect) {
+        self.len = self.len.max(item.saturating_add(1));
+        match self.span(r) {
+            Some((cx0, cy0, cx1, cy1)) => {
+                for cy in cy0..=cy1 {
+                    for cx in cx0..=cx1 {
+                        self.cells.entry((cx, cy)).or_default().push(item);
+                    }
+                }
+            }
+            None => self.wide.push(item),
+        }
+    }
+
+    /// The items whose box may meet `r`, in item order.
+    fn query(&self, r: Rect) -> Vec<usize> {
+        let span = if self.brute { None } else { self.span(r) };
+        let Some((cx0, cy0, cx1, cy1)) = span else {
+            return (0..self.len).collect();
+        };
+        let mut out = self.wide.clone();
+        let cells = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
+        if cells as usize > self.cells.len() {
+            for ((cx, cy), items) in &self.cells {
+                if (cx0..=cx1).contains(cx) && (cy0..=cy1).contains(cy) {
+                    out.extend(items);
+                }
+            }
+        } else {
+            for cy in cy0..=cy1 {
+                for cx in cx0..=cx1 {
+                    if let Some(items) = self.cells.get(&(cx, cy)) {
+                        out.extend(items);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Drops the items `keep` refuses from the cells `r` touches.
+    fn prune(&mut self, r: Rect, keep: impl Fn(usize) -> bool) {
+        if let Some((cx0, cy0, cx1, cy1)) = self.span(r)
+            && ((cx1 - cx0 + 1) * (cy1 - cy0 + 1)) as usize <= self.cells.len()
+        {
+            for cy in cy0..=cy1 {
+                for cx in cx0..=cx1 {
+                    if let Some(items) = self.cells.get_mut(&(cx, cy)) {
+                        items.retain(|&i| keep(i));
+                        if items.is_empty() {
+                            self.cells.remove(&(cx, cy));
+                        }
+                    }
+                }
+            }
+        } else {
+            self.cells.retain(|_, items| {
+                items.retain(|&i| keep(i));
+                !items.is_empty()
+            });
+        }
+        self.wide.retain(|&i| keep(i));
+    }
+}
+
+/// The point `p` as a box.
+fn point_box(p: Point) -> Rect {
+    Rect::new(p.x, p.y, p.x, p.y)
+}
+
+/// Rects in the order they were added, with a [`Grid`] over them.
+struct RectIndex {
+    rects: Vec<Rect>,
+    grid: Grid,
+}
+
+impl RectIndex {
+    fn new(mediabox: Rect) -> Self {
+        RectIndex {
+            rects: Vec::new(),
+            grid: Grid::new(mediabox),
+        }
+    }
+
+    fn of(mediabox: Rect, rects: &[Rect]) -> Self {
+        let mut index = Self::new(mediabox);
+        for &r in rects {
+            index.push(r);
+        }
+        index
+    }
+
+    fn push(&mut self, r: Rect) {
+        self.grid.insert(self.rects.len(), r);
+        self.rects.push(r);
+    }
+
+    /// Whether a rect meeting `near` passes `test`: `near` must hold every
+    /// rect that can.
+    fn any(&self, near: Rect, test: impl Fn(&Rect) -> bool) -> bool {
+        self.grid
+            .query(near)
+            .into_iter()
+            .any(|i| self.rects.get(i).is_some_and(&test))
+    }
+
+    /// Whether `p` is inside one of the rects.
+    fn covers(&self, p: Point) -> bool {
+        self.any(point_box(p), |r| point_in_rect(p, *r))
+    }
 }
 
 struct FlatCollector<'d> {
@@ -356,7 +558,16 @@ struct FlatCollector<'d> {
     stroked_boxes: Vec<StrokedBox>,
     horiz_lines: Vec<HorizLine>,
     vert_lines: Vec<VertLine>,
+    /// Marks in the order they were made, those painted over since among
+    /// them: [`FlatCollector::live_ink`] are the others.
     ink_marks: Vec<InkMark>,
+    ink_alive: Vec<bool>,
+    ink_live: usize,
+    /// The marks by their midpoints, which a whiteout is tested against.
+    ink_grid: Grid,
+    /// The stroked boxes by their corners in 1 pt cells: a box within
+    /// 0.8 pt of another on every side is in a neighbouring cell.
+    box_cells: HashMap<[i64; 4], Vec<usize>>,
     whiteout_rects: Vec<Rect>,
 }
 
@@ -372,8 +583,42 @@ impl<'d> FlatCollector<'d> {
             horiz_lines: Vec::new(),
             vert_lines: Vec::new(),
             ink_marks: Vec::new(),
+            ink_alive: Vec::new(),
+            ink_live: 0,
+            ink_grid: Grid::new(mediabox),
+            box_cells: HashMap::new(),
             whiteout_rects: Vec::new(),
         }
+    }
+
+    /// The marks not painted over, in the order they were made.
+    fn live_ink(&self) -> impl Iterator<Item = &InkMark> {
+        self.ink_marks
+            .iter()
+            .zip(&self.ink_alive)
+            .filter_map(|(m, &alive)| alive.then_some(m))
+    }
+
+    fn push_ink(&mut self, mark: InkMark) {
+        if self.ink_live >= MAX_COLLECTED {
+            return;
+        }
+        // Painted-over marks are dropped once they outnumber the rest.
+        if self.ink_marks.len() >= 2 * MAX_COLLECTED {
+            let live: Vec<InkMark> = self.live_ink().copied().collect();
+            self.ink_marks.clear();
+            self.ink_alive.clear();
+            self.ink_live = 0;
+            self.ink_grid = Grid::new(self.mediabox);
+            for m in live {
+                self.push_ink(m);
+            }
+        }
+        self.ink_grid
+            .insert(self.ink_marks.len(), point_box(ink_midpoint(&mark)));
+        self.ink_marks.push(mark);
+        self.ink_alive.push(true);
+        self.ink_live += 1;
     }
 
     fn current_scissor(&self) -> Rect {
@@ -418,30 +663,60 @@ impl<'d> FlatCollector<'d> {
         if self.whiteout_rects.len() < MAX_COLLECTED {
             self.whiteout_rects.push(white_rect);
         }
-        self.ink_marks.retain(|m| match m {
-            InkMark::Seg { p0, p1 } => {
-                let mid = Point::new(0.5 * (p0.x + p1.x), 0.5 * (p0.y + p1.y));
-                !point_in_rect(mid, white_rect)
+        for i in self.ink_grid.query(white_rect) {
+            if self.ink_alive.get(i) == Some(&true)
+                && let Some(m) = self.ink_marks.get(i)
+                && point_in_rect(ink_midpoint(m), white_rect)
+            {
+                self.ink_alive[i] = false;
+                self.ink_live -= 1;
             }
-            InkMark::Box { bbox } => {
-                let mid = Point::new(0.5 * (bbox.x0 + bbox.x1), 0.5 * (bbox.y0 + bbox.y1));
-                !point_in_rect(mid, white_rect)
-            }
-        });
+        }
+        let alive = &self.ink_alive;
+        self.ink_grid
+            .prune(white_rect, |i| alive.get(i) == Some(&true));
     }
 
     fn add_stroked_box(&mut self, r: Rect) {
         if self.stroked_boxes.len() >= MAX_COLLECTED || self.is_page_backdrop(r) {
             return;
         }
-        for b in &self.stroked_boxes {
-            if (b.bbox.x0 - r.x0).abs() <= 0.8
+        let near = |b: &StrokedBox| {
+            (b.bbox.x0 - r.x0).abs() <= 0.8
                 && (b.bbox.y0 - r.y0).abs() <= 0.8
                 && (b.bbox.x1 - r.x1).abs() <= 0.8
                 && (b.bbox.y1 - r.y1).abs() <= 0.8
-            {
+        };
+        // A box with a coordinate that is not finite is near no box.
+        let key = [r.x0, r.y0, r.x1, r.y1].map(|v| v.floor() as i64);
+        let finite = [r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite());
+        if brute() {
+            if self.stroked_boxes.iter().any(near) {
                 return;
             }
+        } else if finite {
+            for d in 0..81 {
+                let mut k = key;
+                let mut rest = d;
+                for c in &mut k {
+                    *c = c.saturating_add(rest % 3 - 1);
+                    rest /= 3;
+                }
+                let dup = self.box_cells.get(&k).is_some_and(|boxes| {
+                    boxes
+                        .iter()
+                        .any(|&i| self.stroked_boxes.get(i).is_some_and(near))
+                });
+                if dup {
+                    return;
+                }
+            }
+        }
+        if finite {
+            self.box_cells
+                .entry(key)
+                .or_default()
+                .push(self.stroked_boxes.len());
         }
         self.stroked_boxes.push(StrokedBox { bbox: r });
     }
@@ -519,9 +794,7 @@ impl<'d> FlatCollector<'d> {
                             y1: a.y.max(b.y),
                         });
                     }
-                    if self.ink_marks.len() < MAX_COLLECTED {
-                        self.ink_marks.push(InkMark::Seg { p0: a, p1: b });
-                    }
+                    self.push_ink(InkMark::Seg { p0: a, p1: b });
                 }
             }
         } else {
@@ -563,8 +836,8 @@ impl<'d> FlatCollector<'d> {
                         continue;
                     }
                 }
-                if w <= 22.0 && h <= 22.0 && self.ink_marks.len() < MAX_COLLECTED {
-                    self.ink_marks.push(InkMark::Box { bbox: r });
+                if w <= 22.0 && h <= 22.0 {
+                    self.push_ink(InkMark::Box { bbox: r });
                 }
             }
         }
@@ -578,7 +851,7 @@ impl<'d> FlatCollector<'d> {
         color: &[f32],
         alpha: f32,
     ) {
-        if alpha <= 0.02 || self.ink_marks.len() >= MAX_COLLECTED {
+        if alpha <= 0.02 || self.ink_live >= MAX_COLLECTED {
             return;
         }
         let rgb = self.rgb_u8(cs, color);
@@ -591,7 +864,7 @@ impl<'d> FlatCollector<'d> {
             && (bound.x1 - bound.x0) <= 24.0
             && (bound.y1 - bound.y0) <= 24.0
         {
-            self.ink_marks.push(InkMark::Box { bbox: bound });
+            self.push_ink(InkMark::Box { bbox: bound });
         }
     }
 }
@@ -1100,10 +1373,115 @@ fn point_in_rect(p: Point, r: Rect) -> bool {
     p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1
 }
 
-fn overlaps_widget(r: Rect, widget_rects: &[Rect]) -> bool {
-    widget_rects
-        .iter()
-        .any(|w| !r.intersect(w.expand(2.0)).is_empty())
+fn overlaps_widget(r: Rect, widgets: &RectIndex) -> bool {
+    widgets.any(r.expand(3.0), |w| !r.intersect(w.expand(2.0)).is_empty())
+}
+
+/// What a page's fields are looked for among, each with a [`Grid`]: the
+/// glyphs by their centres, the captions by their boxes and centre lines,
+/// the vertical lines by their ends and their extent, and the marks and
+/// whiteouts by their boxes.
+struct PageIndex<'a> {
+    text: &'a FlatPageText,
+    glyphs: Grid,
+    labels: Grid,
+    vl_starts: Grid,
+    vl_ends: Grid,
+    vl_extents: Grid,
+    ink: Vec<InkMark>,
+    ink_boxes: Grid,
+    whiteouts: RectIndex,
+    widgets: RectIndex,
+}
+
+impl<'a> PageIndex<'a> {
+    fn new(
+        mediabox: Rect,
+        collector: &FlatCollector<'_>,
+        text: &'a FlatPageText,
+        widget_rects: &[Rect],
+    ) -> Self {
+        let mut glyphs = Grid::new(mediabox);
+        for (i, g) in text.glyphs.iter().enumerate() {
+            glyphs.insert(i, point_box(Point::new(g.cx, g.cy)));
+        }
+        let mut labels = Grid::new(mediabox);
+        for (i, sp) in text.labels.iter().enumerate() {
+            labels.insert(i, label_box(sp));
+        }
+        let (mut vl_starts, mut vl_ends, mut vl_extents) = (
+            Grid::new(mediabox),
+            Grid::new(mediabox),
+            Grid::new(mediabox),
+        );
+        for (i, vl) in collector.vert_lines.iter().enumerate() {
+            vl_starts.insert(i, point_box(Point::new(vl.x, vl.y0)));
+            vl_ends.insert(i, point_box(Point::new(vl.x, vl.y1)));
+            vl_extents.insert(i, Rect::new(vl.x, vl.y0, vl.x, vl.y1));
+        }
+        let ink: Vec<InkMark> = collector.live_ink().copied().collect();
+        let mut ink_boxes = Grid::new(mediabox);
+        for (i, m) in ink.iter().enumerate() {
+            ink_boxes.insert(i, ink_box(m));
+        }
+        PageIndex {
+            text,
+            glyphs,
+            labels,
+            vl_starts,
+            vl_ends,
+            vl_extents,
+            ink,
+            ink_boxes,
+            whiteouts: RectIndex::of(mediabox, &collector.whiteout_rects),
+            widgets: RectIndex::of(mediabox, widget_rects),
+        }
+    }
+
+    /// The glyphs whose centres may be in `r`, in page order.
+    fn glyphs_near(&self, r: Rect) -> impl Iterator<Item = &'a GlyphItem> + '_ {
+        self.glyphs
+            .query(r)
+            .into_iter()
+            .filter_map(|i| self.text.glyphs.get(i))
+    }
+
+    /// The captions that may meet `r` (box or centre line), with their
+    /// numbers, in page order.
+    fn labels_near(&self, r: Rect) -> Vec<(usize, &'a LabelSpan)> {
+        self.labels
+            .query(r)
+            .into_iter()
+            .filter_map(|i| self.text.labels.get(i).map(|sp| (i, sp)))
+            .collect()
+    }
+
+    fn whited_out(&self, p: Point) -> bool {
+        self.whiteouts.covers(p)
+    }
+}
+
+/// The box a caption is filed under: its box and its centre line, a point
+/// wider, so every caption test near a box finds it there.
+fn label_box(sp: &LabelSpan) -> Rect {
+    let b = sp.bbox;
+    Rect::new(
+        b.x0.min(b.x1) - 1.0,
+        b.y0.min(b.y1).min(sp.cy) - 1.0,
+        b.x0.max(b.x1) + 1.0,
+        b.y0.max(b.y1).max(sp.cy) + 1.0,
+    )
+}
+
+/// The box from `(x0, y0)` to `(x1, y1)` whichever way round, a point
+/// wider: a query box that holds the region a predicate allows.
+fn around(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
+    Rect::new(
+        x0.min(x1) - 1.0,
+        y0.min(y1) - 1.0,
+        x0.max(x1) + 1.0,
+        y0.max(y1) + 1.0,
+    )
 }
 
 fn synthesize_page_fields(
@@ -1116,7 +1494,9 @@ fn synthesize_page_fields(
 ) -> Vec<FlatField> {
     let mut fields: Vec<FlatField> = Vec::new();
     let mut used_boxes = vec![false; collector.stroked_boxes.len()];
-    let mut comb_regions: Vec<Rect> = Vec::new();
+    let mut comb_regions = RectIndex::new(mediabox);
+    let index = PageIndex::new(mediabox, collector, text, widget_rects);
+    let widget_rects = &index.widgets;
 
     // -----------------------------------------------------------------------
     // 1. COMB GRIDS: >= 3 adjacent equal-width stroked cells OR baseline+ticks
@@ -1141,6 +1521,22 @@ fn synthesize_page_fields(
         ra.cmp(&rb).then_with(|| a.x0.total_cmp(&b.x0))
     });
 
+    // Sorted by band, a cell's row-mates in the old scan of every later
+    // cell are the rest of its band and the band below it, and within a
+    // band, sorted by x0, only those whose gap from the row's last cell
+    // is in range can join: the rest are skipped by a binary search.
+    let bands: Vec<i64> = cell_cands
+        .iter()
+        .map(|(_, r)| (r.y0 / 4.0).round() as i64)
+        .collect();
+    let mut run_end = vec![cell_cands.len(); cell_cands.len()];
+    for k in (0..cell_cands.len().saturating_sub(1)).rev() {
+        if bands[k] == bands[k + 1] {
+            run_end[k] = run_end[k + 1];
+        } else {
+            run_end[k] = k + 1;
+        }
+    }
     let mut visited_cand = vec![false; cell_cands.len()];
     for i in 0..cell_cands.len() {
         if visited_cand[i] {
@@ -1149,18 +1545,38 @@ fn synthesize_page_fields(
         let (_, r0) = cell_cands[i];
         let w0 = r0.x1 - r0.x0;
         let mut row: Vec<(usize, usize, Rect)> = vec![(i, cell_cands[i].0, r0)];
+        let mut runs = vec![(i + 1, run_end[i])];
+        if let Some(&next) = run_end.get(i)
+            && next < cell_cands.len()
+            && bands[next] == bands[i].saturating_add(1)
+        {
+            runs.push((next, run_end[next]));
+        }
+        if brute() {
+            runs = vec![(i + 1, cell_cands.len())];
+        }
 
-        for (j, &(box_idx, rj)) in cell_cands.iter().enumerate().skip(i + 1) {
-            if visited_cand[j] {
-                continue;
-            }
-            if (rj.y0 - r0.y0).abs() <= 2.5 && (rj.y1 - r0.y1).abs() <= 2.5 {
-                let prev_r = row[row.len() - 1].2;
-                let gap = rj.x0 - prev_r.x1;
-                let wj = rj.x1 - rj.x0;
-                if (-2.5..=3.5).contains(&gap) && (wj - w0).abs() <= 2.0 {
-                    row.push((j, box_idx, rj));
+        for (lo, hi) in runs {
+            let mut j = lo;
+            while j < hi {
+                let prev_x1 = row[row.len() - 1].2.x1;
+                if !brute() {
+                    j += cell_cands[j..hi].partition_point(|(_, r)| r.x0 - prev_x1 < -2.5);
+                    if j >= hi || cell_cands[j].1.x0 - prev_x1 > 3.5 {
+                        break;
+                    }
                 }
+                let (box_idx, rj) = cell_cands[j];
+                if !visited_cand[j] && (rj.y0 - r0.y0).abs() <= 2.5 && (rj.y1 - r0.y1).abs() <= 2.5
+                {
+                    let prev_r = row[row.len() - 1].2;
+                    let gap = rj.x0 - prev_r.x1;
+                    let wj = rj.x1 - rj.x0;
+                    if (-2.5..=3.5).contains(&gap) && (wj - w0).abs() <= 2.0 {
+                        row.push((j, box_idx, rj));
+                    }
+                }
+                j += 1;
             }
         }
 
@@ -1169,9 +1585,8 @@ fn synthesize_page_fields(
             let multi_char_cells = row
                 .iter()
                 .filter(|(_, _, cr)| {
-                    let count = text
-                        .glyphs
-                        .iter()
+                    let count = index
+                        .glyphs_near(*cr)
                         .filter(|g| point_in_rect(Point::new(g.cx, g.cy), *cr))
                         .count();
                     count >= 2
@@ -1191,14 +1606,8 @@ fn synthesize_page_fields(
             }
             comb_regions.push(overall);
 
-            let current_text = extract_comb_current_text(
-                &x_ranges,
-                overall.y0,
-                overall.y1,
-                &text.glyphs,
-                &collector.whiteout_rects,
-            );
-            let label = find_comb_or_underline_label(overall, &text.labels);
+            let current_text = extract_comb_current_text(&x_ranges, overall.y0, overall.y1, &index);
+            let label = find_comb_or_underline_label(overall, &index);
             let pdf_r = normalize_rect(overall.transform(inv_ctm));
 
             fields.push(FlatField {
@@ -1228,15 +1637,15 @@ fn synthesize_page_fields(
         if bw < 24.0 || !(10.0..=30.0).contains(&bh) || overlaps_widget(sb.bbox, widget_rects) {
             continue;
         }
-        if comb_regions
-            .iter()
-            .any(|cr| !sb.bbox.intersect(*cr).is_empty())
-        {
+        if comb_regions.any(sb.bbox.expand(1.0), |cr| !sb.bbox.intersect(*cr).is_empty()) {
             continue;
         }
-        let mut xs: Vec<f32> = collector
-            .vert_lines
-            .iter()
+        let near = Rect::new(sb.bbox.x0, sb.bbox.y0 - 3.5, sb.bbox.x1, sb.bbox.y0 + 3.5);
+        let mut xs: Vec<f32> = index
+            .vl_starts
+            .query(near)
+            .into_iter()
+            .filter_map(|i| collector.vert_lines.get(i))
             .filter(|vl| {
                 vl.x > sb.bbox.x0 + 4.0
                     && vl.x < sb.bbox.x1 - 4.0
@@ -1265,8 +1674,8 @@ fn synthesize_page_fields(
             .iter()
             .filter(|&&[cx0, cx1]| {
                 let cr = Rect::new(cx0, sb.bbox.y0, cx1, sb.bbox.y1);
-                text.glyphs
-                    .iter()
+                index
+                    .glyphs_near(cr)
                     .filter(|g| point_in_rect(Point::new(g.cx, g.cy), cr))
                     .count()
                     >= 2
@@ -1278,14 +1687,8 @@ fn synthesize_page_fields(
 
         used_boxes[box_idx] = true;
         comb_regions.push(sb.bbox);
-        let current_text = extract_comb_current_text(
-            &x_ranges,
-            sb.bbox.y0,
-            sb.bbox.y1,
-            &text.glyphs,
-            &collector.whiteout_rects,
-        );
-        let label = find_comb_or_underline_label(sb.bbox, &text.labels);
+        let current_text = extract_comb_current_text(&x_ranges, sb.bbox.y0, sb.bbox.y1, &index);
+        let label = find_comb_or_underline_label(sb.bbox, &index);
         let pdf_r = normalize_rect(sb.bbox.transform(inv_ctm));
         fields.push(FlatField {
             id: String::new(),
@@ -1311,15 +1714,16 @@ fn synthesize_page_fields(
         }
         let probe = Rect::new(hl.x0, hl.y - 20.0, hl.x1, hl.y + 2.0);
         if overlaps_widget(probe, widget_rects)
-            || comb_regions
-                .iter()
-                .any(|cr| !probe.intersect(*cr).is_empty())
+            || comb_regions.any(probe.expand(1.0), |cr| !probe.intersect(*cr).is_empty())
         {
             continue;
         }
-        let mut ticks: Vec<&VertLine> = collector
-            .vert_lines
-            .iter()
+        let near = Rect::new(hl.x0 - 3.0, hl.y - 3.5, hl.x1 + 3.0, hl.y + 3.5);
+        let mut ticks: Vec<&VertLine> = index
+            .vl_ends
+            .query(near)
+            .into_iter()
+            .filter_map(|i| collector.vert_lines.get(i))
             .filter(|vl| {
                 vl.x >= hl.x0 - 2.0
                     && vl.x <= hl.x1 + 2.0
@@ -1360,14 +1764,8 @@ fn synthesize_page_fields(
         let x_ranges: Vec<[f32; 2]> = ticks.windows(2).map(|w| [w[0].x, w[1].x]).collect();
         comb_regions.push(overall);
 
-        let current_text = extract_comb_current_text(
-            &x_ranges,
-            overall.y0,
-            overall.y1,
-            &text.glyphs,
-            &collector.whiteout_rects,
-        );
-        let label = find_comb_or_underline_label(overall, &text.labels);
+        let current_text = extract_comb_current_text(&x_ranges, overall.y0, overall.y1, &index);
+        let label = find_comb_or_underline_label(overall, &index);
         let pdf_r = normalize_rect(overall.transform(inv_ctm));
 
         fields.push(FlatField {
@@ -1389,7 +1787,7 @@ fn synthesize_page_fields(
     // -----------------------------------------------------------------------
     // 2. VECTOR CHECKBOXES: 5 <= w,h <= 18, |w - h| <= 3, not in a comb
     // -----------------------------------------------------------------------
-    let mut checkbox_rects: Vec<Rect> = Vec::new();
+    let mut checkbox_rects = RectIndex::new(mediabox);
     for (idx, sb) in collector.stroked_boxes.iter().enumerate() {
         if used_boxes[idx] {
             continue;
@@ -1400,24 +1798,23 @@ fn synthesize_page_fields(
             continue;
         }
         if overlaps_widget(sb.bbox, widget_rects)
-            || comb_regions
-                .iter()
-                .any(|cr| !sb.bbox.intersect(cr.expand(1.0)).is_empty())
+            || comb_regions.any(sb.bbox.expand(2.0), |cr| {
+                !sb.bbox.intersect(cr.expand(1.0)).is_empty()
+            })
         {
             continue;
         }
-        if checkbox_rects
-            .iter()
-            .any(|existing| !existing.intersect(sb.bbox).is_empty())
-        {
+        if checkbox_rects.any(sb.bbox.expand(1.0), |existing| {
+            !existing.intersect(sb.bbox).is_empty()
+        }) {
             continue;
         }
         checkbox_rects.push(sb.bbox);
     }
 
-    for &cb_rect in &checkbox_rects {
-        let checked = is_checkbox_checked(cb_rect, collector, &text.glyphs);
-        let label = find_checkbox_label(cb_rect, &checkbox_rects, &text.labels);
+    for &cb_rect in &checkbox_rects.rects {
+        let checked = is_checkbox_checked(cb_rect, &index);
+        let label = find_checkbox_label(cb_rect, &checkbox_rects, &index);
         let pdf_r = normalize_rect(cb_rect.transform(inv_ctm));
         fields.push(FlatField {
             id: String::new(),
@@ -1439,7 +1836,7 @@ fn synthesize_page_fields(
     // 3. UNDERLINES: horizontal stroked rule (`>= 35 pt`) OR `>= 4` `'_'` run
     // -----------------------------------------------------------------------
     let page_w = (mediabox.x1 - mediabox.x0).max(1.0);
-    let mut underline_rects: Vec<Rect> = Vec::new();
+    let mut underline_rects = RectIndex::new(mediabox);
 
     for hl in &collector.horiz_lines {
         let w = hl.x1 - hl.x0;
@@ -1448,14 +1845,15 @@ fn synthesize_page_fields(
         }
         let cand_bbox = Rect::new(hl.x0, hl.y - 14.0, hl.x1, hl.y);
         if overlaps_widget(cand_bbox, widget_rects)
-            || comb_regions
-                .iter()
-                .any(|cr| !cand_bbox.intersect(cr.expand(2.0)).is_empty())
+            || comb_regions.any(cand_bbox.expand(3.0), |cr| {
+                !cand_bbox.intersect(cr.expand(2.0)).is_empty()
+            })
         {
             continue;
         }
         // Skip duplicate parallel rules at almost the same coordinates.
-        if underline_rects.iter().any(|ur| {
+        let near = Rect::new(hl.x0 - 6.0, hl.y - 4.0, hl.x0 + 6.0, hl.y + 4.0);
+        if underline_rects.any(near, |ur| {
             (ur.y1 - hl.y).abs() <= 3.0
                 && (ur.x0 - hl.x0).abs() <= 5.0
                 && (ur.x1 - hl.x1).abs() <= 5.0
@@ -1463,13 +1861,20 @@ fn synthesize_page_fields(
             continue;
         }
         // Skip table borders: vertical strokes > 10 pt meeting both endpoints.
-        let left_post = collector.vert_lines.iter().any(|vl| {
+        let posts_near = |x: f32| {
+            index
+                .vl_extents
+                .query(Rect::new(x - 3.0, hl.y - 3.0, x + 3.0, hl.y + 3.0))
+                .into_iter()
+                .filter_map(|i| collector.vert_lines.get(i))
+        };
+        let left_post = posts_near(hl.x0).any(|vl| {
             (vl.x - hl.x0).abs() <= 2.0
                 && (vl.y1 - vl.y0) > 10.0
                 && hl.y >= vl.y0 - 2.0
                 && hl.y <= vl.y1 + 2.0
         });
-        let right_post = collector.vert_lines.iter().any(|vl| {
+        let right_post = posts_near(hl.x1).any(|vl| {
             (vl.x - hl.x1).abs() <= 2.0
                 && (vl.y1 - vl.y0) > 10.0
                 && hl.y >= vl.y0 - 2.0
@@ -1480,25 +1885,23 @@ fn synthesize_page_fields(
         }
 
         // Skip text strikethroughs (crossing through middle 25%..75% of a span).
-        let is_strikethrough = text.labels.iter().any(|sp| {
-            let sh = (sp.bbox.y1 - sp.bbox.y0).max(1.0);
-            let overlap = hl.x1.min(sp.bbox.x1) - hl.x0.max(sp.bbox.x0);
-            overlap >= 0.4 * (sp.bbox.x1 - sp.bbox.x0).max(1.0)
-                && hl.y >= sp.bbox.y0 + 0.2 * sh
-                && hl.y <= sp.bbox.y0 + 0.78 * sh
-        });
+        let is_strikethrough = index
+            .labels_near(Rect::new(hl.x0 - 1.0, hl.y - 2.0, hl.x1 + 1.0, hl.y + 2.0))
+            .into_iter()
+            .any(|(_, sp)| {
+                let sh = (sp.bbox.y1 - sp.bbox.y0).max(1.0);
+                let overlap = hl.x1.min(sp.bbox.x1) - hl.x0.max(sp.bbox.x0);
+                overlap >= 0.4 * (sp.bbox.x1 - sp.bbox.x0).max(1.0)
+                    && hl.y >= sp.bbox.y0 + 0.2 * sh
+                    && hl.y <= sp.bbox.y0 + 0.78 * sh
+            });
         if is_strikethrough {
             continue;
         }
 
-        let (current_text, on_line_span_idxs) = find_text_sitting_on_underline(
-            hl.x0,
-            hl.x1,
-            hl.y,
-            &text.labels,
-            &collector.whiteout_rects,
-        );
-        let label = find_underline_label(cand_bbox, hl.y, &text.labels, &on_line_span_idxs);
+        let (current_text, on_line_span_idxs) =
+            find_text_sitting_on_underline(hl.x0, hl.x1, hl.y, &index);
+        let label = find_underline_label(cand_bbox, hl.y, &index, &on_line_span_idxs);
 
         // Reject stylistic underlined headings that tightly match a span's exact width with no field label.
         if label.is_none()
@@ -1530,23 +1933,16 @@ fn synthesize_page_fields(
 
     for ub in &text.underscores {
         if overlaps_widget(ub.bbox, widget_rects)
-            || underline_rects
-                .iter()
-                .any(|ur| !ur.intersect(ub.bbox).is_empty())
+            || underline_rects.any(ub.bbox.expand(1.0), |ur| !ur.intersect(ub.bbox).is_empty())
         {
             continue;
         }
-        let (current_text, on_line_idxs) = find_text_sitting_on_underline(
-            ub.bbox.x0,
-            ub.bbox.x1,
-            ub.bbox.y1,
-            &text.labels,
-            &collector.whiteout_rects,
-        );
+        let (current_text, on_line_idxs) =
+            find_text_sitting_on_underline(ub.bbox.x0, ub.bbox.x1, ub.bbox.y1, &index);
         let label = ub
             .inline_label
             .clone()
-            .or_else(|| find_underline_label(ub.bbox, ub.bbox.y1, &text.labels, &on_line_idxs));
+            .or_else(|| find_underline_label(ub.bbox, ub.bbox.y1, &index, &on_line_idxs));
         underline_rects.push(ub.bbox);
         let pdf_r = normalize_rect(ub.bbox.transform(inv_ctm));
         fields.push(FlatField {
@@ -1575,7 +1971,7 @@ fn synthesize_page_fields(
     fields
 }
 
-fn is_checkbox_checked(cb: Rect, collector: &FlatCollector<'_>, glyphs: &[GlyphItem]) -> bool {
+fn is_checkbox_checked(cb: Rect, index: &PageIndex<'_>) -> bool {
     let w = cb.x1 - cb.x0;
     let h = cb.y1 - cb.y0;
     let inset = (0.22 * w.min(h)).clamp(1.1, 2.5);
@@ -1585,7 +1981,10 @@ fn is_checkbox_checked(cb: Rect, collector: &FlatCollector<'_>, glyphs: &[GlyphI
     }
 
     // 1. Check surviving z-ordered vector strokes or small dark fills crossing `inner`.
-    for m in &collector.ink_marks {
+    for i in index.ink_boxes.query(inner) {
+        let Some(m) = index.ink.get(i) else {
+            continue;
+        };
         match *m {
             InkMark::Seg { p0, p1 } => {
                 if segment_intersects_rect(p0, p1, inner) {
@@ -1606,18 +2005,13 @@ fn is_checkbox_checked(cb: Rect, collector: &FlatCollector<'_>, glyphs: &[GlyphI
     }
 
     // 2. Check visible check/cross glyph centered inside `cb` (unless covered by a whiteout rect).
-    glyphs.iter().any(|g| {
+    index.glyphs_near(cb).any(|g| {
         let pt = Point::new(g.cx, g.cy);
         let is_mark_char = matches!(
             g.ch,
             '✓' | '✔' | '☑' | '✗' | '✘' | '×' | 'X' | 'x' | 'v' | 'V' | '4' | '8'
         );
-        is_mark_char
-            && point_in_rect(pt, cb.expand(-0.5))
-            && !collector
-                .whiteout_rects
-                .iter()
-                .any(|wr| point_in_rect(pt, *wr))
+        is_mark_char && point_in_rect(pt, cb.expand(-0.5)) && !index.whited_out(pt)
     })
 }
 
@@ -1636,19 +2030,31 @@ fn segment_intersects_rect(a: Point, b: Point, r: Rect) -> bool {
     false
 }
 
-fn find_checkbox_label(cb: Rect, all_checkboxes: &[Rect], labels: &[LabelSpan]) -> Option<String> {
+fn find_checkbox_label(
+    cb: Rect,
+    all_checkboxes: &RectIndex,
+    index: &PageIndex<'_>,
+) -> Option<String> {
     let cb_cy = 0.5 * (cb.y0 + cb.y1);
 
     let no_box_between = |x_lo: f32, x_hi: f32| -> bool {
-        !all_checkboxes.iter().any(|other| {
+        let near = around(x_lo, cb_cy - 9.0, x_hi, cb_cy + 9.0);
+        !all_checkboxes.any(near, |other| {
             let o_cy = 0.5 * (other.y0 + other.y1);
             (o_cy - cb_cy).abs() <= 9.0 && other.x0 > x_lo + 0.5 && other.x1 < x_hi - 0.5
         })
     };
+    let near = index.labels_near(Rect::new(
+        cb.x0 - 82.0,
+        cb_cy - 10.0,
+        cb.x1 + 82.0,
+        cb_cy + 10.0,
+    ));
+    let labels = near.iter().map(|(_, sp)| *sp);
 
     // Candidate immediately to the right (`dx in 1.5..=80 pt`).
     let right_cand = labels
-        .iter()
+        .clone()
         .filter(|sp| {
             let dx = sp.bbox.x0 - cb.x1;
             (1.5..=80.0).contains(&dx)
@@ -1660,7 +2066,6 @@ fn find_checkbox_label(cb: Rect, all_checkboxes: &[Rect], labels: &[LabelSpan]) 
 
     // Candidate immediately to the left (`dx in 1.5..=80 pt`).
     let left_cand = labels
-        .iter()
         .filter(|sp| {
             let dx = cb.x0 - sp.bbox.x1;
             (1.5..=80.0).contains(&dx)
@@ -1687,12 +2092,19 @@ fn find_checkbox_label(cb: Rect, all_checkboxes: &[Rect], labels: &[LabelSpan]) 
     }
 }
 
-fn find_comb_or_underline_label(target: Rect, labels: &[LabelSpan]) -> Option<String> {
+fn find_comb_or_underline_label(target: Rect, index: &PageIndex<'_>) -> Option<String> {
     let t_cy = 0.5 * (target.y0 + target.y1);
 
     // 1. Left on same baseline (`gap <= 95 pt`).
-    if let Some(left) = labels
+    let near = index.labels_near(Rect::new(
+        target.x0 - 96.0,
+        t_cy - 11.0,
+        target.x0 + 3.0,
+        t_cy + 11.0,
+    ));
+    if let Some(left) = near
         .iter()
+        .map(|(_, sp)| *sp)
         .filter(|sp| {
             let dx = target.x0 - sp.bbox.x1;
             (-2.0..=95.0).contains(&dx) && (sp.cy - t_cy).abs() <= 10.0
@@ -1703,8 +2115,14 @@ fn find_comb_or_underline_label(target: Rect, labels: &[LabelSpan]) -> Option<St
     }
 
     // 2. Directly above (`dy <= 16 pt`).
-    labels
-        .iter()
+    let near = index.labels_near(around(
+        target.x0 - 8.0,
+        target.y0 - 16.0,
+        target.x1,
+        target.y0 + 2.0,
+    ));
+    near.iter()
+        .map(|(_, sp)| *sp)
         .filter(|sp| {
             let dy = target.y0 - sp.bbox.y1;
             (-2.0..=16.0).contains(&dy) && sp.bbox.x1 >= target.x0 - 8.0 && sp.bbox.x0 <= target.x1
@@ -1717,14 +2135,14 @@ fn find_text_sitting_on_underline(
     x0: f32,
     x1: f32,
     line_y: f32,
-    labels: &[LabelSpan],
-    whiteouts: &[Rect],
+    index: &PageIndex<'_>,
 ) -> (Option<String>, Vec<usize>) {
     let mut idxs = Vec::new();
     let mut words: Vec<(f32, &str)> = Vec::new();
-    for (i, sp) in labels.iter().enumerate() {
+    let near = index.labels_near(around(x0 - 3.0, line_y - 6.0, x1 + 4.0, line_y + 2.5));
+    for (i, sp) in near {
         let mid = Point::new(0.5 * (sp.bbox.x0 + sp.bbox.x1), sp.cy);
-        if whiteouts.iter().any(|wr| point_in_rect(mid, *wr)) {
+        if index.whited_out(mid) {
             continue;
         }
         let horiz_in = sp.bbox.x0 >= x0 - 3.0 && sp.bbox.x1 <= x1 + 4.0;
@@ -1747,15 +2165,20 @@ fn find_text_sitting_on_underline(
 fn find_underline_label(
     cand_bbox: Rect,
     line_y: f32,
-    labels: &[LabelSpan],
+    index: &PageIndex<'_>,
     on_line_idxs: &[usize],
 ) -> Option<String> {
     let t_cy = line_y - 5.0;
 
     // 1. Span immediately to the left on the same baseline (`gap <= 90 pt`).
-    if let Some(left) = labels
-        .iter()
-        .enumerate()
+    let near = index.labels_near(Rect::new(
+        cand_bbox.x0 - 91.0,
+        t_cy - 10.0,
+        cand_bbox.x0 + 4.0,
+        t_cy + 10.0,
+    ));
+    if let Some(left) = near
+        .into_iter()
         .filter(|(i, sp)| {
             !on_line_idxs.contains(i)
                 && (-3.0..=90.0).contains(&(cand_bbox.x0 - sp.bbox.x1))
@@ -1768,9 +2191,14 @@ fn find_underline_label(
     }
 
     // 2. Caption directly below the line (`dy in 0.5..=16 pt`, e.g., signature caption).
-    if let Some(below) = labels
-        .iter()
-        .enumerate()
+    let near = index.labels_near(around(
+        cand_bbox.x0 + 2.0,
+        line_y,
+        cand_bbox.x1 - 2.0,
+        line_y + 16.0,
+    ));
+    if let Some(below) = near
+        .into_iter()
         .filter(|(i, sp)| {
             !on_line_idxs.contains(i)
                 && (0.5..=16.0).contains(&(sp.bbox.y0 - line_y))
@@ -1784,9 +2212,13 @@ fn find_underline_label(
     }
 
     // 3. Caption directly above the field box (`dy <= 16 pt`).
-    labels
-        .iter()
-        .enumerate()
+    let near = index.labels_near(around(
+        cand_bbox.x0,
+        cand_bbox.y0 - 16.0,
+        cand_bbox.x1,
+        cand_bbox.y0 + 2.0,
+    ));
+    near.into_iter()
         .filter(|(i, sp)| {
             !on_line_idxs.contains(i)
                 && (-2.0..=16.0).contains(&(cand_bbox.y0 - sp.bbox.y1))
@@ -1801,17 +2233,16 @@ fn extract_comb_current_text(
     cell_x_ranges: &[[f32; 2]],
     y0: f32,
     y1: f32,
-    glyphs: &[GlyphItem],
-    whiteouts: &[Rect],
+    index: &PageIndex<'_>,
 ) -> Option<String> {
     let mut out = String::new();
     for &[cx0, cx1] in cell_x_ranges {
         let cell_r = Rect::new(cx0, y0 - 1.5, cx1, y1 + 1.5);
-        let mut cell_chars: Vec<(f32, char)> = glyphs
-            .iter()
+        let mut cell_chars: Vec<(f32, char)> = index
+            .glyphs_near(cell_r)
             .filter(|g| {
                 let pt = Point::new(g.cx, g.cy);
-                point_in_rect(pt, cell_r) && !whiteouts.iter().any(|wr| point_in_rect(pt, *wr))
+                point_in_rect(pt, cell_r) && !index.whited_out(pt)
             })
             .map(|g| (g.cx, g.ch))
             .collect();
@@ -3422,5 +3853,194 @@ mod tests {
         let exp = rep.fields.iter().find(|f| f.name == "express").unwrap();
         assert_eq!(exp.kind, "checkbox");
         assert_eq!(exp.checked, Some(true));
+    }
+
+    /// A deterministic xorshift, for varied pages without a dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u64) -> f32 {
+            (self.next() % n.max(1)) as f32
+        }
+    }
+
+    /// A `size`-point square page of `n` flat-form parts: captioned
+    /// checkboxes (some ticked, some whited out), comb cells, outer-box and
+    /// tick combs, captioned underlines, underscore runs, table posts and
+    /// white fills. With `jitter`, parts land anywhere and overlap.
+    fn busy_page(n: usize, size: f32, seed: u64, jitter: bool) -> Document {
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let cols = ((size - 40.0) / 60.0).max(1.0) as usize;
+        let mut s = String::from("0 0 0 rg 0 0 0 RG 1 w\n");
+        for i in 0..n {
+            let (x, y) = if jitter {
+                (
+                    20.0 + rng.below(size as u64 - 80),
+                    20.0 + rng.below(size as u64 - 60),
+                )
+            } else {
+                (
+                    20.0 + 60.0 * (i % cols) as f32,
+                    size - 40.0 - 30.0 * (i / cols) as f32,
+                )
+            };
+            let d = if jitter { rng.below(4) * 0.5 } else { 0.0 };
+            match i % 9 {
+                0 => {
+                    s += &format!(
+                        "{x} {y} 10 10 re S BT /F1 8 Tf {} {} Td (Opt {i}) Tj ET\n",
+                        x + 13.0,
+                        y + 1.0
+                    );
+                }
+                1 => {
+                    s += &format!(
+                        "{x} {y} 10 10 re S 1.5 w {} {} m {} {} l {} {} l S 1 w\n",
+                        x + 2.0,
+                        y + 5.0,
+                        x + 4.5,
+                        y + 2.0 + d,
+                        x + 8.0,
+                        y + 8.0
+                    );
+                    // Unticked again by painting it over, or ticked with a glyph.
+                    if d >= 1.0 {
+                        s += &format!("1 g {} {} 7 7 re f 0 g\n", x + 1.5 + d - 1.0, y + 1.5);
+                    }
+                    if d == 0.5 {
+                        s += &format!(
+                            "{} {y} 10 10 re S BT /F1 9 Tf {} {} Td (X) Tj ET\n",
+                            x + 20.0,
+                            x + 22.0,
+                            y + 2.0
+                        );
+                    }
+                }
+                2 => {
+                    for k in 0..3 {
+                        s += &format!("{} {y} 12 14 re S\n", x + 12.0 * k as f32 + d);
+                    }
+                }
+                3 => {
+                    s += &format!(
+                        "BT /F1 8 Tf {x} {} Td (Name {i}:) Tj ET {} {y} m {} {y} l S\n",
+                        y + 1.0,
+                        x + 30.0 + d,
+                        x + 70.0
+                    );
+                }
+                4 => {
+                    s += &format!("{x} {y} m {} {y} l S\n", x + 48.0);
+                    for k in 0..5 {
+                        let tx = x + 12.0 * k as f32;
+                        let base = y + if k == 2 { 2.0 * d } else { 0.0 };
+                        s += &format!("{tx} {base} m {tx} {} l S\n", y + 8.0 + d);
+                    }
+                }
+                5 => {
+                    s += &format!("{x} {y} 48 14 re S\n");
+                    for k in 1..4 {
+                        let tx = x + 12.0 * k as f32 + d;
+                        s += &format!("{tx} {y} m {tx} {} l S\n", y + 14.0);
+                    }
+                }
+                6 => {
+                    s += &format!("1 g {x} {y} 12 12 re f 0 g\n");
+                }
+                7 => {
+                    s += &format!("BT /F1 8 Tf {x} {y} Td (Pay: ________ now) Tj ET\n");
+                }
+                _ => {
+                    s += &format!(
+                        "{x} {} m {x} {} l S {} {} m {} {} l S {x} {y} m {} {y} l S\n",
+                        y - 6.0,
+                        y + 12.0,
+                        x + 50.0,
+                        y - 6.0,
+                        x + 50.0,
+                        y + 12.0 + d,
+                        x + 50.0
+                    );
+                }
+            }
+        }
+        let font = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>";
+        doc_bytes(&[
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            format!("<</Type/Page/Parent 2 0 R/MediaBox[0 0 {size} {size}]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>").into_bytes(),
+            stream("", s.as_bytes()),
+            font.to_vec(),
+        ])
+    }
+
+    /// Detection with every index answering with every item, as the scans
+    /// it replaced did.
+    fn detect_by_scans(doc: &Document) -> Vec<FlatField> {
+        BRUTE.with(|b| b.set(true));
+        let fields = detect_page_flat_forms(doc, 0);
+        BRUTE.with(|b| b.set(false));
+        fields.unwrap()
+    }
+
+    #[test]
+    fn indexed_detection_finds_what_the_scans_it_replaced_found() {
+        let mut found = 0;
+        for seed in 1..=40u64 {
+            // Crowded small pages, where parts overlap and near-misses are
+            // common, and a spread one.
+            let (n, size, jitter) = match seed % 4 {
+                0 => (400, 2400.0, false),
+                1 => (120, 300.0, true),
+                2 => (300, 612.0, true),
+                _ => (60, 200.0, true),
+            };
+            let doc = busy_page(n, size, seed, jitter);
+            let indexed = detect_page_flat_forms(&doc, 0).unwrap();
+            assert_eq!(indexed, detect_by_scans(&doc), "seed {seed}");
+            found += indexed.len();
+        }
+        // The pages have fields of every kind to compare.
+        assert!(found > 1_000, "{found}");
+        for doc in [flat_intake_form_doc(), three_signature_pages()] {
+            assert_eq!(
+                detect_page_flat_forms(&doc, 0).unwrap(),
+                detect_by_scans(&doc)
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_of_thousands_of_parts_is_not_scanned_once_per_part() {
+        // The scans took 6.7 s for 16,000 parts in a release build; a
+        // generous bound for a debug build, not a benchmark.
+        let (took, fields) = time_busy_page(16_000);
+        assert!(fields > 5_000, "{fields}");
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    }
+
+    fn time_busy_page(n: usize) -> (std::time::Duration, usize) {
+        let size = 60.0 * (n as f32).sqrt().ceil() + 100.0;
+        let doc = busy_page(n, size, 7, false);
+        let started = std::time::Instant::now();
+        let fields = detect_page_flat_forms(&doc, 0).unwrap();
+        (started.elapsed(), fields.len())
+    }
+
+    /// `cargo test --release -p nupdf --lib flat_form_busy_page_timings -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a timing to read, not a check"]
+    fn flat_form_busy_page_timings() {
+        for n in [1_000, 4_000, 16_000] {
+            let (took, fields) = time_busy_page(n);
+            eprintln!("{n} parts: {fields} fields in {took:?}");
+        }
     }
 }
