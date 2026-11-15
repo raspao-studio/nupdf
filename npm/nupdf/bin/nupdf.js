@@ -19,7 +19,7 @@ try {
 } catch {
   console.error(
     `nupdf: the package ${pkg.name}, which carries the binary for this machine, is not installed. ` +
-      'Reinstall nupdf without --omit=optional or --no-optional.',
+      'Reinstall nupdf-cli without --omit=optional or --no-optional.',
   );
   process.exit(1);
 }

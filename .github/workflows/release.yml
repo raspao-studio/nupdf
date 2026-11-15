@@ -1,7 +1,7 @@
 name: release
 
 # Builds the `nupdf` binary for each platform, as an archive, as a Python wheel
-# (`nupdf-cli` on PyPI) and as npm packages (`nupdf`, with one `@nupdf/...`
+# (`nupdf-cli` on PyPI) and as npm packages (`nupdf-cli`, with one `@nupdf/...`
 # package per platform), and, for a version tag, attaches them and the archives'
 # checksums to that tag's GitHub release, creating it as a draft if it is not
 # there. Publishing the release stays a step done by hand (docs/RELEASING.md);

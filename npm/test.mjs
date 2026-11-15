@@ -50,6 +50,7 @@ test('installed from the packed packages, `nupdf` runs the binary', { skip }, ()
   const dirs = build({ version: '9.9.9', out, binaries: { [host.target]: binary } });
 
   const main = JSON.parse(readFileSync(join(out, 'nupdf/package.json'), 'utf8'));
+  assert.equal(main.name, 'nupdf-cli');
   assert.equal(main.version, '9.9.9');
   assert.deepEqual(main.optionalDependencies, Object.fromEntries(PACKAGES.map((p) => [p.name, '9.9.9'])));
 
@@ -58,6 +59,7 @@ test('installed from the packed packages, `nupdf` runs the binary', { skip }, ()
   for (const dir of dirs) execFileSync(npm, ['pack', dir, '--pack-destination', packed, '--silent'], { shell, stdio: 'ignore' });
   const tarballs = readdirSync(packed).map((f) => join(packed, f));
   assert.equal(tarballs.length, 2);
+  assert.ok(tarballs.some((f) => f.endsWith('nupdf-cli-9.9.9.tgz')));
 
   // The other platforms' packages are not anywhere npm can find them; being
   // optional, they are passed over.

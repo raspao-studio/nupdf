@@ -8,7 +8,7 @@ No change to the engine or to any report: this release adds ways to get the `nup
 
 - **Prebuilt binaries** for Linux (x86-64 and ARM, for glibc and as static musl builds), macOS (Apple silicon and Intel) and Windows (x86-64), attached to each GitHub release with SHA-256 checksums. `cargo binstall nupdf-cli` fetches them.
 - **PyPI**: `pip install nupdf-cli`, or `uvx --from nupdf-cli nupdf`.
-- **npm**: `npx nupdf`, or `npm install -g nupdf`.
+- **npm**: `npx nupdf-cli`, or `npm install -g nupdf-cli`.
 - The docs moved to https://nupdf.dev/docs/, behind a landing page at https://nupdf.dev/.
 
 ## 0.1.0
