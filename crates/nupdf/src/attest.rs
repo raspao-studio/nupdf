@@ -327,7 +327,7 @@ pub fn attest_page_with_store(
     // Only if `all_page` found extra spans do we run an unclipped `"View"` pass (`flags: 0`)
     // to distinguish clip-dropped spans from hidden-OCG spans deterministically.
     let view_unclipped_glyphs = if all_extra_candidates.is_empty() {
-        Vec::new()
+        GlyphKeys::default()
     } else {
         let ((unclipped_res, next_store), _) = diag::capture(|| {
             stext::extract_page(
@@ -346,7 +346,7 @@ pub fn attest_page_with_store(
                 let sp = collect_raw_spans(&p, page_num);
                 collect_glyph_keys(&sp)
             }
-            Err(_) => Vec::new(),
+            Err(_) => GlyphKeys::default(),
         }
     };
 
@@ -1334,8 +1334,55 @@ fn collect_blocks_spans(blocks: &[Block], prefix: &str, out: &mut Vec<RawSpan>) 
     }
 }
 
-fn collect_glyph_keys(spans: &[RawSpan]) -> Vec<GlyphKey> {
-    let mut keys = Vec::new();
+/// Glyphs by character and by a grid of [`GLYPH_TOLERANCE`] cells of
+/// their origins, so that a lookup reads the nine cells around one origin
+/// instead of every glyph on the page.
+#[derive(Debug, Default)]
+struct GlyphKeys {
+    cells: std::collections::HashMap<(i32, i64, i64), Vec<GlyphKey>>,
+}
+
+/// How far apart two glyph origins can be and be the same glyph, in points.
+const GLYPH_TOLERANCE: f32 = 0.35;
+
+fn glyph_cell(v: f32) -> i64 {
+    (v / GLYPH_TOLERANCE).floor() as i64
+}
+
+impl GlyphKeys {
+    fn push(&mut self, k: GlyphKey) {
+        self.cells
+            .entry((k.c, glyph_cell(k.x), glyph_cell(k.y)))
+            .or_default()
+            .push(k);
+    }
+
+    /// Whether a glyph of `c` has its origin within [`GLYPH_TOLERANCE`] of
+    /// `(x, y)` on each axis.
+    fn contains(&self, c: i32, x: f32, y: f32) -> bool {
+        let (cx, cy) = (glyph_cell(x), glyph_cell(y));
+        (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| {
+                self.cells
+                    .get(&(c, cx.saturating_add(dx), cy.saturating_add(dy)))
+                    .is_some_and(|ks| {
+                        ks.iter().any(|k| {
+                            (k.x - x).abs() <= GLYPH_TOLERANCE && (k.y - y).abs() <= GLYPH_TOLERANCE
+                        })
+                    })
+            })
+        })
+    }
+
+    fn extend(&mut self, other: GlyphKeys) {
+        for k in other.cells.into_values().flatten() {
+            self.push(k);
+        }
+    }
+}
+
+fn collect_glyph_keys(spans: &[RawSpan]) -> GlyphKeys {
+    let mut keys = GlyphKeys::default();
     for sp in spans {
         for ch in &sp.chars {
             if ch.flags & char_flags::SYNTHETIC == 0 {
@@ -1350,13 +1397,11 @@ fn collect_glyph_keys(spans: &[RawSpan]) -> Vec<GlyphKey> {
     keys
 }
 
-fn glyph_seen(ch: &StextChar, keys: &[GlyphKey]) -> bool {
-    keys.iter().any(|k| {
-        k.c == ch.c && (k.x - ch.origin.x).abs() <= 0.35 && (k.y - ch.origin.y).abs() <= 0.35
-    })
+fn glyph_seen(ch: &StextChar, keys: &GlyphKeys) -> bool {
+    keys.contains(ch.c, ch.origin.x, ch.origin.y)
 }
 
-fn span_matches_glyphs(span: &RawSpan, keys: &[GlyphKey]) -> bool {
+fn span_matches_glyphs(span: &RawSpan, keys: &GlyphKeys) -> bool {
     let mut checked = 0usize;
     let mut matched = 0usize;
     for ch in &span.chars {
@@ -1372,7 +1417,7 @@ fn span_matches_glyphs(span: &RawSpan, keys: &[GlyphKey]) -> bool {
 
 /// Extracts spans (or contiguous unseen sub-runs within merged spans) from
 /// `candidates` whose real glyphs do not appear in `seen`.
-fn extract_unseen_spans(candidates: &[RawSpan], seen: &[GlyphKey]) -> Vec<RawSpan> {
+fn extract_unseen_spans(candidates: &[RawSpan], seen: &GlyphKeys) -> Vec<RawSpan> {
     let mut out = Vec::new();
     for sp in candidates {
         let mut run_start: Option<usize> = None;
@@ -2132,6 +2177,30 @@ mod tests {
         /F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
         /F2<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding>>\
     >>";
+
+    #[test]
+    fn a_glyph_is_seen_within_the_tolerance_across_cells() {
+        let mut keys = GlyphKeys::default();
+        keys.push(GlyphKey {
+            x: 0.34,
+            y: 100.0,
+            c: 'a' as i32,
+        });
+        keys.push(GlyphKey {
+            x: -0.1,
+            y: -0.1,
+            c: 'b' as i32,
+        });
+        // Either side of a cell edge, and corner to corner.
+        assert!(keys.contains('a' as i32, 0.36, 100.0));
+        assert!(keys.contains('a' as i32, 0.0, 99.66));
+        assert!(keys.contains('b' as i32, 0.2, 0.2));
+        // Too far, or another character.
+        assert!(!keys.contains('a' as i32, 0.7, 100.0));
+        assert!(!keys.contains('a' as i32, 0.34, 100.4));
+        assert!(!keys.contains('b' as i32, 0.34, 100.0));
+        assert!(!keys.contains('a' as i32, f32::NAN, 100.0));
+    }
 
     #[test]
     fn visible_spans_preserve_standard_extract_content_ids() {
