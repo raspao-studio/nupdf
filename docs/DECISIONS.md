@@ -730,8 +730,30 @@ Peak memory on the four pages, before D56 and after both (`eval/hostile/make.py`
 | | `search`, `verify` | 4,165 MB | 56 MB; 439 MB and exit 4 | |
 | one path of ten million segments (117 KB) | `trace` | 6,240 MB | 107 MB | 94 MB |
 | | `extract --format text` | 203 MB | 52 MB | 180 MB |
-| | `render` | 2,836 MB | 2,836 MB | 2,049 MB |
+| | `render` | 2,836 MB | 2,836 MB (32 MB with D58) | 2,049 MB |
 
 With the limit raised past the page (`--max-page-glyphs 100000000`) the text commands hold what they held: the glyphs themselves, as MuPDF does.
 
-Still open: a path's segments are not limited, so drawing the last page takes 2.8 GB and 36 s (MuPDF: 2.0 GB and 48 s). Threads multiply a page's cost by the pages run at once, eight at most (D53).
+The last row, a path's segments, is D58. Threads multiply a page's cost by the pages run at once, eight at most (D53).
+
+## D58. A page's run takes at most five million operators
+
+*2026-11-14*
+
+The glyph limit (D57) bounds a page of text and does nothing for a page of paths. Ten million strokes in 270 KB took 19 s to draw, and one path of ten million segments in 117 KB took 2.8 GB and 29 s, as they take MuPDF 16 s, and 2.0 GB and 48 s. `--timeout` stops the first; nothing stopped the second from taking the memory.
+
+- **The limit** (`Limits::max_page_operators`, `--max-page-operators`, 5,000,000): a page's run ends with a limit error at the operator that passes it, counting what its contents run and what they draw (forms, pattern cells, Type 3 glyph procedures) and its annotations' appearances. The page is its error in the report, with the warning `limit.page_operators`, and the rest of the document is read; `verify` does not call the page clean and `redact` refuses the document, as for the glyph limit.
+- **What is limited is a run**: `extract`, `stext`, `search`, `tables`, `trace`, `render`, `ocr`, `diff`, `redact` and `verify`. `operators` lists a page's operators without running them, in constant memory (D56), and lists them all. The commands that rewrite content (`clean -s`, `sanitize`, and `redact` once its targets are found) keep the whole page: a limit there would lose content.
+- **Why five million**: drawing every page of the same 8,212 files (73,250 pages) at 18 dpi, the busiest page runs 1,058,555 operators, six files have a page over 500,000 and 99.9% of the files stay under 466,410. The tail falls by about six for each doubling, which puts a page over five million at well under one file in the 100,000 of the wild tier. Five million is 4.7 times the busiest page found, a thinner margin than the glyph limit's, taken because what it bounds is linear in it: half the limit is half the worst case.
+- **How PDF Oxide does it**, which this was measured against (0.3.78): it stops reading a content stream at 1,000,000 operators and carries on with what it has. That bounds its time (0.2 to 0.4 s on these pages) and not its memory (200 to 870 MB: the stream is decoded whole and parsed into a vector first), and the call succeeds: the page of one path is drawn blank, because the stroke comes after the cap, and the ten million glyphs come back as the first 999,998, with a warning in a list apart. One of the 8,212 real files has a page past its cap. nupdf's limit is five times looser and is an error: a caller is told the page was not read, and never handed part of one as the whole.
+- **What it bounds**: the worst pages the limit lets through, 1.67 million strokes and one path of 4,998,000 segments. The strokes draw in 3.2 s and 12 MB, and their text is read in 0.35 s. The path draws in 14 s and 1.4 GB, the edges of its stroke; that is the most a page of paths can now take, and half what it took.
+
+| Page (`eval/hostile`) | Command | Before | After | MuPDF | PDF Oxide |
+|---|---|---|---|---|---|
+| ten million strokes | `render` | 13 MB, 19 s | 13 MB, 3.2 s, over the limit | 465 MB, 16 s | 371 MB, 0.4 s, the first third drawn |
+| | `extract --format text` | 7 MB, 2.0 s | 7 MB, 0.35 s, over the limit | 464 MB, 2.2 s | 463 MB, 0.2 s |
+| | `trace` | 7 MB, 6.7 s | 7 MB, 1.2 s, over the limit | 4 MB | |
+| one path of ten million segments | `render` | 2,836 MB, 29 s | 32 MB, 0.14 s, over the limit | 2,049 MB, 48 s | 200 MB, 0.2 s, a blank page |
+| one path of 4,998,000 segments | `render` | 1,424 MB, 14 s | 1,424 MB, 14 s | | |
+
+The count costs nothing that shows: `extract`, `stext` and `render` on the 30 long documents are within 1% of the build before, and their output, with that of seven more commands, is the same on the smoke files and the long documents (1,360 runs).
