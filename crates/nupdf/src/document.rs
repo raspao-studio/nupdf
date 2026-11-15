@@ -368,6 +368,54 @@ const CRYPT_PREFIX: &str = "crypt: ";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageCountError(pub String);
 
+/// A content stream being read a piece at a time
+/// ([`Document::open_content_stream`]).
+#[allow(missing_debug_implementations)]
+pub struct ContentStream<'d> {
+    pieces: Pieces<'d>,
+    /// Bytes handed out so far, and the most that may be.
+    read: usize,
+    limit: usize,
+}
+
+enum Pieces<'d> {
+    /// Data that had to be decoded whole, until it is handed out.
+    Whole(Option<Vec<u8>>),
+    Decoded(stream::Stream<'d>),
+}
+
+impl ContentStream<'_> {
+    /// Adds the stream's next bytes to `out`; false once there are no
+    /// more. An error once more than `Limits::max_decoded_bytes` have
+    /// been read, as reading it whole gives.
+    pub fn read_piece(&mut self, out: &mut Vec<u8>) -> Result<bool, DecodeError> {
+        let before = out.len();
+        let more = match &mut self.pieces {
+            Pieces::Whole(data) => {
+                if let Some(data) = data.take() {
+                    out.extend_from_slice(&data);
+                }
+                false
+            }
+            Pieces::Decoded(s) => s.read_piece(out),
+        };
+        self.read += out.len() - before;
+        if self.read > self.limit {
+            return Err(DecodeError::Limit);
+        }
+        Ok(more)
+    }
+
+    /// Whether the read ended in an error, which was reported and taken
+    /// for the end of the data.
+    pub fn had_error(&self) -> bool {
+        match &self.pieces {
+            Pieces::Whole(_) => false,
+            Pieces::Decoded(s) => s.had_error(),
+        }
+    }
+}
+
 impl Document {
     /// `pdf_create_document`: a new document whose page tree has no pages.
     /// As in MuPDF, its /Info is in the catalog, naming the producer.
@@ -1417,6 +1465,30 @@ impl Document {
         let mut s = self.open_decoded(&st, stream, length, false)?;
         let data = s.read_bytewise(self.limits.max_decoded_bytes)?;
         Ok((data, s.had_error()))
+    }
+
+    /// A content stream opened as [`Document::content_stream_data`] opens
+    /// it, to be read a piece at a time: all of its pieces together are
+    /// that function's data, without ever being held together.
+    pub fn open_content_stream(&self, stream: &Stream) -> Result<ContentStream<'_>, DecodeError> {
+        let st = self.current();
+        let limit = self.limits.max_decoded_bytes;
+        if let Some(data) = self.edited_data(stream) {
+            let resolve = |o: &Object| self.resolve_in(&st, o);
+            let data = filter::decode(&stream.dict, &data, &resolve, &self.diag, &self.limits)?;
+            return Ok(ContentStream {
+                pieces: Pieces::Whole(Some(data)),
+                read: 0,
+                limit,
+            });
+        }
+        let length = self.stream_length(&st, stream, true);
+        let opened = self.open_decoded(&st, stream, length, false)?;
+        Ok(ContentStream {
+            pieces: Pieces::Decoded(opened),
+            read: 0,
+            limit,
+        })
     }
 
     // ---- loading -------------------------------------------------------
@@ -2900,6 +2972,66 @@ mod lookups_and_edits {
         assert_eq!(d.stream_bytes(&s).unwrap(), b"ABC");
         assert_eq!(d.content_stream_data(&s).unwrap(), (b"ABC".to_vec(), false));
         assert_eq!(d.image_samples(&s, 2).unwrap(), b"AB");
+    }
+
+    #[test]
+    fn a_content_stream_read_in_pieces_is_the_one_read_whole() {
+        // A deflated stream of 300,000 bytes, which comes in many pieces,
+        // and a stream edited in memory, which comes in one.
+        let payload: Vec<u8> = (0..300_000u32)
+            .map(|i| b"0 1 m l S\n"[i as usize % 10])
+            .collect();
+        let deflated = crate::deflate::compress(&payload, -1).unwrap();
+        let d = crate::testutil::doc_bytes(&[
+            b"<</Type/Catalog>>".to_vec(),
+            crate::testutil::stream("/Filter/FlateDecode", &deflated),
+            crate::testutil::stream("", b"plain"),
+        ]);
+        let pieces = |d: &Document, num: i32| {
+            let Some(Object::Stream(s)) = d.object(num) else {
+                panic!("not a stream");
+            };
+            let mut reader = d.open_content_stream(&s).unwrap();
+            let (mut out, mut count) = (Vec::new(), 0);
+            loop {
+                let before = out.len();
+                let more = reader.read_piece(&mut out).unwrap();
+                count += usize::from(out.len() > before);
+                if !more {
+                    break;
+                }
+            }
+            assert_eq!(
+                d.content_stream_data(&s).unwrap(),
+                (out.clone(), reader.had_error())
+            );
+            (out, count)
+        };
+        let (data, count) = pieces(&d, 2);
+        assert_eq!(data, payload);
+        assert!(count > 1, "{count} pieces");
+        assert_eq!(pieces(&d, 3).0, b"plain");
+        d.replace_stream(3, Dict::new(), b"edited".to_vec());
+        assert_eq!(pieces(&d, 3), (b"edited".to_vec(), 1));
+        // More than the limit is an error, as it is read whole.
+        let limits = Limits {
+            max_decoded_bytes: 1000,
+            ..Limits::default()
+        };
+        let small = Document::open_with(d.data().to_vec(), limits).unwrap();
+        let Some(Object::Stream(s)) = small.object(2) else {
+            panic!("not a stream");
+        };
+        assert_eq!(small.content_stream_data(&s), Err(DecodeError::Limit));
+        let mut reader = small.open_content_stream(&s).unwrap();
+        let mut out = Vec::new();
+        let ended = loop {
+            match reader.read_piece(&mut out) {
+                Ok(true) => {}
+                other => break other,
+            }
+        };
+        assert_eq!(ended, Err(DecodeError::Limit));
     }
 
     #[test]

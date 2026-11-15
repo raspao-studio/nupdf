@@ -660,3 +660,30 @@ Measured on the 30 long documents (3,414 pages), no `--threads`, best of two run
 
 With D53's threads, `render` on the long tier goes from 16.8 s to 6.4 s; `long-020.pdf`, 100 pages that draw in 6 ms, from 171 ms to 57 ms on one thread and 17 ms unasked.
 
+## D55. A content stream is read a window at a time, never whole
+
+*2026-11-14*
+
+The interpreter decoded a page's contents into one buffer before lexing them. MuPDF reads them through a buffer of a few kilobytes, so a content stream that inflates to 512 MB of white space cost it 5 MB and nupdf 521 MB, the one case found where nupdf was a hundred times worse than the engine it follows (`eval/hostile`). Contents are now decoded about 256 KB ahead of the lexer (`content::process_feed`), and the peak on that file is 7 MB.
+
+- **The interpreter keeps its state from one window to the next**: the operand stack, an open `TJ` array, the count of syntax errors. A stream shorter than a window is in one, and is read exactly as before; that is nearly every stream.
+- **A token that reaches the end of a window is lexed again with more bytes.** It may not be whole (`12` may be the start of `123`), so the lexer goes back to its start and the window is refilled from there. An array, a dictionary and an inline image read on from the lexer, and are taken whole or not at all the same way. A token longer than a window doubles the window until it fits: a 200,000-byte string is held, and no more than about it.
+- **Nothing is reported twice.** A token put back has reported what it met (a name too long, a bad hex digit); lexed again it meets the same first, and those reports are dropped (`diag::swallowing`). What an array, a dictionary or an inline image reports is kept only once it has been read whole.
+- **White space and comments before a token are dropped as they are read**, as the lexer skips them, so they are never held however long they run.
+- **A contents array's parts are opened as the interpreter reaches them**, each read to its end before the next, joined with spaces, a failed read ending the stream there, as before.
+- **What changes in a report**: nothing in what is run, shown or drawn. For a stream longer than a window, a decoding error is reported when the decoder reaches it, among the content's own warnings, as MuPDF reports it; before, the whole stream was decoded first, so it came ahead of them. A stream over `--max-decoded-bytes` fails once it has passed the limit, where it failed before anything ran; the page fails with the same error either way.
+- **`info`'s look at whether a page can show anything** (`may_mark`) reads the stream through the same windows, and the stream is read again if it is run.
+
+Checked by running content through every window size: 33 contents built to straddle a window's end (numbers, strings, hex strings, long names, `TJ` arrays, dictionaries, comments, inline images with `EI` in their data, each kind of truncation, over a hundred syntax errors) run to the same operators and the same diagnostics read 1 to 61 bytes at a time into windows of 1 to 64 bytes as read whole. With the window set to 16 bytes for the purpose, the 30 long documents came out byte for byte as on `main` for `extract`, `stext`, `tables`, `operators`, `trace`, `info` and `render` but for the order of one document's diagnostics; 13 harness checks on the standard tier showed no regression; `operators`, `extract` and `tables` on 1,000 files of the wild tier matched `main`; and 15,000 runs on those files ended in no crash. At 256 KB the long tier is byte for byte as on `main`, diagnostics and their order included, in the same time (within 1%). The `content` fuzz target now runs each input whole and in windows whose sizes the input picks, and fails if the two differ in an operator, a diagnostic or how they end: 80,909 runs in its first 150 seconds found no difference.
+
+| File (`eval/hostile`) | Before | After | MuPDF |
+|---|---|---|---|
+| `flate-bomb.pdf`, `extract` | 521 MB | 7 MB | 5 MB |
+| `many-ops.pdf`, `extract` | 305 MB | 238 MB | 237 MB |
+
+What is still read whole, and why:
+
+- **A stream a command is asked to decode**: `streams`, `show --data` and `clean -d` read it as MuPDF's `fz_read_best` does, up to its "compression bomb detected" and `--max-decoded-bytes`: 444 MB on `flate-bomb.pdf` before the bomb is called.
+- **Not the commands that rewrite content.** `redact`, `sanitize`, `clean -c` and `clean -s` read a page's contents through the same windows; what they hold is the content they write. On `flate-bomb.pdf` each stays under 60 MB.
+- **What a page of ten million operators is turned into** is another matter than its stream: on `many-ops.pdf`, a 100 KB file, `extract` holds 238 MB as MuPDF does, but `redact` 2.6 GB, `verify` 1.4 GB, `operators` 5 GB and `trace` 10.8 GB, which build their reports as trees in memory where `mutool trace` writes as it goes. That is not fixed here.
+

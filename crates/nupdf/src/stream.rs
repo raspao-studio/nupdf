@@ -322,6 +322,18 @@ impl<'a> Stream<'a> {
         }
     }
 
+    /// A step of [`Stream::read_bytewise`]: the bytes already decoded are
+    /// added to `out`, and the next are decoded. False once there are no
+    /// more, so that calling it until then gives `out` what
+    /// `read_bytewise` returns, a piece at a time.
+    pub fn read_piece(&mut self, out: &mut Vec<u8>) -> bool {
+        if self.rp < self.buf.len() {
+            out.extend_from_slice(&self.buf[self.rp..]);
+            self.rp = self.buf.len();
+        }
+        !(self.eof || self.fill(1) == Next::Eof)
+    }
+
     /// Reads to the end one byte at a time, as MuPDF's lexer and the xref
     /// stream reader do (`fz_read_byte`), so bytes a finished stage still
     /// holds are read.
@@ -521,5 +533,64 @@ mod tests {
         assert_eq!(s.read_best(10, 0, usize::MAX), Err(ReadError::Bomb));
         let mut s = Stream::new(Zeros, &diag);
         assert_eq!(s.read_best(10, 0, 1 << 20), Err(ReadError::Limit));
+    }
+
+    #[test]
+    fn a_stream_read_a_piece_at_a_time_is_the_stream_read_whole() {
+        /// What each call of `next` gives, in turn.
+        struct Steps(Vec<Result<(&'static [u8], Next), &'static str>>);
+        impl Source for Steps {
+            fn next(
+                &mut self,
+                _: usize,
+                out: &mut Vec<u8>,
+                _: &Diagnostics,
+            ) -> Result<Next, String> {
+                if self.0.is_empty() {
+                    return Ok(Next::Eof);
+                }
+                let (data, next) = self.0.remove(0)?;
+                out.extend_from_slice(data);
+                Ok(next)
+            }
+        }
+        for steps in [
+            vec![],
+            vec![Ok((&b"ab"[..], Next::Data)), Ok((&b"cd"[..], Next::Data))],
+            // A stage that finishes while handing over its last bytes.
+            vec![
+                Ok((&b"ab"[..], Next::Data)),
+                Ok((&b"cd"[..], Next::Finished)),
+                Ok((&b"no"[..], Next::Data)),
+            ],
+            // One that fails: the end, and an error to tell of.
+            vec![
+                Ok((&b"ab"[..], Next::Data)),
+                Err("format error: broken"),
+                Ok((&b"no"[..], Next::Data)),
+            ],
+            // An empty piece is the end too.
+            vec![
+                Ok((&b"ab"[..], Next::Data)),
+                Ok((&b""[..], Next::Data)),
+                Ok((&b"no"[..], Next::Data)),
+            ],
+        ] {
+            let (whole_diag, piece_diag) = (Diagnostics::new(), Diagnostics::new());
+            let mut whole = Stream::new(Steps(steps.clone()), &whole_diag);
+            let want = whole.read_bytewise(usize::MAX).unwrap_or_default();
+            let mut pieces = Stream::new(Steps(steps.clone()), &piece_diag);
+            let (mut got, mut calls) = (Vec::new(), 0);
+            while pieces.read_piece(&mut got) {
+                calls += 1;
+                assert!(calls < 10);
+            }
+            assert_eq!(got, want, "{steps:?}");
+            assert_eq!(pieces.had_error(), whole.had_error());
+            assert_eq!(piece_diag.snapshot(), whole_diag.snapshot());
+            // Asked again, a stream that has ended has ended.
+            assert!(!pieces.read_piece(&mut got));
+            assert_eq!(got, want);
+        }
     }
 }

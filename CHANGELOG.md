@@ -13,6 +13,7 @@ The crates `nupdf` (the library) and `nupdf-cli` (the `nupdf` command) share a v
 - **`info` stops reading a page at its first shown string**, as its scan for scanned pages was meant to: a page that is one long text object was read whole. On a page of ten million strings `info` goes from 991 MB to 75 MB. Its copy of the document shares the file's bytes and keeps the limits given.
 - **`search --max-items` on a long document runs growing windows of pages on threads**, so a needle whose first hit is far in is found as fast as an uncapped one.
 - **`clean` with a stream option checks its output without decoding the streams it kept**: `clean -z` on the 30 long documents goes from 4.2 s to 1.05 s.
+- **A page's content stream is decoded a window at a time as it is run**, not whole: a stream that inflates to 512 MB of white space peaks at 7 MB instead of 521 MB (MuPDF: 5 MB). What is run, shown and drawn is unchanged; for a stream longer than 256 KB, a decoding error is now reported where the decoder meets it, among the content's warnings ([D55](docs/DECISIONS.md)).
 
 ## 0.1.1
 

@@ -6,13 +6,39 @@
 //! These are MuPDF's `fz_warn` calls with stable codes. The message text
 //! follows MuPDF's wording so the harness can line the two up.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::Mutex;
 
 thread_local! {
     /// Where this thread's diagnostics go while [`capture`] runs.
     static CAPTURE: RefCell<Option<Vec<Diagnostic>>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// How many diagnostics this thread has reported: see [`warned`].
+    static WARNED: Cell<u64> = const { Cell::new(0) };
+    /// How many of this thread's next diagnostics are dropped: see
+    /// [`swallowing`].
+    static SWALLOW: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many diagnostics this thread has reported so far, those captured
+/// or swallowed among them: the difference across a piece of work is how
+/// many it reported.
+pub fn warned() -> u64 {
+    WARNED.with(Cell::get)
+}
+
+/// Runs `f` with the first `n` diagnostics it reports on this thread
+/// dropped. For work that is done again from its start after it reported
+/// `n` of them the first time, as a token is lexed again once more of its
+/// stream has been read: what it reports again is not reported twice.
+pub fn swallowing<R>(n: u64, f: impl FnOnce() -> R) -> R {
+    let before = SWALLOW.with(|s| s.replace(n));
+    let r = f();
+    SWALLOW.with(|s| s.set(before));
+    r
 }
 
 /// Runs `f`, keeping the diagnostics it reports on this thread instead of
@@ -52,6 +78,15 @@ impl Diagnostics {
     }
 
     pub fn warn(&self, code: &'static str, message: impl Into<String>) {
+        WARNED.with(|w| w.set(w.get().wrapping_add(1)));
+        let swallowed = SWALLOW.with(|s| {
+            let left = s.get();
+            s.set(left.saturating_sub(1));
+            left > 0
+        });
+        if swallowed {
+            return;
+        }
         let message = message.into();
         let Some(message) = CAPTURE.with(|c| match c.borrow_mut().as_mut() {
             Some(buf) => {
@@ -151,7 +186,37 @@ pub mod report {
 
 #[cfg(test)]
 mod tests {
-    use super::{Diagnostics, MAX_DIAGNOSTICS, capture, report};
+    use super::{Diagnostics, MAX_DIAGNOSTICS, capture, report, swallowing, warned};
+
+    #[test]
+    fn work_done_again_does_not_report_again_what_it_reported() {
+        let d = Diagnostics::new();
+        let codes = |d: &Diagnostics| d.snapshot().iter().map(|x| x.code).collect::<Vec<_>>();
+        // A first try reports two and is given up.
+        let before = warned();
+        d.warn("t.one", "one");
+        d.warn("t.two", "two");
+        let reported = warned() - before;
+        assert_eq!(reported, 2);
+        // The second try reports the same two, then a third.
+        let before = warned();
+        swallowing(reported, || {
+            d.warn("t.one", "one");
+            d.warn("t.two", "two");
+            d.warn("t.three", "three");
+        });
+        // All three calls count, so a third try would swallow three.
+        assert_eq!(warned() - before, 3);
+        assert_eq!(codes(&d), ["t.one", "t.two", "t.three"]);
+        // Nothing is left to swallow afterwards, even if less was reported
+        // than was to be dropped; and captured diagnostics count too.
+        swallowing(5, || d.warn("t.dropped", "dropped"));
+        let before = warned();
+        let ((), kept) = capture(|| d.warn("t.kept", "kept"));
+        assert_eq!((warned() - before, kept.len()), (1, 1));
+        d.warn("t.four", "four");
+        assert_eq!(codes(&d), ["t.one", "t.two", "t.three", "t.four"]);
+    }
 
     #[test]
     fn captured_diagnostics_replay_in_order() {
