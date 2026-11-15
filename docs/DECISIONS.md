@@ -685,5 +685,75 @@ What is still read whole, and why:
 
 - **A stream a command is asked to decode**: `streams`, `show --data` and `clean -d` read it as MuPDF's `fz_read_best` does, up to its "compression bomb detected" and `--max-decoded-bytes`: 444 MB on `flate-bomb.pdf` before the bomb is called.
 - **Not the commands that rewrite content.** `redact`, `sanitize`, `clean -c` and `clean -s` read a page's contents through the same windows; what they hold is the content they write. On `flate-bomb.pdf` each stays under 60 MB.
-- **What a page of ten million operators is turned into** is another matter than its stream: on `many-ops.pdf`, a 100 KB file, `extract` holds 238 MB as MuPDF does, but `redact` 2.6 GB, `verify` 1.4 GB, `operators` 5 GB and `trace` 10.8 GB, which build their reports as trees in memory where `mutool trace` writes as it goes. That is not fixed here.
+- **What a page of ten million operators is turned into** is another matter than its stream, and is D56 and D57.
 
+## D56. What is made of a page is written or dropped as it is made, not kept
+
+*2026-11-14*
+
+D55 bounded what a content stream costs to read. What a command built from the operators was still kept whole, and four pages of 100 to 700 KB (`eval/hostile`: ten million text operators, ten million strokes, ten million glyphs that stay on the page, one path of ten million segments) took 5 to 49 GB in the commands that kept most. Three things kept it, none of them needed:
+
+- **`operators` and `trace` built their report as a tree of JSON values** before printing it, about 500 bytes of tree for each operator, glyph or path segment. They now write each as it is made (`rows`), as `objects` already did: a page's operators go to the output one at a time, and so do the glyphs of a text object and the segments of a path. The bytes written are the same: 858 runs over the smoke files, the 30 long documents and the hostile set match the build before, `--pretty` included.
+- **Under `--timeout` such a report is held until it is whole**, in memory, as bytes: a command out of time writes nothing (AGENT-INTERFACE rule 9), which `objects` did not keep to. Without a deadline nothing is held. The MCP server and `batch` keep a call's output anyway.
+- **The display list `extract --format text` reads through kept every path** (D52), about 650 bytes each, for a text device that reads no filled or stroked path unless it collects vectors. MuPDF's list packs a path into some 46 bytes. All the list takes from such a path is its rectangle, and all it does with a run of them is join their rectangles into what the clip around them holds, so a run of drawn paths is now kept as one rectangle (`DisplayList::drawn_as_rects`). `fz_union_rect` passes over a rectangle that is not valid and stays infinite once it is, so joining them first gives the clip the same box: checked on 400 random sequences of every call that opens, closes or fills a clip, with empty, huge and not-a-number paths among them. With `vectors` the list keeps the paths as before. `text-annots` shows no regression on the standard tier and is at the same 990 of 1,000 on the wild sample; `extract --format text` on the 30 long documents is 4% faster (0.80 s to 0.77 s).
+- **`verify` kept a page's text with its hidden layers while it built the text without them, and built every hit to count them.** It now counts (`search::count_page`) and holds one page's text at a time.
+
+A file that MuPDF reads in less than nupdf did is no longer one: `extract --format text` on the ten million strokes took 6.4 GB against MuPDF's 0.5 GB, and takes 7 MB.
+
+## D57. A page shows at most two million glyphs
+
+*2026-11-14*
+
+What reads a page's text holds every glyph the page shows: 24 bytes in the text object the interpreter hands over, 72 or more in the structured text built from it, as in MuPDF, and several times that when each glyph is a line of its own. So after D56 a 700 KB page of ten million glyphs still took 4 GB in `search` and `verify` and 9 GB in `stext`, and takes MuPDF 1.9 GB. Nothing short of a limit bounds that, and MuPDF has none.
+
+- **The limit** (`Limits::max_page_glyphs`, `--max-page-glyphs`, 2,000,000): a page's run ends with a limit error at the glyph that passes it, the glyphs of its annotations and form fields counted with its contents'. The page is its error in the report, with the warning `limit.page_glyphs`; the other pages and the command go on, as for a page that fails any other way. The error names the option, so an agent that needs such a page can ask again with more.
+- **Why two million**: of 73,250 pages in 8,212 files (the standard tier's suites, the long documents and 3,000 files of the wild tier), the fullest shows between 100,000 and 200,000 glyphs, and 99.9% of the files show under 20,245 characters on their fullest page. No file of the 8,212 reaches the limit (`stext --options clip=no,all-layers`, which counts every glyph). The default is not MuPDF's behaviour (D5) for a page past it, on purpose: no page found is within a tenth of it, and a reader that a 700 KB file can take 9 GB from is not one to hand files from strangers.
+- **Why glyphs, and not memory**: a limit on the memory a call holds needs an allocator that counts, which is `unsafe` code or a dependency that carries it, and a count the threads share: measured, it slowed `extract` on the 30 long documents by 17% and `render` by 5%. It would also make the page that fails depend on the machine and the threads. A count of glyphs is the same everywhere. `--max-memory`, which AGENT-INTERFACE named and no command took, is gone from it.
+- **`verify` does not call such a page clean.** A page that is there and whose text could not be read, for this or any other error, is a finding in `content_text` ("the page's text was not searched: ...") and exit 4: a viewer without the limit shows what the run stopped short of. Before, `verify` passed over a page it could not read. A page the tree counts and does not have is still no finding. `redact` already refused a document with a page it could not read (`input.redaction`), and says why.
+- **What it bounds**: the worst page the limit lets through is one where each of two million glyphs is a line of its own and none is clipped away, 140 KB of content. `search`, `verify` and `redact` hold 462 MB on it, `extract --format text` 368 MB (MuPDF: 386 MB) and `tables` 315 MB; `extract` holds 901 MB and `stext` 1,340 MB, of which 615 MB and 529 MB are the report they write. `render` and `trace` hold under 60 MB.
+- **Two costs of a glyph went with it**, so that the limit bounds what it should. `extract` built each block as a tree of JSON values, some 3.6 KB a line, before writing it: 8.8 GB on that page. It now writes blocks, lines, spans and characters as it walks them, the same bytes in every field set, format and option tried, about 4% faster on the 30 long documents. And a line of text kept room for four characters from its first, a block for four lines, 460 bytes a glyph on that page: a line gives the room back when the next starts (`settle_last_line`), which halved the figures above.
+
+Peak memory on the four pages, before D56 and after both (`eval/hostile/make.py`; MuPDF 1.28.6's `mutool draw -F txt`, `mutool trace` and `mutool draw -F ppm` alongside):
+
+| Page | Command | Before | After | MuPDF |
+|---|---|---|---|---|
+| ten million text operators (100 KB) | `operators` | 5,070 MB | 6 MB | |
+| | `trace` | 10,843 MB | 55 MB, the page over the limit | 236 MB |
+| | `extract --format text` | 467 MB | 55 MB, over the limit | 237 MB |
+| | `verify` | 1,392 MB | 437 MB, exit 4 | |
+| ten million strokes (270 KB) | `operators` | 15,183 MB | 6 MB | |
+| | `trace` | 49,294 MB | 7 MB | 4 MB |
+| | `extract --format text` | 6,456 MB | 7 MB | 464 MB |
+| ten million glyphs on the page (700 KB) | `extract` | 44,094 MB | 56 MB, over the limit | |
+| | `stext` | 9,000 MB | 56 MB, over the limit | |
+| | `extract --format text` | 4,117 MB | 56 MB, over the limit | 1,910 MB |
+| | `search`, `verify` | 4,165 MB | 56 MB; 439 MB and exit 4 | |
+| one path of ten million segments (117 KB) | `trace` | 6,240 MB | 107 MB | 94 MB |
+| | `extract --format text` | 203 MB | 52 MB | 180 MB |
+| | `render` | 2,836 MB | 2,836 MB (32 MB with D58) | 2,049 MB |
+
+With the limit raised past the page (`--max-page-glyphs 100000000`) the text commands hold what they held: the glyphs themselves, as MuPDF does.
+
+The last row, a path's segments, is D58. Threads multiply a page's cost by the pages run at once, eight at most (D53).
+
+## D58. A page's run takes at most five million operators
+
+*2026-11-14*
+
+The glyph limit (D57) bounds a page of text and does nothing for a page of paths. Ten million strokes in 270 KB took 19 s to draw, and one path of ten million segments in 117 KB took 2.8 GB and 29 s, as they take MuPDF 16 s, and 2.0 GB and 48 s. `--timeout` stops the first; nothing stopped the second from taking the memory.
+
+- **The limit** (`Limits::max_page_operators`, `--max-page-operators`, 5,000,000): a page's run ends with a limit error at the operator that passes it, counting what its contents run and what they draw (forms, pattern cells, Type 3 glyph procedures) and its annotations' appearances. The page is its error in the report, with the warning `limit.page_operators`, and the rest of the document is read; `verify` does not call the page clean and `redact` refuses the document, as for the glyph limit.
+- **What is limited is a run**: `extract`, `stext`, `search`, `tables`, `trace`, `render`, `ocr`, `diff`, `redact` and `verify`. `operators` lists a page's operators without running them, in constant memory (D56), and lists them all. The commands that rewrite content (`clean -s`, `sanitize`, and `redact` once its targets are found) keep the whole page: a limit there would lose content.
+- **Why five million**: drawing every page of the same 8,212 files (73,250 pages) at 18 dpi, the busiest page runs 1,058,555 operators, six files have a page over 500,000 and 99.9% of the files stay under 466,410. The tail falls by about six for each doubling, which puts a page over five million at well under one file in the 100,000 of the wild tier. Five million is 4.7 times the busiest page found, a thinner margin than the glyph limit's, taken because what it bounds is linear in it: half the limit is half the worst case.
+- **How PDF Oxide does it**, which this was measured against (0.3.78): it stops reading a content stream at 1,000,000 operators and carries on with what it has. That bounds its time (0.2 to 0.4 s on these pages) and not its memory (200 to 870 MB: the stream is decoded whole and parsed into a vector first), and the call succeeds: the page of one path is drawn blank, because the stroke comes after the cap, and the ten million glyphs come back as the first 999,998, with a warning in a list apart. One of the 8,212 real files has a page past its cap. nupdf's limit is five times looser and is an error: a caller is told the page was not read, and never handed part of one as the whole.
+- **What it bounds**: the worst pages the limit lets through, 1.67 million strokes and one path of 4,998,000 segments. The strokes draw in 3.2 s and 12 MB, and their text is read in 0.35 s. The path draws in 14 s and 1.4 GB, the edges of its stroke; that is the most a page of paths can now take, and half what it took.
+
+| Page (`eval/hostile`) | Command | Before | After | MuPDF | PDF Oxide |
+|---|---|---|---|---|---|
+| ten million strokes | `render` | 13 MB, 19 s | 13 MB, 3.2 s, over the limit | 465 MB, 16 s | 371 MB, 0.4 s, the first third drawn |
+| | `extract --format text` | 7 MB, 2.0 s | 7 MB, 0.35 s, over the limit | 464 MB, 2.2 s | 463 MB, 0.2 s |
+| | `trace` | 7 MB, 6.7 s | 7 MB, 1.2 s, over the limit | 4 MB | |
+| one path of ten million segments | `render` | 2,836 MB, 29 s | 32 MB, 0.14 s, over the limit | 2,049 MB, 48 s | 200 MB, 0.2 s, a blank page |
+| one path of 4,998,000 segments | `render` | 1,424 MB, 14 s | 1,424 MB, 14 s | | |
+
+The count costs nothing that shows: `extract`, `stext` and `render` on the 30 long documents are within 1% of the build before, and their output, with that of seven more commands, is the same on the smoke files and the long documents (1,360 runs).

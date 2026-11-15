@@ -40,6 +40,9 @@ pub enum Cmd {
     ClipText(Text, Matrix, Rect),
     ClipStrokeText(Text, StrokeState, Matrix, Rect),
     IgnoreText(Text, Matrix),
+    /// Paths filled and stroked one after another, kept as the rectangle
+    /// of them all ([`DisplayList::drawn_as_rects`]).
+    Drawn(Rect),
     PopClip,
     BeginMask(Rect, bool, Option<ColorSpace>, Vec<f32>, ColorParams),
     EndMask(Option<Function>),
@@ -60,6 +63,13 @@ pub enum Cmd {
 #[derive(Debug, Clone, Default)]
 pub struct DisplayList {
     pub cmds: Vec<Cmd>,
+    /// For a device that reads no path a page fills or strokes, as the
+    /// text device reads none unless it collects vectors: such a path is
+    /// kept as its rectangle alone, which is all a list played with
+    /// `list_run` takes from it (what the clip around it is narrowed to),
+    /// and a run of them as one rectangle. A page of ten million paths is
+    /// then one entry, where each path kept is some 650 bytes.
+    pub drawn_as_rects: bool,
 }
 
 fn paint(cs: &ColorSpace, color: &[f32], alpha: f32, params: ColorParams) -> Paint {
@@ -72,6 +82,17 @@ fn paint(cs: &ColorSpace, color: &[f32], alpha: f32, params: ColorParams) -> Pai
 }
 
 impl DisplayList {
+    /// A drawn path's rectangle, joined with the one before it if that
+    /// was a drawn path's too. Joined, they add to what their clip holds
+    /// what they add one by one: `fz_union_rect` passes over a rectangle
+    /// that is not valid and stays infinite once it is.
+    fn drawn(&mut self, rect: Rect) {
+        match self.cmds.last_mut() {
+            Some(Cmd::Drawn(so_far)) => *so_far = so_far.union(rect),
+            _ => self.cmds.push(Cmd::Drawn(rect)),
+        }
+    }
+
     /// `fz_run_display_list`: the calls again, onto `dev`. A cached tile
     /// skips the calls up to its end, as the list device's player does.
     pub fn replay(&self, dev: &mut dyn Device) {
@@ -112,6 +133,8 @@ impl DisplayList {
                 Cmd::ClipText(t, m, r) => dev.clip_text(t, *m, *r),
                 Cmd::ClipStrokeText(t, s, m, r) => dev.clip_stroke_text(t, s, *m, *r),
                 Cmd::IgnoreText(t, m) => dev.ignore_text(t, *m),
+                // Kept for a device that reads no drawn path.
+                Cmd::Drawn(_) => {}
                 Cmd::PopClip => dev.pop_clip(),
                 Cmd::BeginMask(r, l, cs, bc, cp) => dev.begin_mask(*r, *l, cs.as_ref(), bc, *cp),
                 Cmd::EndMask(f) => dev.end_mask(f.as_ref()),
@@ -148,6 +171,9 @@ impl Device for DisplayList {
         alpha: f32,
         params: ColorParams,
     ) {
+        if self.drawn_as_rects {
+            return self.drawn(path.bound(None, ctm));
+        }
         self.cmds.push(Cmd::FillPath(
             path.clone(),
             even_odd,
@@ -166,6 +192,9 @@ impl Device for DisplayList {
         alpha: f32,
         params: ColorParams,
     ) {
+        if self.drawn_as_rects {
+            return self.drawn(path.bound(Some(stroke), ctm));
+        }
         self.cmds.push(Cmd::StrokePath(
             path.clone(),
             stroke.clone(),

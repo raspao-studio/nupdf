@@ -327,6 +327,11 @@ pub fn run_page_parts(
     };
     let annots = made(&annots);
     let widgets = made(&widgets);
+    let mut store = store;
+    // The page's glyphs and operators are counted from here, whichever
+    // parts are run.
+    store.page_glyphs = 0;
+    store.page_operators = 0;
     let mut store = Some(store);
     let mut error = None;
     if parts.contents {
@@ -419,6 +424,129 @@ mod tests {
             "<</Type/Annot/Subtype/Square/Rect[40 40 60 50]/OC 13 0 R/AP<</N 9 0 R>>>>",
             "<</Type/OCG/Name(off)>>",
         ])
+    }
+
+    /// Two pages that each show "abcde", the first with a stamp whose
+    /// appearance shows "xyz", opened with `limit` glyphs a page.
+    fn lettered(limit: usize) -> Document {
+        lettered_within(crate::Limits {
+            max_page_glyphs: limit,
+            ..Default::default()
+        })
+    }
+
+    fn lettered_within(limits: crate::Limits) -> Document {
+        let content = stream("", "BT /F1 10 Tf 10 50 Td (ab) Tj (cde) Tj ET");
+        let stamp = stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 50 20]/Resources<</Font<</F1 6 0 R>>>>",
+            "BT /F1 10 Tf 2 5 Td (xyz) Tj ET",
+        );
+        let pdf = pdf_of(&[
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 5 0 R             /Resources<</Font<</F1 6 0 R>>>>/Annots[7 0 R]>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 5 0 R             /Resources<</Font<</F1 6 0 R>>>>>>",
+            &content,
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+            "<</Type/Annot/Subtype/Stamp/Rect[10 10 60 30]/AP<</N 8 0 R>>>>",
+            &stamp,
+        ]);
+        Document::open_with(pdf, limits).unwrap_or_else(|e| panic!("{e:?}"))
+    }
+
+    /// Each page's text through `parts`, or the error that ended it.
+    fn texts(doc: &Document, parts: Parts) -> Vec<Result<String, String>> {
+        let mut store = Store::default();
+        (0..2)
+            .map(|i| {
+                let page = doc.page(i).unwrap_or_else(|e| panic!("{e:?}"));
+                let opts = crate::stext::Options::default();
+                let before = std::mem::take(&mut store);
+                let (text, kept) =
+                    crate::stext::extract_page_parts(doc, &page, opts, before, parts);
+                store = kept;
+                text.map(|p| {
+                    let mut out = String::new();
+                    crate::stext::blocks_text(&p.blocks, &mut out);
+                    out.split_whitespace().collect::<Vec<_>>().join(" ")
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_page_shows_no_more_glyphs_than_its_limit() {
+        let over = |n: usize| {
+            Err(format!(
+                "limit error: page shows more than {n} glyphs (--max-page-glyphs)"
+            ))
+        };
+        let both = |a: &str, b: &str| vec![Ok(a.to_string()), Ok(b.to_string())];
+        // Each page shows five glyphs: the count starts again on each.
+        let doc = lettered(5);
+        assert_eq!(texts(&doc, Parts::CONTENTS), both("abcde", "abcde"));
+        assert!(!doc.diagnostics().has("limit.page_glyphs"));
+        // One fewer ends each page where it shows its fifth.
+        let doc = lettered(4);
+        assert_eq!(texts(&doc, Parts::CONTENTS), [over(4), over(4)]);
+        assert!(doc.diagnostics().has("limit.page_glyphs"));
+        // An annotation's glyphs count with its page's: five and three.
+        let doc = lettered(7);
+        assert_eq!(texts(&doc, Parts::ALL), [over(7), Ok("abcde".into())]);
+        let doc = lettered(8);
+        assert_eq!(texts(&doc, Parts::ALL), both("abcde xyz", "abcde"));
+        // The default is far from any page: a page of five is read.
+        assert_eq!(crate::Limits::default().max_page_glyphs, 2_000_000);
+    }
+
+    #[test]
+    fn a_page_runs_no_more_operators_than_its_limit() {
+        let open = |n: usize| {
+            lettered_within(crate::Limits {
+                max_page_operators: n,
+                ..Default::default()
+            })
+        };
+        let over = |n: usize| {
+            Err(format!(
+                "limit error: page runs more than {n} operators (--max-page-operators)"
+            ))
+        };
+        let both = |a: &str, b: &str| vec![Ok(a.to_string()), Ok(b.to_string())];
+        // Each page's contents are six operators (BT Tf Td Tj Tj ET): the
+        // count starts again on each page.
+        let doc = open(6);
+        assert_eq!(texts(&doc, Parts::CONTENTS), both("abcde", "abcde"));
+        assert!(!doc.diagnostics().has("limit.page_operators"));
+        let doc = open(5);
+        assert_eq!(texts(&doc, Parts::CONTENTS), [over(5), over(5)]);
+        assert!(doc.diagnostics().has("limit.page_operators"));
+        // What an annotation's appearance runs counts with its page's: the
+        // stamp's five operators and the four it is drawn with.
+        let doc = open(14);
+        assert_eq!(texts(&doc, Parts::ALL), [over(14), Ok("abcde".into())]);
+        let doc = open(15);
+        assert_eq!(texts(&doc, Parts::ALL), both("abcde xyz", "abcde"));
+        assert_eq!(crate::Limits::default().max_page_operators, 5_000_000);
+    }
+
+    #[test]
+    fn a_page_over_its_limit_is_drawn_as_far_as_it_got() {
+        // The run ends with the error, as any error ends it, and whoever
+        // drew the page has what was drawn before.
+        let doc = lettered(2);
+        let page = doc.page(1).unwrap_or_else(|e| panic!("{e:?}"));
+        let mut list = crate::draw::list::DisplayList::default();
+        let run = run_page_parts(
+            &doc,
+            &page,
+            &mut list,
+            Store::default(),
+            Some("View"),
+            Matrix::IDENTITY,
+            Parts::ALL,
+        );
+        assert!(run.error.is_some_and(|e| e.starts_with("limit error: ")));
     }
 
     fn render(doc: &Document, parts: Parts) -> Pix {

@@ -383,6 +383,12 @@ pub struct Store {
     pub direct_fonts: Vec<(Object, Arc<crate::fontdesc::FontDesc>)>,
     /// `pdf_load_hail_mary_font`'s font, once loaded.
     pub hail_mary: Option<Arc<crate::fontdesc::FontDesc>>,
+    /// Glyphs the page being run has shown so far, by its contents and
+    /// its annotations: at most `Limits::max_page_glyphs`.
+    pub page_glyphs: usize,
+    /// Operators the page being run has taken so far: at most
+    /// `Limits::max_page_operators`.
+    pub page_operators: usize,
     /// Type 3 fonts whose glyphs are being prepared (`t3loading` while
     /// in the store), by their font object, and fonts whose glyphs are
     /// being drawn, by font.

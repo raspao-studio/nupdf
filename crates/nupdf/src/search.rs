@@ -469,10 +469,30 @@ fn vdist(dir: Point, a: Point, b: Point) -> f32 {
 
 /// `fz_match_stext_page_cb`: every hit of `needle` on the page.
 pub fn search_page(page: &StextPage, needle: &str, opts: u32) -> Result<Vec<Hit>, String> {
+    let mut hits = Vec::new();
+    each_hit(page, needle, opts, &mut |hit| hits.push(hit))?;
+    Ok(hits)
+}
+
+/// How many hits [`search_page`] finds, without keeping them: a needle of
+/// one letter has a hit for every such letter on the page.
+pub fn count_page(page: &StextPage, needle: &str, opts: u32) -> Result<usize, String> {
+    let mut count = 0;
+    each_hit(page, needle, opts, &mut |_| count += 1)?;
+    Ok(count)
+}
+
+/// Hands `found` each hit of `needle` on the page, in order.
+fn each_hit(
+    page: &StextPage,
+    needle: &str,
+    opts: u32,
+    found: &mut dyn FnMut(Hit),
+) -> Result<(), String> {
     let (transform, icase) = transform_for(opts);
     let needle_bytes = needle.as_bytes();
     if needle_bytes.first().is_none_or(|&b| b == 0) {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let spun_needle = transform_text(transform, needle_bytes).out;
     let finder = if opts & options::REGEXP != 0 {
@@ -484,13 +504,13 @@ pub fn search_page(page: &StextPage, needle: &str, opts: u32) -> Result<Vec<Hit>
     } else {
         // An empty needle would match everywhere, forever, in MuPDF.
         if spun_needle.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         Finder::Exact(spun_needle)
     };
     let (haystack, map) = flatten(page, transform);
     if haystack.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let spun = transform_text(transform, &haystack);
     // The rune index of each byte of the haystack.
@@ -514,7 +534,6 @@ pub fn search_page(page: &StextPage, needle: &str, opts: u32) -> Result<Vec<Hit>
         Block::Image(_) | Block::Vector(_) | Block::Struct(_) | Block::Grid(_) => None,
     };
     let s = &spun.out;
-    let mut hits = Vec::new();
     let mut pos = 0usize;
     while pos < s.len() {
         let Some((begin, end)) = finder.find(s, pos)? else {
@@ -569,14 +588,14 @@ pub fn search_page(page: &StextPage, needle: &str, opts: u32) -> Result<Vec<Hit>
             }
         }
         if !quads.is_empty() {
-            hits.push(Hit {
+            found(Hit {
                 begin: b,
                 end: e,
                 quads,
             });
         }
     }
-    Ok(hits)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -667,6 +686,31 @@ mod tests {
         BT /M 12 Tf 20 90 Td (sofdtly) Tj 0 -14 Td (hyd) Tj 0 -14 Td (phenated) Tj ET";
 
     type Expect<'a> = (&'a str, &'a str, Result<&'a [(usize, i32, i32)], &'a str>);
+
+    #[test]
+    fn counting_hits_finds_as_many_as_keeping_them() {
+        let p = stext(&search_doc(PAGE), "");
+        let cases = [
+            ("e", 0),
+            ("the", options::IGNORE_CASE),
+            ("cafe", options::IGNORE_CASE | options::IGNORE_DIACRITICS),
+            ("hyphen", 0),
+            ("[0-9]+", options::REGEXP),
+            ("ends line", options::EXACT),
+            ("no such words", 0),
+            ("", 0),
+        ];
+        let mut found = 0;
+        for (needle, opts) in cases {
+            let kept = search_page(&p, needle, opts).map(|h| h.len());
+            assert_eq!(count_page(&p, needle, opts), kept, "{needle:?}");
+            found += kept.unwrap_or(0);
+        }
+        assert!(found > 20, "{found} hits make no test");
+        // A pattern that does not compile fails either way.
+        assert!(search_page(&p, "(", options::REGEXP).is_err());
+        assert!(count_page(&p, "(", options::REGEXP).is_err());
+    }
 
     /// MuPDF's hits (oracle/js/search.js on the same file).
     #[test]

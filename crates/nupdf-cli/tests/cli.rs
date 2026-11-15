@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[path = "support/schema_check.rs"]
 mod schema_check;
@@ -2321,6 +2321,11 @@ fn heavy_pdf(name: &str, ops: usize) -> PathBuf {
     for i in 0..ops {
         content.extend_from_slice(format!("{} 0 m 100 {} l S\n", i % 97, i % 89).as_bytes());
     }
+    content_pdf(name, &content)
+}
+
+/// A one-page file whose page has `content`.
+fn content_pdf(name: &str, content: &[u8]) -> PathBuf {
     let objects = [
         "<</Type/Catalog/Pages 2 0 R>>".to_string(),
         "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
@@ -2334,7 +2339,7 @@ fn heavy_pdf(name: &str, ops: usize) -> PathBuf {
     }
     offsets.push(out.len());
     out.extend_from_slice(format!("4 0 obj\n<</Length {}>>\nstream\n", content.len()).as_bytes());
-    out.extend_from_slice(&content);
+    out.extend_from_slice(content);
     out.extend_from_slice(b"\nendstream\nendobj\n");
     let xref = out.len();
     out.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
@@ -2614,6 +2619,211 @@ fn a_command_out_of_time_writes_nothing() {
             .status
             .success()
     );
+}
+
+#[test]
+fn a_page_over_its_glyph_limit_fails_alone_and_is_never_called_clean() {
+    let file = smoke("stext.pdf");
+    let file = file.to_str().unwrap();
+    // Within the limit every command reads the file as without one.
+    for command in ["extract", "stext", "trace"] {
+        let plain = nupdf(&[command, file]);
+        let roomy = nupdf(&[command, file, "--max-page-glyphs", "100000"]);
+        assert!(plain.status.success());
+        assert_eq!(plain.stdout, roomy.stdout, "{command}");
+    }
+    // Over it, a page is its error; the command and the other pages go on.
+    let report = run_json(&["extract", file, "--max-page-glyphs", "3"]);
+    let error = "page shows more than 3 glyphs (--max-page-glyphs)";
+    assert_eq!(report["page_count"], 2);
+    for page in report["pages"].as_array().unwrap() {
+        assert_eq!(page["error"], error);
+    }
+    assert_eq!(report["diagnostics"][0]["code"], "limit.page_glyphs");
+    assert_eq!(report["diagnostics"][0]["message"], error);
+    let text = nupdf(&[
+        "extract",
+        file,
+        "--format",
+        "text",
+        "--max-page-glyphs",
+        "3",
+    ]);
+    assert!(text.status.success());
+    // `verify` has not searched such a page, and says so with exit 4.
+    let out = nupdf(&["verify", file, "--text", "zebra", "--max-page-glyphs", "3"]);
+    assert_eq!(out.status.code(), Some(4));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["verified"], false);
+    let finding = &report["verification"]["classes"]["content_text"]["findings"][0];
+    assert_eq!(finding["page"], 1);
+    assert_eq!(
+        finding["detail"],
+        format!("the page's text was not searched: {error}")
+    );
+    let clean = nupdf(&["verify", file, "--text", "zebra"]);
+    assert_eq!(clean.status.code(), Some(0));
+    // `redact` cannot find its targets on such a page, and writes nothing.
+    let written = scratch("glyph-limit-redacted.pdf");
+    let _ = std::fs::remove_file(&written);
+    let out = nupdf(&[
+        "redact",
+        file,
+        "--text",
+        "zebra",
+        "--max-page-glyphs",
+        "3",
+        "-o",
+        written.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(err["error"]["code"], "input.redaction");
+    assert_eq!(err["error"]["message"], error);
+    assert!(!written.exists());
+}
+
+#[test]
+fn a_page_over_its_operator_limit_fails_where_it_is_run_and_not_where_it_is_listed() {
+    // 500 strokes of three operators each.
+    let file = heavy_pdf("operator-limit.pdf", 500);
+    let file = file.to_str().unwrap();
+    let limit = ["--max-page-operators", "100"];
+    let error = "page runs more than 100 operators (--max-page-operators)";
+    // Run for its text or its calls, the page is its error.
+    let report = run_json(&["extract", file, limit[0], limit[1]]);
+    assert_eq!(report["pages"][0]["error"], error);
+    assert_eq!(report["diagnostics"][0]["code"], "limit.page_operators");
+    let report = run_json(&["trace", file, limit[0], limit[1]]);
+    assert_eq!(report["pages"][0]["error"], error);
+    // As far as it got: the default colour spaces and 33 strokes.
+    assert_eq!(report["pages"][0]["events"].as_array().unwrap().len(), 34);
+    // Within the limit it is read as without one.
+    let roomy = nupdf(&["trace", file, "--max-page-operators", "1500"]);
+    assert_eq!(roomy.stdout, nupdf(&["trace", file]).stdout);
+    let tight = run_json(&["trace", file, "--max-page-operators", "1499"]);
+    assert!(tight["pages"][0]["error"].is_string());
+    // `operators` lists a page and does not run it: every operator is there.
+    let listed = nupdf(&["operators", file, limit[0], limit[1]]);
+    assert_eq!(listed.stdout, nupdf(&["operators", file]).stdout);
+    let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(report["pages"][0]["ops"].as_array().unwrap().len(), 1500);
+    // `verify` has not searched the page, and does not call it clean.
+    let out = nupdf(&["verify", file, "--text", "zebra", limit[0], limit[1]]);
+    assert_eq!(out.status.code(), Some(4));
+    // A rewrite keeps the whole page, whatever the limit.
+    let written = scratch("operator-limit-clean.pdf");
+    let _ = std::fs::remove_file(&written);
+    let out = nupdf(&[
+        "clean",
+        "-s",
+        file,
+        limit[0],
+        limit[1],
+        "-o",
+        written.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let kept = run_json(&["operators", written.to_str().unwrap()]);
+    let strokes = kept["pages"][0]["ops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|op| op[0] == "S")
+        .count();
+    assert_eq!(strokes, 500);
+}
+
+#[test]
+fn a_report_written_as_it_is_made_is_not_written_out_of_time() {
+    let heavy = heavy_pdf("timeout-streamed.pdf", 2_000);
+    let heavy = heavy.to_str().unwrap();
+    for command in ["objects", "operators", "trace"] {
+        // Its time is up before it starts, and it has no page to notice on.
+        let out = nupdf(&["--timeout", "0", command, heavy]);
+        assert_eq!(out.status.code(), Some(5), "{command}");
+        assert!(out.stdout.is_empty(), "{command} wrote under a timeout");
+        let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(err["error"]["code"], "limit.timeout");
+        // With time to spare it writes what it writes without a timeout.
+        let timed = nupdf(&["--timeout", "600", command, heavy]);
+        assert!(timed.status.success(), "{command}");
+        assert_eq!(timed.stdout, nupdf(&[command, heavy]).stdout, "{command}");
+    }
+}
+
+#[test]
+fn operators_and_trace_report_each_page_between_schema_and_diagnostics() {
+    let file = heavy_pdf("streamed-report.pdf", 500);
+    let file = file.to_str().unwrap();
+    for (command, rows, per_op) in [("operators", "ops", 3), ("trace", "events", 1)] {
+        let out = nupdf(&[command, file]);
+        assert!(out.status.success());
+        let text = String::from_utf8(out.stdout).unwrap();
+        let schema = format!("{{\"schema\":\"nupdf.{command}/v1\",\"doc_id\":\"");
+        assert!(text.starts_with(&schema), "{command}: {}", &text[..60]);
+        assert!(text.ends_with(",\"diagnostics\":[]}\n"), "{command}");
+        let report: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(report["page_count"], 1);
+        let page = &report["pages"][0];
+        assert!(page.get("error").is_none());
+        let made = page[rows].as_array().unwrap();
+        // `trace` has the page's default colour spaces before its strokes.
+        assert_eq!(made.len(), 500 * per_op + usize::from(command == "trace"));
+        let pretty: Value =
+            serde_json::from_slice(&nupdf(&[command, file, "--pretty"]).stdout).unwrap();
+        assert_eq!(pretty, report, "{command} --pretty");
+    }
+    let report = run_json(&["operators", file]);
+    assert_eq!(
+        report["pages"][0]["ops"].as_array().unwrap()[..3],
+        [
+            json!(["m", 0.0, 0.0]),
+            json!(["l", 100.0, 0.0]),
+            json!(["S"])
+        ]
+    );
+    let report = run_json(&["trace", file]);
+    assert_eq!(report["pages"][0]["events"][1][0], "stroke_path");
+    assert_eq!(
+        report["pages"][0]["events"][1][1],
+        json!([["m", 0.0, 0.0], ["l", 100.0, 0.0]])
+    );
+}
+
+#[test]
+fn a_page_that_fails_reports_its_error_after_what_ran() {
+    let keys =
+        |page: &Value| -> Vec<String> { page.as_object().unwrap().keys().cloned().collect() };
+    // A run that ends in an error has what ran, then the error.
+    let cycle = smoke("pages-parent-cycle.pdf");
+    let report = run_json(&["trace", cycle.to_str().unwrap()]);
+    let page = &report["pages"][0];
+    assert_eq!(keys(page), ["events", "error"]);
+    assert_eq!(page["events"], json!([]));
+    assert_eq!(page["error"], "cycle in parent chain");
+    assert_eq!(report["diagnostics"][0]["code"], "page.parent_cycle");
+    // A page that cannot be loaded is its error alone.
+    let report = run_json(&["operators", cycle.to_str().unwrap()]);
+    assert_eq!(
+        report["pages"],
+        json!([{ "error": "cycle in parent chain" }])
+    );
+    let short = smoke("pages-count-too-high.pdf");
+    for (command, rows) in [("operators", "ops"), ("trace", "events")] {
+        let report = run_json(&[command, short.to_str().unwrap()]);
+        assert_eq!(report["page_count"], 3);
+        let pages = report["pages"].as_array().unwrap();
+        assert_eq!(keys(&pages[0]), [rows]);
+        for (page, n) in pages[1..].iter().zip(2..) {
+            let error = format!("cannot find page {n} in page tree");
+            assert_eq!(*page, json!({ "error": error }), "{command}");
+        }
+    }
 }
 
 fn lines(out: &[u8]) -> Vec<Value> {
