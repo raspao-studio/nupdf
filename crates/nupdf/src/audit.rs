@@ -1,0 +1,2995 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hum
+
+//! Zero-token deterministic claim and citation verifier over PDF documents.
+//!
+//! [`audit_claims`] resolves cited content IDs (`p3`, `p3.b2`, `p3.b2.l4`,
+//! `p3.b2.l4.s1`, `p3.b2.l4.s1:0-5`) or 1-based page numbers, checks exact or
+//! whitespace/ligature-normalized quote fidelity, locates quotes moved to
+//! other pages/spans, detects five epistemic hazards (vector/character
+//! strikethrough, invisible text, `/ActualText` spoofing, omitted superscript
+//! footnotes, and post-signature incremental edits), and optionally renders a
+//! highlighted crop PNG as visual evidence.
+
+use serde::{Deserialize, Serialize};
+
+use crate::annot;
+use crate::colorspace::ColorSpace;
+use crate::content::Store;
+use crate::device::{ColorParams, Device};
+use crate::document::Document;
+use crate::draw::{self, DrawDevice, Pix};
+use crate::extract;
+use crate::form;
+use crate::geometry::{IRect, Matrix, Rect};
+use crate::page_run::{self, Parts};
+use crate::path::{Path, StrokeState};
+use crate::search;
+use crate::signature;
+use crate::stext::{
+    self, Block, Options, StextChar, StextLine, StextPage, TextBlock, char_flags, flags, rune_char,
+};
+
+/// Stable hazard code: horizontal vector stroke, StrikeOut annotation, or character strikeout flag crosses cited text.
+pub const HAZARD_STRUCK_THROUGH: &str = "hazard.struck_through";
+/// Stable hazard code: cited characters are neither filled nor stroked (`3 Tr`) or have zero alpha.
+pub const HAZARD_INVISIBLE_TEXT: &str = "hazard.invisible_text";
+/// Stable hazard code: `/ActualText` replacement differs from underlying glyph characters.
+pub const HAZARD_ACTUAL_TEXT_MISMATCH: &str = "hazard.actual_text_mismatch";
+/// Stable hazard code: adjacent/trailing superscript footnote marker points to a footnote omitted from `quote`.
+pub const HAZARD_UNREFERENCED_FOOTNOTE: &str = "hazard.unreferenced_footnote";
+/// Stable hazard code: document contains unsigned modifications after a digital signature.
+pub const HAZARD_MODIFIED_AFTER_SIGNING: &str = "hazard.modified_after_signing";
+
+/// Maximum pixel count for a single rendered evidence crop.
+const MAX_EVIDENCE_PIXELS: u64 = 16_000_000;
+
+/// Single claim and citation submitted for deterministic verification.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ClaimInput {
+    pub claim_id: Option<String>,
+    pub doc_id: Option<String>,
+    pub id: Option<String>,
+    pub page: Option<i32>,
+    pub quote: String,
+}
+
+/// Outcome category for an audited claim.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditStatus {
+    Verified,
+    VerifiedWithHazards,
+    WrongLocation,
+    Mismatch,
+    NotFound,
+    StaleDocId,
+}
+
+/// Detailed deterministic audit result for a single [`ClaimInput`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClaimAudit {
+    pub index: usize,
+    pub claim_id: Option<String>,
+    pub status: AuditStatus,
+    pub verified: bool,
+    pub cited_id: Option<String>,
+    pub resolved_page: Option<i32>,
+    pub resolved_bbox: Option<[f32; 4]>,
+    pub expected_quote: String,
+    pub actual_text: Option<String>,
+    pub found_elsewhere: Vec<String>,
+    pub hazards: Vec<String>,
+    pub footnote_text: Option<String>,
+    #[serde(skip_serializing, default)]
+    pub evidence_png: Option<Vec<u8>>,
+}
+
+/// Aggregate summary across all audited claims.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuditSummary {
+    pub total: usize,
+    pub verified_clean: usize,
+    pub verified_with_hazards: usize,
+    pub failed: usize,
+    pub all_verified: bool,
+    pub results: Vec<ClaimAudit>,
+}
+
+/// Audit a batch of claims against `doc` and its expected `doc_id_str` (`b3:...`).
+///
+/// `ClaimAudit::verified` is `true` strictly for [`AuditStatus::Verified`] (zero hazards).
+pub fn audit_claims(
+    doc: &Document,
+    doc_id_str: &str,
+    claims: &[ClaimInput],
+    render_evidence: bool,
+    evidence_dpi: f32,
+) -> Result<AuditSummary, String> {
+    audit_claims_with_options(
+        doc,
+        doc_id_str,
+        claims,
+        render_evidence,
+        evidence_dpi,
+        false,
+    )
+}
+
+/// Audit a batch of claims with explicit control over whether [`AuditStatus::VerifiedWithHazards`]
+/// counts as `verified: true` (`allow_hazards`).
+pub fn audit_claims_with_options(
+    doc: &Document,
+    doc_id_str: &str,
+    claims: &[ClaimInput],
+    render_evidence: bool,
+    evidence_dpi: f32,
+    allow_hazards: bool,
+) -> Result<AuditSummary, String> {
+    let page_count = doc.page_count().map_err(|e| e.0)?;
+    let modified_after_signing = check_modified_after_signing(doc, page_count);
+    let mut cache = PageCache::new(page_count.max(0) as usize);
+
+    let mut results = Vec::with_capacity(claims.len());
+    let mut verified_clean = 0usize;
+    let mut verified_with_hazards = 0usize;
+    let mut failed = 0usize;
+
+    for (index, claim) in claims.iter().enumerate() {
+        let audit = audit_single_claim(
+            doc,
+            doc_id_str,
+            page_count,
+            modified_after_signing,
+            &mut cache,
+            index,
+            claim,
+            render_evidence,
+            evidence_dpi,
+            allow_hazards,
+        )?;
+        match audit.status {
+            AuditStatus::Verified => verified_clean += 1,
+            AuditStatus::VerifiedWithHazards => {
+                verified_with_hazards += 1;
+                if !allow_hazards {
+                    failed += 1;
+                }
+            }
+            AuditStatus::WrongLocation
+            | AuditStatus::Mismatch
+            | AuditStatus::NotFound
+            | AuditStatus::StaleDocId => {
+                failed += 1;
+            }
+        }
+        results.push(audit);
+    }
+
+    let total = claims.len();
+    let all_verified = results.iter().all(|r| r.verified);
+
+    Ok(AuditSummary {
+        total,
+        verified_clean,
+        verified_with_hazards,
+        failed,
+        all_verified,
+        results,
+    })
+}
+
+struct PageCache {
+    primary: Vec<Option<StextPage>>,
+    styled: Vec<Option<StextPage>>,
+    raw_glyphs: Vec<Option<StextPage>>,
+    store: Store,
+}
+
+impl PageCache {
+    fn new(pages: usize) -> Self {
+        Self {
+            primary: std::iter::repeat_with(|| None).take(pages).collect(),
+            styled: std::iter::repeat_with(|| None).take(pages).collect(),
+            raw_glyphs: std::iter::repeat_with(|| None).take(pages).collect(),
+            store: Store::default(),
+        }
+    }
+
+    fn primary_page(&mut self, doc: &Document, page_num: i32) -> Result<&StextPage, String> {
+        let idx = page_num
+            .checked_sub(1)
+            .and_then(|i| usize::try_from(i).ok())
+            .ok_or_else(|| format!("page {page_num} out of range"))?;
+        if idx >= self.primary.len() {
+            return Err(format!("page {page_num} out of range"));
+        }
+        if self.primary[idx].is_none() {
+            let page_obj = doc.page(page_num - 1).map_err(|e| e.0)?;
+            let prev = std::mem::take(&mut self.store);
+            let (res, next) = stext::extract_page(doc, &page_obj, Options::default(), prev);
+            self.store = next;
+            self.primary[idx] = Some(res?);
+        }
+        self.primary[idx]
+            .as_ref()
+            .ok_or_else(|| format!("failed to cache page {page_num}"))
+    }
+
+    fn styled_page(&mut self, doc: &Document, page_num: i32) -> Result<&StextPage, String> {
+        let idx = page_num
+            .checked_sub(1)
+            .and_then(|i| usize::try_from(i).ok())
+            .ok_or_else(|| format!("page {page_num} out of range"))?;
+        if idx >= self.styled.len() {
+            return Err(format!("page {page_num} out of range"));
+        }
+        if self.styled[idx].is_none() {
+            let page_obj = doc.page(page_num - 1).map_err(|e| e.0)?;
+            let opts = Options {
+                flags: flags::CLIP | flags::COLLECT_VECTORS | flags::COLLECT_STYLES,
+                clip: Rect::INFINITE,
+            };
+            let prev = std::mem::take(&mut self.store);
+            let (res, next) = stext::extract_page(doc, &page_obj, opts, prev);
+            self.store = next;
+            self.styled[idx] = Some(res?);
+        }
+        self.styled[idx]
+            .as_ref()
+            .ok_or_else(|| format!("failed to cache styled page {page_num}"))
+    }
+
+    fn raw_glyphs_page(&mut self, doc: &Document, page_num: i32) -> Result<&StextPage, String> {
+        let idx = page_num
+            .checked_sub(1)
+            .and_then(|i| usize::try_from(i).ok())
+            .ok_or_else(|| format!("page {page_num} out of range"))?;
+        if idx >= self.raw_glyphs.len() {
+            return Err(format!("page {page_num} out of range"));
+        }
+        if self.raw_glyphs[idx].is_none() {
+            let page_obj = doc.page(page_num - 1).map_err(|e| e.0)?;
+            let opts = Options {
+                flags: flags::CLIP | flags::IGNORE_ACTUALTEXT,
+                clip: Rect::INFINITE,
+            };
+            let prev = std::mem::take(&mut self.store);
+            let (res, next) = stext::extract_page(doc, &page_obj, opts, prev);
+            self.store = next;
+            self.raw_glyphs[idx] = Some(res?);
+        }
+        self.raw_glyphs[idx]
+            .as_ref()
+            .ok_or_else(|| format!("failed to cache raw-glyph page {page_num}"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedContentId {
+    page: i32,
+    blocks: Vec<usize>,
+    line: Option<usize>,
+    span: Option<usize>,
+    slice: Option<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetGranularity {
+    Page,
+    Block,
+    Line,
+    Span,
+    Slice,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedChar {
+    ch: StextChar,
+    span_id: String,
+    line_break_before: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTarget {
+    granularity: TargetGranularity,
+    actual_text: String,
+    bbox: Option<Rect>,
+    chars: Vec<IndexedChar>,
+    /// The text block around a line, span or slice (empty for a block or
+    /// a page, whose `chars` are their own context), so a match is checked
+    /// against the characters next to the target, and `chars` start at
+    /// `context[offset]`.
+    context: Vec<IndexedChar>,
+    offset: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MatchedQuote {
+    page: i32,
+    bbox: Rect,
+    actual_text: String,
+    matched_chars: Vec<StextChar>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_single_claim(
+    doc: &Document,
+    doc_id_str: &str,
+    page_count: i32,
+    modified_after_signing: bool,
+    cache: &mut PageCache,
+    index: usize,
+    claim: &ClaimInput,
+    render_evidence: bool,
+    evidence_dpi: f32,
+    allow_hazards: bool,
+) -> Result<ClaimAudit, String> {
+    if let Some(ref claim_doc_id) = claim.doc_id
+        && !doc_id_str.is_empty()
+        && claim_doc_id != doc_id_str
+    {
+        return Ok(ClaimAudit {
+            index,
+            claim_id: claim.claim_id.clone(),
+            status: AuditStatus::StaleDocId,
+            verified: false,
+            cited_id: claim.id.clone(),
+            resolved_page: None,
+            resolved_bbox: None,
+            expected_quote: claim.quote.clone(),
+            actual_text: None,
+            found_elsewhere: Vec::new(),
+            hazards: Vec::new(),
+            footnote_text: None,
+            evidence_png: None,
+        });
+    }
+
+    let quote_norm = normalize_text(&claim.quote);
+    if quote_norm.is_empty() || page_count <= 0 {
+        return Ok(ClaimAudit {
+            index,
+            claim_id: claim.claim_id.clone(),
+            status: AuditStatus::NotFound,
+            verified: false,
+            cited_id: claim.id.clone(),
+            resolved_page: None,
+            resolved_bbox: None,
+            expected_quote: claim.quote.clone(),
+            actual_text: None,
+            found_elsewhere: Vec::new(),
+            hazards: Vec::new(),
+            footnote_text: None,
+            evidence_png: None,
+        });
+    }
+
+    // Case 1: Specific content ID cited (`p3`, `p3.b2`, `p3.b2.l4`, `p3.b2.l4.s1`, `p3.b2.l4.s1:0-5`).
+    if let Some(ref cited_id_str) = claim.id {
+        let Some(parsed_id) = parse_content_id(cited_id_str) else {
+            let elsewhere = search_document_elsewhere(doc, page_count, cache, &claim.quote, None)?;
+            let status = if elsewhere.is_empty() {
+                AuditStatus::NotFound
+            } else {
+                AuditStatus::WrongLocation
+            };
+            return Ok(ClaimAudit {
+                index,
+                claim_id: claim.claim_id.clone(),
+                status,
+                verified: false,
+                cited_id: Some(cited_id_str.clone()),
+                resolved_page: None,
+                resolved_bbox: None,
+                expected_quote: claim.quote.clone(),
+                actual_text: None,
+                found_elsewhere: elsewhere,
+                hazards: Vec::new(),
+                footnote_text: None,
+                evidence_png: None,
+            });
+        };
+
+        // Contradictory explicit `page` alongside `id` (e.g. id="p1.b1", page=Some(2)).
+        if let Some(explicit_page) = claim.page
+            && explicit_page != parsed_id.page
+        {
+            let elsewhere = search_document_elsewhere(doc, page_count, cache, &claim.quote, None)?;
+            let status = if elsewhere.is_empty() {
+                AuditStatus::NotFound
+            } else {
+                AuditStatus::WrongLocation
+            };
+            return Ok(ClaimAudit {
+                index,
+                claim_id: claim.claim_id.clone(),
+                status,
+                verified: false,
+                cited_id: Some(cited_id_str.clone()),
+                resolved_page: None,
+                resolved_bbox: None,
+                expected_quote: claim.quote.clone(),
+                actual_text: None,
+                found_elsewhere: elsewhere,
+                hazards: Vec::new(),
+                footnote_text: None,
+                evidence_png: None,
+            });
+        }
+
+        if parsed_id.page < 1 || parsed_id.page > page_count {
+            let elsewhere = search_document_elsewhere(doc, page_count, cache, &claim.quote, None)?;
+            let status = if elsewhere.is_empty() {
+                AuditStatus::NotFound
+            } else {
+                AuditStatus::WrongLocation
+            };
+            return Ok(ClaimAudit {
+                index,
+                claim_id: claim.claim_id.clone(),
+                status,
+                verified: false,
+                cited_id: Some(cited_id_str.clone()),
+                resolved_page: None,
+                resolved_bbox: None,
+                expected_quote: claim.quote.clone(),
+                actual_text: None,
+                found_elsewhere: elsewhere,
+                hazards: Vec::new(),
+                footnote_text: None,
+                evidence_png: None,
+            });
+        }
+
+        let target_opt = {
+            let stext_page = cache.primary_page(doc, parsed_id.page)?;
+            resolve_target(stext_page, &parsed_id)
+        };
+
+        let Some(target) = target_opt else {
+            let elsewhere = search_document_elsewhere(doc, page_count, cache, &claim.quote, None)?;
+            let status = if elsewhere.is_empty() {
+                AuditStatus::NotFound
+            } else {
+                AuditStatus::WrongLocation
+            };
+            return Ok(ClaimAudit {
+                index,
+                claim_id: claim.claim_id.clone(),
+                status,
+                verified: false,
+                cited_id: Some(cited_id_str.clone()),
+                resolved_page: None,
+                resolved_bbox: None,
+                expected_quote: claim.quote.clone(),
+                actual_text: None,
+                found_elsewhere: elsewhere,
+                hazards: Vec::new(),
+                footnote_text: None,
+                evidence_png: None,
+            });
+        };
+
+        if let Some(matched) = match_quote_in_target(&target, parsed_id.page, &claim.quote) {
+            return finalize_matched_claim(
+                doc,
+                cache,
+                modified_after_signing,
+                index,
+                claim,
+                Some(cited_id_str.clone()),
+                matched,
+                render_evidence,
+                evidence_dpi,
+                allow_hazards,
+            );
+        }
+
+        // Target resolved, but its text did not match `claim.quote`.
+        // Check whether `claim.quote` actually lives elsewhere in the document.
+        let elsewhere = search_document_elsewhere(
+            doc,
+            page_count,
+            cache,
+            &claim.quote,
+            Some(cited_id_str.as_str()),
+        )?;
+        let resolved_bbox = target.bbox.map(rect_to_array);
+        let status = if elsewhere.is_empty() {
+            AuditStatus::Mismatch
+        } else {
+            AuditStatus::WrongLocation
+        };
+        let evidence_png = if render_evidence && let Some(b) = target.bbox {
+            render_evidence_crop(doc, parsed_id.page, b, false, evidence_dpi).ok()
+        } else {
+            None
+        };
+
+        return Ok(ClaimAudit {
+            index,
+            claim_id: claim.claim_id.clone(),
+            status,
+            verified: false,
+            cited_id: Some(cited_id_str.clone()),
+            resolved_page: Some(parsed_id.page),
+            resolved_bbox,
+            expected_quote: claim.quote.clone(),
+            actual_text: Some(target.actual_text),
+            found_elsewhere: elsewhere,
+            hazards: Vec::new(),
+            footnote_text: None,
+            evidence_png,
+        });
+    }
+
+    // Case 2: Page-level citation (`id` is None, `page` is Some(p)).
+    if let Some(cited_page) = claim.page {
+        if cited_page >= 1 && cited_page <= page_count {
+            let matched_on_page = {
+                let stext_page = cache.primary_page(doc, cited_page)?;
+                find_quote_on_page(stext_page, cited_page, &claim.quote)
+            };
+            if let Some((matched, _span_id)) = matched_on_page {
+                return finalize_matched_claim(
+                    doc,
+                    cache,
+                    modified_after_signing,
+                    index,
+                    claim,
+                    None,
+                    matched,
+                    render_evidence,
+                    evidence_dpi,
+                    allow_hazards,
+                );
+            }
+        }
+
+        let elsewhere = search_document_elsewhere(doc, page_count, cache, &claim.quote, None)?;
+        let status = if elsewhere.is_empty() {
+            AuditStatus::NotFound
+        } else {
+            AuditStatus::WrongLocation
+        };
+        return Ok(ClaimAudit {
+            index,
+            claim_id: claim.claim_id.clone(),
+            status,
+            verified: false,
+            cited_id: None,
+            resolved_page: None,
+            resolved_bbox: None,
+            expected_quote: claim.quote.clone(),
+            actual_text: None,
+            found_elsewhere: elsewhere,
+            hazards: Vec::new(),
+            footnote_text: None,
+            evidence_png: None,
+        });
+    }
+
+    // Case 3: Unanchored claim (`id` is None and `page` is None) -> search all pages in order.
+    for p in 1..=page_count {
+        let found = {
+            let stext_page = cache.primary_page(doc, p)?;
+            find_quote_on_page(stext_page, p, &claim.quote)
+        };
+        if let Some((matched, span_id)) = found {
+            return finalize_matched_claim(
+                doc,
+                cache,
+                modified_after_signing,
+                index,
+                claim,
+                Some(span_id),
+                matched,
+                render_evidence,
+                evidence_dpi,
+                allow_hazards,
+            );
+        }
+    }
+
+    Ok(ClaimAudit {
+        index,
+        claim_id: claim.claim_id.clone(),
+        status: AuditStatus::NotFound,
+        verified: false,
+        cited_id: None,
+        resolved_page: None,
+        resolved_bbox: None,
+        expected_quote: claim.quote.clone(),
+        actual_text: None,
+        found_elsewhere: Vec::new(),
+        hazards: Vec::new(),
+        footnote_text: None,
+        evidence_png: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_matched_claim(
+    doc: &Document,
+    cache: &mut PageCache,
+    modified_after_signing: bool,
+    index: usize,
+    claim: &ClaimInput,
+    cited_id: Option<String>,
+    matched: MatchedQuote,
+    render_evidence: bool,
+    evidence_dpi: f32,
+    allow_hazards: bool,
+) -> Result<ClaimAudit, String> {
+    let (hazards, footnote_text) =
+        detect_hazards(doc, cache, modified_after_signing, &matched, &claim.quote)?;
+
+    let status = if hazards.is_empty() {
+        AuditStatus::Verified
+    } else {
+        AuditStatus::VerifiedWithHazards
+    };
+    let verified = match status {
+        AuditStatus::Verified => true,
+        AuditStatus::VerifiedWithHazards => allow_hazards,
+        _ => false,
+    };
+
+    let evidence_png = if render_evidence {
+        render_evidence_crop(
+            doc,
+            matched.page,
+            matched.bbox,
+            status == AuditStatus::Verified,
+            evidence_dpi,
+        )
+        .ok()
+    } else {
+        None
+    };
+
+    Ok(ClaimAudit {
+        index,
+        claim_id: claim.claim_id.clone(),
+        status,
+        verified,
+        cited_id,
+        resolved_page: Some(matched.page),
+        resolved_bbox: Some(rect_to_array(matched.bbox)),
+        expected_quote: claim.quote.clone(),
+        actual_text: Some(matched.actual_text),
+        found_elsewhere: Vec::new(),
+        hazards,
+        footnote_text,
+        evidence_png,
+    })
+}
+
+fn check_modified_after_signing(doc: &Document, page_count: i32) -> bool {
+    for p in 0..page_count {
+        let Ok(page_obj) = doc.page(p) else {
+            continue;
+        };
+        let (_, widgets) = annot::page_annots(doc, &page_obj);
+        for w in &widgets {
+            if form::is_signed(doc, w)
+                && (signature::changed_since_signing(doc, w).unwrap_or(false)
+                    || signature::check_digest(doc, w).ok() == Some(signature::DIGEST_FAILURE))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Parse content IDs:
+/// - `p3`
+/// - `p3.b2` (and nested `p3.b2.b1`)
+/// - `p3.b2.l4`
+/// - `p3.b2.l4.s1`
+/// - `p3.b2.l4.s1:0-5`
+fn parse_content_id(raw: &str) -> Option<ParsedContentId> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return None;
+    }
+
+    let (id_part, slice) = if let Some((left, right)) = trimmed.split_once(':') {
+        let (a_str, b_str) = right.split_once('-')?;
+        let a = a_str.parse::<usize>().ok()?;
+        let b = b_str.parse::<usize>().ok()?;
+        if a >= b {
+            return None;
+        }
+        (left, Some((a, b)))
+    } else {
+        (trimmed, None)
+    };
+
+    let mut parts = id_part.split('.');
+    let page_seg = parts.next()?;
+    let page_num_str = page_seg
+        .strip_prefix('p')
+        .or_else(|| page_seg.strip_prefix('P'))?;
+    let page = page_num_str.parse::<i32>().ok()?;
+    if page < 1 {
+        return None;
+    }
+
+    let mut blocks: Vec<usize> = Vec::new();
+    let mut line: Option<usize> = None;
+    let mut span: Option<usize> = None;
+
+    for seg in parts {
+        if let Some(num) = seg.strip_prefix('b').or_else(|| seg.strip_prefix('B')) {
+            if line.is_some() || span.is_some() {
+                return None;
+            }
+            let b_idx = num.parse::<usize>().ok()?.checked_sub(1)?;
+            blocks.push(b_idx);
+        } else if let Some(num) = seg.strip_prefix('l').or_else(|| seg.strip_prefix('L')) {
+            if blocks.is_empty() || line.is_some() || span.is_some() {
+                return None;
+            }
+            let l_idx = num.parse::<usize>().ok()?.checked_sub(1)?;
+            line = Some(l_idx);
+        } else {
+            let num = seg.strip_prefix('s').or_else(|| seg.strip_prefix('S'))?;
+            if line.is_none() || span.is_some() {
+                return None;
+            }
+            let s_idx = num.parse::<usize>().ok()?.checked_sub(1)?;
+            span = Some(s_idx);
+        }
+    }
+
+    if slice.is_some() && span.is_none() {
+        return None;
+    }
+
+    Some(ParsedContentId {
+        page,
+        blocks,
+        line,
+        span,
+        slice,
+    })
+}
+
+fn resolve_target(page: &StextPage, parsed: &ParsedContentId) -> Option<ResolvedTarget> {
+    if parsed.blocks.is_empty() {
+        let mut chars = Vec::new();
+        let prefix = format!("p{}", parsed.page);
+        collect_blocks_indexed(&page.blocks, &prefix, &mut chars);
+        let actual_text = extract_page_text(&page.blocks);
+        let bbox = indexed_chars_bbox(&chars);
+        return Some(ResolvedTarget {
+            granularity: TargetGranularity::Page,
+            actual_text,
+            bbox,
+            chars,
+            context: Vec::new(),
+            offset: 0,
+        });
+    }
+
+    let mut cur_blocks = &page.blocks[..];
+    let mut block_prefix = format!("p{}", parsed.page);
+    let mut target_block: Option<&Block> = None;
+
+    for (depth, &b_idx) in parsed.blocks.iter().enumerate() {
+        let b = cur_blocks.get(b_idx)?;
+        block_prefix = format!("{block_prefix}.b{}", b_idx + 1);
+        if depth + 1 == parsed.blocks.len() {
+            target_block = Some(b);
+        } else {
+            match b {
+                Block::Struct(sb) => cur_blocks = &sb.blocks,
+                _ => return None,
+            }
+        }
+    }
+
+    let block = target_block?;
+    let Some(l_idx) = parsed.line else {
+        let mut chars = Vec::new();
+        let actual_text = match block {
+            Block::Text(tb) => {
+                collect_text_block_indexed(tb, &block_prefix, &mut chars);
+                extract::block_text(tb)
+            }
+            Block::Struct(sb) => {
+                collect_blocks_indexed(&sb.blocks, &block_prefix, &mut chars);
+                extract_page_text(&sb.blocks)
+            }
+            Block::Image(_) | Block::Vector(_) | Block::Grid(_) => return None,
+        };
+        let bbox = indexed_chars_bbox(&chars);
+        return Some(ResolvedTarget {
+            granularity: TargetGranularity::Block,
+            actual_text,
+            bbox,
+            chars,
+            context: Vec::new(),
+            offset: 0,
+        });
+    };
+
+    let Block::Text(tb) = block else {
+        return None;
+    };
+    let line = tb.lines.get(l_idx)?;
+    let line_id = format!("{block_prefix}.l{}", l_idx + 1);
+    let spans = extract::spans(line);
+    let mut context = Vec::new();
+    collect_text_block_indexed(tb, &block_prefix, &mut context);
+    let line_offset: usize = tb.lines.iter().take(l_idx).map(|l| l.chars.len()).sum();
+
+    let Some(s_idx) = parsed.span else {
+        let mut chars = Vec::with_capacity(line.chars.len());
+        for (si, sp) in spans.iter().enumerate() {
+            let sp_id = format!("{line_id}.s{}", si + 1);
+            if let Some(slice) = line.chars.get(sp.start..sp.end) {
+                for ch in slice {
+                    chars.push(IndexedChar {
+                        ch: ch.clone(),
+                        span_id: sp_id.clone(),
+                        line_break_before: false,
+                    });
+                }
+            }
+        }
+        let actual_text = extract::chars_text(&line.chars);
+        return Some(ResolvedTarget {
+            granularity: TargetGranularity::Line,
+            actual_text,
+            bbox: Some(line.bbox),
+            chars,
+            context,
+            offset: line_offset,
+        });
+    };
+
+    let sp = spans.get(s_idx)?;
+    let span_id = format!("{line_id}.s{}", s_idx + 1);
+    let span_chars = line.chars.get(sp.start..sp.end)?;
+
+    if let Some((a, b)) = parsed.slice {
+        if a >= span_chars.len() {
+            return None;
+        }
+        let end = b.min(span_chars.len());
+        let sub = span_chars.get(a..end)?;
+        let chars: Vec<IndexedChar> = sub
+            .iter()
+            .map(|ch| IndexedChar {
+                ch: ch.clone(),
+                span_id: format!("{span_id}:{a}-{end}"),
+                line_break_before: false,
+            })
+            .collect();
+        let bbox = indexed_chars_bbox(&chars);
+        let actual_text = extract::chars_text(sub);
+        return Some(ResolvedTarget {
+            granularity: TargetGranularity::Slice,
+            actual_text,
+            bbox,
+            chars,
+            context,
+            offset: line_offset + sp.start + a,
+        });
+    }
+
+    let chars: Vec<IndexedChar> = span_chars
+        .iter()
+        .map(|ch| IndexedChar {
+            ch: ch.clone(),
+            span_id: span_id.clone(),
+            line_break_before: false,
+        })
+        .collect();
+    let actual_text = extract::chars_text(span_chars);
+
+    Some(ResolvedTarget {
+        granularity: TargetGranularity::Span,
+        actual_text,
+        bbox: Some(sp.bbox),
+        chars,
+        context,
+        offset: line_offset + sp.start,
+    })
+}
+
+fn collect_blocks_indexed(blocks: &[Block], prefix: &str, out: &mut Vec<IndexedChar>) {
+    for (bi, b) in blocks.iter().enumerate() {
+        let block_id = format!("{prefix}.b{}", bi + 1);
+        match b {
+            Block::Text(tb) => collect_text_block_indexed(tb, &block_id, out),
+            Block::Struct(sb) => collect_blocks_indexed(&sb.blocks, &block_id, out),
+            Block::Image(_) | Block::Vector(_) | Block::Grid(_) => {}
+        }
+    }
+}
+
+fn collect_text_block_indexed(tb: &TextBlock, block_id: &str, out: &mut Vec<IndexedChar>) {
+    for (li, line) in tb.lines.iter().enumerate() {
+        let line_id = format!("{block_id}.l{}", li + 1);
+        let spans = extract::spans(line);
+        let mut first_in_line = !out.is_empty();
+        for (si, sp) in spans.iter().enumerate() {
+            let sp_id = format!("{line_id}.s{}", si + 1);
+            if let Some(slice) = line.chars.get(sp.start..sp.end) {
+                for ch in slice {
+                    out.push(IndexedChar {
+                        ch: ch.clone(),
+                        span_id: sp_id.clone(),
+                        line_break_before: first_in_line,
+                    });
+                    first_in_line = false;
+                }
+            }
+        }
+    }
+}
+
+fn extract_page_text(blocks: &[Block]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for b in blocks {
+        match b {
+            Block::Text(tb) => {
+                let t = extract::block_text(tb);
+                if !t.is_empty() {
+                    parts.push(t);
+                }
+            }
+            Block::Struct(sb) => {
+                let t = extract_page_text(&sb.blocks);
+                if !t.is_empty() {
+                    parts.push(t);
+                }
+            }
+            Block::Image(_) | Block::Vector(_) | Block::Grid(_) => {}
+        }
+    }
+    parts.join("\n\n")
+}
+
+fn match_quote_in_target(target: &ResolvedTarget, page: i32, quote: &str) -> Option<MatchedQuote> {
+    let quote_norm = normalize_text(quote);
+    if quote_norm.is_empty() || target.chars.is_empty() {
+        return None;
+    }
+
+    let (norm_target, byte_to_char) = normalize_indexed_chars(&target.chars);
+    if norm_target.is_empty() {
+        return None;
+    }
+
+    // A number is cut or not by the characters around the target too, so
+    // a match is checked in the target's context.
+    let (context, offset) = if target.context.is_empty() {
+        (&target.chars, 0)
+    } else {
+        (&target.context, target.offset)
+    };
+    let (norm_context, context_map) = normalize_indexed_chars(context);
+    let cuts_in_context = number_cut_in(&norm_context, context, &context_map);
+    let cuts = |r: std::ops::Range<usize>| {
+        let first = offset + *byte_to_char.get(r.start)?;
+        let last = offset + *byte_to_char.get(r.end.checked_sub(1)?)?;
+        let range = byte_range_of(&norm_context, &context_map, first, last)?;
+        Some(cuts_in_context(range))
+    };
+    // A match that cannot be placed in its context counts as cutting.
+    let cuts = |r: std::ops::Range<usize>| cuts(r).unwrap_or(true);
+
+    let matched_byte_range = if norm_target == quote_norm {
+        Some(0..norm_target.len()).filter(|r| !cuts(r.clone()))
+    } else if matches!(target.granularity, TargetGranularity::Slice) {
+        None
+    } else {
+        find_clean_substring(&norm_target, &quote_norm, 0, cuts)
+    };
+
+    let range = matched_byte_range?;
+    let first_idx = *byte_to_char.get(range.start)?;
+    let last_idx = *byte_to_char.get(range.end.checked_sub(1)?)?;
+    let slice = target.chars.get(first_idx..=last_idx)?;
+    let bbox = indexed_chars_bbox(slice)?;
+    let matched_chars: Vec<StextChar> = slice.iter().map(|ic| ic.ch.clone()).collect();
+    let actual_text = reconstruct_matched_text(slice);
+
+    Some(MatchedQuote {
+        page,
+        bbox,
+        actual_text,
+        matched_chars,
+    })
+}
+
+fn find_quote_on_page(
+    page: &StextPage,
+    page_num: i32,
+    quote: &str,
+) -> Option<(MatchedQuote, String)> {
+    let mut chars = Vec::new();
+    let prefix = format!("p{page_num}");
+    collect_blocks_indexed(&page.blocks, &prefix, &mut chars);
+    if chars.is_empty() {
+        return None;
+    }
+
+    let quote_norm = normalize_text(quote);
+    if !quote_norm.is_empty() {
+        let (norm_page, byte_to_char) = normalize_indexed_chars(&chars);
+        if let Some(range) = find_clean_substring(
+            &norm_page,
+            &quote_norm,
+            0,
+            number_cut_in(&norm_page, &chars, &byte_to_char),
+        ) && let (Some(&first_idx), Some(&last_idx)) = (
+            byte_to_char.get(range.start),
+            range.end.checked_sub(1).and_then(|e| byte_to_char.get(e)),
+        ) && let Some(slice) = chars.get(first_idx..=last_idx)
+            && let Some(bbox) = indexed_chars_bbox(slice)
+        {
+            let span_id = common_content_id(slice);
+            let matched = MatchedQuote {
+                page: page_num,
+                bbox,
+                actual_text: reconstruct_matched_text(slice),
+                matched_chars: slice.iter().map(|ic| ic.ch.clone()).collect(),
+            };
+            return Some((matched, span_id));
+        }
+    }
+
+    // Fallback to MuPDF's page search (`search::search_page`) for soft-hyphen / diacritic edge cases.
+    if let Ok(hits) = search::search_page(page, quote, search::options::EXACT)
+        && let Some(hit) = hits.iter().find(|h| !hit_cuts_a_number(page, h))
+        && let Some((matched, span_id)) = matched_from_search_hit(page, page_num, hit)
+    {
+        return Some((matched, span_id));
+    }
+
+    None
+}
+
+fn search_document_elsewhere(
+    doc: &Document,
+    page_count: i32,
+    cache: &mut PageCache,
+    quote: &str,
+    exclude_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let quote_norm = normalize_text(quote);
+    if quote_norm.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut found_ids: Vec<String> = Vec::new();
+    for p in 1..=page_count {
+        let stext_page = cache.primary_page(doc, p)?;
+        let mut chars = Vec::new();
+        let prefix = format!("p{p}");
+        collect_blocks_indexed(&stext_page.blocks, &prefix, &mut chars);
+        if chars.is_empty() {
+            continue;
+        }
+        let (norm_page, byte_to_char) = normalize_indexed_chars(&chars);
+        let cuts = number_cut_in(&norm_page, &chars, &byte_to_char);
+        let mut search_from = 0usize;
+        while search_from < norm_page.len() {
+            let Some(range) = find_clean_substring(&norm_page, &quote_norm, search_from, &cuts)
+            else {
+                break;
+            };
+            let (abs_start, abs_end) = (range.start, range.end);
+            if let (Some(&first_idx), Some(&last_idx)) = (
+                byte_to_char.get(abs_start),
+                abs_end.checked_sub(1).and_then(|e| byte_to_char.get(e)),
+            ) && let Some(slice) = chars.get(first_idx..=last_idx)
+            {
+                let cid = common_content_id(slice);
+                if exclude_id.is_none_or(|ex| ex != cid) && !found_ids.contains(&cid) {
+                    found_ids.push(cid);
+                }
+            }
+            search_from = abs_end.max(search_from + 1);
+            while search_from < norm_page.len() && !norm_page.is_char_boundary(search_from) {
+                search_from += 1;
+            }
+        }
+
+        if found_ids.is_empty()
+            && let Ok(hits) = search::search_page(stext_page, quote, search::options::EXACT)
+        {
+            for hit in hits.iter().filter(|h| !hit_cuts_a_number(stext_page, h)) {
+                if let Some((_, cid)) = matched_from_search_hit(stext_page, p, hit)
+                    && exclude_id.is_none_or(|ex| ex != cid)
+                    && !found_ids.contains(&cid)
+                {
+                    found_ids.push(cid);
+                }
+            }
+        }
+    }
+
+    Ok(found_ids)
+}
+
+/// [`number_cut_in`] for a hit of the page search, in the text blocks it
+/// covers.
+fn hit_cuts_a_number(page: &StextPage, hit: &search::Hit) -> bool {
+    let mut chars = Vec::new();
+    let (mut first, mut last) = (None, None);
+    let blocks = page.blocks.iter().enumerate();
+    for (bi, block) in blocks.take(hit.end.block + 1).skip(hit.begin.block) {
+        let Block::Text(tb) = block else {
+            continue;
+        };
+        let index = |pos: &search::Position| {
+            (pos.block == bi).then(|| {
+                let lines = tb.lines.iter().take(pos.line);
+                chars.len() + lines.map(|l| l.chars.len()).sum::<usize>() + pos.ch
+            })
+        };
+        first = first.or_else(|| index(&hit.begin));
+        last = last.or_else(|| index(&hit.end));
+        collect_text_block_indexed(tb, &format!("p.b{}", bi + 1), &mut chars);
+    }
+    let (Some(first), Some(last)) = (first, last) else {
+        return false;
+    };
+    let (norm, map) = normalize_indexed_chars(&chars);
+    byte_range_of(&norm, &map, first, last).is_some_and(number_cut_in(&norm, &chars, &map))
+}
+
+fn matched_from_search_hit(
+    page: &StextPage,
+    page_num: i32,
+    hit: &search::Hit,
+) -> Option<(MatchedQuote, String)> {
+    let mut bbox_opt: Option<Rect> = None;
+    for q in &hit.quads {
+        let r = Rect::from_quad(*q);
+        bbox_opt = Some(match bbox_opt {
+            Some(prev) => prev.union(r),
+            None => r,
+        });
+    }
+    let bbox = bbox_opt?;
+
+    let mut matched_chars = Vec::new();
+    let mut span_ids: Vec<String> = Vec::new();
+    for (bi, block) in page.blocks.iter().enumerate() {
+        if bi < hit.begin.block || bi > hit.end.block {
+            continue;
+        }
+        let Block::Text(tb) = block else {
+            continue;
+        };
+        for (li, line) in tb.lines.iter().enumerate() {
+            if bi == hit.begin.block && li < hit.begin.line {
+                continue;
+            }
+            if bi == hit.end.block && li > hit.end.line {
+                continue;
+            }
+            let c_start = if bi == hit.begin.block && li == hit.begin.line {
+                hit.begin.ch
+            } else {
+                0
+            };
+            // `hit.end` is the hit's last character, not one past it.
+            let c_end = if bi == hit.end.block && li == hit.end.line {
+                hit.end.ch.saturating_add(1).min(line.chars.len())
+            } else {
+                line.chars.len()
+            };
+            if c_start < c_end
+                && let Some(slice) = line.chars.get(c_start..c_end)
+            {
+                let spans = extract::spans(line);
+                for (offset, ch) in slice.iter().enumerate() {
+                    let abs_ci = c_start + offset;
+                    if let Some((si, _)) = spans
+                        .iter()
+                        .enumerate()
+                        .find(|(_, sp)| abs_ci >= sp.start && abs_ci < sp.end)
+                    {
+                        let sid = format!("p{page_num}.b{}.l{}.s{}", bi + 1, li + 1, si + 1);
+                        if !span_ids.contains(&sid) {
+                            span_ids.push(sid);
+                        }
+                    }
+                    matched_chars.push(ch.clone());
+                }
+            }
+        }
+    }
+
+    if matched_chars.is_empty() {
+        return None;
+    }
+
+    let actual_text = extract::chars_text(&matched_chars);
+    let cid = if span_ids.len() == 1 {
+        span_ids[0].clone()
+    } else {
+        format!("p{page_num}.b{}", hit.begin.block + 1)
+    };
+    Some((
+        MatchedQuote {
+            page: page_num,
+            bbox,
+            actual_text,
+            matched_chars,
+        },
+        cid,
+    ))
+}
+
+fn common_content_id(slice: &[IndexedChar]) -> String {
+    let Some(first) = slice.first() else {
+        return String::new();
+    };
+    let first_span = &first.span_id;
+    if slice.iter().all(|ic| &ic.span_id == first_span) {
+        return first_span.clone();
+    }
+    // Check common line prefix (`pN.bB.lL`).
+    if let Some((first_line, _)) = first_span.rsplit_once(".s")
+        && slice.iter().all(|ic| {
+            ic.span_id
+                .rsplit_once(".s")
+                .is_some_and(|(l, _)| l == first_line)
+        })
+    {
+        return first_line.to_owned();
+    }
+    // Check common block prefix (`pN.bB`).
+    if let Some((first_block, _)) = first_span.split_once(".l")
+        && slice.iter().all(|ic| {
+            ic.span_id
+                .split_once(".l")
+                .is_some_and(|(b, _)| b == first_block)
+        })
+    {
+        return first_block.to_owned();
+    }
+    first_span
+        .split_once('.')
+        .map_or_else(|| first_span.clone(), |(p, _)| p.to_owned())
+}
+
+fn reconstruct_matched_text(slice: &[IndexedChar]) -> String {
+    let mut out = String::with_capacity(slice.len());
+    for (idx, ic) in slice.iter().enumerate() {
+        if idx > 0 && ic.line_break_before && !out.ends_with(' ') {
+            out.push(' ');
+        }
+        out.push(rune_char(ic.ch.c));
+    }
+    out.trim().to_owned()
+}
+
+fn indexed_chars_bbox(chars: &[IndexedChar]) -> Option<Rect> {
+    let mut acc: Option<Rect> = None;
+    for ic in chars {
+        if rune_char(ic.ch.c).is_whitespace() && (ic.ch.flags & char_flags::SYNTHETIC != 0) {
+            continue;
+        }
+        let r = Rect::from_quad(ic.ch.quad);
+        acc = Some(match acc {
+            Some(prev) => prev.union(r),
+            None => r,
+        });
+    }
+    if acc.is_none() {
+        for ic in chars {
+            let r = Rect::from_quad(ic.ch.quad);
+            acc = Some(match acc {
+                Some(prev) => prev.union(r),
+                None => r,
+            });
+        }
+    }
+    acc
+}
+
+/// Normalize whitespace, common Unicode ligatures, typographic quotes, and dashes.
+fn normalize_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = true;
+    for ch in s.chars() {
+        push_normalized_char(ch, &mut out, &mut prev_space);
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+fn normalize_indexed_chars(chars: &[IndexedChar]) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(chars.len());
+    let mut map = Vec::with_capacity(chars.len());
+    let mut prev_space = true;
+
+    for (idx, ic) in chars.iter().enumerate() {
+        if ic.line_break_before && !prev_space {
+            out.push(' ');
+            map.push(idx);
+            prev_space = true;
+        }
+        let before_len = out.len();
+        push_normalized_char(rune_char(ic.ch.c), &mut out, &mut prev_space);
+        let added = out.len() - before_len;
+        map.resize(map.len() + added, idx);
+    }
+
+    if out.ends_with(' ') {
+        out.pop();
+        map.pop();
+    }
+
+    (out, map)
+}
+
+fn push_normalized_char(ch: char, out: &mut String, prev_space: &mut bool) {
+    if ch == '\u{00ad}' {
+        return;
+    }
+    if ch.is_whitespace() || ch == '\u{00a0}' {
+        if !*prev_space {
+            out.push(' ');
+            *prev_space = true;
+        }
+        return;
+    }
+    *prev_space = false;
+    match ch {
+        '\u{fb00}' => out.push_str("ff"),
+        '\u{fb01}' => out.push_str("fi"),
+        '\u{fb02}' => out.push_str("fl"),
+        '\u{fb03}' => out.push_str("ffi"),
+        '\u{fb04}' => out.push_str("ffl"),
+        '\u{fb05}' | '\u{fb06}' => out.push_str("st"),
+        '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{02bc}' => out.push('\''),
+        '\u{201c}' | '\u{201d}' | '\u{201e}' => out.push('"'),
+        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => {
+            out.push('-')
+        }
+        other => out.push(other),
+    }
+}
+
+/// Find `needle` in `haystack`, preferring token/word boundaries so short quotes
+/// do not match inside unrelated words while still allowing trailing superscript
+/// digits (`"capped at $1,000.1"` matching `"capped at $1,000."`).
+///
+/// The search starts at byte `from`, and a match is kept only when
+/// `cuts(range)` says it does not cut a number ([`number_cut_in`]).
+fn find_clean_substring(
+    haystack: &str,
+    needle: &str,
+    from: usize,
+    cuts: impl Fn(std::ops::Range<usize>) -> bool,
+) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    let mut from = from;
+    while let Some(rel) = haystack.get(from..)?.find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+
+        let left_ok = if start == 0 {
+            true
+        } else {
+            let prev = haystack[..start].chars().next_back();
+            let first = needle.chars().next();
+            match (prev, first) {
+                (Some(p), Some(f)) => !(p.is_alphanumeric() && f.is_alphanumeric()),
+                _ => true,
+            }
+        };
+
+        let right_ok = if end == haystack.len() {
+            true
+        } else {
+            let next = haystack[end..].chars().next();
+            let last = needle.chars().next_back();
+            match (last, next) {
+                // If quote ends with punctuation (e.g. '.'), allow immediately adjacent superscript digits/markers.
+                (Some(l), Some(n)) => !(l.is_alphabetic() && n.is_alphabetic()),
+                _ => true,
+            }
+        };
+
+        if left_ok && right_ok && !cuts(start..end) {
+            return Some(start..end);
+        }
+
+        from = start + 1;
+        while from < haystack.len() && !haystack.is_char_boundary(from) {
+            from += 1;
+        }
+    }
+    None
+}
+
+/// Whether a match of `needle` between `before` and `after` takes part of
+/// a number: digits, with `.` or `,` between digits. "Total 12" in "Total
+/// 125" names another amount than the page does. A quote that ends in
+/// `.` or `,` before a digit ("rate 12." before "5", or "capped at
+/// $1,000." before a superscript footnote "1") is left to
+/// [`ends_before_a_digit`] and the page's geometry.
+///
+/// This is one of three checks [`number_cut_in`] makes, each on the
+/// characters straight before and after the match in the page's
+/// normalised text (a content id's target read in its text block). The
+/// second is that punctuation rule; the third, [`cuts_a_grouped_number`],
+/// takes digit groups set apart by a space no wider than a word space on
+/// one baseline in one size.
+///
+/// None of them looks across a line break: a line that ends in a number
+/// and a next line that starts with one are read as two numbers, so a
+/// grouped figure wrapped at a group ("1,234," or "1 234" then "567")
+/// verifies cut. Even the narrowest shape, a line ending in two or more
+/// comma groups and a comma before a line starting with exactly three
+/// digits, is also the shape of a list of figures ("84,000," then
+/// "105,000, 119,000"), which a refusal there would refuse.
+/// Also not checked: digit groups split by a space character set wider
+/// than a word space (the page's text keeps no-break, thin and narrow
+/// no-break spaces only as U+0020 and their width); whether the spaces
+/// earlier in a chain of groups are grouping spaces (only the one at the
+/// match's edge is measured); other digit separators (apostrophes, a `.`
+/// thousands mark); digits other than ASCII; and vertical writing
+/// (rotated lines are measured along their direction, but no test covers
+/// them).
+fn cuts_a_number(before: &str, needle: &str, after: &str) -> bool {
+    let is_sep = |c: char| c == '.' || c == ',';
+    let mut first = needle.chars();
+    let starts_numeric = match (first.next(), first.next()) {
+        (Some(f), _) if f.is_ascii_digit() => true,
+        (Some(f), Some(g)) => is_sep(f) && g.is_ascii_digit(),
+        _ => false,
+    };
+    let mut back = before.chars().rev();
+    let left_cut = starts_numeric
+        && match (back.next(), back.next()) {
+            (Some(p), _) if p.is_ascii_digit() => true,
+            (Some(p), Some(q)) => {
+                is_sep(p) && q.is_ascii_digit() && needle.starts_with(|c: char| c.is_ascii_digit())
+            }
+            _ => false,
+        };
+    let mut fwd = after.chars();
+    let right_cut = needle.ends_with(|c: char| c.is_ascii_digit())
+        && match (fwd.next(), fwd.next()) {
+            (Some(n), _) if n.is_ascii_digit() => true,
+            (Some(n), Some(m)) => is_sep(n) && m.is_ascii_digit(),
+            _ => false,
+        };
+    left_cut || right_cut
+}
+
+/// Whether `needle` ends in a number's `.` or `,` and `after` goes on with a
+/// digit: "rate 12." before "5", or "1,000." before a footnote marker "1".
+/// The two read the same; only the page tells them apart
+/// ([`number_goes_on`]).
+fn ends_before_a_digit(needle: &str, after: &str) -> bool {
+    let mut back = needle.chars().rev();
+    matches!(
+        (back.next(), back.next()),
+        (Some('.' | ','), Some(d)) if d.is_ascii_digit()
+    ) && after.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// Whether the digit `next` after the punctuation `prev` continues its
+/// number: it does unless it is a superscript marker, smaller and raised.
+fn number_goes_on(prev: &StextChar, next: &StextChar) -> bool {
+    !is_superscript(next, prev.origin.y, prev.size)
+}
+
+/// Whether the match `range` of the normalised text `hay` of `chars`,
+/// whose bytes `map` to them, cuts a number short: [`cuts_a_number`],
+/// [`ends_before_a_digit`] unless the digit after is a superscript marker,
+/// or [`cuts_a_grouped_number`].
+fn number_cut_in<'a>(
+    hay: &'a str,
+    chars: &'a [IndexedChar],
+    map: &'a [usize],
+) -> impl Fn(std::ops::Range<usize>) -> bool + 'a {
+    move |range| {
+        let (Some(before), Some(needle), Some(after)) = (
+            hay.get(..range.start),
+            hay.get(range.clone()),
+            hay.get(range.end..),
+        ) else {
+            return false;
+        };
+        let at = |b: usize| map.get(b).and_then(|&i| chars.get(i));
+        cuts_a_number(before, needle, after)
+            || (ends_before_a_digit(needle, after)
+                && match (range.end.checked_sub(1).and_then(at), at(range.end)) {
+                    (Some(prev), Some(next)) => number_goes_on(&prev.ch, &next.ch),
+                    _ => true,
+                })
+            || cuts_a_grouped_number(hay, range, |b| gap_at(chars, map, b))
+    }
+}
+
+/// The bytes of a normalised text whose bytes `map` to characters, from
+/// the first character's own bytes (not a line break's space before it)
+/// to the end of the last's.
+fn byte_range_of(
+    hay: &str,
+    map: &[usize],
+    first: usize,
+    last: usize,
+) -> Option<std::ops::Range<usize>> {
+    let mut start = map.iter().position(|&i| i == first)?;
+    if hay.as_bytes().get(start) == Some(&b' ') && map.get(start + 1) == Some(&first) {
+        start += 1;
+    }
+    let end = map.iter().rposition(|&i| i == last)? + 1;
+    (start < end).then_some(start..end)
+}
+
+/// What the space at a byte of a normalised text is between the digits on
+/// either side of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    /// One that can group a number's digits: on one baseline, in one size,
+    /// no wider than a word space. The page's text has every space
+    /// character as U+0020 (MuPDF folds no-break, thin and narrow no-break
+    /// spaces into it), so only their width tells them apart.
+    Group,
+    /// Anything else: a table gutter, a jump to another line or block.
+    Other,
+}
+
+/// The widest gap, in ems of the text's size, read as a word space when
+/// no space character gives one: wider than a proportional font's space
+/// (a quarter to a third of an em) with room for justified lines, and
+/// narrower than a table's gutter, which is commonly an em or more.
+const WORD_SPACE_EMS: f32 = 0.4;
+
+/// [`Gap`] for the space at byte `b` of a normalised text of `chars`
+/// whose bytes `map` to them.
+fn gap_at(chars: &[IndexedChar], map: &[usize], b: usize) -> Gap {
+    let at = |b: usize| map.get(b).copied();
+    let (Some(p), Some(n)) = (b.checked_sub(1).and_then(at), at(b + 1)) else {
+        return Gap::Other;
+    };
+    let (Some(prev), Some(next), Some(between)) =
+        (chars.get(p), chars.get(n), chars.get(p + 1..=n))
+    else {
+        return Gap::Other;
+    };
+    let block = |c: &IndexedChar| c.span_id.split_once(".l").map(|(b, _)| b.to_owned());
+    let size = prev.ch.size;
+    if block(prev) != block(next)
+        || size.is_nan()
+        || size <= 0.0
+        || (next.ch.size - size).abs() > 0.02 * size
+    {
+        return Gap::Other;
+    }
+    // Distances in ems along and across the line `prev` is set on.
+    let q = prev.ch.quad;
+    let (dx, dy) = (q.lr.x - q.ll.x, q.lr.y - q.ll.y);
+    let advance = dx.hypot(dy);
+    let (ux, uy) = if advance > 0.0 {
+        (dx / advance, dy / advance)
+    } else {
+        (1.0, 0.0)
+    };
+    let (ox, oy) = (
+        next.ch.origin.x - prev.ch.origin.x,
+        next.ch.origin.y - prev.ch.origin.y,
+    );
+    let along = (ux * ox + uy * oy) / size;
+    let across = (-uy * ox + ux * oy) / size;
+    if between.iter().any(|c| c.line_break_before) {
+        return Gap::Other;
+    }
+    let space = between
+        .iter()
+        .find(|c| rune_char(c.ch.c) == ' ' && c.ch.flags & char_flags::SYNTHETIC == 0)
+        .map(|c| {
+            let q = c.ch.quad;
+            (q.lr.x - q.ll.x).hypot(q.lr.y - q.ll.y) / size
+        });
+    let widest = space.map_or(WORD_SPACE_EMS, |w| (1.25 * w).max(WORD_SPACE_EMS));
+    let gap = along - advance / size;
+    if across.abs() <= 0.1 && gap > -0.1 && gap <= widest {
+        Gap::Group
+    } else {
+        Gap::Other
+    }
+}
+
+/// Whether the match `range` of `hay` stops or starts at a boundary
+/// between digit groups of one number. `gap(b)` says what the space at
+/// byte `b` is.
+///
+/// Grouped by spaces ("12 500", "1 234 567,89"): the match ends in a
+/// digit and the page goes on with a [`Gap::Group`] space and exactly
+/// three digits, or it starts with exactly three digits after such a
+/// space, and the digits on the other side form groups (one to three
+/// digits, then groups of three): "2024 500" and "12 5000" are not one
+/// number.
+fn cuts_a_grouped_number(
+    hay: &str,
+    range: std::ops::Range<usize>,
+    gap: impl Fn(usize) -> Gap,
+) -> bool {
+    let b = hay.as_bytes();
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let is = |i: usize, c: u8| b.get(i) == Some(&c);
+    let three = |i: usize| (i..i + 3).all(digit) && !digit(i + 3);
+    let (s, e) = (range.start, range.end);
+    let Some(last) = e.checked_sub(1).filter(|&l| l >= s) else {
+        return false;
+    };
+    let ends_cut = digit(last)
+        && is(e, b' ')
+        && three(e + 1)
+        && digit_groups_end(b, e, b' ', 1)
+        && gap(e) == Gap::Group;
+    let starts_cut = s + 3 <= e
+        && three(s)
+        && s >= 2
+        && is(s - 1, b' ')
+        && digit(s - 2)
+        && digit_groups_end(b, s - 1, b' ', 1)
+        && gap(s - 1) == Gap::Group;
+    ends_cut || starts_cut
+}
+
+/// Whether the digits that end at byte `end` of `b` are a number grouped
+/// by `sep`, in at least `min` groups: one to three digits, then groups
+/// of exactly three. Past 64 groups the shape is taken as given.
+fn digit_groups_end(b: &[u8], end: usize, sep: u8, min: usize) -> bool {
+    let mut i = end;
+    for groups in 1..=64 {
+        let stop = i;
+        while i > 0 && stop - i < 4 && b.get(i - 1).is_some_and(u8::is_ascii_digit) {
+            i -= 1;
+        }
+        let len = stop - i;
+        if len == 0 || len > 3 {
+            return false;
+        }
+        let more =
+            i >= 2 && b.get(i - 1) == Some(&sep) && b.get(i - 2).is_some_and(u8::is_ascii_digit);
+        if !more {
+            return groups >= min;
+        }
+        if len != 3 {
+            return false;
+        }
+        i -= 1;
+    }
+    true
+}
+
+/// A superscript against text of `ref_size` on the baseline `ref_origin_y`:
+/// under 82% of the size and raised (in top-down page space) by more than
+/// 4% and at most 115% of it.
+fn is_superscript(ch: &StextChar, ref_origin_y: f32, ref_size: f32) -> bool {
+    ch.size < 0.82 * ref_size
+        && ch.origin.y < ref_origin_y - 0.04 * ref_size
+        && ch.origin.y >= ref_origin_y - 1.15 * ref_size
+}
+
+/// Evaluate all five deterministic epistemic hazards on a matched quote.
+fn detect_hazards(
+    doc: &Document,
+    cache: &mut PageCache,
+    modified_after_signing: bool,
+    matched: &MatchedQuote,
+    expected_quote: &str,
+) -> Result<(Vec<String>, Option<String>), String> {
+    let mut hazards: Vec<String> = Vec::new();
+    let mut footnote_text: Option<String> = None;
+
+    // 1. Strikethrough hazard (character flag, StrikeOut annotation, or vector bar crossing mid-body).
+    if check_struck_through(doc, cache, matched)? {
+        hazards.push(HAZARD_STRUCK_THROUGH.to_owned());
+    }
+
+    // 2. Invisible text hazard (`3 Tr` neither filled nor stroked, or alpha == 0).
+    if check_invisible_text(&matched.matched_chars) {
+        hazards.push(HAZARD_INVISIBLE_TEXT.to_owned());
+    }
+
+    // 3. `/ActualText` mismatch hazard.
+    if check_actual_text_mismatch(doc, cache, matched)? {
+        hazards.push(HAZARD_ACTUAL_TEXT_MISMATCH.to_owned());
+    }
+
+    // 4. Unreferenced superscript footnote hazard.
+    let primary = cache.primary_page(doc, matched.page)?;
+    if let Some(fn_text) = check_unreferenced_footnote(primary, matched, expected_quote) {
+        hazards.push(HAZARD_UNREFERENCED_FOOTNOTE.to_owned());
+        footnote_text = Some(fn_text);
+    }
+
+    // 5. Post-signature incremental modification hazard.
+    if modified_after_signing {
+        hazards.push(HAZARD_MODIFIED_AFTER_SIGNING.to_owned());
+    }
+
+    Ok((hazards, footnote_text))
+}
+
+fn check_invisible_text(chars: &[StextChar]) -> bool {
+    for ch in chars {
+        if (ch.flags & char_flags::SYNTHETIC != 0) || rune_char(ch.c).is_whitespace() {
+            continue;
+        }
+        let visible_paint = ch.flags & (char_flags::FILLED | char_flags::STROKED) != 0;
+        let alpha = ch.argb >> 24;
+        if !visible_paint || alpha == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_struck_through(
+    doc: &Document,
+    cache: &mut PageCache,
+    matched: &MatchedQuote,
+) -> Result<bool, String> {
+    if matched
+        .matched_chars
+        .iter()
+        .any(|c| !rune_char(c.c).is_whitespace() && (c.flags & char_flags::STRIKEOUT != 0))
+    {
+        return Ok(true);
+    }
+
+    // Check PDF StrikeOut markup annotations on the page.
+    let page_obj = doc.page(matched.page - 1).map_err(|e| e.0)?;
+    let (_, page_ctm) = doc.page_transform(&page_obj).map_err(|e| e.0)?;
+    let (annots, _) = annot::page_annots(doc, &page_obj);
+    let target = matched.bbox;
+    let target_w = (target.x1 - target.x0).max(1.0);
+
+    for a in &annots {
+        if annot::type_name(doc, a) == "StrikeOut"
+            && let Some(ar) = annot::rect(doc, a, page_ctm)
+        {
+            let ov_x = ar.x1.min(target.x1) - ar.x0.max(target.x0);
+            let ov_y = ar.y1.min(target.y1) - ar.y0.max(target.y0);
+            if ov_x >= 0.25 * target_w && ov_y > 0.0 {
+                return Ok(true);
+            }
+        }
+    }
+
+    // Extract styled page (with `COLLECT_VECTORS | COLLECT_STYLES`) to inspect
+    // both MuPDF's character strikeout flag and raw horizontal vector strokes/bars.
+    let styled = cache.styled_page(doc, matched.page)?;
+
+    for ch in iter_page_chars(&styled.blocks) {
+        if rune_char(ch.c).is_whitespace() || (ch.flags & char_flags::STRIKEOUT == 0) {
+            continue;
+        }
+        let cr = Rect::from_quad(ch.quad);
+        let cx = 0.5 * (cr.x0 + cr.x1);
+        let cy = 0.5 * (cr.y0 + cr.y1);
+        if cx >= target.x0 - 1.0
+            && cx <= target.x1 + 1.0
+            && cy >= target.y0 - 1.0
+            && cy <= target.y1 + 1.0
+        {
+            return Ok(true);
+        }
+    }
+
+    // Compute average font size and baseline `origin.y` of non-space matched characters.
+    let mut sum_size = 0.0f32;
+    let mut sum_origin_y = 0.0f32;
+    let mut n_chars = 0usize;
+    for ch in &matched.matched_chars {
+        if !rune_char(ch.c).is_whitespace() {
+            sum_size += ch.size;
+            sum_origin_y += ch.origin.y;
+            n_chars += 1;
+        }
+    }
+    let avg_size = if n_chars > 0 {
+        sum_size / (n_chars as f32)
+    } else {
+        (target.y1 - target.y0).max(10.0)
+    };
+    let avg_origin_y = if n_chars > 0 {
+        Some(sum_origin_y / (n_chars as f32))
+    } else {
+        None
+    };
+
+    // Interior vertical band of the glyph body: strictly above the baseline/underline
+    // zone and strictly below the top border zone.
+    let (band_y0, band_y1) = match avg_origin_y {
+        Some(oy) => (oy - 0.68 * avg_size, oy - 0.12 * avg_size),
+        None => {
+            let h = (target.y1 - target.y0).max(1.0);
+            (target.y0 + 0.18 * h, target.y0 + 0.72 * h)
+        }
+    };
+    let max_bar_thickness = (avg_size * 0.35).max(3.5);
+    let min_bar_width = (avg_size * 1.2).max(6.0);
+    let min_overlap_x = (0.25 * target_w).clamp(4.0, 24.0);
+
+    for block in &styled.blocks {
+        if let Block::Vector(vb) = block {
+            let vw = vb.bbox.x1 - vb.bbox.x0;
+            let vh = vb.bbox.y1 - vb.bbox.y0;
+            if vh <= max_bar_thickness && vw >= min_bar_width {
+                let vy = 0.5 * (vb.bbox.y0 + vb.bbox.y1);
+                let ov_x = vb.bbox.x1.min(target.x1) - vb.bbox.x0.max(target.x0);
+                if vy >= band_y0 && vy <= band_y1 && ov_x >= min_overlap_x {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn check_actual_text_mismatch(
+    doc: &Document,
+    cache: &mut PageCache,
+    matched: &MatchedQuote,
+) -> Result<bool, String> {
+    let primary_all = {
+        let p = cache.primary_page(doc, matched.page)?;
+        normalize_text(&extract_page_text(&p.blocks))
+    };
+    let raw_page = cache.raw_glyphs_page(doc, matched.page)?;
+    let raw_all = normalize_text(&extract_page_text(&raw_page.blocks));
+
+    // Fast path: if `IGNORE_ACTUALTEXT` produces identical normalized text on the
+    // entire page, `/ActualText` did not alter any glyph text on this page.
+    if primary_all == raw_all {
+        return Ok(false);
+    }
+
+    // Collect raw glyph characters falling inside `matched.bbox`.
+    let box_exp = matched.bbox.expand(2.0);
+    let mut raw_chars: Vec<StextChar> = Vec::new();
+    for ch in iter_page_chars(&raw_page.blocks) {
+        let cr = Rect::from_quad(ch.quad);
+        let cx = 0.5 * (cr.x0 + cr.x1);
+        let cy = 0.5 * (cr.y0 + cr.y1);
+        if cx >= box_exp.x0 && cx <= box_exp.x1 && cy >= box_exp.y0 && cy <= box_exp.y1 {
+            raw_chars.push(ch.clone());
+        }
+    }
+
+    let raw_text = normalize_text(&extract::chars_text(&raw_chars));
+    let matched_norm = normalize_text(&matched.actual_text);
+
+    Ok(!raw_text.contains(&matched_norm))
+}
+
+/// Detect an immediately adjacent or trailing superscript footnote marker (`1`, `2`, `*`, `†`, ...)
+/// at `< 82%` body font size and raised baseline whose corresponding bottom-of-page footnote
+/// text is absent from `expected_quote`.
+fn check_unreferenced_footnote(
+    page: &StextPage,
+    matched: &MatchedQuote,
+    expected_quote: &str,
+) -> Option<String> {
+    let non_ws: Vec<&StextChar> = matched
+        .matched_chars
+        .iter()
+        .filter(|c| !rune_char(c.c).is_whitespace())
+        .collect();
+    if non_ws.is_empty() {
+        return None;
+    }
+
+    // Determine dominant body font size of the cited clause (falling back to page body size).
+    let mut sizes: Vec<f32> = non_ws.iter().map(|c| c.size).collect();
+    sizes.sort_by(f32::total_cmp);
+    let clause_body_size = sizes[sizes.len() / 2];
+    let block_refs: Vec<&Block> = page.blocks.iter().collect();
+    let page_body_size = extract::body_size(&block_refs);
+    let ref_size = if clause_body_size > 0.0 {
+        clause_body_size.max(page_body_size)
+    } else {
+        page_body_size
+    };
+    if ref_size <= 0.0 {
+        return None;
+    }
+
+    let max_sup_size = 0.82 * ref_size;
+
+    // Last body-sized character in `matched.matched_chars` anchors baseline and right edge.
+    let last_body_ch = non_ws
+        .iter()
+        .rev()
+        .copied()
+        .find(|c| c.size >= max_sup_size)
+        .unwrap_or(non_ws[non_ws.len() - 1]);
+    let ref_origin_y = last_body_ch.origin.y;
+    let mut ref_x1 = Rect::from_quad(last_body_ch.quad).x1;
+
+    let all_chars: Vec<&StextChar> = iter_page_chars(&page.blocks).collect();
+
+    // Allow a single trailing punctuation character (e.g. '.', ',', '"') immediately
+    // after the matched span on the same baseline when `expected_quote` omitted punctuation.
+    for ch in &all_chars {
+        let c = rune_char(ch.c);
+        if matches!(c, '.' | ',' | ';' | ':' | '"' | '\'' | ')')
+            && (ch.origin.y - ref_origin_y).abs() <= 0.15 * ref_size
+        {
+            let cr = Rect::from_quad(ch.quad);
+            if cr.x0 >= ref_x1 - 2.0 && cr.x0 <= ref_x1 + 0.35 * ref_size && cr.x1 > ref_x1 {
+                ref_x1 = cr.x1;
+            }
+        }
+    }
+
+    // Gather superscript characters immediately adjacent to `ref_x1` (within `< 82%` size
+    // and raised baseline in top-down fitz page coordinates: `origin.y < ref_origin_y`).
+    let mut sup_cands: Vec<&StextChar> = all_chars
+        .into_iter()
+        .filter(|ch| {
+            if rune_char(ch.c).is_whitespace() || !is_superscript(ch, ref_origin_y, ref_size) {
+                return false;
+            }
+            let cr = Rect::from_quad(ch.quad);
+            cr.x0 >= ref_x1 - 3.5 && cr.x0 <= ref_x1 + 1.25 * ref_size
+        })
+        .collect();
+
+    if sup_cands.is_empty() {
+        return None;
+    }
+
+    sup_cands.sort_by(|a, b| {
+        Rect::from_quad(a.quad)
+            .x0
+            .total_cmp(&Rect::from_quad(b.quad).x0)
+    });
+
+    // Chain contiguous adjacent superscript characters into the marker token (max 4 chars).
+    let mut marker_raw = String::new();
+    let mut prev_x1 = ref_x1;
+    for ch in sup_cands {
+        let cr = Rect::from_quad(ch.quad);
+        if marker_raw.is_empty() {
+            if cr.x0 > ref_x1 + 0.85 * ref_size {
+                break;
+            }
+        } else if cr.x0 > prev_x1 + 0.6 * ref_size {
+            break;
+        }
+        marker_raw.push(rune_char(ch.c));
+        prev_x1 = cr.x1.max(prev_x1);
+        if marker_raw.chars().count() >= 4 {
+            break;
+        }
+    }
+
+    let marker = marker_raw
+        .trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']'))
+        .trim();
+    if !is_plausible_footnote_marker(marker) {
+        return None;
+    }
+
+    let fn_text = find_footnote_at_bottom(page, marker, ref_origin_y, ref_size)?;
+    let fn_body = strip_leading_marker(&fn_text, marker);
+    let fn_body_norm = normalize_text(fn_body);
+    let quote_norm = normalize_text(expected_quote);
+
+    if !fn_body_norm.is_empty() && !quote_norm.contains(&fn_body_norm) {
+        Some(fn_text)
+    } else {
+        None
+    }
+}
+
+fn is_plausible_footnote_marker(marker: &str) -> bool {
+    if marker.is_empty() || marker.chars().count() > 3 {
+        return false;
+    }
+    if marker.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    if marker
+        .chars()
+        .all(|c| matches!(c, '*' | '\u{2020}' | '\u{2021}' | '\u{00a7}' | '\u{00b6}'))
+    {
+        return true;
+    }
+    marker.len() == 1 && marker.chars().all(|c| c.is_ascii_lowercase())
+}
+
+/// Find the footnote text corresponding to `marker` below `cited_y` on `page`.
+fn find_footnote_at_bottom(
+    page: &StextPage,
+    marker: &str,
+    cited_y: f32,
+    ref_size: f32,
+) -> Option<String> {
+    let mut lines_below: Vec<(Rect, String, usize)> = Vec::new();
+    for (bi, block) in page.blocks.iter().enumerate() {
+        walk_block_lines_below(block, bi, cited_y + 0.5 * ref_size, &mut lines_below);
+    }
+    if lines_below.is_empty() {
+        return None;
+    }
+
+    lines_below.sort_by(|a, b| {
+        a.0.y0
+            .total_cmp(&b.0.y0)
+            .then_with(|| a.0.x0.total_cmp(&b.0.x0))
+    });
+
+    // Prefer matches starting from the lower part of the page if multiple candidates exist,
+    // while still matching single-paragraph pages cleanly.
+    for (idx, &(l_bbox, ref l_text, block_idx)) in lines_below.iter().enumerate() {
+        let trimmed = l_text.trim();
+        if trimmed == marker
+            || trimmed
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .is_some_and(|m| m == marker)
+        {
+            // Superscript footnote marker placed in its own tiny block just left of the footnote body!
+            let mut row_parts = vec![trimmed.to_owned()];
+            let row_cy = 0.5 * (l_bbox.y0 + l_bbox.y1);
+            let mut body_block_idx = block_idx;
+            for (other_bbox, other_text, other_bi) in lines_below.iter().skip(idx + 1) {
+                let other_cy = 0.5 * (other_bbox.y0 + other_bbox.y1);
+                if (other_cy - row_cy).abs() <= ref_size && other_bbox.x0 >= l_bbox.x1 - 3.0 {
+                    row_parts.push(other_text.trim().to_owned());
+                    body_block_idx = *other_bi;
+                }
+            }
+            if row_parts.len() > 1 {
+                let mut combined = row_parts.join(" ");
+                append_continuation_lines(
+                    &lines_below,
+                    idx + 1,
+                    body_block_idx,
+                    l_bbox.y1,
+                    &mut combined,
+                );
+                return Some(combined);
+            }
+        }
+
+        if line_starts_with_footnote_marker(trimmed, marker) {
+            let mut full = trimmed.to_owned();
+            append_continuation_lines(&lines_below, idx + 1, block_idx, l_bbox.y1, &mut full);
+            return Some(full);
+        }
+    }
+
+    None
+}
+
+fn append_continuation_lines(
+    lines_below: &[(Rect, String, usize)],
+    start_idx: usize,
+    block_idx: usize,
+    first_y1: f32,
+    out: &mut String,
+) {
+    let mut prev_y1 = first_y1;
+    for (bbox, text, bi) in lines_below.iter().skip(start_idx) {
+        if *bi != block_idx || bbox.y0 <= prev_y1 - 1.0 {
+            continue;
+        }
+        let t = text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Stop if the next line begins another numbered footnote entry.
+        if starts_new_numbered_footnote(t) {
+            break;
+        }
+        out.push(' ');
+        out.push_str(t);
+        prev_y1 = bbox.y1;
+    }
+}
+
+fn starts_new_numbered_footnote(line: &str) -> bool {
+    let digits_len = line.bytes().take_while(u8::is_ascii_digit).count();
+    if (1..=2).contains(&digits_len) {
+        let rest = &line[digits_len..];
+        rest.starts_with(' ') || rest.starts_with('.') || rest.starts_with(')')
+    } else {
+        line.starts_with("* ") || line.starts_with("\u{2020} ") || line.starts_with("\u{2021} ")
+    }
+}
+
+fn line_starts_with_footnote_marker(trimmed: &str, marker: &str) -> bool {
+    if let Some(rest) = trimmed.strip_prefix(marker) {
+        if rest.is_empty() {
+            return false;
+        }
+        if rest.starts_with(' ')
+            || rest.starts_with('.')
+            || rest.starts_with(')')
+            || rest.starts_with(':')
+        {
+            return rest
+                .trim_start_matches([' ', '.', ')', ':'])
+                .chars()
+                .next()
+                .is_some();
+        }
+        // Also allow superscript marker directly followed by an uppercase word (`"1Excludes..."`).
+        if rest.chars().next().is_some_and(char::is_uppercase) {
+            return true;
+        }
+    }
+    if let Some(bracketed) = trimmed.strip_prefix('[')
+        && let Some(after_m) = bracketed.strip_prefix(marker)
+        && let Some(rest) = after_m.strip_prefix(']')
+    {
+        return !rest.trim().is_empty();
+    }
+    if let Some(paren) = trimmed.strip_prefix('(')
+        && let Some(after_m) = paren.strip_prefix(marker)
+        && let Some(rest) = after_m.strip_prefix(')')
+    {
+        return !rest.trim().is_empty();
+    }
+    false
+}
+
+fn strip_leading_marker<'a>(footnote: &'a str, marker: &str) -> &'a str {
+    let trimmed = footnote.trim();
+    if let Some(rest) = trimmed.strip_prefix(marker) {
+        return rest.trim_start_matches([' ', '.', ')', ':']);
+    }
+    if let Some(b) = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_prefix(marker))
+        .and_then(|s| s.strip_prefix(']'))
+    {
+        return b.trim_start_matches([' ', '.', ':']);
+    }
+    if let Some(p) = trimmed
+        .strip_prefix('(')
+        .and_then(|s| s.strip_prefix(marker))
+        .and_then(|s| s.strip_prefix(')'))
+    {
+        return p.trim_start_matches([' ', '.', ':']);
+    }
+    trimmed
+}
+
+fn walk_block_lines_below(
+    block: &Block,
+    block_idx: usize,
+    min_y: f32,
+    out: &mut Vec<(Rect, String, usize)>,
+) {
+    match block {
+        Block::Text(tb) => {
+            for line in &tb.lines {
+                if line.bbox.y0 > min_y {
+                    let text = extract::chars_text(&line.chars);
+                    if !text.trim().is_empty() {
+                        out.push((line.bbox, text, block_idx));
+                    }
+                }
+            }
+        }
+        Block::Struct(sb) => {
+            for child in &sb.blocks {
+                walk_block_lines_below(child, block_idx, min_y, out);
+            }
+        }
+        Block::Image(_) | Block::Vector(_) | Block::Grid(_) => {}
+    }
+}
+
+fn iter_page_chars(blocks: &[Block]) -> impl Iterator<Item = &StextChar> {
+    let mut lines: Vec<&StextLine> = Vec::new();
+    collect_lines_ref(blocks, &mut lines);
+    lines.into_iter().flat_map(|l| l.chars.iter())
+}
+
+fn collect_lines_ref<'a>(blocks: &'a [Block], out: &mut Vec<&'a StextLine>) {
+    for b in blocks {
+        match b {
+            Block::Text(tb) => out.extend(tb.lines.iter()),
+            Block::Struct(sb) => collect_lines_ref(&sb.blocks, out),
+            Block::Image(_) | Block::Vector(_) | Block::Grid(_) => {}
+        }
+    }
+}
+
+/// Render a padded crop PNG around `bbox` with a translucent yellow (`clean == true`)
+/// or red (`clean == false`) highlight rectangle painted over `bbox`.
+fn render_evidence_crop(
+    doc: &Document,
+    page_num: i32,
+    bbox: Rect,
+    clean: bool,
+    evidence_dpi: f32,
+) -> Result<Vec<u8>, String> {
+    let page_obj = doc.page(page_num - 1).map_err(|e| e.0)?;
+    let dpi = if evidence_dpi.is_finite() && evidence_dpi > 0.0 {
+        evidence_dpi.clamp(36.0, 600.0)
+    } else {
+        144.0
+    };
+    let scale = dpi / 72.0;
+    let ctm = Matrix::scale(scale, scale);
+
+    let full_page_px = draw::page_bbox(doc, &page_obj, ctm)?;
+    let padded_page_space = Rect::new(
+        bbox.x0 - 28.0,
+        bbox.y0 - 20.0,
+        bbox.x1 + 28.0,
+        bbox.y1 + 20.0,
+    );
+    let mut crop_irect = IRect::round(padded_page_space.transform(ctm)).intersect(full_page_px);
+    if crop_irect.is_empty() {
+        crop_irect = IRect::round(padded_page_space.transform(ctm));
+    }
+    if crop_irect.width() <= 0 || crop_irect.height() <= 0 {
+        return Err("empty evidence crop region".to_owned());
+    }
+    let pixels = (crop_irect.width() as u64).saturating_mul(crop_irect.height() as u64);
+    if pixels > MAX_EVIDENCE_PIXELS {
+        return Err("evidence crop exceeds maximum pixel budget".to_owned());
+    }
+
+    let mut pix = Pix::new(crop_irect, 3, false)?;
+    pix.clear_with(255);
+    let mut dev = DrawDevice::new(Some(doc), pix);
+    dev.cc.icc = true;
+    let _run = page_run::run_page_parts(
+        doc,
+        &page_obj,
+        &mut dev,
+        Store::default(),
+        Some("View"),
+        ctm,
+        Parts::ALL,
+    );
+
+    let mut path = Path::new();
+    let hl = bbox.expand(1.5);
+    path.move_to(hl.x0, hl.y0);
+    path.line_to(hl.x1, hl.y0);
+    path.line_to(hl.x1, hl.y1);
+    path.line_to(hl.x0, hl.y1);
+    path.close_path();
+
+    let cs = ColorSpace::Rgb;
+    let (rgb, fill_alpha) = if clean {
+        ([1.0f32, 0.90, 0.15], 0.32f32)
+    } else {
+        ([0.90f32, 0.20, 0.15], 0.30f32)
+    };
+    dev.fill_path(
+        &path,
+        false,
+        ctm,
+        &cs,
+        &rgb,
+        fill_alpha,
+        ColorParams::default(),
+    );
+
+    let stroke = StrokeState {
+        linewidth: 1.0 / ctm.expansion().max(f32::EPSILON),
+        ..StrokeState::default()
+    };
+    dev.stroke_path(&path, &stroke, ctm, &cs, &rgb, 0.90, ColorParams::default());
+
+    dev.into_pix().to_pixmap(Some(ColorSpace::Rgb)).png()
+}
+
+fn rect_to_array(r: Rect) -> [f32; 4] {
+    [r.x0, r.y0, r.x1, r.y1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{doc_bytes, page_doc, stream};
+
+    const FONT_RES: &str = "/Font<<\
+        /F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
+        /F2<</Type/Font/Subtype/Type1/BaseFont/Helvetica-Bold/Encoding/WinAnsiEncoding>>\
+    >>";
+
+    fn two_page_doc(p1_content: &[u8], p2_content: &[u8]) -> Document {
+        let objs = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>".to_vec(),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 4 0 R>>"
+            )
+            .into_bytes(),
+            stream("", p1_content),
+            format!(
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<<{FONT_RES}>>/Contents 6 0 R>>"
+            )
+            .into_bytes(),
+            stream("", p2_content),
+        ];
+        doc_bytes(&objs)
+    }
+
+    #[test]
+    fn clean_exact_citation_verifies_and_renders_evidence_png() {
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Governing Law shall be the State of Delaware.) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        let claims = vec![ClaimInput {
+            claim_id: Some("c1".to_owned()),
+            doc_id: Some("b3:testdoc".to_owned()),
+            id: Some("p1.b1.l1.s1".to_owned()),
+            page: Some(1),
+            quote: "Governing Law shall be the State of Delaware.".to_owned(),
+        }];
+
+        let summary = audit_claims(&doc, "b3:testdoc", &claims, true, 144.0)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.verified_clean, 1);
+        assert_eq!(summary.verified_with_hazards, 0);
+        assert_eq!(summary.failed, 0);
+        assert!(summary.all_verified);
+
+        let item = &summary.results[0];
+        assert_eq!(item.status, AuditStatus::Verified);
+        assert!(item.verified);
+        assert!(item.hazards.is_empty());
+        assert_eq!(item.resolved_page, Some(1));
+        let png = item
+            .evidence_png
+            .as_ref()
+            .unwrap_or_else(|| panic!("expected evidence PNG"));
+        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+
+    #[test]
+    fn citation_on_wrong_page_reports_wrong_location_and_found_elsewhere() {
+        let doc = two_page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Definitions and Interpretation.) Tj ET",
+            b"BT /F1 12 Tf 50 700 Td (Payment is due within thirty days.) Tj ET",
+        );
+        let claims = vec![
+            ClaimInput {
+                claim_id: Some("wrong-page".to_owned()),
+                doc_id: None,
+                id: None,
+                page: Some(1),
+                quote: "Payment is due within thirty days.".to_owned(),
+            },
+            ClaimInput {
+                claim_id: Some("wrong-span".to_owned()),
+                doc_id: None,
+                id: Some("p1.b1.l1.s1".to_owned()),
+                page: None,
+                quote: "Payment is due within thirty days.".to_owned(),
+            },
+        ];
+
+        let summary = audit_claims(&doc, "b3:testdoc", &claims, false, 72.0)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(summary.failed, 2);
+        assert!(!summary.all_verified);
+
+        for res in &summary.results {
+            assert_eq!(res.status, AuditStatus::WrongLocation);
+            assert!(!res.verified);
+            assert_eq!(res.found_elsewhere, vec!["p2.b1.l1.s1".to_owned()]);
+        }
+    }
+
+    #[test]
+    fn hallucinated_quotes_report_mismatch_and_not_found_and_stale_doc_id() {
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Annual fee is $500.) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        let claims = vec![
+            ClaimInput {
+                claim_id: Some("mismatch".to_owned()),
+                doc_id: None,
+                id: Some("p1.b1.l1.s1".to_owned()),
+                page: None,
+                quote: "Annual fee is $5,000.".to_owned(),
+            },
+            ClaimInput {
+                claim_id: Some("not-found".to_owned()),
+                doc_id: None,
+                id: None,
+                page: Some(1),
+                quote: "Unlimited free renewals forever.".to_owned(),
+            },
+            ClaimInput {
+                claim_id: Some("stale".to_owned()),
+                doc_id: Some("b3:oldhash".to_owned()),
+                id: Some("p1.b1.l1.s1".to_owned()),
+                page: None,
+                quote: "Annual fee is $500.".to_owned(),
+            },
+        ];
+
+        let summary = audit_claims(&doc, "b3:currenthash", &claims, false, 72.0)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(summary.failed, 3);
+        assert_eq!(summary.results[0].status, AuditStatus::Mismatch);
+        assert_eq!(
+            summary.results[0].actual_text.as_deref(),
+            Some("Annual fee is $500.")
+        );
+        assert_eq!(summary.results[1].status, AuditStatus::NotFound);
+        assert_eq!(summary.results[2].status, AuditStatus::StaleDocId);
+    }
+
+    #[test]
+    fn a_quote_that_cuts_a_number_short_does_not_verify() {
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Total 125 units, fee $125, rate 12.5 and 1,000 more) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        let status = |quote: &str, id: Option<&str>| {
+            let claims = vec![ClaimInput {
+                claim_id: None,
+                doc_id: None,
+                id: id.map(str::to_owned),
+                page: Some(1),
+                quote: quote.to_owned(),
+            }];
+            let summary = audit_claims(&doc, "b3:doc", &claims, false, 72.0)
+                .unwrap_or_else(|e| panic!("{e}"));
+            summary.results[0].status
+        };
+        for cut in [
+            "Total 12", "fee $12", "rate 12", "25 units", "5 units", "000 more", "and 1",
+        ] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                assert_ne!(status(cut, id), AuditStatus::Verified, "{cut:?} at {id:?}");
+            }
+        }
+        for whole in [
+            "Total 125",
+            "fee $125",
+            "rate 12.5",
+            "1,000 more",
+            "125 units,",
+        ] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                assert_eq!(
+                    status(whole, id),
+                    AuditStatus::Verified,
+                    "{whole:?} at {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_content_id_whose_text_cuts_a_number_does_not_verify() {
+        // The slice's own text is exactly the quote, and the span ends
+        // where a bold "5" goes on; the digits next to the target count.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Total 125 units, fee 12) Tj /F2 12 Tf (5) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for (quote, id) in [
+            ("Total 12", "p1.b1.l1.s1:0-8"),
+            ("25 units", "p1.b1.l1.s1:7-15"),
+            ("fee 12", "p1.b1.l1.s1"),
+        ] {
+            assert_ne!(
+                audit_one(&doc, None, Some(id), quote).0,
+                AuditStatus::Verified,
+                "{quote:?} at {id:?}"
+            );
+        }
+        assert_eq!(
+            audit_one(&doc, None, Some("p1.b1.l1.s1:0-9"), "Total 125").0,
+            AuditStatus::Verified
+        );
+    }
+
+    #[test]
+    fn a_quote_ending_in_punctuation_before_the_numbers_next_digit_does_not_verify() {
+        // The digit after the full stop or comma is in the same size on the
+        // same baseline: the number goes on, so the quote names another one.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (The rate 12.5 applies to 1,000,000 units) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for quote in ["The rate 12.", "applies to 1,000,", "applies to 1,"] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                let claims = vec![ClaimInput {
+                    id: id.map(str::to_owned),
+                    page: Some(1),
+                    quote: quote.to_owned(),
+                    ..ClaimInput::default()
+                }];
+                let summary = audit_claims(&doc, "b3:doc", &claims, false, 72.0)
+                    .unwrap_or_else(|e| panic!("{e}"));
+                assert_ne!(
+                    summary.results[0].status,
+                    AuditStatus::Verified,
+                    "{quote:?} at {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_quote_ending_in_punctuation_before_a_superscript_marker_verifies() {
+        // The "1" after "$1,000." is a raised, smaller footnote marker, not
+        // more of the number. With no footnote text on the page, it is clean.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Liability is capped at $1,000.) Tj \
+            4 Ts /F1 7 Tf (1) Tj 0 Ts /F1 12 Tf ( Fees are 2,) Tj 4 Ts /F1 7 Tf (2) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for quote in ["Liability is capped at $1,000.", "Fees are 2,"] {
+            for id in [None, Some("p1.b1.l1")] {
+                let claims = vec![ClaimInput {
+                    id: id.map(str::to_owned),
+                    page: Some(1),
+                    quote: quote.to_owned(),
+                    ..ClaimInput::default()
+                }];
+                let summary = audit_claims(&doc, "b3:doc", &claims, false, 72.0)
+                    .unwrap_or_else(|e| panic!("{e}"));
+                assert_eq!(
+                    summary.results[0].status,
+                    AuditStatus::Verified,
+                    "{quote:?} at {id:?}"
+                );
+            }
+        }
+    }
+
+    /// The status and `found_elsewhere` of one claim of `quote`.
+    fn audit_one(
+        doc: &Document,
+        page: Option<i32>,
+        id: Option<&str>,
+        quote: &str,
+    ) -> (AuditStatus, Vec<String>) {
+        let claims = vec![ClaimInput {
+            id: id.map(str::to_owned),
+            page,
+            quote: quote.to_owned(),
+            ..ClaimInput::default()
+        }];
+        let summary =
+            audit_claims(doc, "b3:doc", &claims, false, 72.0).unwrap_or_else(|e| panic!("{e}"));
+        let item = &summary.results[0];
+        (item.status, item.found_elsewhere.clone())
+    }
+
+    /// A ToUnicode map reading codes 1 to 3 as U+00A0, U+2009 and U+202F.
+    const SPACES_CMAP: &[u8] = b"/CIDInit/ProcSet findresource begin 12 dict begin begincmap \
+        /CMapName/M def 1 begincodespacerange <00><FF> endcodespacerange \
+        3 beginbfchar <01><00A0> <02><2009> <03><202F> endbfchar endcmap CMapName \
+        currentdict /CMap defineresource pop end end";
+
+    /// A page in Helvetica through [`SPACES_CMAP`], as font `M`.
+    fn spaces_font_doc(content: &[u8]) -> Document {
+        page_doc(
+            content,
+            "/Font<</M<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>>>",
+            &[stream("", SPACES_CMAP)],
+        )
+    }
+
+    /// Whether every hit of the page search for `quote` on the first page
+    /// of `doc` cuts a number.
+    fn every_search_hit_cuts_a_number(doc: &Document, quote: &str) -> bool {
+        let page = stext::extract_page(
+            doc,
+            &doc.page(0).unwrap_or_else(|e| panic!("{}", e.0)),
+            Options::default(),
+            Store::default(),
+        )
+        .0
+        .unwrap_or_else(|e| panic!("{e}"));
+        let hits = search::search_page(&page, quote, search::options::EXACT)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!hits.is_empty(), "the search finds {quote:?}");
+        hits.iter().all(|h| hit_cuts_a_number(&page, h))
+    }
+
+    #[test]
+    fn a_quote_that_stops_at_a_digit_group_space_does_not_verify() {
+        // "12 500" is one amount however the group is spaced: a plain space
+        // (a word space wide), a no-break space, a thin space, a narrow
+        // no-break space, or a positioned gap with no space character.
+        // (WinAnsi's code 240 reads as a plain space, so the grouping
+        // spaces come through a ToUnicode map; the page's text folds them
+        // all into U+0020, set as wide as each glyph.)
+        let docs = [
+            (
+                "plain",
+                page_doc(
+                    b"BT /F1 12 Tf 50 700 Td (Total 12 500 units) Tj ET",
+                    FONT_RES,
+                    &[],
+                ),
+            ),
+            (
+                "no-break",
+                spaces_font_doc(b"BT /M 12 Tf 50 700 Td (Total 12\\001500 units) Tj ET"),
+            ),
+            (
+                "thin",
+                spaces_font_doc(b"BT /M 12 Tf 50 700 Td (Total 12\\002500 units) Tj ET"),
+            ),
+            (
+                "narrow no-break",
+                spaces_font_doc(b"BT /M 12 Tf 50 700 Td (Total 12\\003500 units) Tj ET"),
+            ),
+            (
+                "kerned",
+                page_doc(
+                    b"BT /F1 12 Tf 50 700 Td [(Total 12) -300 (500 units)] TJ ET",
+                    FONT_RES,
+                    &[],
+                ),
+            ),
+        ];
+        for (sep, doc) in &docs {
+            for cut in ["Total 12", "500 units", "Total 1", "00 units"] {
+                for id in [None, Some("p1.b1.l1"), Some("p1.b1")] {
+                    assert_ne!(
+                        audit_one(doc, Some(1), id, cut).0,
+                        AuditStatus::Verified,
+                        "{cut:?} at {id:?}, {sep}"
+                    );
+                }
+                assert!(every_search_hit_cuts_a_number(doc, cut), "{cut:?}, {sep}");
+            }
+            for whole in [
+                "Total 12 500 units",
+                "Total 12 500",
+                "12 500 units",
+                "12 500",
+            ] {
+                for id in [None, Some("p1.b1.l1"), Some("p1.b1")] {
+                    assert_eq!(
+                        audit_one(doc, Some(1), id, whole).0,
+                        AuditStatus::Verified,
+                        "{whole:?} at {id:?}, {sep}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_quote_that_stops_inside_a_chain_of_digit_groups_does_not_verify() {
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Sum 1 234 567 net, and 12 500,75 due) Tj ET",
+            FONT_RES,
+            &[],
+        );
+        for cut in [
+            "Sum 1 234",
+            "Sum 1",
+            "234 567 net",
+            "567 net",
+            "and 12",
+            "500,75 due",
+            "and 12 500",
+        ] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                assert_ne!(
+                    audit_one(&doc, Some(1), id, cut).0,
+                    AuditStatus::Verified,
+                    "{cut:?} at {id:?}"
+                );
+            }
+        }
+        // "12 500" before ",75" is cut by the decimal rule, not the groups'.
+        assert!(cuts_a_number("and ", "12 500", ",75 due"));
+        for whole in ["Sum 1 234 567 net", "1 234 567", "and 12 500,75 due"] {
+            for id in [None, Some("p1.b1.l1.s1")] {
+                assert_eq!(
+                    audit_one(&doc, Some(1), id, whole).0,
+                    AuditStatus::Verified,
+                    "{whole:?} at {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn digits_around_a_space_that_are_not_one_grouped_number_still_verify() {
+        // "2024 500" has a first group of four digits, "12 5000" a second
+        // of four; the next two lines put "12" and "500" in table columns,
+        // a gutter apart (a wide gap, and one past the next line's start).
+        // The last is a known miss: a no-break space set wider than a word
+        // space reads as a gap like any other, since the page's text does
+        // not keep which space character it was.
+        let doc = page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Year 2024 500 rows) Tj ET \
+            BT /F1 12 Tf 50 650 Td (Pack 12 5000 pcs) Tj ET \
+            BT /F1 12 Tf 50 600 Td (Cols 12) Tj ET BT /F1 12 Tf 98 600 Td (500 cells) Tj ET \
+            BT /F1 12 Tf 50 550 Td (Rows 12) Tj ET BT /F1 12 Tf 200 550 Td (500 cols) Tj ET \
+            BT /M 12 Tf 50 500 Td [(Wide 12\\001) -500 (500 sets)] TJ ET",
+            "/Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>\
+            /M<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>>>",
+            &[stream("", SPACES_CMAP)],
+        );
+        for quote in [
+            "Wide 12",
+            "Year 2024",
+            "Pack 12",
+            "5000 pcs",
+            "Cols 12",
+            "500 cells",
+            "Rows 12",
+            "500 cols",
+            "500 rows",
+        ] {
+            assert_eq!(
+                audit_one(&doc, Some(1), None, quote).0,
+                AuditStatus::Verified,
+                "{quote:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quote_that_cuts_a_grouped_number_is_not_found_elsewhere() {
+        let doc = two_page_doc(
+            b"BT /F1 12 Tf 50 700 Td (Nothing here.) Tj ET",
+            b"BT /F1 12 Tf 50 700 Td (Total 12 500 units) Tj ET",
+        );
+        for cut in ["Total 12", "500 units"] {
+            assert_eq!(
+                audit_one(&doc, Some(1), None, cut),
+                (AuditStatus::NotFound, Vec::new()),
+                "{cut:?}"
+            );
+        }
+        assert_eq!(
+            audit_one(&doc, Some(1), None, "Total 12 500").0,
+            AuditStatus::WrongLocation
+        );
+    }
+
+    #[test]
+    fn two_numbers_on_two_lines_verify() {
+        // A line that ends in a number and a next line that starts with one
+        // are two numbers: a year and a count, a list's "102," and "103",
+        // a list of figures. No check looks across a line break, so a
+        // grouped figure wrapped after its comma ("1,234," then "567") is
+        // a known miss: it verifies cut.
+        let one_block: [(&[u8], &[&str]); 7] = [
+            (
+                b"BT /F1 12 Tf 50 700 Td (in 2020.) Tj 0 -14 Td (150 people came) Tj ET",
+                &["in 2020.", "in 2020", "150 people"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (rows 12) Tj 0 -14 Td (345 left) Tj ET",
+                &["rows 12", "345 left"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (sections 101, 102,) Tj 0 -14 Td (103 and 104) Tj ET",
+                &["sections 101, 102,", "sections 101, 102", "103 and"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (sizes of 84,000,) Tj 0 -14 Td (105,000 and 119,000) Tj ET",
+                &["sizes of 84,000,", "sizes of 84,000", "105,000 and"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (cost 1,250.) Tj 0 -14 Td (300 more) Tj ET",
+                &["cost 1,250.", "300 more"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (Sum 1 234) Tj 0 -14 Td (567 kg) Tj ET",
+                &["Sum 1 234", "567 kg"],
+            ),
+            (
+                b"BT /F1 12 Tf 50 700 Td (Paid 1,234,) Tj 0 -14 Td (567 dollars) Tj ET",
+                &["Paid 1,234,", "Paid 1,234", "567 dollars"],
+            ),
+        ];
+        for (content, quotes) in one_block {
+            let doc = page_doc(content, FONT_RES, &[]);
+            for &quote in quotes {
+                for id in [None, Some("p1.b1")] {
+                    assert_eq!(
+                        audit_one(&doc, Some(1), id, quote).0,
+                        AuditStatus::Verified,
+                        "{quote:?} at {id:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_quote_found_by_the_page_search_keeps_its_last_character() {
+        // "hyphen" is split over two lines at a soft hyphen (byte `d`
+        // through the font's ToUnicode), which the page's own text keeps as
+        // a line break, so only the page search finds the quote; its hit
+        // ends on the full stop.
+        let cmap = b"/CIDInit/ProcSet findresource begin 12 dict begin begincmap \
+            /CMapName/M def 1 begincodespacerange <00><FF> endcodespacerange \
+            1 beginbfchar <64><00AD> endbfchar endcmap CMapName currentdict /CMap \
+            defineresource pop end end";
+        let doc = page_doc(
+            b"BT /M 12 Tf 50 700 Td (the hyd) Tj 0 -14 Td (phen is here.) Tj ET",
+            "/Font<</M<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>>>",
+            &[stream("", cmap)],
+        );
+        let quote = "the hyphen is here.";
+        let page = stext::extract_page(
+            &doc,
+            &doc.page(0).unwrap_or_else(|e| panic!("{}", e.0)),
+            Options::default(),
+            Store::default(),
+        )
+        .0
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            find_quote_on_page(&page, 1, quote).is_some_and(|(m, _)| {
+                m.matched_chars.last().map(|c| rune_char(c.c)) == Some('.')
+                    && m.actual_text.ends_with("here.")
+            }),
+            "the matched characters end on the quote's full stop"
+        );
+        let claims = vec![ClaimInput {
+            page: Some(1),
+            quote: quote.to_owned(),
+            ..ClaimInput::default()
+        }];
+        let summary =
+            audit_claims(&doc, "b3:doc", &claims, false, 72.0).unwrap_or_else(|e| panic!("{e}"));
+        let item = &summary.results[0];
+        assert_eq!(item.status, AuditStatus::Verified);
+        assert!(
+            item.actual_text
+                .as_deref()
+                .is_some_and(|t| t.ends_with("here.")),
+            "{:?}",
+            item.actual_text
+        );
+    }
+
+    #[test]
+    fn superscript_footnote_omitted_flags_hazard_and_includes_footnote_text() {
+        // Clause at top of page (y=700) with 7pt raised superscript "1" via `4 Ts`,
+        // pointing to bottom-of-page footnote (y=72) "1 Excludes consequential damages."
+        let content = b"BT /F1 12 Tf 50 700 Td (Liability is capped at $1,000.) Tj \
+            4 Ts /F1 7 Tf (1) Tj 0 Ts ET \
+            BT /F1 9 Tf 50 72 Td (1 Excludes consequential damages.) Tj ET";
+        let doc = page_doc(content, FONT_RES, &[]);
+
+        let claims = vec![ClaimInput {
+            claim_id: Some("fn-omitted".to_owned()),
+            doc_id: None,
+            id: Some("p1.b1.l1.s1".to_owned()),
+            page: Some(1),
+            quote: "Liability is capped at $1,000.".to_owned(),
+        }];
+
+        let summary =
+            audit_claims(&doc, "b3:doc", &claims, false, 72.0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(summary.verified_clean, 0);
+        assert_eq!(summary.verified_with_hazards, 1);
+        assert_eq!(summary.failed, 1);
+        assert!(!summary.all_verified);
+
+        let item = &summary.results[0];
+        assert_eq!(item.status, AuditStatus::VerifiedWithHazards);
+        assert!(!item.verified);
+        assert!(
+            item.hazards
+                .contains(&HAZARD_UNREFERENCED_FOOTNOTE.to_owned())
+        );
+        assert_eq!(
+            item.footnote_text.as_deref(),
+            Some("1 Excludes consequential damages.")
+        );
+    }
+
+    #[test]
+    fn vector_strikethrough_and_invisible_text_flag_hazards() {
+        // Clause 1 at y=700 crossed by a horizontal stroke at y=704 (through x-height),
+        // Clause 2 at y=660 rendered with `3 Tr` (invisible text mode).
+        let content = b"BT /F1 12 Tf 50 700 Td (Tenant may sublease without consent.) Tj ET \
+            0.75 w 48 704 m 255 704 l S \
+            BT 3 Tr /F1 12 Tf 50 660 Td (Hidden prompt injection text.) Tj ET";
+        let doc = page_doc(content, FONT_RES, &[]);
+
+        let claims = vec![
+            ClaimInput {
+                claim_id: Some("struck".to_owned()),
+                doc_id: None,
+                id: Some("p1.b1.l1.s1".to_owned()),
+                page: Some(1),
+                quote: "Tenant may sublease without consent.".to_owned(),
+            },
+            ClaimInput {
+                claim_id: Some("invisible".to_owned()),
+                doc_id: None,
+                id: None,
+                page: Some(1),
+                quote: "Hidden prompt injection text.".to_owned(),
+            },
+        ];
+
+        let summary =
+            audit_claims(&doc, "b3:doc", &claims, false, 72.0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(summary.verified_with_hazards, 2);
+
+        assert_eq!(summary.results[0].status, AuditStatus::VerifiedWithHazards);
+        assert!(
+            summary.results[0]
+                .hazards
+                .contains(&HAZARD_STRUCK_THROUGH.to_owned())
+        );
+
+        assert_eq!(summary.results[1].status, AuditStatus::VerifiedWithHazards);
+        assert!(
+            summary.results[1]
+                .hazards
+                .contains(&HAZARD_INVISIBLE_TEXT.to_owned())
+        );
+    }
+
+    #[test]
+    fn actual_text_spoof_flags_hazard() {
+        let content = b"/Span <</ActualText (Fee is $100.)>> BDC \
+            BT /F1 12 Tf 50 700 Td (Total: 900 USD) Tj ET \
+            EMC";
+        let doc = page_doc(content, FONT_RES, &[]);
+
+        let claims = vec![ClaimInput {
+            claim_id: Some("spoof".to_owned()),
+            doc_id: None,
+            id: Some("p1.b1.l1.s1".to_owned()),
+            page: Some(1),
+            quote: "Fee is $100.".to_owned(),
+        }];
+
+        let summary =
+            audit_claims(&doc, "b3:doc", &claims, false, 72.0).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(summary.results[0].status, AuditStatus::VerifiedWithHazards);
+        assert!(
+            summary.results[0]
+                .hazards
+                .contains(&HAZARD_ACTUAL_TEXT_MISMATCH.to_owned())
+        );
+    }
+}

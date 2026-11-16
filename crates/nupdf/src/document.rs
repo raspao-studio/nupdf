@@ -526,6 +526,43 @@ impl Document {
         Ok(doc)
     }
 
+    /// Branches a clean, unedited view of this document in `O(1)` by sharing
+    /// the immutable source bytes, parsed cross-reference [`State`], sharded
+    /// object cache, and security handler, while starting with an empty edit
+    /// overlay. Speculative or multi-agent edit branches can mutate their
+    /// fork independently without reparsing the file or affecting readers.
+    pub fn fork_clean(&self) -> Document {
+        let diag = Diagnostics::new();
+        diag.replay(self.diag.snapshot());
+        let state = self
+            .state
+            .read()
+            .map(|s| Arc::clone(&s))
+            .unwrap_or_else(|_| Arc::new(State::empty()));
+        let crypt = self.crypt.read().ok().and_then(|c| c.clone());
+        Document {
+            data: Arc::clone(&self.data),
+            file_size: self.file_size,
+            header_version: self.header_version,
+            is_fdf: self.is_fdf,
+            linearized: self.linearized,
+            limits: self.limits,
+            diag,
+            state: RwLock::new(state),
+            generation: AtomicU64::new(self.generation.load(Ordering::Acquire)),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            repair_attempted: AtomicBool::new(self.repair_attempted.load(Ordering::Acquire)),
+            repair_lock: Mutex::new(()),
+            crypt: RwLock::new(crypt),
+            needs_password: AtomicBool::new(self.needs_password.load(Ordering::Acquire)),
+            edits: RwLock::new(Edits::default()),
+            edited: AtomicBool::new(false),
+            created: self.created,
+            local: RwLock::new(HashMap::new()),
+            local_next: std::sync::atomic::AtomicI32::new(-1),
+        }
+    }
+
     fn install(&self, state: State) {
         if let Ok(mut s) = self.state.write() {
             *s = Arc::new(state);

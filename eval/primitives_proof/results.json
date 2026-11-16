@@ -1,0 +1,141 @@
+{
+  "exp1_attest": {
+    "latency_ms": 7.13,
+    "rivals_fooled_by_z_order_occlusion": {
+      "pypdf": true,
+      "pdfplumber": true,
+      "PyMuPDF": true,
+      "pypdfium2": true,
+      "mutool": true,
+      "pdf-oxide (native CLI)": true
+    },
+    "rivals_detected_vector_strikethrough": {
+      "pypdf": false,
+      "pdfplumber": false,
+      "PyMuPDF": false,
+      "pdf-oxide (native CLI)": false
+    },
+    "rivals_detected_actualtext_spoof": {
+      "pypdf": false,
+      "pdfplumber": false,
+      "PyMuPDF": false,
+      "pdf-oxide (native CLI)": false
+    },
+    "nupdf_attest": {
+      "detected_vector_strikethrough": true,
+      "detected_z_order_occlusion": true,
+      "detected_actualtext_spoof": true,
+      "blind_spot_crops_emitted": 1,
+      "all_passed": true
+    }
+  },
+  "exp2_patch": {
+    "valid_patch_ms": 5.09,
+    "independent_grader_verified": true,
+    "collision_trap_exit_code": 4,
+    "collision_trap_prevented_corrupt_file": true,
+    "pymupdf_silent_corruption_or_truncation": true
+  },
+  "exp3_multi_agent_apply": {
+    "atomic_3_agent_commit_ms": 9.13,
+    "independent_graders_passed": true,
+    "conflict_trap_exit_code": 4,
+    "conflict_prevented_write": true
+  },
+  "exp4_spatial_query_100_receipts": {
+    "receipt_count": 100,
+    "expected_sum": 7897.5,
+    "nupdf_query_sum": 7897.5,
+    "exact_match": true,
+    "output_bytes": {
+      "nupdf_batch_extract_json": 302961,
+      "pdf_oxide_cli_structured_json": 1046142,
+      "nupdf_query_summary": 236,
+      "token_reduction_vs_batch_extract": 1283.7,
+      "token_reduction_vs_pdf_oxide_cli": 4432.8
+    },
+    "wall_time_ms": {
+      "nupdf_query_cli": 8.31,
+      "pdf_oxide_native_cli_100_calls": 416.26,
+      "pymupdf_in_python": 87.85,
+      "pdfplumber_in_python": 120.64
+    }
+  },
+  "exp5_audit_claims": {
+    "audit_5_claims_ms": 7.58,
+    "llm_tokens_spent": 0,
+    "statuses": {
+      "c1_clean": "verified",
+      "c2_wrong_page": "wrong_location",
+      "c3_hallucinated": "mismatch",
+      "c4_footnote_trap": "verified_with_hazards",
+      "c5_strikethrough_trap": "verified_with_hazards"
+    },
+    "footnote_recovered": "1 Excluding consumable batteries and user-modified hardware.",
+    "relocated_wrong_page_to": [
+      "p3.b1.l1.s1"
+    ],
+    "evidence_cards_rendered": 4,
+    "pdf_oxide_cli_returns_struck_clause_as_active_hit": true
+  },
+  "native_rust_engines_vs_pdf_oxide": {
+    "pdf_oxide_version": "0.3.78",
+    "exp1_attest": {
+      "pdf_oxide_native": {
+        "plain_leaks_occluded_injection": true,
+        "spans_leak_occluded_injection": true,
+        "structured_leaks_occluded_injection": true,
+        "has_span_strikethrough_or_occlusion_api": false,
+        "has_actualtext_vs_glyph_diff_api": false,
+        "saw_actualtext_100k": true,
+        "saw_glyph_100": false,
+        "span_count": 4
+      },
+      "pdf_oxide_extract_spans_median_ms": 0.083,
+      "nupdf_attest_in_process_median_ms": 1.375,
+      "nupdf_detected_all_4_traps": true
+    },
+    "exp2_patch": {
+      "nupdf_patch_and_verify_median_ms": 0.993,
+      "pdf_oxide_document_editor_median_ms": 0.072,
+      "speedup_vs_pdf_oxide": 0.072,
+      "nupdf_caught_collision": true,
+      "pdf_oxide_matched_elements": 1,
+      "pdf_oxide_silently_allowed_collision": true,
+      "pdf_oxide_collision_overlaps_neighbor_spans": true,
+      "pymupdf_grader_on_oxide_valid_patch": {
+        "has_new_15400": true,
+        "removed_old_14500": true,
+        "kept_neighbor_due_date": true
+      },
+      "pymupdf_grader_confirms_oxide_overlap": true
+    },
+    "exp3_branching": {
+      "iterations": 1000,
+      "pdf_size_bytes": 17812,
+      "pdf_oxide_editor_1000_branches_ms": 105.558,
+      "nupdf_open_1000_branches_ms": 38.442,
+      "nupdf_fork_clean_1000_branches_ms": 0.313,
+      "fork_clean_speedup_vs_pdf_oxide": 337.2,
+      "nupdf_open_speedup_vs_pdf_oxide": 2.746
+    },
+    "exp4_query_100_receipts": {
+      "receipt_count": 100,
+      "nupdf_sum": 7897.5,
+      "pdf_oxide_custom_rust_loop_sum": 7897.5,
+      "nupdf_1_thread_median_ms": 15.642,
+      "pdf_oxide_1_thread_median_ms": 4.473,
+      "single_thread_speedup_vs_pdf_oxide": 0.286,
+      "workers": 8,
+      "nupdf_parallel_median_ms": 3.877,
+      "pdf_oxide_parallel_median_ms": 2.146,
+      "parallel_speedup_vs_pdf_oxide": 0.553
+    },
+    "exp5_audit": {
+      "nupdf_audit_5_claims_no_crops_median_ms": 0.311,
+      "nupdf_audit_5_claims_with_4_png_crops_median_ms": 2.596,
+      "pdf_oxide_has_claim_or_hazard_auditor": false,
+      "pdf_oxide_extracts_struck_clause_as_active_text": true
+    }
+  }
+}
