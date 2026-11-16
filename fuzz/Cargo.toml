@@ -152,3 +152,15 @@ name = "agent_primitives"
 path = "fuzz_targets/agent_primitives.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "cloak"
+path = "fuzz_targets/cloak.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "flat_forms"
+path = "fuzz_targets/flat_forms.rs"
+test = false
+doc = false

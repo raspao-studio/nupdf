@@ -467,6 +467,26 @@ fn vdist(dir: Point, a: Point, b: Point) -> f32 {
     (dx * dir.y - dy * dir.x).abs()
 }
 
+/// The needle as [`search_page`] looks for it with `opts`, which are not a
+/// regular expression's: the bytes it finds in [`spun_page`]'s text, or None
+/// when it finds nothing anywhere. A hit of `search_page` is these bytes
+/// found in that text, so a needle whose bytes are not there has no hit.
+pub(crate) fn spun_needle(needle: &str, opts: u32) -> Option<Vec<u8>> {
+    let needle = needle.as_bytes();
+    if opts & options::REGEXP != 0 || needle.first().is_none_or(|&b| b == 0) {
+        return None;
+    }
+    let out = transform_text(transform_for(opts).0, needle).out;
+    (!out.is_empty()).then_some(out)
+}
+
+/// The page's text as [`search_page`] searches it with `opts`.
+pub(crate) fn spun_page(page: &StextPage, opts: u32) -> Vec<u8> {
+    let transform = transform_for(opts).0;
+    let (haystack, _) = flatten(page, transform);
+    transform_text(transform, &haystack).out
+}
+
 /// `fz_match_stext_page_cb`: every hit of `needle` on the page.
 pub fn search_page(page: &StextPage, needle: &str, opts: u32) -> Result<Vec<Hit>, String> {
     let (transform, icase) = transform_for(opts);

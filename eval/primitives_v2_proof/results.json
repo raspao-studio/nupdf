@@ -1,0 +1,497 @@
+{
+  "exp1_vector_chart_and_diagram_decompiler": {
+    "nupdf_cli_ms": 5.27,
+    "vision_tokens_spent": 0,
+    "charts_recovered": 2,
+    "bar_axis_r_squared": 1.0,
+    "max_bar_abs_error": 0.0,
+    "max_line_abs_error": 0.0,
+    "diagram_nodes_recovered": 4,
+    "diagram_directed_edges_recovered": 3,
+    "rivals": {
+      "PyMuPDF": {
+        "recovered_bar_42_37": false,
+        "recovered_bar_68_91": false,
+        "charts_extracted": 0,
+        "directed_edges_extracted": 0
+      },
+      "pypdf": {
+        "recovered_bar_42_37": false,
+        "charts_extracted": 0,
+        "directed_edges_extracted": 0
+      },
+      "pdfplumber": {
+        "recovered_bar_42_37": false,
+        "tables_found_on_charts": 0,
+        "charts_extracted": 0,
+        "directed_edges_extracted": 0
+      },
+      "pypdfium2": {
+        "recovered_bar_42_37": false,
+        "charts_extracted": 0,
+        "directed_edges_extracted": 0
+      },
+      "mutool": {
+        "recovered_bar_42_37": false,
+        "charts_extracted": 0,
+        "directed_edges_extracted": 0
+      },
+      "pdf_oxide_cli": {
+        "recovered_bar_42_37": false,
+        "charts_extracted": 0,
+        "directed_edges_extracted": 0
+      }
+    }
+  },
+  "exp2_flat_forms_fill_and_promote": {
+    "rivals_detected_fields": {
+      "PyMuPDF": 0,
+      "pypdf": 0,
+      "pdf_oxide_cli": 0
+    },
+    "nupdf_detect_ms": 5.15,
+    "nupdf_detected_fields": 6,
+    "nupdf_fill_ms": 7.78,
+    "nupdf_comb_overflow_exit_code": 4,
+    "nupdf_promote_ms": 5.6,
+    "pypdf_verified_promoted_acroform_fields": 6,
+    "pymupdf_verified_promoted_widgets": 6
+  },
+  "exp3_block_paragraph_reflow": {
+    "nupdf_reflow_cli_ms": 13.96,
+    "clause3_shifted_down_pt": 56.0,
+    "signature_shifted_down_pt": 56.0,
+    "pymupdf_verified_zero_block_overlaps": true,
+    "pymupdf_max_word_x1_pt": 537.85,
+    "nupdf_45_line_overflow_exit_code": 4,
+    "pymupdf_naive_textbox_truncated_in_original_rect": true
+  },
+  "exp4_temporal_history_and_tamper_forensics": {
+    "revision_byte_sizes": {
+      "rev1_len": 7326,
+      "rev2_len": 7928,
+      "rev3_len": 8352
+    },
+    "nupdf_history_cli_ms": 12.7,
+    "revision_classifications": [
+      "initial",
+      "clean_incremental_fill",
+      "tampered_after_signature"
+    ],
+    "rev2_incremental_fill_kept_rsa_signature_valid": true,
+    "rev3_forensic_hazards": [
+      "tamper.post_signature_content_edit",
+      "tamper.post_signature_visual_occlusion"
+    ],
+    "strict_exit_code_on_tamper": 4,
+    "extracted_rev1_verified_clean_10k": true,
+    "rivals_on_tampered_pdf": {
+      "PyMuPDF_sees_90k": true,
+      "pypdf_sees_90k": true,
+      "rivals_time_travel_or_visual_occlusion_forensics": false
+    },
+    "mutool_rev1_note": "Verifying signature 7:\n\tDistinguished name: cn=Elena Rostova, o=Helios Treasury, ou=, email=, c=US\n\tCertificate error: Self-signed certificate.\n\tThe document is"
+  },
+  "exp5_reversible_pii_cloak_firewall": {
+    "nupdf_cloak_cli_ms": 7.91,
+    "nupdf_uncloak_pdf_cli_ms": 6.31,
+    "nupdf_uncloak_text_cli_ms": 4.85,
+    "entities_cloaked": 6,
+    "replacements": 12,
+    "zero_leaks_across_pymupdf_pypdf_widgets_and_metadata": true,
+    "coreference_preserved": true,
+    "pdf_and_json_roundtrip_exact": true
+  },
+  "exp6_single_call_pipeline_and_zero_import_wasm": {
+    "sequential_5_cli_turns_ms": 29.08,
+    "single_call_pipeline_cli_ms": 9.95,
+    "cli_wall_speedup": 2.92,
+    "sequential_5_turns_stdout_bytes": 5063,
+    "single_call_compact_pipeline_stdout_bytes": 1873,
+    "context_payload_reduction_ratio": 2.7,
+    "tamper_gate_halted_before_mutation_exit_code": 4,
+    "wasm32_v8_zero_import_edge": {
+      "wasm_size_bytes": 7098097,
+      "wasm_compile_ms": 3.336,
+      "wasm_instantiate_ms": 0.249,
+      "host_imports_count": 0,
+      "host_imports": [],
+      "exports": [
+        "memory:memory",
+        "function:wasm_cmd_buffer",
+        "function:wasm_invoke",
+        "function:wasm_pdf_buffer",
+        "function:wasm_result_len",
+        "function:wasm_result_ptr"
+      ],
+      "linear_memory_mb_after_all_calls": 7.94,
+      "benchmarks": {
+        "chart": {
+          "median_ms": 0.828,
+          "charts_found": 2,
+          "diagrams_found": 1
+        },
+        "flat_forms": {
+          "median_ms": 0.432,
+          "fields_found": 6
+        },
+        "reflow_patch": {
+          "median_ms": 7.025,
+          "verified": true,
+          "patched_bytes_len": 2223
+        },
+        "cloak": {
+          "median_ms": 2.683,
+          "verified_zero_leaks": true,
+          "entities_cloaked": 4,
+          "replacements": 5
+        },
+        "history": {
+          "median_ms": 7.514,
+          "revision_count": 3,
+          "tampered": true,
+          "classifications": [
+            "initial",
+            "clean_incremental_fill",
+            "tampered_after_signature"
+          ]
+        },
+        "pipeline": {
+          "median_ms": 5.21,
+          "mutated": true,
+          "steps_completed": 4,
+          "audit_verified": true
+        }
+      }
+    }
+  },
+  "native_rust_engines_vs_pdf_oxide": {
+    "engine": "pdf_oxide 0.3.78 (native Rust crate, thin LTO) vs nupdf v2 (native Rust crate, thin LTO)",
+    "exp1_chart": {
+      "pdf_oxide_extract_median_ms": 0.308,
+      "pdf_oxide_span_count": 29,
+      "pdf_oxide_recovered_bar_42_37": false,
+      "pdf_oxide_recovered_bar_68_91": false,
+      "pdf_oxide_charts_api_exists": false,
+      "pdf_oxide_diagrams_api_exists": false,
+      "nupdf_chart_in_process_median_ms": 0.301,
+      "nupdf_charts_found": 2,
+      "nupdf_diagrams_found": 1,
+      "nupdf_report": {
+        "page_count": 3,
+        "charts": [
+          {
+            "id": "p1.chart1",
+            "page": 1,
+            "kind": "bar",
+            "title": "Quarterly Cloud Spend vs Revenue",
+            "bbox": [
+              58.0,
+              44.025001525878906,
+              536.527099609375,
+              318.989990234375
+            ],
+            "axis_r_squared": 1.0,
+            "series": [
+              {
+                "name": "Revenue",
+                "color": "#2e6bd1",
+                "points": [
+                  {
+                    "label": "Q1",
+                    "x_value": null,
+                    "value": 42.37,
+                    "bbox": [
+                      135.0,
+                      215.260009765625,
+                      159.0,
+                      300.0
+                    ]
+                  },
+                  {
+                    "label": "Q2",
+                    "x_value": null,
+                    "value": 68.91,
+                    "bbox": [
+                      230.0,
+                      162.17999267578125,
+                      254.0,
+                      300.0
+                    ]
+                  },
+                  {
+                    "label": "Q3",
+                    "x_value": null,
+                    "value": 81.25,
+                    "bbox": [
+                      325.0,
+                      137.5,
+                      349.0,
+                      300.0
+                    ]
+                  },
+                  {
+                    "label": "Q4",
+                    "x_value": null,
+                    "value": 94.6,
+                    "bbox": [
+                      420.0,
+                      110.79998779296875,
+                      444.0,
+                      300.0
+                    ]
+                  }
+                ]
+              },
+              {
+                "name": "CloudSpend",
+                "color": "#db5938",
+                "points": [
+                  {
+                    "label": "Q1",
+                    "x_value": null,
+                    "value": 19.45,
+                    "bbox": [
+                      163.0,
+                      261.0999755859375,
+                      187.0,
+                      300.0
+                    ]
+                  },
+                  {
+                    "label": "Q2",
+                    "x_value": null,
+                    "value": 27.8,
+                    "bbox": [
+                      258.0,
+                      244.4000244140625,
+                      282.0,
+                      300.0
+                    ]
+                  },
+                  {
+                    "label": "Q3",
+                    "x_value": null,
+                    "value": 31.15,
+                    "bbox": [
+                      353.0,
+                      237.70001220703125,
+                      377.0,
+                      300.0
+                    ]
+                  },
+                  {
+                    "label": "Q4",
+                    "x_value": null,
+                    "value": 35.9,
+                    "bbox": [
+                      448.0,
+                      228.20001220703125,
+                      472.0,
+                      300.0
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "p2.chart1",
+            "page": 2,
+            "kind": "line",
+            "title": "Net Retention Index",
+            "bbox": [
+              58.0,
+              102.0999984741211,
+              456.0039978027344,
+              358.6910095214844
+            ],
+            "axis_r_squared": 1.0,
+            "series": [
+              {
+                "name": "series_1",
+                "color": "#1f9e57",
+                "points": [
+                  {
+                    "label": "Jan",
+                    "x_value": null,
+                    "value": 31.5,
+                    "bbox": [
+                      148.0,
+                      275.0,
+                      152.0,
+                      279.0
+                    ]
+                  },
+                  {
+                    "label": "Feb",
+                    "x_value": null,
+                    "value": 54.0,
+                    "bbox": [
+                      248.0,
+                      230.0,
+                      252.0,
+                      234.0
+                    ]
+                  },
+                  {
+                    "label": "Mar",
+                    "x_value": null,
+                    "value": 62.5,
+                    "bbox": [
+                      348.0,
+                      213.0,
+                      352.0,
+                      217.0
+                    ]
+                  },
+                  {
+                    "label": "Apr",
+                    "x_value": null,
+                    "value": 88.0,
+                    "bbox": [
+                      448.0,
+                      162.0,
+                      452.0,
+                      166.0
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "diagrams": [
+          {
+            "id": "p3.diagram1",
+            "page": 3,
+            "bbox": [
+              70.0,
+              140.0,
+              555.0,
+              304.0
+            ],
+            "nodes": [
+              {
+                "id": "p3.n1",
+                "label": "Ingest PDF",
+                "bbox": [
+                  70.0,
+                  140.0,
+                  180.0,
+                  184.0
+                ]
+              },
+              {
+                "id": "p3.n2",
+                "label": "Attest Pixels",
+                "bbox": [
+                  250.0,
+                  140.0,
+                  370.0,
+                  184.0
+                ]
+              },
+              {
+                "id": "p3.n3",
+                "label": "Audit Claims",
+                "bbox": [
+                  440.0,
+                  200.0,
+                  555.0,
+                  244.0
+                ]
+              },
+              {
+                "id": "p3.n4",
+                "label": "Cloak PII",
+                "bbox": [
+                  250.0,
+                  260.0,
+                  370.0,
+                  304.0
+                ]
+              }
+            ],
+            "edges": [
+              {
+                "from": "p3.n1",
+                "to": "p3.n2",
+                "label": "valid",
+                "directed": true
+              },
+              {
+                "from": "p3.n2",
+                "to": "p3.n4",
+                "label": null,
+                "directed": true
+              },
+              {
+                "from": "p3.n4",
+                "to": "p3.n3",
+                "label": "clean",
+                "directed": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "exp2_flat_forms": {
+      "pdf_oxide_flat_fields_detected": 0,
+      "nupdf_detect_median_ms": 0.201,
+      "nupdf_flat_fields_detected": 6,
+      "nupdf_fill_ms": 1.8,
+      "nupdf_fill_verified": true,
+      "nupdf_comb_overflow_rejected": true,
+      "nupdf_promote_ms": 0.266,
+      "nupdf_promoted_widgets": 6,
+      "pdf_oxide_fields_after_nupdf_promote": 6,
+      "pdf_oxide_sees_acroform_after_nupdf_promote": true
+    },
+    "exp3_reflow": {
+      "pdf_oxide_edit_ms": 0.282,
+      "pdf_oxide_matched_hits": 1,
+      "pdf_oxide_max_line_x1_pt": 612.452,
+      "pdf_oxide_overflowed_612pt_page_right_edge": true,
+      "nupdf_reflow_median_ms": 6.209,
+      "nupdf_reflow_verified": true,
+      "nupdf_max_line_x1_pt": 539.093,
+      "nupdf_caught_45_line_page_overflow": true
+    },
+    "exp4_history": {
+      "pdf_oxide_revision_api_exists": false,
+      "pdf_oxide_signature_verify_api_exists": false,
+      "pdf_oxide_final_text_contains_tampered_90000": true,
+      "nupdf_history_median_ms": 6.144,
+      "nupdf_revision_count": 3,
+      "nupdf_tampered": true,
+      "nupdf_classifications": [
+        "initial",
+        "clean_incremental_fill",
+        "tampered_after_signature"
+      ],
+      "nupdf_rev3_hazards": [
+        "tamper.post_signature_content_edit",
+        "tamper.post_signature_visual_occlusion"
+      ]
+    },
+    "exp5_cloak": {
+      "nupdf_cloak_median_ms": 2.035,
+      "nupdf_uncloak_ms": 1.413,
+      "nupdf_verified_zero_leaks": true,
+      "nupdf_entities_cloaked": 6,
+      "nupdf_replacements": 12,
+      "nupdf_restored_replacements": 12,
+      "pdf_oxide_leaked_any_secret_in_cloaked_pdf": false,
+      "pdf_oxide_saw_coreference_token_person_01": true,
+      "pdf_oxide_saw_format_preserving_ssn": true,
+      "pdf_oxide_verified_all_secrets_restored_after_uncloak": true
+    },
+    "exp6_pipeline": {
+      "nupdf_5_step_pipeline_in_process_median_ms": 4.201,
+      "steps_completed": 5,
+      "mutated": true
+    }
+  }
+}

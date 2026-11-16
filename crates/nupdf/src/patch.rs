@@ -120,25 +120,25 @@ impl std::fmt::Display for PatchError {
 
 impl std::error::Error for PatchError {}
 
-/// Parsed 1-based content identifier for a line or span.
+/// Parsed 1-based content identifier for a block, line, or span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TargetAddr {
-    page: i32,
-    block: usize,
-    line: usize,
-    span: Option<usize>,
+pub(crate) struct TargetAddr {
+    pub(crate) page: i32,
+    pub(crate) block: usize,
+    pub(crate) line: Option<usize>,
+    pub(crate) span: Option<usize>,
 }
 
 impl TargetAddr {
-    fn parse(raw: &str) -> Result<TargetAddr, PatchError> {
+    pub(crate) fn parse(raw: &str) -> Result<TargetAddr, PatchError> {
         let bad = || PatchError {
             code: "usage.bad_id",
             message: format!(
-                "invalid target id {raw:?}: expected p<page>.b<block>.l<line>[.s<span>] with 1-based indices"
+                "invalid target id {raw:?}: expected p<page>.b<block>[.l<line>[.s<span>]] with 1-based indices"
             ),
         };
         let parts: Vec<&str> = raw.split('.').collect();
-        if parts.len() != 3 && parts.len() != 4 {
+        if !matches!(parts.len(), 2..=4) {
             return Err(bad());
         }
         let parse_pos = |part: &str, prefix: char| -> Option<usize> {
@@ -151,7 +151,10 @@ impl TargetAddr {
         let page_usize = parse_pos(parts[0], 'p').ok_or_else(bad)?;
         let page = i32::try_from(page_usize).map_err(|_| bad())?;
         let block = parse_pos(parts[1], 'b').ok_or_else(bad)?;
-        let line = parse_pos(parts[2], 'l').ok_or_else(bad)?;
+        let line = match parts.get(2) {
+            Some(l) => Some(parse_pos(l, 'l').ok_or_else(bad)?),
+            None => None,
+        };
         let span = match parts.get(3) {
             Some(s) => Some(parse_pos(s, 's').ok_or_else(bad)?),
             None => None,
@@ -164,12 +167,16 @@ impl TargetAddr {
         })
     }
 
-    fn overlaps(self, other: TargetAddr) -> bool {
-        if self.page != other.page || self.block != other.block || self.line != other.line {
+    pub(crate) fn overlaps(self, other: TargetAddr) -> bool {
+        if self.page != other.page || self.block != other.block {
             return false;
         }
-        match (self.span, other.span) {
-            (Some(a), Some(b)) => a == b,
+        match (self.line, other.line) {
+            (Some(l1), Some(l2)) if l1 != l2 => false,
+            (Some(_), Some(_)) => match (self.span, other.span) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            },
             _ => true,
         }
     }
@@ -177,12 +184,13 @@ impl TargetAddr {
     fn matches_span(self, page: i32, block: usize, line: usize, span: usize) -> bool {
         self.page == page
             && self.block == block
-            && self.line == line
-            && self.span.is_none_or(|s| s == span)
+            && self
+                .line
+                .is_none_or(|l| l == line && self.span.is_none_or(|s| s == span))
     }
 }
 
-fn parse_and_validate_specs(specs: &[PatchSpec]) -> Result<Vec<TargetAddr>, PatchError> {
+pub(crate) fn parse_and_validate_specs(specs: &[PatchSpec]) -> Result<Vec<TargetAddr>, PatchError> {
     let mut addrs = Vec::with_capacity(specs.len());
     for spec in specs {
         let addr = TargetAddr::parse(&spec.target_id)?;
@@ -218,7 +226,7 @@ pub fn overlapping_targets(specs: &[PatchSpec]) -> Result<Vec<Option<usize>>, Pa
 
 /// Union of non-synthetic character boxes in `chars`, falling back to `fallback`
 /// if every character in the slice is synthetic.
-fn ink_bbox(chars: &[StextChar], fallback: Rect) -> Rect {
+pub(crate) fn ink_bbox(chars: &[StextChar], fallback: Rect) -> Rect {
     let mut r = Rect::EMPTY;
     let mut any = false;
     for ch in chars {
@@ -233,7 +241,7 @@ fn ink_bbox(chars: &[StextChar], fallback: Rect) -> Rect {
 /// Trims leading and trailing gap-synthesized whitespace characters (`SYNTHETIC`)
 /// from a span slice so `old_text`, `old_bbox`, and erase quads cover only real
 /// glyphs drawn in that span.
-fn trim_synthetic_edges(chars: &[StextChar]) -> &[StextChar] {
+pub(crate) fn trim_synthetic_edges(chars: &[StextChar]) -> &[StextChar] {
     let mut start = 0usize;
     let mut end = chars.len();
     while start < end && chars[start].flags & char_flags::SYNTHETIC != 0 {
@@ -249,11 +257,11 @@ fn trim_synthetic_edges(chars: &[StextChar]) -> &[StextChar] {
     }
 }
 
-fn rect_array(r: Rect) -> [f32; 4] {
+pub(crate) fn rect_array(r: Rect) -> [f32; 4] {
     [r.x0, r.y0, r.x1, r.y1]
 }
 
-fn rect_from_array(a: [f32; 4]) -> Rect {
+pub(crate) fn rect_from_array(a: [f32; 4]) -> Rect {
     Rect::new(a[0], a[1], a[2], a[3])
 }
 
@@ -351,7 +359,7 @@ struct ResolvedTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum CjkLang {
+pub(crate) enum CjkLang {
     Japan,
     Korea,
     Hans,
@@ -365,7 +373,7 @@ enum Family {
     Mono,
 }
 
-fn strip_subset_prefix(name: &[u8]) -> (&[u8], bool) {
+pub(crate) fn strip_subset_prefix(name: &[u8]) -> (&[u8], bool) {
     if name.len() > 7 && name[..6].iter().all(u8::is_ascii_uppercase) && name[6] == b'+' {
         (&name[7..], true)
     } else {
@@ -373,7 +381,7 @@ fn strip_subset_prefix(name: &[u8]) -> (&[u8], bool) {
     }
 }
 
-fn guess_cjk_lang(font_name: &[u8]) -> CjkLang {
+pub(crate) fn guess_cjk_lang(font_name: &[u8]) -> CjkLang {
     let lower = String::from_utf8_lossy(font_name).to_ascii_lowercase();
     if [
         "simfang",
@@ -430,7 +438,7 @@ fn guess_cjk_lang(font_name: &[u8]) -> CjkLang {
 /// Maps the original span's `Style` to the closest standard Base-14 PostScript
 /// font name, preserving family (`Times` / `Courier` / `Helvetica`), bold, and
 /// italic/oblique posture.
-fn match_base14(style: &Style) -> &'static str {
+pub(crate) fn match_base14(style: &Style) -> &'static str {
     let (stripped, _) = strip_subset_prefix(&style.font);
     let lower = String::from_utf8_lossy(stripped).to_ascii_lowercase();
 
@@ -501,7 +509,11 @@ fn match_base14(style: &Style) -> &'static str {
 /// Checks whether `page_obj`'s `/Resources /Font` already contains a non-embedded
 /// simple Base-14 font matching `base14_name` with a standard encoding (not a
 /// subsetted or custom-encoded font).
-fn page_has_matching_base14(doc: &Document, page_obj: &Object, base14_name: &str) -> bool {
+pub(crate) fn page_has_matching_base14(
+    doc: &Document,
+    page_obj: &Object,
+    base14_name: &str,
+) -> bool {
     let Ok(Some(res_raw)) = doc.inherited(page_obj, b"Resources") else {
         return false;
     };
@@ -621,7 +633,7 @@ impl Hooks for SpanEraser {
 
 /// Font encoding variant used for a run of replacement characters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum FontKey {
+pub(crate) enum FontKey {
     WinAnsi(&'static str),
     Greek(&'static str),
     Cyrillic(&'static str),
@@ -633,7 +645,7 @@ enum FontKey {
 }
 
 impl FontKey {
-    fn display_name(&self) -> &'static str {
+    pub(crate) fn display_name(&self) -> &'static str {
         match self {
             FontKey::WinAnsi(b) | FontKey::Greek(b) | FontKey::Cyrillic(b) => b,
             FontKey::CustomDiff { base, .. } => base,
@@ -646,7 +658,7 @@ impl FontKey {
 }
 
 #[derive(Debug, Clone)]
-enum EncodedRun {
+pub(crate) enum EncodedRun {
     Byte { key: FontKey, bytes: Vec<u8> },
     Utf16 { key: FontKey, units: Vec<u16> },
 }
@@ -694,7 +706,7 @@ fn find_agl_glyph(base_name: &'static str, u: i32) -> Option<(&'static str, &'st
 /// Splits `text` into encoded runs using `base_name` (WinAnsi, ISO-8859-7,
 /// KOI8-U, custom AGL `/Differences`, or CJK UTF-16 Type0), returning the runs
 /// and whether all characters fit in plain `WinAnsiEncoding` of `base_name`.
-fn encode_replacement_runs(
+pub(crate) fn encode_replacement_runs(
     text: &str,
     base_name: &'static str,
     cjk_lang: CjkLang,
@@ -861,6 +873,71 @@ fn encode_replacement_runs(
     (runs, pure_winansi)
 }
 
+/// Measures the exact horizontal advance width in ems of `runs` using the same
+/// Base-14/Differences/CJK font metrics written by [`add_font_object`].
+pub(crate) fn measure_runs_advance_em(runs: &[EncodedRun]) -> f32 {
+    let mut total_em = 0.0_f32;
+    for run in runs {
+        match run {
+            EncodedRun::Byte { key, bytes } => {
+                let (base, table_kind) = match key {
+                    FontKey::WinAnsi(b) => (*b, 0u8),
+                    FontKey::Greek(b) => (*b, 1u8),
+                    FontKey::Cyrillic(b) => (*b, 2u8),
+                    FontKey::CustomDiff { base, .. } => (*base, 3u8),
+                    FontKey::Cjk(_) => ("Helvetica", 0u8),
+                };
+                if let Some(font) = fontdesc::base14_font(base) {
+                    for &b in bytes {
+                        let idx = usize::from(b);
+                        let gname = match table_kind {
+                            0 => tables::WIN_ANSI.get(idx).copied().flatten(),
+                            1 => tables::ISO8859_7.get(idx).copied().flatten(),
+                            2 => tables::KOI8U.get(idx).copied().flatten(),
+                            _ => {
+                                if let FontKey::CustomDiff { glyphs, .. } = key
+                                    && b >= 128
+                                {
+                                    glyphs
+                                        .get(usize::from(b - 128))
+                                        .copied()
+                                        .or_else(|| tables::WIN_ANSI.get(idx).copied().flatten())
+                                } else {
+                                    tables::WIN_ANSI.get(idx).copied().flatten()
+                                }
+                            }
+                        };
+                        let gid = gname.map_or(0, |n| encode_by_glyph_name(&font, n));
+                        let adv = if gid > 0 {
+                            fontdesc::advance_glyph(&font, gid, 0)
+                        } else {
+                            0.5
+                        };
+                        total_em += adv;
+                    }
+                } else {
+                    total_em += bytes.len() as f32 * 0.55;
+                }
+            }
+            EncodedRun::Utf16 { units, .. } => {
+                let char_count = char::decode_utf16(units.iter().copied()).count();
+                total_em += char_count as f32;
+            }
+        }
+    }
+    total_em
+}
+
+/// Returns `(ascender_em, descender_em)` for `base14_name` matching `stext`
+/// line bounding-box construction (`descender_em` is negative, e.g. `-0.207`).
+pub(crate) fn font_vertical_metrics_em(base14_name: &str) -> (f32, f32) {
+    if let Some(font) = fontdesc::base14_font(base14_name) {
+        (font.ascender, font.descender)
+    } else {
+        (0.8, -0.2)
+    }
+}
+
 fn reference(num: i32) -> Object {
     Object::Ref(ObjRef::new(num, 0))
 }
@@ -931,7 +1008,11 @@ fn identity_utf16_tounicode() -> Vec<u8> {
     s.into_bytes()
 }
 
-fn add_font_object(doc: &Document, key: &FontKey, tounicode_ref: &mut Option<i32>) -> i32 {
+pub(crate) fn add_font_object(
+    doc: &Document,
+    key: &FontKey,
+    tounicode_ref: &mut Option<i32>,
+) -> i32 {
     match key {
         FontKey::WinAnsi(base) => {
             let mut d = Dict::new();
@@ -1023,11 +1104,11 @@ fn add_font_object(doc: &Document, key: &FontKey, tounicode_ref: &mut Option<i32
     }
 }
 
-fn push_float(out: &mut Vec<u8>, v: f32) {
+pub(crate) fn push_float(out: &mut Vec<u8>, v: f32) {
     crate::print::fmtfloat(v, out);
 }
 
-fn push_pdf_literal(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn push_pdf_literal(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(b'(');
     for &b in bytes {
         match b {
@@ -1045,7 +1126,7 @@ fn push_pdf_literal(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(b')');
 }
 
-fn push_pdf_hex_utf16(out: &mut Vec<u8>, units: &[u16]) {
+pub(crate) fn push_pdf_hex_utf16(out: &mut Vec<u8>, units: &[u16]) {
     out.push(b'<');
     for &u in units {
         let hex = format!("{u:04X}");
@@ -1057,7 +1138,7 @@ fn push_pdf_hex_utf16(out: &mut Vec<u8>, units: &[u16]) {
 /// Computes the PDF `Tm` matrix mapping text space (`y` up) to PDF user space
 /// for a baseline starting at `origin` along direction `dir` in page space
 /// (`y` down).
-fn baseline_text_matrix(origin: Point, dir: Point, page_ctm: Matrix) -> Matrix {
+pub(crate) fn baseline_text_matrix(origin: Point, dir: Point, page_ctm: Matrix) -> Matrix {
     let d = if dir.x == 0.0 && dir.y == 0.0 {
         Point::new(1.0, 0.0)
     } else {
@@ -1074,7 +1155,7 @@ fn baseline_text_matrix(origin: Point, dir: Point, page_ctm: Matrix) -> Matrix {
     glyph_to_page.concat(page_ctm.invert())
 }
 
-fn next_unique_font_res_name(fonts: &Dict, counter: &mut usize) -> Vec<u8> {
+pub(crate) fn next_unique_font_res_name(fonts: &Dict, counter: &mut usize) -> Vec<u8> {
     loop {
         let cand = format!("FPat{}", *counter).into_bytes();
         *counter += 1;
@@ -1087,7 +1168,7 @@ fn next_unique_font_res_name(fonts: &Dict, counter: &mut usize) -> Vec<u8> {
 /// Appends `layer` to page `index` with balanced `q`/`Q` wrappers around the
 /// existing contents (matching [`crate::ocr::add_layer`]), registering `new_fonts`
 /// in the page's `/Resources /Font`.
-fn append_patch_layer(
+pub(crate) fn append_patch_layer(
     doc: &Document,
     index: i32,
     new_fonts: &[(Vec<u8>, i32)],
@@ -1144,11 +1225,30 @@ fn append_patch_layer(
 
 /// Applies surgical in-place text patches onto `doc`'s copy-on-write edit
 /// overlay without touching unrelated glyphs, vector graphics, or images.
+/// Block-level content IDs (`p<page>.b<block>`) automatically delegate to
+/// [`crate::reflow::apply_reflow`].
 pub fn apply_patches(
     doc: &Document,
     specs: &[PatchSpec],
-    _options: &PatchOptions,
+    options: &PatchOptions,
 ) -> Result<Vec<AppliedPatch>, PatchError> {
+    apply_patches_with_reflow(doc, specs, options, false)
+}
+
+/// Applies text patches onto `doc`, using block-scoped paragraph reflow and
+/// downstream vertical shifting whenever `reflow` is `true` or any target ID
+/// addresses a whole block (`p<page>.b<block>`).
+pub fn apply_patches_with_reflow(
+    doc: &Document,
+    specs: &[PatchSpec],
+    options: &PatchOptions,
+    reflow: bool,
+) -> Result<Vec<AppliedPatch>, PatchError> {
+    let addrs = parse_and_validate_specs(specs)?;
+    if reflow || addrs.iter().any(|a| a.line.is_none()) {
+        let reflowed = crate::reflow::apply_reflow(doc, specs, options)?;
+        return Ok(reflowed.into_iter().map(Into::into).collect());
+    }
     let resolved = resolve_patches(doc, specs)?;
     Ok(apply_resolved(doc, resolved)?.0)
 }
@@ -1186,6 +1286,17 @@ pub fn resolve_patches(doc: &Document, specs: &[PatchSpec]) -> Result<ResolvedPa
         return Ok(ResolvedPatches {
             count: 0,
             by_page: BTreeMap::new(),
+        });
+    }
+    // A block is replaced by reflowing it, which moves what is below it: that
+    // is not a target that stays where it was found.
+    if let Some(i) = addrs.iter().position(|a| a.line.is_none()) {
+        return Err(PatchError {
+            code: "usage.block_target",
+            message: format!(
+                "target {:?} is a block: replace a line or span here, or reflow the block with `patch --reflow`",
+                specs[i].target_id
+            ),
         });
     }
 
@@ -1243,7 +1354,10 @@ pub fn resolve_patches(doc: &Document, specs: &[PatchSpec]) -> Result<ResolvedPa
             let Some(Block::Text(tb)) = stext_page.blocks.get(addr.block - 1) else {
                 return Err(not_found());
             };
-            let Some(line) = tb.lines.get(addr.line - 1) else {
+            let Some(line_num) = addr.line else {
+                return Err(not_found());
+            };
+            let Some(line) = tb.lines.get(line_num - 1) else {
                 return Err(not_found());
             };
             let line_spans = extract::spans(line);
@@ -1570,7 +1684,7 @@ fn overlaps_deeper(a: Rect, a_old: Rect, b: Rect, b_old: Rect) -> bool {
 
 /// Normalizes whitespace runs to single `' '` for resilient comparison across
 /// `stext` synthetic space inference.
-fn normalize_ws(s: &str) -> String {
+pub(crate) fn normalize_ws(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_ws = false;
     for ch in s.trim().chars() {
@@ -1973,7 +2087,8 @@ pub fn verify_patched_bytes(
 
 /// Snapshots untouched spans on affected pages, applies `specs` onto `doc`,
 /// serializes the updated document with `write_opts`, and runs
-/// [`verify_patched_bytes`] on the serialized bytes.
+/// [`verify_patched_bytes`] on the serialized bytes. Block-level content IDs
+/// (`p<page>.b<block>`) automatically delegate to [`crate::reflow::reflow_and_verify`].
 pub fn patch_and_verify(
     doc: &Document,
     specs: &[PatchSpec],
@@ -1981,6 +2096,33 @@ pub fn patch_and_verify(
     write_opts: &WriteOptions,
     password: Option<&str>,
 ) -> Result<(Vec<u8>, PatchResult), PatchError> {
+    patch_and_verify_with_reflow(doc, specs, options, false, write_opts, password)
+}
+
+/// Applies `specs` onto `doc`, serializes, and self-verifies. When `reflow` is
+/// `true` or any target ID addresses a whole block (`p<page>.b<block>`), wraps
+/// lines to the column width and vertically shifts downstream page content via
+/// [`crate::reflow::reflow_and_verify`].
+pub fn patch_and_verify_with_reflow(
+    doc: &Document,
+    specs: &[PatchSpec],
+    options: &PatchOptions,
+    reflow: bool,
+    write_opts: &WriteOptions,
+    password: Option<&str>,
+) -> Result<(Vec<u8>, PatchResult), PatchError> {
+    let addrs = parse_and_validate_specs(specs)?;
+    if reflow || addrs.iter().any(|a| a.line.is_none()) {
+        let (bytes, res) =
+            crate::reflow::reflow_and_verify(doc, specs, options, write_opts, password)?;
+        return Ok((
+            bytes,
+            PatchResult {
+                patches: res.patches,
+                verification: res.verification,
+            },
+        ));
+    }
     let untouched = snapshot_untouched_spans(doc, specs)?;
     let mut applied = apply_patches(doc, specs, options)?;
     let mut effective_write = write_opts.clone();

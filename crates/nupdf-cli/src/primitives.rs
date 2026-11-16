@@ -1,22 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 hum
 
-//! Agent-native PDF primitives: `attest`, `patch`, `apply`, `query`, and `audit`.
+//! Agent-native PDF primitives: `attest`, `patch`, `apply`, `query`, `audit`,
+//! `chart`, `flat-forms`, `history`, `cloak`, `uncloak`, and `pipeline`.
 
 use std::path::{Path, PathBuf};
 
-use nupdf::Document;
 use nupdf::attest::{self, AttestOptions};
 use nupdf::audit::{self, ClaimInput};
+use nupdf::chart;
+use nupdf::cloak::{self, CloakTarget, CloakVault};
+use nupdf::flat_form::{self, FlatFillOp};
+use nupdf::history::{self, HistoryOptions};
 use nupdf::patch::{self, PatchOptions, PatchSpec};
+use nupdf::pipeline;
 use nupdf::plan::{self, EditPlan};
 use nupdf::query::{self, Aggregation, QuerySpec};
+use nupdf::{DocId, Document};
 use serde_json::{Map, Value, json};
 
 use super::commands::WriteArgs;
 use super::{
     Clean, Exit, Failure, FileFacts, diagnostics, emit, output_dir, report, save_verified,
-    standard_output, write_file, write_verified,
+    standard_output, write_atomically, write_file, write_verified,
 };
 
 type OpenFn<'a> = &'a (dyn Fn(&Path) -> Result<(Document, FileFacts), Failure> + Sync);
@@ -124,13 +130,14 @@ pub fn attest_cmd(
     Ok(report("nupdf.attest/v1", facts, doc, body))
 }
 
-/// `patch`: verified surgical text replacement by content ID.
+/// `patch`: verified surgical text replacement by content ID (with optional block reflow).
 #[allow(clippy::too_many_arguments)]
 pub fn patch_cmd(
     doc: &Document,
     facts: &FileFacts,
     replace: &[String],
     strict_font: bool,
+    reflow: bool,
     no_collision_check: bool,
     no_overflow_check: bool,
     write: &WriteArgs,
@@ -178,12 +185,24 @@ pub fn patch_cmd(
     // writer's are, then checked as patches, before anything is written.
     let work = doc.fork_clean();
     nupdf::write::check_document(&work);
-    let untouched = if plan.verify {
-        patch::snapshot_untouched_spans(&work, &specs).map_err(map_patch_error)?
+    // A block id, or --reflow, wraps the replacement to the column and moves
+    // what is below it; a line or span id is replaced where it is.
+    let reflowing = reflow
+        || specs
+            .iter()
+            .any(|s| nupdf::reflow::is_block_target_id(&s.target_id));
+    let mut reflows = Vec::new();
+    let mut untouched = Default::default();
+    let mut patches: Vec<patch::AppliedPatch> = if reflowing {
+        reflows =
+            nupdf::reflow::apply_reflow(&work, &specs, &patch_opts).map_err(map_patch_error)?;
+        reflows.iter().cloned().map(Into::into).collect()
     } else {
-        Default::default()
+        if plan.verify {
+            untouched = patch::snapshot_untouched_spans(&work, &specs).map_err(map_patch_error)?;
+        }
+        patch::apply_patches(&work, &specs, &patch_opts).map_err(map_patch_error)?
     };
-    let mut patches = patch::apply_patches(&work, &specs, &patch_opts).map_err(map_patch_error)?;
     let mut options = plan.options.clone();
     if !options.incremental {
         options.garbage = options.garbage.max(1);
@@ -197,13 +216,19 @@ pub fn patch_cmd(
         pages: None,
     };
     let (bytes, written) = save_verified(&work, &save_plan, None)?;
-    let verification = if plan.verify {
+    let verification = if !plan.verify {
+        None
+    } else if reflowing {
+        let checked =
+            nupdf::reflow::verify_reflowed_bytes(&bytes, password, &mut reflows, &patch_opts)
+                .map_err(map_patch_error)?;
+        patches = reflows.iter().cloned().map(Into::into).collect();
+        Some(checked)
+    } else {
         Some(
             patch::verify_patched_bytes(&bytes, password, &mut patches, &untouched, &patch_opts)
                 .map_err(map_patch_error)?,
         )
-    } else {
-        None
     };
 
     if let Some(v) = &verification
@@ -753,5 +778,752 @@ fn parse_claims_payload(raw: &str) -> Result<Vec<ClaimInput>, Failure> {
             "usage.bad_value",
             "claims file must be a JSON array or {\"claims\": [...]}".into(),
         )),
+    }
+}
+
+/// `chart`: deterministic vector bar, horizontal-bar, line chart & diagram decompiler.
+pub fn chart_cmd(doc: &Document, facts: &FileFacts, pages: Option<&str>) -> Result<Value, Failure> {
+    let rep =
+        chart::decompile_charts(doc, pages).map_err(|msg| input_err("input.page_tree", msg))?;
+    let body = serde_json::to_value(&rep).map_err(|e| Failure {
+        exit: Exit::Internal,
+        code: "internal.serialize",
+        message: e.to_string(),
+    })?;
+    Ok(report("nupdf.chart/v1", facts, doc, body))
+}
+
+/// `flat-forms`: flat vector field discovery, verified filling, and `/AcroForm` promotion.
+#[allow(clippy::too_many_arguments)]
+pub fn flat_forms_cmd(
+    doc: &Document,
+    facts: &FileFacts,
+    pages: Option<&str>,
+    set: &[String],
+    check: &[String],
+    uncheck: &[String],
+    promote: bool,
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<Value, Failure> {
+    let has_fills = !set.is_empty() || !check.is_empty() || !uncheck.is_empty();
+    if has_fills && promote {
+        return Err(usage(
+            "usage.bad_option",
+            "cannot combine --promote with --set/--check/--uncheck in the same call".into(),
+        ));
+    }
+
+    if !has_fills && !promote {
+        let rep = flat_form::detect_flat_forms(doc, pages)
+            .map_err(|msg| input_err("input.page_tree", msg))?;
+        let body = json!({
+            "mode": "detect",
+            "applied": false,
+            "page_count": rep.page_count,
+            "fields": rep.fields,
+            "promoted_widgets": 0usize,
+            "applied_fills": [],
+            "verified": Value::Null,
+            "output": Value::Null,
+        });
+        return Ok(report("nupdf.flat_forms/v1", facts, doc, body));
+    }
+
+    let plan: Clean<'_> = write.plan(nupdf::write::WriteOptions::default(), password)?;
+    if doc.needs_password() && password.is_none() {
+        return Err(input_failure_password());
+    }
+
+    // Made on a fork, saved, read back as every writer's output is, then
+    // checked as fills or widgets, before anything is written.
+    if promote {
+        let staged = flat_form::stage_flat_promote(doc).map_err(map_flat_form_error)?;
+        let (bytes, written) = save_verified(&staged.work, &plan, None)?;
+        let rep = staged
+            .finish(&bytes, password)
+            .map_err(map_flat_form_error)?;
+        let (output, _) = write_verified(&staged.work, &plan, &bytes, written)?;
+        let body = json!({
+            "mode": "promote",
+            "applied": plan.apply,
+            "page_count": rep.page_count,
+            "fields": rep.fields,
+            "promoted_widgets": rep.promoted_widgets,
+            "applied_fills": [],
+            "verified": true,
+            "output": output,
+        });
+        return Ok(report("nupdf.flat_forms/v1", facts, &staged.work, body));
+    }
+
+    let mut ops = Vec::with_capacity(set.len() + check.len() + uncheck.len());
+    for entry in set {
+        let Some((target, value)) = entry.split_once('=') else {
+            return Err(usage(
+                "usage.bad_value",
+                format!("--set takes TARGET=VALUE, got {entry:?}"),
+            ));
+        };
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(usage(
+                "usage.bad_value",
+                format!("--set needs a non-empty field target, got {entry:?}"),
+            ));
+        }
+        ops.push(FlatFillOp::SetText {
+            target: target.to_string(),
+            value: value.to_string(),
+        });
+    }
+    for target in check {
+        ops.push(FlatFillOp::SetCheck {
+            target: target.trim().to_string(),
+            checked: true,
+        });
+    }
+    for target in uncheck {
+        ops.push(FlatFillOp::SetCheck {
+            target: target.trim().to_string(),
+            checked: false,
+        });
+    }
+
+    let staged = flat_form::stage_flat_fill(doc, &ops).map_err(map_flat_form_error)?;
+    let (bytes, written) = save_verified(&staged.work, &plan, None)?;
+    let fill_rep = staged
+        .finish(&bytes, password)
+        .map_err(map_flat_form_error)?;
+    // The fields as written: detected on the output, not the input.
+    let filled = Document::open_with(bytes.clone(), doc.limits())
+        .map_err(|e| input_err(e.code, e.message))?;
+    if filled.needs_password()
+        && let Some(pw) = password
+    {
+        let _ = filled.authenticate(pw);
+    }
+    let detected = flat_form::detect_flat_forms(&filled, pages)
+        .map_err(|msg| input_err("input.page_tree", msg))?;
+    let (output, _) = write_verified(&staged.work, &plan, &bytes, written)?;
+    let body = json!({
+        "mode": "fill",
+        "applied": plan.apply,
+        "page_count": detected.page_count,
+        "fields": detected.fields,
+        "promoted_widgets": 0usize,
+        "applied_fills": fill_rep.applied,
+        "verified": fill_rep.verified,
+        "output": output,
+    });
+    Ok(report("nupdf.flat_forms/v1", facts, &staged.work, body))
+}
+
+fn map_flat_form_error(e: flat_form::FlatFormError) -> Failure {
+    let exit = if e.code.starts_with("usage.") {
+        Exit::Usage
+    } else if e.code.starts_with("limit.") {
+        Exit::Limit
+    } else if e.code.starts_with("verify.") {
+        Exit::Verify
+    } else {
+        Exit::Input
+    };
+    Failure {
+        exit,
+        code: e.code,
+        message: e.message,
+    }
+}
+
+/// `history`: temporal xref time-travel, revision diffing, and post-signature tamper forensics.
+pub fn history_cmd(
+    doc: &Document,
+    facts: &FileFacts,
+    run_attest: bool,
+    extract_revision: Option<usize>,
+    output: Option<&Path>,
+    strict: bool,
+    pretty: bool,
+) -> Result<Value, Failure> {
+    if extract_revision.is_none() && output.is_some() {
+        return Err(usage(
+            "usage.bad_option",
+            "--output requires --extract-revision REV".into(),
+        ));
+    }
+    if extract_revision.is_some() && output.is_none() {
+        return Err(usage(
+            "usage.missing_output",
+            "--extract-revision REV requires -o / --output FILE".into(),
+        ));
+    }
+
+    let mut extracted_output: Option<Value> = None;
+    if let (Some(rev), Some(path)) = (extract_revision, output) {
+        let Ok(slice) = doc.revision_bytes(rev) else {
+            let max_rev = doc.revision_byte_ends().len().max(1);
+            return Err(usage(
+                "usage.bad_value",
+                format!("revision {rev} out of range (document has 1..={max_rev})"),
+            ));
+        };
+        write_atomically(path, slice).map_err(|e| {
+            input_err(
+                "output.unwritable",
+                format!("cannot write {}: {e}", path.display()),
+            )
+        })?;
+        let hash = blake3::hash(slice);
+        extracted_output = Some(json!({
+            "path": path.display().to_string(),
+            "revision": rev,
+            "doc_id": DocId::from_hash(&hash).to_string(),
+            "len": slice.len(),
+            "blake3": hash.to_hex().to_string(),
+        }));
+    }
+
+    let rep = history::inspect_history(doc, &HistoryOptions { run_attest })
+        .map_err(|msg| input_err("input.page_tree", msg))?;
+    let tampered = rep.tampered;
+    let body = json!({
+        "revision_count": rep.revision_count,
+        "repaired": rep.repaired,
+        "tampered": rep.tampered,
+        "extracted_revision": extract_revision,
+        "extracted_output": extracted_output,
+        "revisions": rep.revisions,
+    });
+    let out = report("nupdf.history/v1", facts, doc, body);
+    if strict && tampered {
+        emit(&mut standard_output(), &out, pretty);
+        return Err(Failure {
+            exit: Exit::Verify,
+            code: "tamper.detected",
+            message: "one or more revisions tampered with content or visual rendering after a valid signature".into(),
+        });
+    }
+    Ok(out)
+}
+
+/// `cloak`: reversible format-preserving PII cloaking with zero-leak verification.
+#[allow(clippy::too_many_arguments)]
+pub fn cloak_cmd(
+    doc: &Document,
+    facts: &FileFacts,
+    vault_path: &Path,
+    presets: &[String],
+    entities: &[String],
+    regexes: &[String],
+    write: &WriteArgs,
+    password: Option<&str>,
+) -> Result<Value, Failure> {
+    if presets.is_empty() && entities.is_empty() && regexes.is_empty() {
+        return Err(usage(
+            "usage.bad_option",
+            "nothing to cloak: pass --preset, --entity CATEGORY=SECRET, or --regex CATEGORY=PATTERN"
+                .into(),
+        ));
+    }
+
+    let plan: Clean<'_> = write.plan(nupdf::write::WriteOptions::default(), password)?;
+    if doc.needs_password() && password.is_none() {
+        return Err(input_failure_password());
+    }
+
+    let mut targets = Vec::with_capacity(presets.len() + entities.len() + regexes.len());
+    for p in presets {
+        targets.push(CloakTarget::Preset(p.clone()));
+    }
+    for entry in entities {
+        let Some((cat, secret)) = entry.split_once('=') else {
+            return Err(usage(
+                "usage.bad_value",
+                format!("--entity takes CATEGORY=SECRET, got {entry:?}"),
+            ));
+        };
+        if secret.is_empty() {
+            return Err(usage(
+                "usage.bad_value",
+                format!("--entity secret must not be empty, got {entry:?}"),
+            ));
+        }
+        targets.push(CloakTarget::Literal {
+            category: cat.to_string(),
+            secret: secret.to_string(),
+        });
+    }
+    for entry in regexes {
+        let Some((cat, pat)) = entry.split_once('=') else {
+            return Err(usage(
+                "usage.bad_value",
+                format!("--regex takes CATEGORY=PATTERN, got {entry:?}"),
+            ));
+        };
+        targets.push(CloakTarget::Regex {
+            category: cat.to_string(),
+            pattern: pat.to_string(),
+        });
+    }
+
+    // Rewritten on a fork, saved, read back as every writer's output is,
+    // then checked for leaks, before anything is written.
+    let staged = cloak::stage_cloak(doc, &targets, &plan.options).map_err(map_cloak_error)?;
+    let save_plan = Clean {
+        options: staged.write_options.clone(),
+        ..plan
+    };
+    let (bytes, written) = save_verified(&staged.work, &save_plan, None)?;
+    let (vault, rep) = staged.finish(&bytes, password).map_err(map_cloak_error)?;
+
+    if save_plan.apply {
+        let vault_json = serde_json::to_vec_pretty(&vault).map_err(|e| Failure {
+            exit: Exit::Internal,
+            code: "internal.serialize",
+            message: e.to_string(),
+        })?;
+        write_atomically(vault_path, &vault_json).map_err(|e| {
+            input_err(
+                "output.unwritable",
+                format!("cannot write vault {}: {e}", vault_path.display()),
+            )
+        })?;
+    }
+    let (output, _) = write_verified(&staged.work, &save_plan, &bytes, written)?;
+    let body = json!({
+        "applied": plan.apply,
+        "vault_path": vault_path.display().to_string(),
+        "original_doc_id": rep.original_doc_id,
+        "cloaked_doc_id": rep.cloaked_doc_id,
+        "replacements": rep.replacements,
+        "entities_cloaked": rep.entities_cloaked,
+        "verified_zero_leaks": rep.verified_zero_leaks,
+        "token_preview": rep.token_preview,
+        "output": output,
+    });
+    Ok(report("nupdf.cloak/v1", facts, &staged.work, body))
+}
+
+/// `uncloak`: deterministic restoration of synthetic tokens in PDFs or UTF-8 text/JSON.
+pub fn uncloak_cmd(
+    file: &Path,
+    vault_path: &Path,
+    text_mode: bool,
+    write: &WriteArgs,
+    password: Option<&str>,
+    open: OpenFn<'_>,
+) -> Result<Value, Failure> {
+    let plan: Clean<'_> = write.plan(nupdf::write::WriteOptions::default(), password)?;
+    let vault_raw = std::fs::read_to_string(vault_path).map_err(|e| {
+        input_err(
+            "input.unreadable",
+            format!("cannot read vault {}: {e}", vault_path.display()),
+        )
+    })?;
+    let vault: CloakVault = serde_json::from_str(&vault_raw).map_err(|e| {
+        usage(
+            "usage.bad_value",
+            format!("invalid cloak vault {}: {e}", vault_path.display()),
+        )
+    })?;
+
+    if text_mode {
+        let input_text = std::fs::read_to_string(file).map_err(|e| {
+            input_err(
+                "input.unreadable",
+                format!("cannot read text file {}: {e}", file.display()),
+            )
+        })?;
+        let (restored_text, replacements) = cloak::uncloak_text(&input_text, &vault);
+        let bytes = restored_text.as_bytes();
+        if plan.apply
+            && let Some(path) = plan.output
+        {
+            write_atomically(path, bytes).map_err(|e| {
+                input_err(
+                    "output.unwritable",
+                    format!("cannot write {}: {e}", path.display()),
+                )
+            })?;
+        }
+        let hash = blake3::hash(bytes);
+        let entities_restored = vault
+            .entries
+            .iter()
+            .filter(|e| !e.token.is_empty() && input_text.contains(&e.token))
+            .count();
+        return Ok(json!({
+            "schema": "nupdf.uncloak/v1",
+            "doc_id": Value::Null,
+            "mode": "text",
+            "applied": plan.apply,
+            "original_doc_id": vault.original_doc_id,
+            "cloaked_doc_id": vault.cloaked_doc_id,
+            "restored_doc_id": Value::Null,
+            "replacements": replacements,
+            "entities_restored": entities_restored,
+            "output": {
+                "path": plan.output.map(|p| p.display().to_string()),
+                "doc_id": DocId::from_hash(&hash).to_string(),
+                "len": bytes.len(),
+                "blake3": hash.to_hex().to_string(),
+            },
+            "diagnostics": [],
+        }));
+    }
+
+    let (doc, facts) = open(file)?;
+    if doc.needs_password() && password.is_none() {
+        return Err(input_failure_password());
+    }
+    let staged = cloak::stage_uncloak(&doc, &vault, &plan.options).map_err(map_cloak_error)?;
+    let save_plan = Clean {
+        options: staged.write_options.clone(),
+        ..plan
+    };
+    let (bytes, written) = save_verified(&staged.work, &save_plan, None)?;
+    let rep = staged.finish(&bytes);
+    let (output, _) = write_verified(&staged.work, &save_plan, &bytes, written)?;
+    let body = json!({
+        "mode": "pdf",
+        "applied": plan.apply,
+        "original_doc_id": rep.original_doc_id,
+        "cloaked_doc_id": rep.cloaked_doc_id,
+        "restored_doc_id": rep.restored_doc_id,
+        "replacements": rep.replacements,
+        "entities_restored": rep.entities_restored,
+        "output": output,
+    });
+    Ok(report("nupdf.uncloak/v1", &facts, &staged.work, body))
+}
+
+fn map_cloak_error(e: cloak::CloakError) -> Failure {
+    let exit = if e.code.starts_with("usage.") {
+        Exit::Usage
+    } else if e.code.starts_with("verify.") {
+        Exit::Verify
+    } else {
+        Exit::Input
+    };
+    Failure {
+        exit,
+        code: e.code,
+        message: e.message,
+    }
+}
+
+/// `pipeline`: single-call in-memory compound agent workflow engine.
+#[allow(clippy::too_many_arguments)]
+pub fn pipeline_cmd(
+    doc: &Document,
+    facts: &FileFacts,
+    spec_file: Option<&Path>,
+    inline_spec: Option<&str>,
+    compact: bool,
+    write: &WriteArgs,
+    password: Option<&str>,
+    pretty: bool,
+) -> Result<Value, Failure> {
+    let raw = match (spec_file, inline_spec) {
+        (Some(_), Some(_)) => {
+            return Err(usage(
+                "usage.bad_option",
+                "pass either --spec FILE or --inline JSON, not both".into(),
+            ));
+        }
+        (None, None) => {
+            return Err(usage(
+                "usage.bad_option",
+                "nothing to run: pass --spec FILE or --inline JSON".into(),
+            ));
+        }
+        (Some(path), None) => std::fs::read_to_string(path).map_err(|e| {
+            input_err(
+                "input.unreadable",
+                format!("cannot read {}: {e}", path.display()),
+            )
+        })?,
+        (None, Some(s)) => s.to_string(),
+    };
+
+    if doc.needs_password() && password.is_none() {
+        return Err(input_failure_password());
+    }
+
+    let mut spec = pipeline::parse_pipeline_spec(&raw).map_err(map_pipeline_error)?;
+    if compact {
+        spec.compact = true;
+    }
+
+    let write_opts = nupdf::write::WriteOptions {
+        incremental: write.incremental,
+        ..nupdf::write::WriteOptions::default()
+    };
+    let outcome =
+        pipeline::run_pipeline_with_password(doc, &spec, &write_opts, password).map_err(|e| {
+            let mut failure = map_pipeline_error(e);
+            // A step's incremental save the file cannot take, as every writer reports it.
+            if nupdf::write::save_error_code(&write_opts, &failure.message) == "usage.incremental" {
+                failure.exit = Exit::Usage;
+                failure.code = "usage.incremental";
+            }
+            failure
+        })?;
+
+    let mut output_val = Value::Null;
+    let mut applied = false;
+    let mut read_back: Option<Document> = None;
+    // A gate abort writes nothing, like every other exit-4 path.
+    if outcome.aborted.is_some() {
+    } else if outcome.mutated {
+        let plan: Clean<'_> = write.plan(write_opts, password)?;
+        if let Some(ref bytes) = outcome.output_bytes {
+            if plan.verify {
+                read_back = Some(read_back_output(doc, bytes, password)?);
+            }
+            (output_val, _) = write_verified(doc, &plan, bytes, None)?;
+            applied = plan.apply;
+        }
+    } else if let Some(ref path) = write.output
+        && !write.dry_run
+    {
+        let bytes = doc.data();
+        write_atomically(path, bytes).map_err(|e| {
+            input_err(
+                "output.unwritable",
+                format!("cannot write {}: {e}", path.display()),
+            )
+        })?;
+        applied = true;
+        let hash = blake3::hash(bytes);
+        output_val = json!({
+            "path": path.display().to_string(),
+            "doc_id": DocId::from_hash(&hash).to_string(),
+            "len": bytes.len(),
+            "blake3": hash.to_hex().to_string(),
+        });
+    }
+
+    let aborted = outcome.aborted.clone();
+    let body = json!({
+        "applied": applied,
+        "initial_doc_id": outcome.initial_doc_id,
+        "final_doc_id": outcome.final_doc_id,
+        "mutated": outcome.mutated,
+        "aborted": outcome.aborted,
+        "steps": outcome.steps,
+        "output": output_val,
+    });
+    let mut out = report("nupdf.pipeline/v1", facts, doc, body);
+    // What the steps' working copies raised, and what reading the output
+    // back did, each once: the report's own list is the input document's.
+    if let Some(list) = out["diagnostics"].as_array_mut() {
+        let mut more: Vec<Value> = outcome
+            .diagnostics
+            .iter()
+            .map(|d| json!({ "code": d.code, "severity": "warning", "message": d.message }))
+            .collect();
+        if let Some(checked) = &read_back
+            && let Value::Array(read) = diagnostics(checked)
+        {
+            more.extend(read);
+        }
+        for d in more {
+            if !list.contains(&d) {
+                list.push(d);
+            }
+        }
+    }
+    if let Some(ab) = aborted {
+        emit(&mut standard_output(), &out, pretty);
+        let code: &'static str = if ab.code == pipeline::GATE_ATTEST_HAZARD {
+            pipeline::GATE_ATTEST_HAZARD
+        } else if ab.code == pipeline::GATE_TAMPER_DETECTED {
+            pipeline::GATE_TAMPER_DETECTED
+        } else {
+            "gate.aborted"
+        };
+        return Err(Failure {
+            exit: Exit::Verify,
+            code,
+            message: ab.message,
+        });
+    }
+    Ok(out)
+}
+
+/// The read-back of a pipeline's output, which comes as bytes with no
+/// document saved beside them to compare (each step's save was compared
+/// with the copy it saved inside the pipeline): it must open (with the
+/// password when locked) without a repair, load every object, and load
+/// every page.
+fn read_back_output(
+    doc: &Document,
+    bytes: &[u8],
+    password: Option<&str>,
+) -> Result<Document, Failure> {
+    let failed = |message: String| Failure {
+        exit: Exit::Verify,
+        code: "verify.failed",
+        message: format!("{message}; nothing was written"),
+    };
+    let out = Document::open_with(bytes.to_vec(), doc.limits())
+        .map_err(|e| failed(format!("the output does not open: {}", e.message)))?;
+    if out.needs_password() && !password.is_some_and(|p| out.authenticate(p).is_ok_and(|a| a != 0))
+    {
+        return Err(failed(
+            "the output does not open with the document's password".into(),
+        ));
+    }
+    nupdf::write::check_document(&out);
+    let count = out
+        .page_count()
+        .map_err(|e| failed(format!("the output's pages do not load: {}", e.0)))?;
+    for index in 0..count {
+        out.page(index).map_err(|e| {
+            failed(format!(
+                "page {} of the output does not load: {}",
+                index + 1,
+                e.0
+            ))
+        })?;
+    }
+    if out.repaired() {
+        return Err(failed("the output needs a repair to open".into()));
+    }
+    Ok(out)
+}
+
+fn map_pipeline_error(e: pipeline::PipelineError) -> Failure {
+    let exit = if e.code.starts_with("usage.") {
+        Exit::Usage
+    } else if e.code.starts_with("limit.") {
+        Exit::Limit
+    } else if e.code.starts_with("verify.")
+        || e.code.starts_with("audit.")
+        || e.code.starts_with("plan.")
+        || e.code.starts_with("gate.")
+    {
+        Exit::Verify
+    } else {
+        Exit::Input
+    };
+    Failure {
+        exit,
+        code: e.code,
+        message: e.message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn open(bytes: &[u8]) -> Document {
+        Document::open(bytes.to_vec()).unwrap()
+    }
+
+    /// The message of a refused read-back, after checking it is
+    /// `verify.failed` with exit 4.
+    fn refused(doc: &Document, bytes: &[u8], password: Option<&str>) -> String {
+        let Err(failure) = read_back_output(doc, bytes, password) else {
+            panic!("the read-back took the output");
+        };
+        assert_eq!(failure.code, "verify.failed", "{}", failure.message);
+        assert_eq!(failure.exit as i32, Exit::Verify as i32);
+        assert!(
+            failure.message.ends_with("; nothing was written"),
+            "{}",
+            failure.message
+        );
+        failure.message
+    }
+
+    const MINIMAL: &[u8] = include_bytes!("../../../corpus/smoke/minimal.pdf");
+
+    #[test]
+    fn a_pipeline_output_that_opens_cleanly_reads_back() {
+        let doc = open(MINIMAL);
+        let out = read_back_output(&doc, MINIMAL, None)
+            .map_err(|f| f.message)
+            .unwrap();
+        assert_eq!(out.page_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_pipeline_output_that_does_not_open_is_refused() {
+        let doc = open(MINIMAL);
+        let message = refused(&doc, b"not a PDF at all", None);
+        assert!(message.starts_with("the output does not open"), "{message}");
+    }
+
+    #[test]
+    fn a_pipeline_output_that_needs_a_repair_is_refused() {
+        let doc = open(MINIMAL);
+        let broken = include_bytes!("../../../corpus/smoke/broken-xref-offsets.pdf");
+        let message = refused(&doc, broken, None);
+        assert_eq!(
+            message,
+            "the output needs a repair to open; nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_locked_pipeline_output_reads_back_only_with_its_password() {
+        let locked = include_bytes!("../../../corpus/smoke/encrypted-user-password.pdf");
+        let doc = open(locked);
+        for password in [None, Some("wrong")] {
+            let message = refused(&doc, locked, password);
+            assert!(
+                message.starts_with("the output does not open with the document's password"),
+                "{password:?}: {message}"
+            );
+        }
+        assert!(read_back_output(&doc, locked, Some("user")).is_ok());
+    }
+
+    /// One page, in a page tree whose /Count is `count`.
+    fn one_page_counted(count: i32) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let objects = [
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            format!("<</Type/Pages/Kids[3 0 R]/Count {count}>>"),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]>>".to_string(),
+        ];
+        let mut offsets = Vec::new();
+        for (i, o) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        for o in offsets {
+            bytes.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!("trailer\n<</Size 4/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+        bytes
+    }
+
+    #[test]
+    fn a_pipeline_output_whose_pages_do_not_load_is_refused() {
+        let doc = open(MINIMAL);
+        assert!(read_back_output(&doc, &one_page_counted(1), None).is_ok());
+        // Two pages counted, one there: the second does not load.
+        let message = refused(&doc, &one_page_counted(2), None);
+        assert!(
+            message.starts_with("page 2 of the output does not load"),
+            "{message}"
+        );
+        // More pages counted than the file has objects: none load.
+        let message = refused(&doc, &one_page_counted(99), None);
+        assert!(
+            message.starts_with("the output's pages do not load"),
+            "{message}"
+        );
     }
 }

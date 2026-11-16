@@ -727,12 +727,117 @@ enum Command {
         /// Fail with exit 4 if a font fallback is needed for the new text.
         #[arg(long)]
         strict_font: bool,
+        /// Word-wrap multi-line replacement text within column width and shift
+        /// downstream page content vertically.
+        #[arg(long)]
+        reflow: bool,
         /// Allow replacement text to overlap neighbouring spans on the page.
         #[arg(long)]
         no_collision_check: bool,
         /// Allow replacement text to extend past the page's bounds.
         #[arg(long)]
         no_overflow_check: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Decompile vector bar, horizontal-bar and line charts plus directed
+    /// node-edge flowcharts directly from content-stream paths and tick spans.
+    Chart {
+        file: PathBuf,
+        /// Pages to decompile, in MuPDF's syntax (`1-3,7`, `N` for the last).
+        #[arg(long)]
+        pages: Option<String>,
+    },
+    /// Synthesize flat vector form fields (underlines, underscore runs, 8x8
+    /// checkboxes and multi-cell comb grids) on non-AcroForm PDFs; or fill
+    /// them (`--set`, `--check`, `--uncheck`) or promote them to real
+    /// `/AcroForm` `/Widget`s (`--promote`).
+    FlatForms {
+        file: PathBuf,
+        /// Pages to inspect when detecting fields (`1-3,7`, `N` for the last).
+        #[arg(long)]
+        pages: Option<String>,
+        /// Fill a flat underline or comb field as `TARGET=VALUE` (repeatable;
+        /// TARGET matches field id, snake_case name, or label).
+        #[arg(long = "set", value_name = "TARGET=VALUE")]
+        set: Vec<String>,
+        /// Check a flat vector checkbox by id, name, or label (repeatable).
+        #[arg(long, value_name = "TARGET")]
+        check: Vec<String>,
+        /// Uncheck a flat vector checkbox by id, name, or label (repeatable).
+        #[arg(long, value_name = "TARGET")]
+        uncheck: Vec<String>,
+        /// Promote detected flat fields into interactive `/AcroForm` widgets.
+        #[arg(long)]
+        promote: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Time-travel across incremental `%%EOF` revisions, verify PKCS#7 digital
+    /// signatures at every historical state, diff text, form fields and
+    /// annotations, and flag post-signature content or visual occlusion tampering.
+    History {
+        file: PathBuf,
+        /// Skip perceptual visibility attestation on each revision.
+        #[arg(long)]
+        no_attest: bool,
+        /// Extract exact historical bytes of 1-based revision `REV` to `--output`.
+        #[arg(long, value_name = "REV")]
+        extract_revision: Option<usize>,
+        /// Destination file when `--extract-revision` is given.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Exit 4 (`tamper.detected`) if any revision tampered after a valid signature.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Replace sensitive PII and custom entities across streams, forms,
+    /// annotations, metadata and outlines with reversible format-preserving
+    /// synthetic tokens, write a secret mapping vault, and verify zero leaks.
+    Cloak {
+        file: PathBuf,
+        /// Path where the JSON mapping vault (`nupdf.cloak.vault/v1`) is written.
+        #[arg(long, value_name = "FILE")]
+        vault: PathBuf,
+        /// PII preset: email, phone, card, ssn, iban, or pii for all five (repeatable).
+        #[arg(long, value_parser = ["pii", "email", "phone", "card", "ssn", "iban"])]
+        preset: Vec<String>,
+        /// Exact literal entity as `CATEGORY=SECRET` (e.g. `PERSON=Alice Vance`).
+        #[arg(long = "entity", value_name = "CATEGORY=SECRET")]
+        entity: Vec<String>,
+        /// Regular expression entity as `CATEGORY=PATTERN` (repeatable).
+        #[arg(long = "regex", value_name = "CATEGORY=PATTERN")]
+        regex: Vec<String>,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Restore synthetic tokens back to original secrets in an agent-edited
+    /// PDF (or in UTF-8 text/JSON with `--text-mode`) using a cloak vault.
+    Uncloak {
+        file: PathBuf,
+        /// Path to the JSON mapping vault written by `nupdf cloak`.
+        #[arg(long, value_name = "FILE")]
+        vault: PathBuf,
+        /// Treat `file` as UTF-8 text/JSON rather than a PDF document.
+        #[arg(long)]
+        text_mode: bool,
+        #[command(flatten)]
+        write: commands::WriteArgs,
+    },
+    /// Execute a multi-step agent workflow (`info`, `attest` gate, `query`,
+    /// `${step.var}` interpolation, `patch`, `chart`, `flat_forms`, `apply_plan`,
+    /// `history` gate, `audit`) in a single in-memory pass.
+    Pipeline {
+        file: PathBuf,
+        /// JSON pipeline specification file.
+        #[arg(long, value_name = "FILE")]
+        spec: Option<PathBuf>,
+        /// Inline JSON pipeline specification string.
+        #[arg(long = "inline", value_name = "JSON")]
+        inline: Option<String>,
+        /// Omit verbose per-span and per-match arrays from step outputs.
+        #[arg(long)]
+        compact: bool,
         #[command(flatten)]
         write: commands::WriteArgs,
     },
@@ -1837,6 +1942,7 @@ fn run(cli: Cli) -> ExitCode {
             file,
             replace,
             strict_font,
+            reflow,
             no_collision_check,
             no_overflow_check,
             write,
@@ -1846,10 +1952,85 @@ fn run(cli: Cli) -> ExitCode {
                 &facts,
                 replace,
                 *strict_font,
+                *reflow,
                 *no_collision_check,
                 *no_overflow_check,
                 write,
                 password,
+            )
+        }),
+        Command::Chart { file, pages } => open(file)
+            .and_then(|(doc, facts)| primitives::chart_cmd(&doc, &facts, pages.as_deref())),
+        Command::FlatForms {
+            file,
+            pages,
+            set,
+            check,
+            uncheck,
+            promote,
+            write,
+        } => open(file).and_then(|(doc, facts)| {
+            primitives::flat_forms_cmd(
+                &doc,
+                &facts,
+                pages.as_deref(),
+                set,
+                check,
+                uncheck,
+                *promote,
+                write,
+                password,
+            )
+        }),
+        Command::History {
+            file,
+            no_attest,
+            extract_revision,
+            output,
+            strict,
+        } => open(file).and_then(|(doc, facts)| {
+            primitives::history_cmd(
+                &doc,
+                &facts,
+                !*no_attest,
+                *extract_revision,
+                output.as_deref(),
+                *strict,
+                cli.pretty,
+            )
+        }),
+        Command::Cloak {
+            file,
+            vault,
+            preset,
+            entity,
+            regex,
+            write,
+        } => open(file).and_then(|(doc, facts)| {
+            primitives::cloak_cmd(&doc, &facts, vault, preset, entity, regex, write, password)
+        }),
+        Command::Uncloak {
+            file,
+            vault,
+            text_mode,
+            write,
+        } => primitives::uncloak_cmd(file, vault, *text_mode, write, password, &open),
+        Command::Pipeline {
+            file,
+            spec,
+            inline,
+            compact,
+            write,
+        } => open(file).and_then(|(doc, facts)| {
+            primitives::pipeline_cmd(
+                &doc,
+                &facts,
+                spec.as_deref(),
+                inline.as_deref(),
+                *compact,
+                write,
+                password,
+                cli.pretty,
             )
         }),
         Command::Apply {
@@ -2672,7 +2853,7 @@ fn save_verified(
             let message = nupdf::diag::report::strip(e.message.lines().last().unwrap_or_default())
                 .to_string();
             // MuPDF's refusals of an incremental write are argument errors.
-            if plan.options.incremental && message.starts_with("Can't do incremental") {
+            if nupdf::write::save_error_code(&plan.options, &message) == "usage.incremental" {
                 Failure {
                     exit: Exit::Usage,
                     code: "usage.incremental",
@@ -2694,7 +2875,7 @@ fn save_verified(
             Err(Failure {
                 exit: Exit::Verify,
                 code: "verify.failed",
-                message: verify_failure(&v),
+                message: v.failure(),
             })
         }
     });
@@ -2772,35 +2953,6 @@ fn signatures_kept(doc: &Document, bytes: &[u8], plan: &Clean) -> Option<serde_j
         })
         .collect();
     Some(list.into())
-}
-
-/// Why the written document failed its self-check.
-fn verify_failure(v: &nupdf::write::Verification) -> String {
-    if !v.reopened {
-        return "the output does not open".into();
-    }
-    if v.repaired {
-        return "the output needs a repair to open".into();
-    }
-    const SHOWN: usize = 10;
-    let mut nums: Vec<String> = v
-        .mismatched
-        .iter()
-        .take(SHOWN)
-        .map(|&n| match n {
-            0 => "the trailer".to_string(),
-            n => n.to_string(),
-        })
-        .collect();
-    if v.mismatched.len() > SHOWN {
-        nums.push(format!("and {} more", v.mismatched.len() - SHOWN));
-    }
-    format!(
-        "{} of {} objects read back differently from the input: {}",
-        v.mismatched.len(),
-        v.objects,
-        nums.join(", ")
-    )
 }
 
 /// Writes a file a command makes, unless the call was stopped: what it

@@ -1,0 +1,25 @@
+# Standalone WebAssembly edge module compiling nupdf to wasm32-unknown-unknown
+# with zero WASI / OS / filesystem / JS-glue host imports.
+[package]
+name = "nupdf-wasm-edge"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.92"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nupdf = { path = "../../crates/nupdf" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

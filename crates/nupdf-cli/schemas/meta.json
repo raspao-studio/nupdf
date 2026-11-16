@@ -54,7 +54,10 @@
           "type": "integer"
         },
         "path": {
-          "type": "null"
+          "type": [
+            "null",
+            "string"
+          ]
         },
         "signatures": {
           "type": "array",
